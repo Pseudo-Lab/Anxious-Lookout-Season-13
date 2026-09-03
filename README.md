@@ -198,38 +198,6 @@ MVP는 **메인 에이전트 + 뉴스 리서치 Skill + 검색·RSS 수집·저�
 - OCI 에이전트 MVP의 범위와 담당자
 - 원고 편집자와 기술 운영자의 역할
 
-## 로컬 개발
-
-### 요구 사항
-
-- Node.js 20 이상
-- pnpm
-- Supabase 프로젝트
-
-### 실행
-
-```bash
-pnpm install
-cp .env.local.example .env.local
-pnpm dev
-```
-
-`.env.local`에 다음 값을 설정합니다.
-
-```dotenv
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key-here
-```
-
-주요 명령어는 다음과 같습니다.
-
-```bash
-pnpm dev     # 개발 서버
-pnpm lint    # 정적 검사
-pnpm build   # 프로덕션 빌드
-pnpm start   # 프로덕션 서버
-```
-
 ## 우리가 남기려는 것
 
 결과물은 책 한 권만이 아닙니다.
