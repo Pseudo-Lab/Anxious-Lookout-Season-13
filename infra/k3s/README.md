@@ -25,9 +25,9 @@ Issue [#1](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/1) is 
    ```bash
    source infra/k3s/versions.env
    sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
-     cilium install --version "$CILIUM_VERSION" --values infra/k3s/cilium-values.yaml
-   sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml cilium status --wait
-   sudo k3s kubectl get nodes,pods -A -o wide
+     /usr/local/bin/cilium install --version "$CILIUM_VERSION" --values infra/k3s/cilium-values.yaml
+   sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml /usr/local/bin/cilium status --wait
+   sudo /usr/local/bin/k3s kubectl get nodes,pods -A -o wide
    ```
 
 6. Inspect the rendered Cilium ConfigMap, especially `allow-localhost: policy`, CNI readiness and selected IPAM range. Do not enable tenant workloads until the tenant policy is applied and realized by Cilium.
@@ -35,8 +35,8 @@ Issue [#1](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/1) is 
 
    ```bash
    NODE_PUBLIC_IPV4='<current public IPv4>' infra/k3s/render-policy.sh > /tmp/tenant-boundary.yaml
-   sudo k3s kubectl apply --dry-run=server -f /tmp/tenant-boundary.yaml
-   sudo k3s kubectl apply -f /tmp/tenant-boundary.yaml
+   sudo /usr/local/bin/k3s kubectl apply --dry-run=server -f /tmp/tenant-boundary.yaml
+   sudo /usr/local/bin/k3s kubectl apply -f /tmp/tenant-boundary.yaml
    ```
 
 8. Create tenant namespaces from `policies/tenant-namespace.yaml`, with a different name for each user. Change the ServiceAccount namespace in the same document. Apply policies before scheduling workloads and check Cilium endpoint policy realization before granting a user access. Run the verification matrix below.
@@ -116,3 +116,30 @@ Measure memory/CPU after steady-state and again with two tenant workloads. Do no
 - [Docker packet filtering](https://docs.docker.com/engine/network/packet-filtering-firewalls/)
 
 L7 proxying is explicitly disabled in the initial Cilium values. If later adding DNS-aware FQDN or HTTP policy, enable the necessary proxy support, review its resource overhead and repeat the network checks before applying those policies.
+
+## Additional node identity protection and system-Pod firewall access
+
+`render-policy.sh` emits both the tenant boundary and `anxious-lookout-node-protection`. The latter selects every Pod namespace except `kube-system`, including unlabelled namespaces, and explicitly denies host/node/API, metadata and server-public-IP egress without otherwise changing default access. This protects against a former system Pod IP being reused by a tenant. It also applies to `platform-system`: a future agent manager needing Kubernetes API access requires a separately reviewed service-account-scoped exception, which is not granted here.
+
+On this host, firewalld blocks Pod access to the host API/kubelet even when Cilium permits it. A whole-Pod-CIDR input exception was rejected during approval review. The minimal alternative combines the identity guard with exact trusted-system-Pod IP sets. Do not enable those firewall exceptions until Cilium has realized the guard and a non-system Pod's node/API traffic has a matching policy-denied event, including a Pod using a misleading system ServiceAccount name in a non-system namespace.
+
+`host/firewall-sync.py` reads the guard and kube-system Pod inventory, then reconciles two operator-created firewalld `hash:ip` sets in both runtime and permanent views:
+
+- `anxious-k3s-api-clients`: fixed trusted system service accounts, for TCP 6443 only.
+- `anxious-k3s-metrics-clients`: metrics-server only, for TCP 10250 only.
+
+Only non-hostNetwork, nondeleting Running/Pending Pods with an IPv4 inside the Pod CIDR qualify. Old IPs are removed before new ones are added. An API/read error retains the current rules without adding entries. The script checks the exact namespace selector shape and unqualified entity deny, but that is not a substitute for live policy-realization checks. Cluster-admin changes to the guard must follow the rollback ordering below.
+
+Install the Python script root-owned mode 0700 at `/usr/local/sbin/anxious-k3s-firewall-sync.py` and the supplied service/timer units under `/etc/systemd/system/`, after container-based script tests and operator review. The timer reconciles every 30 seconds. firewalld owns the two sets and source-set-to-port rich rules; create them explicitly in runtime and permanent configuration and record the exact zone and rules in the issue. No global FORWARD ACCEPT, broad trusted zone or Docker daemon change is part of this mechanism.
+
+Rollback order is mandatory: stop/disable the timer, remove the two owned firewall input allow rules and sets in runtime and permanent views, then remove the node-protection guard if needed. Never remove the guard while IP-based input allowances remain. Keep the tenant boundary active during rollback. Disabling or replacing Cilium likewise requires removing these exceptions first.
+
+## Repeatable validation and online backup commands
+
+The fixture generator and runner never execute automatically. The operator creates `platform-system` if absent, renders `validation/manifests.sh`, applies the output, waits for all fixture Pods and Cilium policy revisions, then runs `validation/run.sh` with `NODE_PRIVATE_IPV4`, `NODE_PUBLIC_IPV4` and `DOCKER_SERVICE_IPV4`. All actual probes run in the disposable Python Pods. Record the resolved `python:3.12-alpine` image digest with results; it is a test fixture, not a production runtime pin.
+
+The runner requires a successful authorized-source control before calling a denied connection a PASS. Host/API/metadata controls are intentionally also protected by the global guard, so those cases report INCONCLUSIVE until matched with Cilium drop evidence. Exit 1 means unexpected behavior; exit 2 means additional policy evidence is needed. Neither is silently treated as a completed matrix. Cleanup deletes only the resources bearing `anxious-lookout.io/validation=issue-1` and the four dedicated validation namespaces; leave an existing `platform-system` intact.
+
+`backup.sh /var/backups/anxious-lookout/k3s` now provides an **online** SQLite backup using the database backup API, without stopping k3s or Docker. It includes the matching token, `cred`, TLS material, config, host configuration and policy exports in a root-only archive. Avoid concurrent token/certificate/encryption-key rotation while backing up. The earlier offline-copy method remains a recovery option, not the script's implementation. The backup directory must be a canonical absolute root-owned path. The script does not delete old snapshots: keep the last seven verified copies plus an encrypted off-host copy before manually pruning.
+
+Run `validation/restore-check.py` in a disposable `python:3.12-alpine` container with `--network none --read-only --tmpfs /tmp` and only the archive mounted at `/backup.tar.gz:ro` plus the checker mounted read-only. It restores the SQLite files into container-local temporary storage and checks integrity, active policy records and recovery inputs. Do not mount the live k3s directory. A subsequent isolated k3s server boot can validate the restored API state more fully; it must use a separate copied data directory, no host network, no published ports and no agent. Archive verification does not establish that application PVCs were backed up or that off-host disaster recovery exists.

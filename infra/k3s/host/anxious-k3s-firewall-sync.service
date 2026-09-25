@@ -1,0 +1,14 @@
+[Unit]
+Description=Synchronize exact trusted k3s system Pod firewall clients
+After=k3s.service firewalld.service network-online.target
+Wants=firewalld.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /usr/local/sbin/anxious-k3s-firewall-sync.py
+TimeoutStartSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
