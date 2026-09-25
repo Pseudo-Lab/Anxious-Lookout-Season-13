@@ -1,5 +1,6 @@
 # Cilium 1.20.2; kube-proxy is retained.
 kubeProxyReplacement: false
+l7Proxy: false
 ipam:
   mode: cluster-pool
   operator:

@@ -114,3 +114,5 @@ Measure memory/CPU after steady-state and again with two tenant workloads. Do no
 - [K3s requirements](https://docs.k3s.io/installation/requirements)
 - [K3s backup and restore](https://docs.k3s.io/datastore/backup-restore)
 - [Docker packet filtering](https://docs.docker.com/engine/network/packet-filtering-firewalls/)
+
+L7 proxying is explicitly disabled in the initial Cilium values. If later adding DNS-aware FQDN or HTTP policy, enable the necessary proxy support, review its resource overhead and repeat the network checks before applying those policies.
