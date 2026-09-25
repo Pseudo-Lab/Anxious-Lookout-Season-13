@@ -143,3 +143,13 @@ The runner requires a successful authorized-source control before calling a deni
 `backup.sh /var/backups/anxious-lookout/k3s` now provides an **online** SQLite backup using the database backup API, without stopping k3s or Docker. It includes the matching token, `cred`, TLS material, config, host configuration and policy exports in a root-only archive. Avoid concurrent token/certificate/encryption-key rotation while backing up. The earlier offline-copy method remains a recovery option, not the script's implementation. The backup directory must be a canonical absolute root-owned path. The script does not delete old snapshots: keep the last seven verified copies plus an encrypted off-host copy before manually pruning.
 
 Run `validation/restore-check.py` in a disposable `python:3.12-alpine` container with `--network none --read-only --tmpfs /tmp` and only the archive mounted at `/backup.tar.gz:ro` plus the checker mounted read-only. It restores the SQLite files into container-local temporary storage and checks integrity, active policy records and recovery inputs. Do not mount the live k3s directory. A subsequent isolated k3s server boot can validate the restored API state more fully; it must use a separate copied data directory, no host network, no published ports and no agent. Archive verification does not establish that application PVCs were backed up or that off-host disaster recovery exists.
+
+On this host, a firewalld reload removed Cilium-managed iptables chains even while `cilium status` remained healthy. After any controlled firewalld reload, restore and verify Cilium's dataplane:
+
+```bash
+sudo /usr/local/bin/k3s kubectl -n kube-system rollout restart daemonset/cilium
+sudo /usr/local/bin/k3s kubectl -n kube-system rollout status daemonset/cilium --timeout=180s
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml /usr/local/bin/cilium status --wait
+```
+
+Then check `CILIUM_FORWARD`/masquerade rules and run DNS, internet, tenant isolation, host/API and Docker regression checks. Agent health alone does not prove those rules exist. Expect a short network interruption during the agent rollout; schedule the change and keep recovery access. This is an explicit operator recovery procedure, not an unverified automatic reload hook. Do not assume changing `FlushAllOnReload` will preserve every Cilium rule without separate testing.
