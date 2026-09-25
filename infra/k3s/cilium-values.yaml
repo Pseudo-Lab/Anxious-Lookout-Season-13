@@ -1,0 +1,24 @@
+# Cilium 1.20.2; kube-proxy is retained.
+kubeProxyReplacement: false
+ipam:
+  mode: cluster-pool
+  operator:
+    clusterPoolIPv4PodCIDRList:
+      - 10.42.0.0/16
+    clusterPoolIPv4MaskSize: 24
+ipv4:
+  enabled: true
+ipv6:
+  enabled: false
+operator:
+  replicas: 1
+hubble:
+  enabled: false
+  relay:
+    enabled: false
+  ui:
+    enabled: false
+envoy:
+  enabled: false
+extraConfig:
+  allow-localhost: policy

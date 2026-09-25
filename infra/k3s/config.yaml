@@ -1,0 +1,11 @@
+# /etc/rancher/k3s/config.yaml — single-server deployment, Docker unchanged.
+flannel-backend: none
+disable-network-policy: true
+cluster-cidr: 10.42.0.0/16
+service-cidr: 10.43.0.0/16
+write-kubeconfig-mode: "0600"
+# kube-proxy, Traefik, ServiceLB and local-path provisioner retain k3s defaults.
+# No node-external-ip: OCI's public address is NATed, not a node interface.
+node-name: anxious-lookout
+selinux: true
+secrets-encryption: true
