@@ -36,7 +36,10 @@ paths=(var/lib/rancher/k3s/server/token var/lib/rancher/k3s/server/tls
        var/lib/rancher/k3s/server/cred var/lib/rancher/k3s/server/manifests etc/rancher/k3s)
 for optional in etc/firewalld etc/NetworkManager/conf.d etc/systemd/system/k3s.service \
                 etc/systemd/system/k3s.service.env etc/systemd/system/anxious-k3s-firewall-sync.service \
-                etc/systemd/system/anxious-k3s-firewall-sync.timer usr/local/sbin/anxious-k3s-firewall-sync.py; do
+                etc/systemd/system/anxious-k3s-firewall-sync.timer usr/local/sbin/anxious-k3s-firewall-sync.py \
+                etc/systemd/system/anxious-k3s-postboot-check.service etc/anxious-lookout/postboot.env \
+                usr/local/sbin/anxious-k3s-postboot-check.sh usr/local/lib/anxious-k3s-validation \
+                var/lib/anxious-lookout/reboot-check; do
   [[ ! -e "/$optional" ]] || paths+=("$optional")
 done
 for required in "${paths[@]}"; do

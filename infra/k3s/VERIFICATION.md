@@ -57,6 +57,29 @@ This is a point-in-time infrastructure sample, not a representative Codex capaci
 
 ## Remaining acceptance evidence
 
-- Complete the full positive/negative matrix, including DNS UDP/TCP, materials API direct/Service, tenant A/B direct/Service, unauthorized ports/platform destinations and Docker/metadata/public-IP paths. Timeouts without a positive control or correlated drop event remain inconclusive.
 - Execute a real host reboot, establish a changed boot ID and re-run readiness, dataplane, policy, retained-state and Docker checks. `REBOOT.md` and the one-time collector preserve the procedure/evidence; creating those files is not reboot verification.
-- Record final script syntax checks, new checker runtime results and independent final review before completing the milestone.
+- Obtain independent review of the final commit before PR creation; actual postboot collector execution remains part of the outstanding reboot check.
+
+PM subsequently installed the root-owned postboot collector, actual-value environment file, validation assets and one-shot service. `systemd-analyze verify` passed; the service was enabled **without being started**, and the pre-reboot boot ID was saved. This prepares durable evidence collection but does not complete the real-host reboot acceptance check. Future backups include those optional installed recovery artifacts; the first 14:09 archive predates their installation.
+
+## Completed independent network matrix
+
+The reviewer repeated the probes after Cilium dataplane repair at 14:10–14:16 UTC; [the full issue record](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/1#issuecomment-5833890927) contains the results and caveats.
+
+| Probe | Result |
+| --- | --- |
+| Tenant to DNS UDP/TCP 53 | Valid replies |
+| Tenant to external HTTPS / TCP 80 | Certificate verification and HTTP 200 / connected |
+| Tenant to materials API TCP 8080, Pod and Service addresses | Allowed |
+| Manager to tenant A/B TCP 8080 | Allowed |
+| Tenant A/B to each other, direct and Service addresses | Blocked |
+| Materials API forbidden TCP 9090 / unrelated private Pod | Blocked; control Pod connected |
+| Unapproved control Pod to tenant | Blocked |
+| Tenant and unlabelled Pod to node TCP 6443/10250 | Blocked; host controls connected |
+| Tenant to Kubernetes Service TCP 443 | Blocked after translation to node TCP 6443 |
+| Tenant to Docker direct / node / public address TCP 8642 | Cilium policy denied |
+| Tenant to OCI metadata TCP 80 | Cilium policy denied; no metadata body read |
+
+Negative results were correlated with the target SYN's `Policy denied` or `Policy denied by denylist` events rather than inferred from timeouts alone. The Docker port 8642 host control was refused, consistent with the pre-existing failing HTTP endpoint; only the network-policy denial is claimed for that path. This completes the initial network matrix; it must be repeated after a real reboot before reboot acceptance can pass.
+
+The postboot service-state regression test passed in a PM-managed `bash:5.2` Docker container with network disabled and repository input mounted read-only. It exercises the actual collector helper and confirms that every required inactive unit prevents startup success. This corrects the earlier aggregate `systemctl is-active` behavior; it does not execute the reboot collector or simulate a host reboot.
