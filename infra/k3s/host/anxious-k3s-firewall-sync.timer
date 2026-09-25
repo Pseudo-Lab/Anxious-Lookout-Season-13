@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh trusted k3s system Pod firewall addresses
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+Unit=anxious-k3s-firewall-sync.service
+
+[Install]
+WantedBy=timers.target
