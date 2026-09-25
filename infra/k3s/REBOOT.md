@@ -2,6 +2,8 @@
 
 A successful process restart is not a server reboot. This procedure is an operator checklist; it neither reboots automatically nor claims the check has passed. Keep the issue current before disconnecting the active session.
 
+The 2026-09-25 execution and its initial DNS timeout, subsequent successful probes and independent policy-drop review are recorded in [VERIFICATION.md](VERIFICATION.md#actual-host-reboot-verification). Preserve the original log when repeating the collector; a later successful probe does not erase an earlier failure.
+
 ## Before reboot
 
 1. Push current infrastructure changes and post the current validation results, remaining checks and backup checksum to issue #1. Keep credentials and archives private.

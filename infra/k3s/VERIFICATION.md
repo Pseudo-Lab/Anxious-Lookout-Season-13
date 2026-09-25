@@ -1,6 +1,6 @@
 # Execution evidence — 2026-09-25 UTC
 
-Permanent chronological record: [issue #1](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/1), especially [installation and firewall recovery](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/1#issuecomment-5833811335). PM/root performed host changes and container lifecycle operations; backend authored configuration and inspected DNS metadata/logs read-only. Results below distinguish completed checks from pending acceptance.
+Permanent chronological record: [issue #1](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/1), especially [installation and firewall recovery](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/1#issuecomment-5833811335). PM/root performed host changes and container lifecycle operations; backend authored configuration and inspected DNS metadata/logs read-only. Results below distinguish the initial installation checks, actual reboot verification and remaining limitations.
 
 ## Installed and observed
 
@@ -30,7 +30,7 @@ The tenant default ServiceAccount could not read kube-system Secrets (`kubectl a
 
 ## Existing Docker regression
 
-The existing `hermes` container remained healthy, its `StartedAt` did not change, and internal DNS plus HTTPS returned success/200. Docker was not restarted. Its exposed port 8642 already reset the tested HTTP request before installation; that pre-existing response is not reported as an application health success.
+During installation, the existing `hermes` container remained healthy, its `StartedAt` did not change, and internal DNS plus HTTPS returned success/200. Docker was not restarted during installation. Its exposed port 8642 already reset the tested HTTP request before installation; that pre-existing response is not reported as an application health success. After the later host reboot, the container automatically restarted at `2026-09-25T14:34:36.142048522Z`, became healthy, and again passed internal DNS and HTTPS 200 checks.
 
 ## Backup and restore
 
@@ -55,12 +55,21 @@ PM's 14:12 UTC sample, with disposable validation workloads present:
 
 This is a point-in-time infrastructure sample, not a representative Codex capacity benchmark.
 
-## Remaining acceptance evidence
+## Actual host reboot verification
 
-- Execute a real host reboot, establish a changed boot ID and re-run readiness, dataplane, policy, retained-state and Docker checks. `REBOOT.md` and the one-time collector preserve the procedure/evidence; creating those files is not reboot verification.
-- Obtain independent review of the final commit before PR creation; actual postboot collector execution remains part of the outstanding reboot check.
+The boot ID changed from `572ff9a7-c364-45bc-9c37-6ccb51bcda56` to `e90e21db-5eca-4f3f-8c8e-47b25198cadb`. The root-owned one-time collector began automatically at 14:34:44 UTC. k3s, Docker, firewalld and the firewall synchronizer timer recovered without postboot configuration changes, firewall reloads or Cilium restarts. The node and expected running system/validation Pods were Ready, Cilium forwarding/NAT chains were present, and both CCNPs remained valid.
 
-PM subsequently installed the root-owned postboot collector, actual-value environment file, validation assets and one-shot service. `systemd-analyze verify` passed; the service was enabled **without being started**, and the pre-reboot boot ID was saved. This prepares durable evidence collection but does not complete the real-host reboot acceptance check. Future backups include those optional installed recovery artifacts; the first 14:09 archive predates their installation.
+The timer automatically replaced the old system-Pod IP entries after addresses changed: its 14:35:28 UTC run reported 20 changes. Runtime and permanent API sets matched the current system Pods: `10.42.0.35`, `.93`, `.137`, `.246`; the metrics set contained only `10.42.0.246`. Subsequent synchronizer runs succeeded. Secrets encryption remained enabled with matching hashes, and both retained backup archive checksums verified.
+
+The first automatic matrix reported **14 passed, 1 failed, 8 requiring policy-drop correlation**, and the collector exited failed. The failure was one tenant DNS UDP timeout. Its exact cause is unproven. Later PM probes returned three valid UDP replies; an independent reviewer obtained five valid replies out of five, plus valid replies for direct CoreDNS UDP, tenant B DNS UDP and tenant A DNS TCP. The reviewer also repeated allowed materials/manager access and denied cross-tenant/forbidden-port probes. These follow-up checks required no infrastructure remediation; the first failed run remains in the private log and is not relabelled as a pass.
+
+The reviewer correlated all eight original inconclusive denials to contemporaneous Cilium policy-drop events from the current tenant identity/IP: Docker direct TCP 8642; host TCP 22, 6443, 10250 and 8642; own public IP TCP 8642; OCI metadata TCP 80; and Kubernetes Service TCP 443 translated to host TCP 6443. Events also showed the node guard denying the unlabelled control identity. Thus policy enforcement is supported by packet-drop evidence rather than timeout alone. Independent operational acceptance was approved; final documentation review is tracked on PR #2.
+
+PM reran the unchanged collector at 14:48:34 UTC. The repeat matrix reported **15 passed, 0 failed, 8 requiring policy-drop correlation**. Its exit status was 2, the collector's intentional pending-review result, rather than an automatic service success. The reviewer independently correlated all eight denials in this second run to matching Cilium drop events, completing all 23 matrix cases. The original run and repeat remain in the appended root-only log.
+
+After evidence review, PM disabled the one-time collector and reset only that unit's failed state to inactive; its original exit 1 and repeat exit 2 remain documented and the mode-0600 log was retained. Cleanup removed six labelled validation Pods, six validation Services and the four dedicated tenant/control/private namespaces. No labelled fixtures remained; `platform-system` was preserved. System workloads remained Ready, both CCNPs valid and Docker healthy. No policy or network configuration was changed during these postboot checks or cleanup.
+
+The pre-reboot installation of the one-time collector passed `systemd-analyze verify`; its actual-value environment file, installed validation assets and saved boot ID are root-only. Future backups include those optional recovery artifacts; the first 14:09 archive predates their installation. This verification covers one real reboot and control-plane recovery. It does not establish packet-loss rates, repeated reboot reliability, application/PVC persistence or an off-host backup copy.
 
 ## Completed independent network matrix
 
@@ -80,6 +89,6 @@ The reviewer repeated the probes after Cilium dataplane repair at 14:10–14:16 
 | Tenant to Docker direct / node / public address TCP 8642 | Cilium policy denied |
 | Tenant to OCI metadata TCP 80 | Cilium policy denied; no metadata body read |
 
-Negative results were correlated with the target SYN's `Policy denied` or `Policy denied by denylist` events rather than inferred from timeouts alone. The Docker port 8642 host control was refused, consistent with the pre-existing failing HTTP endpoint; only the network-policy denial is claimed for that path. This completes the initial network matrix; it must be repeated after a real reboot before reboot acceptance can pass.
+Negative results were correlated with the target SYN's `Policy denied` or `Policy denied by denylist` events rather than inferred from timeouts alone. The Docker port 8642 host control was refused, consistent with the pre-existing failing HTTP endpoint; only the network-policy denial is claimed for that path. This table records the initial network matrix; actual reboot and subsequent repeat evidence are recorded above.
 
 The postboot service-state regression test passed in a PM-managed `bash:5.2` Docker container with network disabled and repository input mounted read-only. It exercises the actual collector helper and confirms that every required inactive unit prevents startup success. This corrects the earlier aggregate `systemctl is-active` behavior; it does not execute the reboot collector or simulate a host reboot.
