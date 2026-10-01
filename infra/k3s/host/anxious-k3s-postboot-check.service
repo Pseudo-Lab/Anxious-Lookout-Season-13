@@ -1,0 +1,17 @@
+# Operator enables for one reboot only, then disables after evidence review.
+[Unit]
+Description=One-time k3s postboot evidence collection
+After=network-online.target k3s.service docker.service firewalld.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/etc/anxious-lookout/postboot.env
+ExecStart=/usr/local/sbin/anxious-k3s-postboot-check.sh
+TimeoutStartSec=600
+UMask=0077
+# Exit 2 records pending policy-event review, not a silent success.
+
+[Install]
+WantedBy=multi-user.target
