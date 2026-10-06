@@ -1,0 +1,19 @@
+http:
+  routers:
+    api:
+      rule: "Path(`/api`) || PathPrefix(`/api/`)"
+      priority: 20
+      entryPoints: [web]
+      service: api
+    web:
+      rule: "PathPrefix(`/`) && !(Path(`/api`) || PathPrefix(`/api/`))"
+      priority: 10
+      entryPoints: [web]
+      service: web
+  services:
+    api:
+      loadBalancer:
+        servers: [{url: "http://api:8080"}]
+    web:
+      loadBalancer:
+        servers: [{url: "http://web:8080"}]
