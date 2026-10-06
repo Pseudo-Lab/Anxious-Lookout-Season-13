@@ -52,14 +52,22 @@ Actual GitHub success/denial/logout and persistent account/session checks remain
 
 ## Sequential reviewed command plan and surge evidence to collect
 
-Final workload file prepared for review: /tmp/m2-final-d1d10a0-target.yaml (actual refs above); JSON stages /tmp/m2-stage-00-bootstrap.json through /tmp/m2-stage-05-exposure.json are generated from its client-decoded JSON stream, with one copy of each resource. Namespace/storage/SA, CNP, public config, database, apps and exposure are separated; **do not apply the full renderer output at once**. Future authorized sequence:
+Final workload file prepared for review: /tmp/m2-final-d1d10a0-target.yaml (actual refs above); JSON stages /tmp/m2-stage-00-bootstrap.json through /tmp/m2-stage-05-exposure.json plus /tmp/m2-stage-00-serviceaccount.json are generated from its client-decoded JSON stream, with one copy of each resource. **Bootstrap contains only cluster-scoped Namespace/StorageClass**; the ServiceAccount is its own namespaced stage. CNP, config, database, apps and exposure remain separate. Do not apply the full renderer output at once. A successful Namespace server dry-run does not create that namespace. Future authorized sequence:
 
 ```sh
 # Operator authorization + image/import/private-input checks first.
 sudo k3s kubectl apply --dry-run=server -f /tmp/m2-stage-00-bootstrap.json
 sudo k3s kubectl diff -f /tmp/m2-stage-00-bootstrap.json
+# Only after explicit namespace/storage creation authorization:
 sudo k3s kubectl apply -f /tmp/m2-stage-00-bootstrap.json
-# In the now-existing dedicated namespace, dry-run/diff remaining stages before apply.
+# Require the deliberately created namespace to exist before any namespaced server check.
+sudo k3s kubectl get namespace m2-hosting
+sudo k3s kubectl apply --dry-run=server -f /tmp/m2-stage-00-serviceaccount.json
+sudo k3s kubectl diff -f /tmp/m2-stage-00-serviceaccount.json
+sudo k3s kubectl apply -f /tmp/m2-stage-00-serviceaccount.json
+# Server dry-run/diff each subsequent stage in that now-existing namespace before apply.
+sudo k3s kubectl apply --dry-run=server -f /tmp/m2-stage-01-policy.json
+sudo k3s kubectl diff -f /tmp/m2-stage-01-policy.json
 sudo k3s kubectl apply -f /tmp/m2-stage-01-policy.json
 # Wait for Cilium to accept/realize policy; inspect exact owned rules before workloads.
 sudo k3s kubectl apply -f /tmp/m2-stage-02-config.json
@@ -77,5 +85,7 @@ sudo k3s kubectl apply -f /tmp/m2-stage-05-exposure.json
 ```
 
 These commands are proposals, not commands executed in this session. CLI path is /usr/local/bin/k3s on this host. An absent namespace/credential/precondition is a stop condition, not permission to bypass validation. Refresh baseline immediately before an approved run; original state contains no m2-hosting resources, so diff must be additions only. First-install rollback removes only the owned route and app Deployments after inspection, preserving CNP/PG/SA/SC/PVC and any initialized data; a later rollout restores the previous image/settings bundle.
+
+Review correction: the old combined Namespace/SC/SA bootstrap failed server dry-run at the SA because m2-hosting did not exist. The prepared split cluster-only file now passes server dry-run without creating resources; SA passes client schema check only. SA and later namespaced server dry-run/diff are deliberately deferred until authorized Namespace creation. No temporary namespace was created just to make validation pass.
 
 Initial steady request sum: 250m CPU/480Mi memory; limits 1250m/1280Mi. Updating API/web **one controller at a time**, waiting for old Pods to disappear and new minReady stability, gives a nominal maximum of web2/API1/DB1: requests 350m/608Mi, limits 1750m/1792Mi. Concurrent rollouts/overlapping terminating Pods can exceed this estimate, so do not stack updates. The host has 2 CPU and existing system/apps; limits are not throughput or spare-capacity guarantees. Before and during approved rollout, record node allocatable/requests, top metrics, available memory/disk, Pending/FailedScheduling events, OOM/restarts and old/new Pod counts; verify existing app latency/responses and all probes. No actual cluster surge measurement has been performed, and these arithmetic estimates are not a pass.
