@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import { BASE_PATH } from "@/lib/constants";
+import { API_ENABLED, BASE_PATH } from "@/lib/constants";
 import { apiUrl, describeFailure, fetchJson, type FetchResult } from "@/lib/api/client";
 import { useAuth } from "@/hooks/useAuth";
 import { ROLE_LABELS } from "@/lib/auth/api";
@@ -24,8 +24,9 @@ function parseHealth(body: unknown): true | null {
 
 interface Checks {
   web: FetchResult<VersionInfo>;
-  health: FetchResult<true>;
-  api: FetchResult<VersionInfo>;
+  // API가 없는 배포(정적 export)에서는 null
+  health: FetchResult<true> | null;
+  api: FetchResult<VersionInfo> | null;
 }
 
 function Row({ label, ok, children }: { label: string; ok: boolean | null; children: ReactNode }) {
@@ -54,11 +55,13 @@ function VersionText({ result }: { result: FetchResult<VersionInfo> }) {
 async function loadChecks(): Promise<Checks> {
   const [web, health, api] = await Promise.all([
     fetchJson(`${BASE_PATH}/version.json`, parseVersion),
-    fetchJson(apiUrl("/health"), parseHealth),
-    fetchJson(apiUrl("/version"), parseVersion),
+    API_ENABLED ? fetchJson(apiUrl("/health"), parseHealth) : null,
+    API_ENABLED ? fetchJson(apiUrl("/version"), parseVersion) : null,
   ]);
   return { web, health, api };
 }
+
+const NO_API = "이 배포(정적 사이트)에는 API 서버가 없습니다.";
 
 export default function StatusPanel() {
   const [checks, setChecks] = useState<Checks | null>(null);
@@ -81,7 +84,9 @@ export default function StatusPanel() {
   }
 
   let healthText: ReactNode = "확인 중...";
-  if (checks) {
+  if (checks?.health === null) {
+    healthText = NO_API;
+  } else if (checks) {
     if (checks.health.ok) healthText = "정상 (요청을 받을 준비가 되었습니다)";
     else if (checks.health.failure.kind === "http" && checks.health.failure.code === "not_ready")
       healthText = "준비되지 않음 (not_ready)";
@@ -106,6 +111,8 @@ export default function StatusPanel() {
   } else if (auth.status === "unauthenticated") {
     accountOk = null;
     accountText = "로그인하지 않았습니다.";
+  } else if (auth.status === "disabled") {
+    accountText = "이 배포에서는 로그인을 제공하지 않습니다.";
   } else if (auth.status === "error" && auth.failure) {
     accountOk = false;
     accountText = `로그인 상태를 확인하지 못했습니다. ${describeFailure(auth.failure)}`;
@@ -117,11 +124,11 @@ export default function StatusPanel() {
         <Row label="웹 버전" ok={checks ? checks.web.ok : null}>
           {checks ? <VersionText result={checks.web} /> : "확인 중..."}
         </Row>
-        <Row label="API 상태" ok={checks ? checks.health.ok : null}>
+        <Row label="API 상태" ok={checks?.health ? checks.health.ok : null}>
           {healthText}
         </Row>
-        <Row label="API 버전" ok={checks ? checks.api.ok : null}>
-          {checks ? <VersionText result={checks.api} /> : "확인 중..."}
+        <Row label="API 버전" ok={checks?.api ? checks.api.ok : null}>
+          {!checks ? "확인 중..." : checks.api === null ? NO_API : <VersionText result={checks.api} />}
         </Row>
         <Row label="계정" ok={accountOk}>
           {accountText}

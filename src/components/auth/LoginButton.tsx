@@ -11,7 +11,7 @@ export default function LoginButton() {
   const [pending, setPending] = useState(false);
   const [logoutError, setLogoutError] = useState("");
 
-  if (status === "loading") return null;
+  if (status === "loading" || status === "disabled") return null;
 
   if (status === "error") {
     return (

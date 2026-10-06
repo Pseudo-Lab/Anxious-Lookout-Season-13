@@ -5,13 +5,16 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
 import { getMe, logout, type AuthUser, type LogoutResult, type MeResult } from "@/lib/auth/api";
 import type { FetchFailure } from "@/lib/api/client";
+import { API_ENABLED } from "@/lib/constants";
 
-export type AuthStatus = "loading" | "authenticated" | "unauthenticated" | "error";
+// "disabled": API가 없는 배포(GitHub Pages 정적 export). 인증 조회를 하지 않는다.
+export type AuthStatus = "loading" | "authenticated" | "unauthenticated" | "error" | "disabled";
 
 interface AuthContextValue {
   status: AuthStatus;
@@ -31,11 +34,14 @@ const AuthContext = createContext<AuthContextValue>({
 });
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [status, setStatus] = useState<AuthStatus>("loading");
+  const [status, setStatus] = useState<AuthStatus>(API_ENABLED ? "loading" : "disabled");
   const [user, setUser] = useState<AuthUser | null>(null);
   // CSRF nonce는 메모리에만 둔다(cookie/localStorage에 저장하지 않음).
   const [csrfToken, setCsrfToken] = useState<string | null>(null);
   const [failure, setFailure] = useState<FetchFailure | null>(null);
+  // me 조회 세대. 로그아웃이 시작·완료될 때 올려서, 그 전에 보낸 조회의 늦은 응답이
+  // 로그아웃 이후 상태를 덮어쓰지 않게 한다.
+  const generation = useRef(0);
 
   const applyMe = useCallback((me: MeResult) => {
     if (me.state === "authenticated") {
@@ -56,14 +62,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refresh = useCallback(async () => {
-    applyMe(await getMe());
+    if (!API_ENABLED) return;
+    const gen = generation.current;
+    const me = await getMe();
+    if (gen === generation.current) applyMe(me);
   }, [applyMe]);
 
   useEffect(() => {
+    if (!API_ENABLED) return;
     // 마운트 시 1회 서버 session 상태를 조회한다.
     let active = true;
+    const gen = generation.current;
     void getMe().then((me) => {
-      if (active) applyMe(me);
+      if (active && gen === generation.current) applyMe(me);
     });
     return () => {
       active = false;
@@ -72,7 +83,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signOut = useCallback(async (): Promise<LogoutResult> => {
     if (!csrfToken) return { ok: false, failure: { kind: "http", status: 401, code: "unauthenticated" } };
+    // 로그아웃 전·중에 보낸 me 응답은 모두 무효로 한다.
+    generation.current += 1;
     const result = await logout(csrfToken);
+    generation.current += 1;
     if (result.ok) {
       setUser(null);
       setCsrfToken(null);

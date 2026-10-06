@@ -21,7 +21,11 @@ function LoginPanel() {
         </p>
       )}
 
-      {status === "authenticated" && user ? (
+      {status === "disabled" ? (
+        <p className="rounded-lg bg-stone-50 px-4 py-3 text-center text-sm text-stone-600">
+          이 정적 사이트에는 API 서버가 없어 로그인을 제공하지 않습니다.
+        </p>
+      ) : status === "authenticated" && user ? (
         <div className="text-center">
           <p className="text-sm text-stone-600">
             <span className="font-medium text-stone-900">{user.login}</span> 계정으로 로그인되어 있습니다.
