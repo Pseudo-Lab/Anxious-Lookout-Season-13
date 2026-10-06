@@ -4,6 +4,16 @@ import { chromium } from "playwright";
 const ORIGIN = process.env.ORIGIN ?? "http://127.0.0.1:8080";
 const BASE = process.env.BASE_PATH ?? "";
 const U = (p) => `${ORIGIN}${BASE}${p}`;
+
+// 클라이언트에서 늦게 그려지는 요소: 나타날 때까지 기다린 뒤 판정한다(즉시 isVisible()은 hydration과 경쟁).
+async function appears(locator, timeout = 5000) {
+  try {
+    await locator.first().waitFor({ state: "visible", timeout });
+    return true;
+  } catch {
+    return false;
+  }
+}
 const results = [];
 function check(name, ok, detail = "") {
   results.push({ name, ok: !!ok });
@@ -43,7 +53,7 @@ check("home lists mdx posts", (await page.locator("main").innerText()).includes(
 
 await page.goto(U("/auth/login/"));
 await page.waitForLoadState("networkidle");
-check("login page shows no-API notice", (await page.locator("main").innerText()).includes("API 서버가 없어 로그인을 제공하지 않습니다"));
+check("login page shows no-API notice", await appears(page.getByText("API 서버가 없어 로그인을 제공하지 않습니다")));
 check("login page has no GitHub login link", (await page.getByRole("link", { name: /GitHub로 계속하기/ }).count()) === 0);
 
 await page.goto(U("/status/"));

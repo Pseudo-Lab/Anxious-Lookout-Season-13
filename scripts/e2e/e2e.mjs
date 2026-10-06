@@ -11,6 +11,15 @@ function check(name, ok, detail = "") {
   results.push({ name, ok: !!ok, detail });
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? `  — ${detail}` : ""}`);
 }
+// 클라이언트에서 늦게 그려지는 요소: 나타날 때까지 기다린 뒤 판정한다(즉시 isVisible()은 hydration과 경쟁).
+async function appears(locator, timeout = 5000) {
+  try {
+    await locator.first().waitFor({ state: "visible", timeout });
+    return true;
+  } catch {
+    return false;
+  }
+}
 const setMock = (q) => fetch(`${ORIGIN}/__mock/set?${q}`).then((r) => r.json());
 
 // ---------- HTTP ----------
@@ -131,7 +140,7 @@ await page.goto(U("/"));
 await header.getByRole("button", { name: "로그아웃" }).first().click();
 await header.getByRole("link", { name: "GitHub 로그인" }).first().click();
 await page.waitForURL(/auth_error=access_denied/);
-check("G. access_denied message", await page.getByText("GitHub 로그인 동의가 취소되었습니다.").isVisible());
+check("G. access_denied message", await appears(page.getByText("GitHub 로그인 동의가 취소되었습니다.")));
 await page.goto(U("/auth/login/?auth_error=%3Cb%3Ex%3C%2Fb%3E"));
 await page.getByRole("alert").first().waitFor();
 const alertText = await page.getByRole("alert").first().innerText();
