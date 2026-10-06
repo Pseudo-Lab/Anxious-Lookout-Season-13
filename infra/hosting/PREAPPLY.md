@@ -14,16 +14,16 @@ The user authorized temporary unencrypted HTTP. HTTP session/transaction cookies
 
 ## Release provenance
 
-**Review correction in progress:** 79367ab/c319162 API is not a corrected deployment candidate. Review found two incompatible legacy schemas could be stamped then fail login. The amended code preserves quoted literals and validates nondeferrable immediate UNIQUE arbiters; 53 Docker regressions pass. The c319162 runtime evidence below is historical until replaced by the clean corrected-source build record. Do not import/apply that API as the fixed release.
+**Review correction:** 79367ab/c319162 API is superseded. Review found two incompatible legacy schemas could be stamped then fail login. Corrected source **684d627** preserves quoted literals and validates every matching UNIQUE arbiter as nondeferrable/nondeferred and immediate/valid/ready; **53 Docker regressions pass** including marker-free rejection with data/grant/password preservation and real app-role upsert for normal v1/empty DB. Independent re-review is still required before actual application. Do not import/apply the old API as the fixed release.
 
 The historical d1d10a0 API image lacks Alembic and these origin changes and **must not be used for this target**. Its previous successful runtime results remain historical in VERIFICATION.md. Build the new API from the final reviewed clean commit using backend/Dockerfile runtime target, full APP_GIT_SHA and UTC APP_BUILT_AT. Build/reconfirm web with infra/hosting/web.Dockerfile, WEB_BUILD=standalone, NEXT_PUBLIC_BASE_PATH empty, full WEB_GIT_SHA and WEB_BUILT_AT. Locked dependencies and pinned bases remain mandatory.
 
-Clean source **c3191629e5a484131b5b5cfc4c8ba1f19c5cefc0**, built at **2026-10-06T16:35:21Z**, was used for both new linux/arm64 images with the exact targets/args above. The worktree was clean before both builds. Actual `/api/version` and `/version.json` HTTP responses returned exactly that full SHA/time and no-store. Local Docker RepoDigests:
+Clean corrected source **684d627db464b2e531cf3fce3633e8f75aa93d44**, built at **2026-10-06T16:49:41Z**, was used for both new linux/arm64 images with the exact targets/args above. The worktree was clean before both builds. Actual `/api/version` and `/version.json` HTTP responses returned exactly that full SHA/time and no-store. Local Docker RepoDigests:
 
 | Image | Local OCI digest |
 | --- | --- |
-| anxious-hosting-api:c3191629e5a484131b5b5cfc4c8ba1f19c5cefc0 | sha256:5f611d76daec8589ff255780affb2d7c45d6b661bda9f64aaba1e7c141811930 |
-| anxious-hosting-web:c3191629e5a484131b5b5cfc4c8ba1f19c5cefc0 | sha256:1e2dd644e574b28f99ed2f3a7212eecefae8e132c04dbbd6cf27ca56add3f727 |
+| anxious-hosting-api:684d627db464b2e531cf3fce3633e8f75aa93d44 | sha256:843880452e3b53c62c46fc932356263461b43aeed23b0b3f46896f36b1767e6f |
+| anxious-hosting-web:684d627db464b2e531cf3fce3633e8f75aa93d44 | sha256:199a065195bfff1f8f8b67668dcd57c0ad7c4a53073bb1729380f38674ee4cfa |
 
 Runtime HTTP and Chromium mock-provider checks passed with these images, PostgreSQL and real Docker Traefik; both app containers were UID/GID 10001, read-only with /tmp only. The new runtime API also completed the explicit Alembic command on the existing disposable test DB under 128Mi/0.2CPU/non-root/read-only restrictions. These are Docker evidence, not actual GitHub or cluster application.
 
@@ -65,7 +65,7 @@ These are reviewed-plan commands, not operations executed by back. No new public
 
 ## Migration, recovery and rollback
 
-Alembic revision `0001_auth` creates an empty DB schema or adopts only structurally verified original v1 tables. The serialized SQLAlchemy transaction uses a PostgreSQL advisory lock and commits DDL/grants/version together. Missing or altered legacy contracts fail without stamping/repairing them. Repeat/concurrent runs retain existing data and DB role password. Only explicit reviewed revision is accepted; no `head`, blind stamp, startup migration, automatic downgrade or reset. Restricted API role has SELECT on both version markers, no version/role/approval/audit writes.
+Alembic revision `0001_auth` creates an empty DB schema or adopts only structurally verified original v1 tables. Quoted literal semantics and login UNIQUE arbiter immediacy/validity are checked before adoption. The serialized SQLAlchemy transaction uses a PostgreSQL advisory lock and commits DDL/grants/version together. Missing or altered legacy contracts fail without stamping/repairing them. Repeat/concurrent runs retain existing data and DB role password. Only explicit reviewed revision is accepted; no `head`, blind stamp, startup migration, automatic downgrade or reset. Restricted API role has SELECT on both version markers, no version/role/approval/audit writes.
 
 Backups include both auth.schema_version and auth.alembic_version. Restore checker requires 0001_auth when an Alembic marker exists; original legacy v1 is recognized with a required reviewed upgrade before new API readiness. Unsupported/multiple markers fail. It invalidates sessions/transactions only in the fresh copy, retains account/approval/audit rows and never mounts the live PVC. Production recovery must re-provision grants, invalidate copied credentials and reconcile later approvals/revocations before reopening auth.
 
