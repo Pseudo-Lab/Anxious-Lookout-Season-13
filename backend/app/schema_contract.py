@@ -20,8 +20,13 @@ DEFAULTS = {
 
 
 def normalize(expression):
-    expression = re.sub(r"::(?:character varying|text|boolean)(?:\[\])?", "", expression.lower())
-    return re.sub(r"[\s()]", "", expression)
+    # Only normalize unquoted syntax. SQL literals/quoted identifiers are
+    # case-sensitive, and spaces/parentheses/cast-like text inside them matter.
+    tokens = re.split(r"('(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")", expression)
+    for position in range(0, len(tokens), 2):
+        syntax = re.sub(r"::(?:character varying|text|boolean)(?:\[\])?", "", tokens[position].lower())
+        tokens[position] = re.sub(r"[\s()]", "", syntax)
+    return "".join(tokens)
 
 
 def validate_v1(connection):
@@ -50,8 +55,24 @@ def validate_v1(connection):
     if connection.execute(text("SELECT count(*) FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname='auth' AND NOT c.convalidated")).scalar_one():
         raise RuntimeError("Existing authentication constraints are unvalidated")
     unique = inspector.get_unique_constraints("accounts", schema="auth")
-    if not any(c["column_names"] == ["github_id"] for c in unique):
+    arbiters = {c["name"] for c in unique if c["column_names"] == ["github_id"]}
+    if not arbiters:
         raise RuntimeError("Existing provider identity uniqueness is missing")
+    # ON CONFLICT(github_id) infers every matching UNIQUE index. A redundant
+    # deferrable constraint still breaks login even alongside an immediate one.
+    timing = {
+        row.conname: row
+        for row in connection.execute(text("""
+            SELECT c.conname, c.condeferrable, c.condeferred,
+                   i.indimmediate, i.indisvalid, i.indisready
+            FROM pg_constraint c JOIN pg_index i ON i.indexrelid=c.conindid
+            WHERE c.conrelid='auth.accounts'::regclass AND c.contype='u'
+        """))
+    }
+    for name in arbiters:
+        row = timing.get(name)
+        if row is None or row.condeferrable or row.condeferred or not all((row.indimmediate, row.indisvalid, row.indisready)):
+            raise RuntimeError("Existing provider identity arbiter is not immediate and valid")
     for table in ("sessions", "permission_audit"):
         foreign = inspector.get_foreign_keys(table, schema="auth")
         if not any(c["constrained_columns"] == ["account_id"] and c["referred_schema"] == "auth" and c["referred_table"] == "accounts" and c["referred_columns"] == ["id"] for c in foreign):

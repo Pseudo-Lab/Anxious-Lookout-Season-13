@@ -14,6 +14,8 @@ The user authorized temporary unencrypted HTTP. HTTP session/transaction cookies
 
 ## Release provenance
 
+**Review correction in progress:** 79367ab/c319162 API is not a corrected deployment candidate. Review found two incompatible legacy schemas could be stamped then fail login. The amended code preserves quoted literals and validates nondeferrable immediate UNIQUE arbiters; 53 Docker regressions pass. The c319162 runtime evidence below is historical until replaced by the clean corrected-source build record. Do not import/apply that API as the fixed release.
+
 The historical d1d10a0 API image lacks Alembic and these origin changes and **must not be used for this target**. Its previous successful runtime results remain historical in VERIFICATION.md. Build the new API from the final reviewed clean commit using backend/Dockerfile runtime target, full APP_GIT_SHA and UTC APP_BUILT_AT. Build/reconfirm web with infra/hosting/web.Dockerfile, WEB_BUILD=standalone, NEXT_PUBLIC_BASE_PATH empty, full WEB_GIT_SHA and WEB_BUILT_AT. Locked dependencies and pinned bases remain mandatory.
 
 Clean source **c3191629e5a484131b5b5cfc4c8ba1f19c5cefc0**, built at **2026-10-06T16:35:21Z**, was used for both new linux/arm64 images with the exact targets/args above. The worktree was clean before both builds. Actual `/api/version` and `/version.json` HTTP responses returned exactly that full SHA/time and no-store. Local Docker RepoDigests:
