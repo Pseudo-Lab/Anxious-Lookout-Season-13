@@ -5,6 +5,17 @@ const browser = await chromium.launch({headless: true});
 try {
   const page = await browser.newPage();
   const unexpected = [];
+  // Fresh disposable provider identity makes replay independent of the approved
+  // account intentionally created by the DB restart/restore seed fixture.
+  const providerId = String(Date.now());
+  await page.route('**/api/auth/github/start', async route => {
+    const response = await route.fetch({maxRedirects: 0});
+    assert.equal(response.status(), 302);
+    const url = new URL(response.headers().location);
+    assert.equal(url.hostname, 'mock-github');
+    url.searchParams.set('github_id', providerId);
+    await route.fulfill({response, headers: {...response.headers(), location: url.toString()}});
+  });
   page.on('pageerror', error => unexpected.push(error.message));
   await page.goto('http://127.0.0.1:8080/auth/login/');
   await page.getByRole('link', {name: 'GitHub로 계속하기'}).waitFor();

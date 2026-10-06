@@ -108,11 +108,15 @@ sudo env WEB_RUNTIME_IMAGE=ACTUAL_WEB_IMAGE API_RUNTIME_IMAGE=ACTUAL_API_IMAGE \
   docker compose -p anxious-s13-back-test -f infra/hosting/compose.test.yml \
   -f infra/hosting/compose.integration.yml up -d api web gateway
 sudo docker compose -p anxious-s13-back-test -f infra/hosting/compose.test.yml \
+  run --rm --no-deps test python -m tests.wait_gateway
+sudo docker compose -p anxious-s13-back-test -f infra/hosting/compose.test.yml \
   run --rm --no-deps test python -m tests.gateway_probe
 sudo docker run --rm --network container:anxious-s13-back-test-gateway-1 anxious-hosting-browser-test
 ```
 
 Gateway checks use the real runtime services with a mock identity provider, not a mocked frontend API. The HTTP driver follows web slash redirects; browser checks auth/guest state rather than requiring a noncontractual logout URL navigation. The web process is UID 10001/read-only with /tmp only. Keep these results separate from Cilium and real provider checks.
+
+The browser driver requests a fresh disposable mock-provider identity per run, so the approved identity used by the restart/restore seed cannot incorrectly turn the expected pending UI into an approved account. Only the mock-provider identity input is varied; actual API/session/DB/CSRF behavior remains real.
 
 Pages out/ generation is independently reproduced with the builder target:
 

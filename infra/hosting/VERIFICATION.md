@@ -30,10 +30,20 @@ Issue [#4](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/4) is 
 
 Existing k3s resources/data/roles, GitHub OAuth apps and Supabase data have not been changed. Real GitHub code/token/user/session/logout flow, production web/API image release/digests, k3s rollout/Traefik routing, resource/surge measurements, and M1/Docker/android service regressions require separate evidence before acceptance. Control-plane backups do not establish application DB recovery.
 
-The rendered workload/Cilium/Traefik/migration/approval resources passed **client dry-run/schema validation** against the existing cluster, with placeholder app digests. This created no resources. Server dry-run after namespace prerequisites, Secret/volume binding, Cilium realization and actual packet/HTTP regressions remain separate operational checks.
+Dry-run timeline (UTC, 2026-10-06):
+
+- **13:30:47**: preliminary renderer workload target used placeholder web/API references; client schema validation passed. Separate migration/approval Job client checks also passed. This was not an app-image availability check.
+- **14:26:10**: workload target used actual 305c6f6 Docker app digests and the updated API resource request/limit; client schema validation passed. No namespace/SC/PVC/Secret/Pod was created.
+- **14:43:51**: final workload target used rebuilt d1d10a0 runtime digests (below) and actual renderer resource budget; client schema validation passed. Server dry-run after namespace prerequisites, Secret/volume binding, Cilium realization and packet/HTTP checks remain unexecuted.
 
 ## Backup and remaining evidence
 
 An initial logical auth backup restored in a read-only non-root/network-none PostgreSQL container with fresh tmpfs, schema/role/FK invariants passing. The stronger fixture reported **1 live session and 2 transaction rows before invalidation**, **1 retained account / 1 approval audit**, and **0 live sessions after invalidation**. Thus copied credential invalidation was exercised on nonempty tables. The restore container cleaned up its own fresh tmpfs and never mounted the live/test database volume.
 
 Off-host backup destination/retention/RPO/RTO and post-snapshot approval reconciliation remain operational handoff items. Actual cluster application must be preceded by target/diff/baseline/rollback review. A mock/loopback pass is not public HTTPS operating acceptance.
+
+## Final d1d10a0 rebuild / readiness follow-up
+
+PM/reviewer source-mapping request triggered a clean-source rebuild at **2026-10-06T14:34:58Z**, including final web Dockerfile (telemetry off, standalone/pages switch) and API Dockerfile runtime target. Both version payloads now name d1d10a0176f621c0d5bd8b568968005d7b6520a3 and that timestamp. ARM64 web digest **9ef19d77ad1c7b105aeffcca6223d1e2cb0379c2b1436a31b5589fd689fb0d71**, API digest **bc03d01170fb5a9f73d2c884adf291c5707c09320ff878c51e4f32c5bbaf5b5c**. PREAPPLY contains complete context/targets/args and separates image inputs from test-stage/renderer inputs.
+
+Actual Traefik/Next/API/PG/mock HTTP (13 assets) and Chromium checks passed with those rebuilt images. An initial immediate HTTP preflight saw startup 503; bounded gateway wait (30s deadline, per-request timeout) was added and passed before rerunning functional checks. Retained DB seed approval also made a repeated browser fixture's old fixed identity approved; the driver now selects a fresh **mock-only** identity in the preserved real API-start redirect response. Its first redirect-request override was ineffective, corrected before successful repeat. No application auth or web source was changed to force these fixture results. This does not rerun or supersede the already-passed 28 backend/backup suite, and readiness/driver/doc follow-ups do not change runtime Dockerfiles/code.
