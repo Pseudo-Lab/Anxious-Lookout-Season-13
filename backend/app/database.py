@@ -1,5 +1,6 @@
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+from .schema_contract import AUTH_REVISION
 
 
 def database(url):
@@ -12,4 +13,6 @@ def check_ready(engine):
         # Verify connectivity AND the exact migration contract as the application role.
         if conn.execute(text("SELECT version FROM auth.schema_version WHERE singleton = true")).scalar_one() != 1:
             raise RuntimeError("Unsupported authentication schema")
+        if conn.execute(text("SELECT version_num FROM auth.alembic_version")).scalar_one() != AUTH_REVISION:
+            raise RuntimeError("Unsupported authentication Alembic revision")
         conn.execute(text("SELECT id FROM auth.accounts LIMIT 0"))

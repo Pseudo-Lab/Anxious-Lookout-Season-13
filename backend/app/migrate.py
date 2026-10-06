@@ -1,36 +1,53 @@
-import os
+import argparse
 import sys
 from pathlib import Path
 
-import psycopg
+from alembic import command
+from alembic.config import Config
 from psycopg import sql
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.pool import NullPool
 
+from .schema_contract import AUTH_REVISION, validate_v1
 from .settings import secret
 
 
-def migrate():
-    url = secret("ADMIN_DATABASE_URL").replace("postgresql+psycopg://", "postgresql://", 1)
+def migrate(revision=AUTH_REVISION):
+    url = secret("ADMIN_DATABASE_URL")
     password = secret("API_DATABASE_PASSWORD")
-    if not url or len(password) < 16:
+    if not url or len(password) < 16 or revision != AUTH_REVISION:
         raise ValueError("Migration credentials are required")
-    with psycopg.connect(url) as conn:
-        # Serialize explicit migrations. Never run automatically in API startup.
-        conn.execute("SELECT pg_advisory_xact_lock(44004)")
-        existing = conn.execute("SELECT 1 FROM pg_roles WHERE rolname = 'anxious_api'").fetchone()
-        if not existing:
-            conn.execute(sql.SQL("CREATE ROLE anxious_api LOGIN PASSWORD {}").format(sql.Literal(password)))
-        # An existing role's password is never silently rotated by repeat migrations.
-        schema = Path(os.getenv("MIGRATION_FILE", "/app/db/001_auth.sql")).read_text()
-        conn.execute(schema, prepare=False)
-        version = conn.execute("SELECT version FROM auth.schema_version WHERE singleton").fetchone()[0]
-        if version != 1:
-            raise ValueError("Unsupported migration version")
+    engine = create_engine(url, poolclass=NullPool, hide_parameters=True, connect_args={"connect_timeout": 3})
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("SELECT pg_advisory_xact_lock(44004)"))
+            tables = set(inspect(connection).get_table_names(schema="auth"))
+            if tables - {"alembic_version"}:
+                validate_v1(connection)  # Never blindly stamp an existing schema.
+            existing = connection.execute(text("SELECT 1 FROM pg_roles WHERE rolname='anxious_api'")).first()
+            if not existing:
+                connection.connection.driver_connection.execute(sql.SQL("CREATE ROLE anxious_api LOGIN PASSWORD {}").format(sql.Literal(password)))
+            connection.execute(text("CREATE SCHEMA IF NOT EXISTS auth"))
+            cfg = Config()
+            cfg.set_main_option("script_location", str(Path(__file__).resolve().parent.parent / "alembic"))
+            cfg.attributes["connection"] = connection
+            command.upgrade(cfg, revision)
+            validate_v1(connection)
+            if connection.execute(text("SELECT version_num FROM auth.alembic_version")).scalar_one() != AUTH_REVISION:
+                raise RuntimeError("Authentication Alembic revision mismatch")
+            connection.execute(text("REVOKE ALL ON auth.alembic_version FROM PUBLIC"))
+            connection.execute(text("GRANT SELECT ON auth.alembic_version TO anxious_api"))
+    finally:
+        engine.dispose()
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Reviewed, serialized Alembic authentication upgrade; no automatic downgrade")
+    parser.add_argument("--revision", default=AUTH_REVISION)
+    args = parser.parse_args()
     try:
-        migrate()
+        migrate(args.revision)
     except Exception:
         print("Authentication migration failed; credentials and SQL are not printed", file=sys.stderr)
         sys.exit(1)
-    print("Authentication migration v1 complete")
+    print("Authentication Alembic revision 0001_auth complete")

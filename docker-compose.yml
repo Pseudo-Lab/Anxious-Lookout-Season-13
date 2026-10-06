@@ -32,6 +32,7 @@ services:
       AUTH_ORIGIN: ${AUTH_ORIGIN:-https://m2.invalid}
       APP_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-}
       ALLOW_INSECURE_LOOPBACK: ${ALLOW_INSECURE_LOOPBACK:-false}
+      ALLOW_PUBLIC_IP_HTTP: ${ALLOW_PUBLIC_IP_HTTP:-false}
     secrets: [api_database_url, auth_transaction_key, github_client_secret]
     ports: ["127.0.0.1:${API_PORT:-28080}:8080"]
     depends_on:

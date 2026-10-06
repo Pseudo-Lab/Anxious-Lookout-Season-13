@@ -13,5 +13,5 @@ set -euo pipefail
 [[ "$ACTOR" =~ ^[a-zA-Z0-9._:@/\ -]{1,200}$ && "$REASON" =~ ^[a-zA-Z0-9._:@/\ -]{1,200}$ ]] || exit 1
 hosting_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 bash "$hosting_dir/render-migration.sh" | sed \
-  -e 's/name: auth-migration-v1/generateName: auth-approval-/' \
-  -e "s|command: \[python, -m, app.migrate\]|command: [python, -m, app.admin, --github-id, \"$GITHUB_ID\", --approved, \"$APPROVED\", --role, \"$ROLE\", --actor, \"$ACTOR\", --reason, \"$REASON\"]|"
+  -e 's/name: auth-alembic-0001/generateName: auth-approval-/' \
+  -e "s|command: \[python, -m, app.migrate, --revision, \"0001_auth\"\]|command: [python, -m, app.admin, --github-id, \"$GITHUB_ID\", --approved, \"$APPROVED\", --role, \"$ROLE\", --actor, \"$ACTOR\", --reason, \"$REASON\"]|"

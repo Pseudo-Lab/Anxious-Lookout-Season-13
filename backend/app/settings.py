@@ -33,10 +33,23 @@ class Settings:
         origin = os.getenv("AUTH_ORIGIN", "https://m2.invalid").rstrip("/")
         parsed = urlsplit(origin)
         insecure = os.getenv("ALLOW_INSECURE_LOOPBACK", "false") == "true"
+        public_http = os.getenv("ALLOW_PUBLIC_IP_HTTP", "false") == "true"
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password:
             raise ValueError("Invalid authentication origin")
-        if parsed.scheme == "http" and not (insecure and parsed.hostname in {"127.0.0.1", "localhost", "::1"}):
-            raise ValueError("HTTP authentication is restricted to explicit loopback verification")
+        try:
+            address = ipaddress.ip_address(parsed.hostname)
+            public_ipv4 = address.version == 4 and address.is_global
+        except ValueError:
+            public_ipv4 = False
+        if parsed.scheme == "http" and not ((insecure and parsed.hostname in {"127.0.0.1", "localhost", "::1"}) or (public_http and public_ipv4)):
+            raise ValueError("HTTP authentication requires an explicitly enabled verification origin")
+        if parsed.port is not None and not 1 <= parsed.port <= 65535:
+            raise ValueError("Invalid authentication port")
+        if parsed.port is not None and not parsed.netloc.endswith(f":{parsed.port}"):
+            raise ValueError("Use the canonical origin port")
+        # Browsers omit the default port from Origin; configure exactly that form.
+        if (parsed.scheme == "http" and parsed.port == 80) or (parsed.scheme == "https" and parsed.port == 443):
+            raise ValueError("Omit the default origin port")
         base = os.getenv("APP_BASE_PATH", "")
         if base and not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)+", base):
             raise ValueError("Invalid base path")

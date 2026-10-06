@@ -3,6 +3,21 @@
 set -euo pipefail
 : "${WEB_IMAGE:?Set immutable web image reference}"
 : "${API_IMAGE:?Set immutable API image reference}"
+: "${M2_PUBLIC_ORIGIN:?Set reviewed http://PUBLIC_IPV4[:PORT] origin}"
+[[ "$M2_PUBLIC_ORIGIN" =~ ^http://([0-9]{1,3}(\.[0-9]{1,3}){3})(:([0-9]{1,5}))?$ ]] || { echo 'Reviewed numeric public IPv4 HTTP origin required' >&2; exit 1; }
+public_ipv4=${BASH_REMATCH[1]}
+public_port=${BASH_REMATCH[4]:-80}
+[[ "$public_port" != 0* && "$public_port" -le 65535 && "$M2_PUBLIC_ORIGIN" != *:80 ]] || exit 1
+IFS=. read -r ip_a ip_b ip_c ip_d <<< "$public_ipv4"
+for octet in "$ip_a" "$ip_b" "$ip_c" "$ip_d"; do
+  [[ "$octet" == 0 || "$octet" != 0* ]] || exit 1
+  [[ "$octet" -le 255 ]] || exit 1
+done
+[[ "$ip_a" -gt 0 && "$ip_a" -lt 224 && "$ip_a" != 10 && "$ip_a" != 127 ]] || exit 1
+[[ "$public_ipv4" != 169.254.* && "$public_ipv4" != 192.168.* && "$public_ipv4" != 192.0.0.* && "$public_ipv4" != 192.0.2.* && "$public_ipv4" != 198.51.100.* && "$public_ipv4" != 203.0.113.* ]] || exit 1
+[[ "$ip_a" != 172 || "$ip_b" -lt 16 || "$ip_b" -gt 31 ]] || exit 1
+[[ "$ip_a" != 100 || "$ip_b" -lt 64 || "$ip_b" -gt 127 ]] || exit 1
+[[ "$ip_a" != 198 || ( "$ip_b" != 18 && "$ip_b" != 19 ) ]] || exit 1
 for image in "$WEB_IMAGE" "$API_IMAGE"; do
   [[ "$image" =~ ^[a-zA-Z0-9._/:-]+@sha256:[0-9a-f]{64}$ ]] || { echo 'Digest-qualified image required' >&2; exit 1; }
 done
@@ -39,7 +54,8 @@ metadata:
   name: hosting-config
   namespace: m2-hosting
 data:
-  AUTH_ORIGIN: https://m2.invalid
+  AUTH_ORIGIN: "$M2_PUBLIC_ORIGIN"
+  ALLOW_PUBLIC_IP_HTTP: "true"
   OAUTH_MODE: disabled
   APP_BASE_PATH: ""
   GITHUB_CLIENT_ID: ""
@@ -231,7 +247,7 @@ YAML
 }
 deployment api "$API_IMAGE" 50m 96Mi 250m 256Mi
 deployment web "$WEB_IMAGE" 100m 128Mi 500m 512Mi
-cat <<'YAML'
+cat <<YAML
 ---
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
@@ -241,11 +257,11 @@ metadata:
 spec:
   entryPoints: [web]
   routes:
-    - match: Host(`m2.invalid`) && (Path(`/api`) || PathPrefix(`/api/`))
+    - match: Host(\`$public_ipv4\`) && (Path(\`/api\`) || PathPrefix(\`/api/\`))
       kind: Rule
       priority: 20
       services: [{name: api, port: 8080}]
-    - match: Host(`m2.invalid`) && PathPrefix(`/`) && !(Path(`/api`) || PathPrefix(`/api/`))
+    - match: Host(\`$public_ipv4\`) && PathPrefix(\`/\`) && !(Path(\`/api\`) || PathPrefix(\`/api/\`)) && !(Path(\`/android-agent\`) || PathPrefix(\`/android-agent/\`))
       kind: Rule
       priority: 10
       services: [{name: web, port: 8080}]

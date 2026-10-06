@@ -38,6 +38,12 @@ def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def session_digest(value, origin):
+    # A cookie obtained during HTTP/IP verification cannot authenticate after
+    # an origin or HTTPS transition. Legacy unbound hashes require re-login.
+    return digest("m2-origin-session-v1\0" + origin + "\0" + value)
+
+
 def error(code, message, status):
     return JSONResponse({"error": {"code": code, "message": message}}, status_code=status, headers={"Cache-Control": "no-store"})
 
@@ -205,7 +211,7 @@ def create_app(settings=None):
                 statement = insert(Account).values(github_id=str(user["id"]), login=user["login"]).on_conflict_do_update(index_elements=[Account.github_id], set_={"login": user["login"], "updated_at": now()}).returning(Account.id)
                 account_id = db.scalar(statement)
                 db.execute(delete(LoginSession).where(LoginSession.expires_at < now()))
-                db.add(LoginSession(token_hash=digest(session_token), account_id=account_id, csrf_token=csrf, expires_at=now() + timedelta(seconds=settings.session_seconds)))
+                db.add(LoginSession(token_hash=session_digest(session_token, settings.origin), account_id=account_id, csrf_token=csrf, expires_at=now() + timedelta(seconds=settings.session_seconds)))
             response = RedirectResponse(settings.base_path + "/", status_code=303, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
             set_cookie(response, SESSION_COOKIE, session_token, settings.cookie_path, settings.session_seconds)
             clear_cookie(response, TRANSACTION_COOKIE, settings.cookie_path + "/auth/github")
@@ -221,7 +227,7 @@ def create_app(settings=None):
         token = request.cookies.get(SESSION_COOKIE, "")
         if not token or len(token) > 200:
             return None
-        return db.scalar(select(LoginSession).where(LoginSession.token_hash == digest(token), LoginSession.expires_at > now()))
+        return db.scalar(select(LoginSession).where(LoginSession.token_hash == session_digest(token, settings.origin), LoginSession.expires_at > now()))
 
     @app.get(prefix + "/auth/me")
     def me(request: Request):

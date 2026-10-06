@@ -25,6 +25,16 @@ SELECT CASE WHEN (SELECT version FROM auth.schema_version WHERE singleton)=1
   AND NOT EXISTS(SELECT 1 FROM auth.sessions s LEFT JOIN auth.accounts a ON a.id=s.account_id WHERE a.id IS NULL)
   AND NOT EXISTS(SELECT 1 FROM auth.permission_audit p LEFT JOIN auth.accounts a ON a.id=p.account_id WHERE a.id IS NULL)
 THEN 'VALID' ELSE 'INVALID' END;
+DO $$
+BEGIN
+  IF to_regclass('auth.alembic_version') IS NOT NULL THEN
+    IF (SELECT version_num FROM auth.alembic_version) IS DISTINCT FROM '0001_auth' THEN
+      RAISE EXCEPTION 'Unsupported authentication Alembic revision';
+    END IF;
+  ELSE
+    RAISE NOTICE 'Legacy v1 backup: reviewed Alembic upgrade required before app readiness';
+  END IF;
+END $$;
 SELECT 'RESTORE pre-invalidation sessions=' || count(*) FROM auth.sessions;
 SELECT 'RESTORE pre-invalidation transactions=' || count(*) FROM auth.oauth_transactions;
 BEGIN;

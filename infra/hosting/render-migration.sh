@@ -7,7 +7,7 @@ cat <<YAML
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: auth-migration-v1
+  name: auth-alembic-0001
   namespace: m2-hosting
 spec:
   backoffLimit: 0
@@ -28,7 +28,7 @@ spec:
       containers:
         - name: migrate
           image: $API_IMAGE
-          command: [python, -m, app.migrate]
+          command: [python, -m, app.migrate, --revision, "0001_auth"]
           env:
             - {name: ADMIN_DATABASE_URL_FILE, value: /run/secrets/database-url}
             - {name: API_DATABASE_PASSWORD_FILE, value: /run/secrets/api-password}

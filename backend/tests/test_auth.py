@@ -11,7 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from app.admin import change_permissions
-from app.main import SESSION_COOKIE, TRANSACTION_COOKIE, create_app, digest, now
+from app.main import SESSION_COOKIE, TRANSACTION_COOKIE, create_app, digest, now, session_digest
 from app.settings import Settings
 
 
@@ -45,7 +45,7 @@ def test_pending_identity_and_token_boundaries(client, admin):
     token = client.cookies.get(SESSION_COOKIE)
     with admin.connect() as conn:
         saved = conn.execute(text("SELECT token_hash FROM auth.sessions")).scalar_one()
-        assert saved == digest(token) and saved != token
+        assert saved == session_digest(token, client.app.state.settings.origin) and saved != token
         assert conn.execute(text("SELECT count(*) FROM auth.oauth_transactions")).scalar_one() == 0
     assert client.get("/api/auth/me").headers["cache-control"] == "no-store"
 
