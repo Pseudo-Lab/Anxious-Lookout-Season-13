@@ -16,7 +16,16 @@ The user authorized temporary unencrypted HTTP. HTTP session/transaction cookies
 
 The historical d1d10a0 API image lacks Alembic and these origin changes and **must not be used for this target**. Its previous successful runtime results remain historical in VERIFICATION.md. Build the new API from the final reviewed clean commit using backend/Dockerfile runtime target, full APP_GIT_SHA and UTC APP_BUILT_AT. Build/reconfirm web with infra/hosting/web.Dockerfile, WEB_BUILD=standalone, NEXT_PUBLIC_BASE_PATH empty, full WEB_GIT_SHA and WEB_BUILT_AT. Locked dependencies and pinned bases remain mandatory.
 
-Record each exact SHA/time/platform and OCI digest, archive/checksum and verified k3s containerd import name as one release bundle. Docker build availability does not imply kubelet availability. PM supplies actual immutable refs to render.sh and render-migration.sh. Final new runtime refs and import outcome are acceptance inputs, not assumed values in this packet.
+Clean source **c3191629e5a484131b5b5cfc4c8ba1f19c5cefc0**, built at **2026-10-06T16:35:21Z**, was used for both new linux/arm64 images with the exact targets/args above. The worktree was clean before both builds. Actual `/api/version` and `/version.json` HTTP responses returned exactly that full SHA/time and no-store. Local Docker RepoDigests:
+
+| Image | Local OCI digest |
+| --- | --- |
+| anxious-hosting-api:c3191629e5a484131b5b5cfc4c8ba1f19c5cefc0 | sha256:5f611d76daec8589ff255780affb2d7c45d6b661bda9f64aaba1e7c141811930 |
+| anxious-hosting-web:c3191629e5a484131b5b5cfc4c8ba1f19c5cefc0 | sha256:1e2dd644e574b28f99ed2f3a7212eecefae8e132c04dbbd6cf27ca56add3f727 |
+
+Runtime HTTP and Chromium mock-provider checks passed with these images, PostgreSQL and real Docker Traefik; both app containers were UID/GID 10001, read-only with /tmp only. The new runtime API also completed the explicit Alembic command on the existing disposable test DB under 128Mi/0.2CPU/non-root/read-only restrictions. These are Docker evidence, not actual GitHub or cluster application.
+
+Record each exact SHA/time/platform and OCI digest, archive/checksum and verified k3s containerd import name as one release bundle. Docker build availability does not imply kubelet availability. PM supplies actual immutable refs to render.sh and render-migration.sh after verifying archives/import names; neither archive/import nor actual target rendering with the still-unconfirmed operational origin has been performed here. Subsequent documentation-only provenance commits do not change these runtime inputs. BuildKit could not auto-capture Git metadata in this worktree; explicit source args, clean Git checks and actual HTTP payloads establish the recorded mapping, not an unverified automatic Git attestation.
 
 ## Owned target and safe stages
 
