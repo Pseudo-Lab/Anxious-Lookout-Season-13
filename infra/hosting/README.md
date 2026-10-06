@@ -26,6 +26,8 @@ Ignored `.local/hosting/` contains private root-readable provisioning files. Cre
 
 k3s Secret references (resources are not committed with values):
 
+For Docker Compose file-backed secrets, preserve a root-owned mode-0700 `.local/hosting` parent and set the mounted API/ops files to UID/GID 10001 mode 0400; PG password file uses UID/GID 999 mode 0400. File-backed Compose secrets retain bind-file ownership rather than applying requested uid/gid modes. The private parent prevents host users traversing these files while the actual mounted non-root process can read them. Kubernetes instead projects mode-0440 Secrets with the matching fsGroup. Verify readability inside the reviewed container before startup; do not solve it by putting passwords in the image or broadly opening the parent directory.
+
 | Secret | Keys / mount |
 | --- | --- |
 | hosting-db-admin | password → PG /run/secrets/password |
@@ -63,12 +65,14 @@ Normal rollback reapplies previous web/API images and matching public config/Ing
 
 ```sh
 # Approved Docker DB, private new file. Use k3s mode for the owned postgres-0 instead.
-sudo env COMPOSE_FILE=/ABSOLUTE/docker-compose.yml DB_NAME=hosting \
+sudo env COMPOSE_FILE=/ABSOLUTE/docker-compose.yml BACKUP_PROJECT_NAME=anxious-s13-back DB_NAME=hosting \
   bash infra/hosting/db-backup.sh docker /PRIVATE/auth-new.dump
 sudo bash infra/hosting/restore-check.sh /PRIVATE/auth-new.dump
 ```
 
 Backup is PostgreSQL consistent `pg_dump -Fc` without owner/privilege credentials and mode 0600 + checksum. M1's control-plane backup and naive live PGDATA copying are not DB backups. Role provisioning/grants use the versioned migration/recovery input, with operator credentials held separately.
+
+The backup tool rejects both existing dump/checksum (including symlinks), takes an atomic per-destination lock, writes in its own private temporary directory and publishes with non-overwriting hard links. Cleanup deletes only its own temporary files; existing/public files are never removed on failure. A killed process can leave a lock, or an interrupted publication can leave a partial pair; operators must verify no writer is live and inspect/verify artifacts before manual cleanup or reuse. Failure is not reported as a completed backup. Dedicated Docker collision/failure/concurrency tests cover this boundary.
 
 Restore checker creates a new non-root read-only/network-none PG container with only fresh tmpfs, no host ports/live PVC/host network. It restores atomically with errors fatal, checks auth schema/role/FK invariants and removes sessions/transactions in the copy. It prints counts, not identity/secret data, and deletes only its own container. Actual recovery must provision/re-grant DB roles, invalidate all restored sessions/transactions, reconcile post-snapshot approvals/revocations from trusted operational records, then validate/reopen auth. Backups can contain identity/session hashes/short-lived encrypted verifier data and must stay private/encrypted before any off-host transfer.
 
@@ -93,3 +97,30 @@ Open the local URL in that computer's browser. Use AUTH_ORIGIN=http://127.0.0.1:
 Real-auth endpoints validate incoming Host/protocol against configured AUTH_ORIGIN. Forwarded protocol is trusted only from explicit AUTH_TRUSTED_PROXY_CIDRS combined with the ingress-only-from-Traefik Cilium policy; forwarded headers from other sources do not enable HTTP login. The rendered HTTPS origin with HTTP-only ingress therefore cannot issue real sessions until a matching protected/HTTPS access configuration is reviewed. If using cluster validation rather than Compose staging, prepare a reviewed local proxy preserving the configured external Host and secure/protected transport; do not merely change AUTH_ORIGIN to localhost while continuing public Host routing.
 
 For k3s operator account changes, `render-approval.sh` emits an ops-labelled non-root Job with the private operator credential. Supply verified GITHUB_ID, APPROVED, ROLE, ACTOR and REASON plus API_IMAGE, inspect it, then use `kubectl create -f` only under the approved operation. No ID/default administrator is selected by the script. It uses generateName for an auditable one-shot execution; retain status/log outcome and remove only the completed owned Job if desired. The direct CLI remains available for audit text outside the renderer's safe ASCII literal set.
+
+## Reproduce cumulative runtime/Pages checks
+
+After building web/API for an actual release SHA, run backend validation first to create only the dedicated test DB and role. The integration overlay reuses that test project, supplies mock-mode API settings and binds a test-only gateway to loopback 28100. Inside its network, the driver origin is 127.0.0.1:8080; it is not an actual GitHub callback registration.
+
+```sh
+sudo docker build -f infra/hosting/browser.Dockerfile -t anxious-hosting-browser-test .
+sudo env WEB_RUNTIME_IMAGE=ACTUAL_WEB_IMAGE API_RUNTIME_IMAGE=ACTUAL_API_IMAGE \
+  docker compose -p anxious-s13-back-test -f infra/hosting/compose.test.yml \
+  -f infra/hosting/compose.integration.yml up -d api web gateway
+sudo docker compose -p anxious-s13-back-test -f infra/hosting/compose.test.yml \
+  run --rm --no-deps test python -m tests.gateway_probe
+sudo docker run --rm --network container:anxious-s13-back-test-gateway-1 anxious-hosting-browser-test
+```
+
+Gateway checks use the real runtime services with a mock identity provider, not a mocked frontend API. The HTTP driver follows web slash redirects; browser checks auth/guest state rather than requiring a noncontractual logout URL navigation. The web process is UID 10001/read-only with /tmp only. Keep these results separate from Cilium and real provider checks.
+
+Pages out/ generation is independently reproduced with the builder target:
+
+```sh
+sudo docker build -f infra/hosting/web.Dockerfile --target builder \
+  --build-arg WEB_BUILD=pages --build-arg NEXT_PUBLIC_BASE_PATH=/Anxious-Lookout-Season-13 \
+  --build-arg WEB_GIT_SHA=ACTUAL_SHA --build-arg WEB_BUILT_AT=ACTUAL_UTC \
+  -t anxious-hosting-pages-test .
+```
+
+This invokes the same build:pages command as the preserved workflow and produces /webapp/out. The static browser fixture uses front's read-only pages-static.mjs and backend browser_pages.mjs on an isolated container network. It verifies API-disabled UI/no API requests, not any GitHub Pages deployment or external cache behavior. Cleanup stops only these owned validation containers; test volume deletion is explicit and never part of production rollback.

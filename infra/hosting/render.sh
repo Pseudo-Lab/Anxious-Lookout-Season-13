@@ -229,7 +229,7 @@ spec:
   ports: [{name: http, port: 8080, targetPort: http}]
 YAML
 }
-deployment api "$API_IMAGE" 50m 64Mi 250m 192Mi
+deployment api "$API_IMAGE" 50m 96Mi 250m 256Mi
 deployment web "$WEB_IMAGE" 100m 128Mi 500m 512Mi
 cat <<'YAML'
 ---

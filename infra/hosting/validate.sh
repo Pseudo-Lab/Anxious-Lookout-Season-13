@@ -4,7 +4,7 @@ set -euo pipefail
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_dir"
 test_compose=infra/hosting/compose.test.yml
-dc() { docker compose -f "$test_compose" "$@"; }
+dc() { docker compose -p anxious-s13-back-test -f "$test_compose" "$@"; }
 dc build mock-github
 dc run --rm test
 dc up -d api

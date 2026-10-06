@@ -19,5 +19,11 @@ docker inspect hermes --format '{{.State.StartedAt}} {{.State.Status}} {{.State.
 systemctl is-active k3s docker firewalld anxious-k3s-firewall-sync.timer > "$target/systemd.txt"
 free -m > "$target/memory.txt"
 df -h / > "$target/disk.txt"
-curl --max-time 10 -sS -D "$target/android.headers" -o "$target/android.body" http://127.0.0.1/android-agent/ || echo 'Existing android probe failed; investigate before apply' > "$target/android.failure"
+ingress_ipv4=$(kctl -n kube-system get svc traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+printf '%s\n' "$ingress_ipv4" > "$target/ingress-address.txt"
+if [[ "$ingress_ipv4" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+  curl --max-time 10 -sS -D "$target/android.headers" -o "$target/android.body" "http://$ingress_ipv4/android-agent/" || echo 'Existing android probe failed; investigate before apply' > "$target/android.failure"
+else
+  echo 'No verified IPv4 ingress address; collect an operator-confirmed route baseline' > "$target/android.failure"
+fi
 echo 'Private read-only baseline collected; collect representative app and packet-policy controls separately before/after apply'

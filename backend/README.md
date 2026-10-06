@@ -13,7 +13,7 @@ sudo bash infra/hosting/validate.sh
 This builds pinned ARM64 dependencies and runs the `anxious-s13-back-test` project on an internal network. Credentials in `compose.test.yml` are disposable fixtures, never deployment credentials. The test project publishes no ports; its named PostgreSQL volume survives the deliberate stop/start probe. It does not use host/k3s DB data. Cleanup is explicit:
 
 ```sh
-sudo docker compose -f infra/hosting/compose.test.yml down --volumes
+sudo docker compose -p anxious-s13-back-test -f infra/hosting/compose.test.yml down --volumes
 ```
 
 Do not use that command on deployment volumes. The test fixture's mock provider is packaged only in the Docker `test` stage. Real OAuth is not validated by these tests.

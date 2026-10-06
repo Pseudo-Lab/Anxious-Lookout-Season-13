@@ -4,6 +4,7 @@ from dataclasses import replace
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import httpx
+import os
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -207,3 +208,16 @@ def test_malformed_auth_host_rejected(client, host):
     with TestClient(create_app(settings), base_url="https://m2.invalid", follow_redirects=False) as other:
         response = other.get("/api/auth/github/start", headers={"Host": host})
         assert response.status_code == 303 and "server_error" in response.headers["location"]
+
+
+def test_private_secret_files_override_environment_for_login(client, tmp_path, monkeypatch):
+    for name in ("DATABASE_URL", "GITHUB_CLIENT_SECRET", "AUTH_TRANSACTION_KEY"):
+        value = os.environ[name]
+        file = tmp_path / name.lower()
+        file.write_text(value)
+        file.chmod(0o400)
+        monkeypatch.setenv(name + "_FILE", str(file))
+        monkeypatch.setenv(name, "wrong-environment-value")
+    with TestClient(create_app(), base_url=client.app.state.settings.origin, follow_redirects=False) as other:
+        data, _ = login(other)
+        assert data["user"]["isApproved"] is False
