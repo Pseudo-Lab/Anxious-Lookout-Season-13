@@ -30,6 +30,10 @@ const consoleErrors = [];
 page.on("request", (r) => { if (new URL(r.url()).pathname.includes("/api/")) apiRequests.push(r.url()); });
 page.on("console", (m) => { if (m.type() === "error" && !/Failed to load resource/.test(m.text())) consoleErrors.push(m.text()); });
 const header = page.locator("header").first();
+if (process.env.EXPECT_INSECURE === "1") {
+  await page.goto(U("/"));
+  check("origin is not a secure context (public IP HTTP 조건)", (await page.evaluate(() => window.isSecureContext)) === false);
+}
 
 await page.goto(U("/"));
 await page.waitForLoadState("networkidle");

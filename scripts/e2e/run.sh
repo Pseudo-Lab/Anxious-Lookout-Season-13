@@ -5,6 +5,9 @@
 #   sh scripts/e2e/run.sh node  [base]   # k3s용 standalone. 예: sh scripts/e2e/run.sh node /m2
 #   sh scripts/e2e/run.sh pages [base]   # GitHub Pages용 정적 export(API 없음). 기본 base /Anxious-Lookout-Season-13
 #
+# E2E_INSECURE_ORIGIN=1: 127.0.0.1 대신 컨테이너의 비-loopback IP로 접속한다. 공인 IP HTTP처럼
+# 브라우저가 secure context가 아닌 origin에서도 동작하는지 확인한다(isSecureContext === false 단언).
+#
 # 저장소는 읽기 전용으로 마운트하고 빌드·실행 산출물은 임시 디렉터리($E2E_WORK)에만 만든다.
 set -eu
 
@@ -63,10 +66,18 @@ fi
 trap 'docker stop "$NAME" >/dev/null 2>&1 || true' EXIT
 sleep 4
 
+ORIGIN_HOST=127.0.0.1
+EXPECT_INSECURE=0
+if [ "${E2E_INSECURE_ORIGIN:-0}" = 1 ]; then
+  ORIGIN_HOST=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$NAME")
+  EXPECT_INSECURE=1
+fi
+echo "== origin http://$ORIGIN_HOST:8080"
+
 # 3) 브라우저 검증
 STATUS=0
 docker run --rm --network "container:$NAME" --ipc=host -e HOME=/tmp \
-  -e ORIGIN=http://127.0.0.1:8080 -e BASE_PATH="$BASE" -e EXPECT_SHA="$SHA" \
+  -e ORIGIN="http://$ORIGIN_HOST:8080" -e EXPECT_INSECURE="$EXPECT_INSECURE" -e BASE_PATH="$BASE" -e EXPECT_SHA="$SHA" \
   -v "$E2E_DIR:/e2e:ro" "$PW_IMAGE" sh -c "
     mkdir -p /tmp/t && cd /tmp/t && npm i --silent playwright@$PW_VERSION >/dev/null 2>&1 &&
     cp /e2e/$SCRIPT . && node $SCRIPT" || STATUS=$?

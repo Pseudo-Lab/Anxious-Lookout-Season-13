@@ -57,6 +57,10 @@ page.on("request", (req) => {
   if (h !== new URL(ORIGIN).host) externalHosts.add(h);
 });
 const header = page.locator("header").first();
+if (process.env.EXPECT_INSECURE === "1") {
+  await page.goto(U("/"));
+  check("origin is not a secure context (public IP HTTP 조건)", (await page.evaluate(() => window.isSecureContext)) === false);
+}
 
 await setMock("me=normal&health=normal&nextLogin=pending&logout=normal");
 
