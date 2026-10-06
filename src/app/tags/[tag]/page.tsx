@@ -6,6 +6,9 @@ interface PageProps {
   params: Promise<{ tag: string }>;
 }
 
+// 저장소 mdx에서 만든 경로만 제공한다. 빌드에 없는 값은 404이며 런타임 렌더링·캐시 쓰기를 하지 않는다.
+export const dynamicParams = false;
+
 export async function generateStaticParams() {
   const tags = getAllTags();
   return tags.map((tag) => ({ tag }));

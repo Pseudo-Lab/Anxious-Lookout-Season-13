@@ -30,10 +30,10 @@ export default function Hero() {
             글 둘러보기
           </Link>
           <Link
-            href="/write/"
+            href="/status/"
             className="rounded-lg border border-white/50 bg-white/50 px-5 py-2.5 text-sm font-medium text-slate-700 backdrop-blur-sm transition-colors hover:bg-white/80"
           >
-            글 쓰기
+            서비스 상태
           </Link>
         </div>
       </div>

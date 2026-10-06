@@ -1,8 +1,11 @@
-import SupabasePosts from "@/components/posts/SupabasePosts";
-import Hero from "@/components/layout/Hero";
 import Link from "next/link";
+import Hero from "@/components/layout/Hero";
+import PostList from "@/components/posts/PostList";
+import { getAllPosts } from "@/lib/posts/mdx";
 
 export default function HomePage() {
+  const recentPosts = getAllPosts().slice(0, 5);
+
   return (
     <>
       <Hero />
@@ -17,7 +20,7 @@ export default function HomePage() {
             전체 보기 →
           </Link>
         </div>
-        <SupabasePosts limit={5} />
+        <PostList posts={recentPosts} />
       </section>
     </>
   );
