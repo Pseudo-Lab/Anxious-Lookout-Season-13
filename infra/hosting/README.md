@@ -80,4 +80,16 @@ Mock tests do not need an external app/secret. Actual GitHub flow requires an ow
 
 Public domain/DNS/TLS is subsequent work. Public real-session operation requires HTTPS origin/callback/Secure cookies, owned provider setup, audited approvals, persistence and recovery readiness. M2 local/mock verification is not public HTTPS operation completion.
 
+### Concrete secret-free verification address
+
+The protected local Compose verification gateway is **http://127.0.0.1:28000/** and the exact GitHub callback is **http://127.0.0.1:28000/api/auth/github/callback**. Before actual OAuth, the owner confirms this registration and private secret injection separately. From the verifier's computer, a reviewed server staging gateway bound only to server loopback can be reached with:
+
+```sh
+ssh -N -L 28000:127.0.0.1:28000 VERIFIED_SSH_USER@VERIFIED_SERVER
+```
+
+Open the local URL in that computer's browser. Use AUTH_ORIGIN=http://127.0.0.1:28000 and explicit ALLOW_INSECURE_LOOPBACK=true only for this protected staging origin. The callback and app browser URL use the same address/port. Do not bind this verification gateway to 0.0.0.0 or create a cloud port rule. This procedure requires separate staging-data/credential/application review; no such gateway or OAuth app has been started/changed as a production operation here.
+
+Real-auth endpoints validate incoming Host/protocol against configured AUTH_ORIGIN. Forwarded protocol is trusted only from explicit AUTH_TRUSTED_PROXY_CIDRS combined with the ingress-only-from-Traefik Cilium policy; forwarded headers from other sources do not enable HTTP login. The rendered HTTPS origin with HTTP-only ingress therefore cannot issue real sessions until a matching protected/HTTPS access configuration is reviewed. If using cluster validation rather than Compose staging, prepare a reviewed local proxy preserving the configured external Host and secure/protected transport; do not merely change AUTH_ORIGIN to localhost while continuing public Host routing.
+
 For k3s operator account changes, `render-approval.sh` emits an ops-labelled non-root Job with the private operator credential. Supply verified GITHUB_ID, APPROVED, ROLE, ACTOR and REASON plus API_IMAGE, inspect it, then use `kubectl create -f` only under the approved operation. No ID/default administrator is selected by the script. It uses generateName for an auditable one-shot execution; retain status/log outcome and remove only the completed owned Job if desired. The direct CLI remains available for audit text outside the renderer's safe ASCII literal set.

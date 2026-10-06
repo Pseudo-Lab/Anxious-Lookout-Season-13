@@ -31,6 +31,8 @@ Settings read `<NAME>_FILE` when present, otherwise `<NAME>`. Deployment uses pr
 
 Public browser API and cookie paths include APP_BASE_PATH when configured. Default is empty for the dedicated Host. The committed Compose gateway/k3s renderer use root web/API; changing base also requires corresponding routing and a new web build. Uvicorn disables access logging to keep callback code/state out of logs and does not trust proxy headers. Responses use no-store; provider exceptions/credentials/SQL parameters are not printed.
 
+Real auth additionally checks request Host/protocol against AUTH_ORIGIN. X-Forwarded-Proto is used only from configured AUTH_TRUSTED_PROXY_CIDRS; k3s restricts API ingress to Traefik endpoints before trusting the Pod source CIDR. Public HTTP and spoofed headers from other sources cannot issue real sessions. Protected loopback verification preserves the exact configured loopback Host. Mock transport remains confined to test mode.
+
 ## Migration and operator authority
 
 `python -m app.migrate` runs **inside an explicit operator container**, with ADMIN_DATABASE_URL and API_DATABASE_PASSWORD private inputs. It serializes migration v1, creates the API role only if absent, grants auth DML, and does not rotate an existing password. The app role can create identities/update display login, but cannot set role/approval or read/write permission audit. A migration/schema mismatch is an error, not an automatic downgrade.

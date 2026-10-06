@@ -4,12 +4,13 @@ import hmac
 import json
 import logging
 import os
+import ipaddress
 import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from cryptography.fernet import Fernet
@@ -65,6 +66,37 @@ def create_app(settings=None):
     app.state.sessions = sessions
     app.state.settings = settings
     prefix = settings.base_path + "/api"
+
+    @app.middleware("http")
+    async def auth_transport(request, call_next):
+        # Mock transport is confined to APP_ENV=test. Never let a public HTTP
+        # callback issue a real app session merely because configured origin is HTTPS.
+        is_auth = request.url.path.startswith(prefix + "/auth/")
+        needs_protection = settings.oauth_mode == "github" or bool(request.cookies.get(SESSION_COOKIE))
+        if is_auth and needs_protection and settings.oauth_mode != "mock":
+            protocol = request.url.scheme
+            if settings.trusted_proxy_cidrs:
+                try:
+                    peer = ipaddress.ip_address(request.client.host)
+                    trusted = any(peer in ipaddress.ip_network(cidr) for cidr in settings.trusted_proxy_cidrs)
+                except ValueError:
+                    trusted = False
+                if trusted:
+                    protocol = request.headers.get("x-forwarded-proto", "")
+            try:
+                actual = urlsplit(protocol + "://" + request.headers.get("host", ""))
+                expected = urlsplit(settings.origin)
+                default_port = 443 if expected.scheme == "https" else 80
+                matches = (actual.scheme == expected.scheme and actual.hostname == expected.hostname
+                           and (actual.port or default_port) == (expected.port or default_port)
+                           and not any((actual.path, actual.query, actual.fragment, actual.username, actual.password)))
+            except ValueError:
+                matches = False
+            if not matches:
+                if request.url.path.endswith(("/github/start", "/github/callback")):
+                    return callback_failure("server_error")
+                return error("not_ready", "Service is not ready", 503)
+        return await call_next(request)
 
     @app.exception_handler(SQLAlchemyError)
     async def database_error(request, exc):

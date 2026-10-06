@@ -1,5 +1,6 @@
 import os
 import re
+import ipaddress
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -25,6 +26,7 @@ class Settings:
     session_seconds: int = 28800
     transaction_seconds: int = 300
     secure_cookie: bool = True
+    trusted_proxy_cidrs: tuple[str, ...] = ()
 
     @classmethod
     def load(cls):
@@ -51,6 +53,7 @@ class Settings:
             session_seconds=int(os.getenv("SESSION_SECONDS", "28800")),
             transaction_seconds=int(os.getenv("TRANSACTION_SECONDS", "300")),
             secure_cookie=parsed.scheme == "https",
+            trusted_proxy_cidrs=tuple(filter(None, os.getenv("AUTH_TRUSTED_PROXY_CIDRS", "").split(","))),
         )
         if not settings.database_url or settings.session_seconds < 60 or not 30 <= settings.transaction_seconds <= 600:
             raise ValueError("Invalid database or session settings")
@@ -58,6 +61,8 @@ class Settings:
             raise ValueError("OAuth credentials are required in enabled mode")
         if mode == "github" and (settings.authorize_url != "https://github.com/login/oauth/authorize" or settings.token_url != "https://github.com/login/oauth/access_token" or settings.user_url != "https://api.github.com/user"):
             raise ValueError("GitHub endpoints cannot be overridden outside mock mode")
+        for cidr in settings.trusted_proxy_cidrs:
+            ipaddress.ip_network(cidr, strict=True)
         return settings
 
     @property

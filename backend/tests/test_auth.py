@@ -183,3 +183,27 @@ def test_https_cookie_and_session_policy(client):
         assert "Secure" in response.headers["set-cookie"]
         assert "HttpOnly" in response.headers["set-cookie"]
         assert "SameSite=lax" in response.headers["set-cookie"]
+
+
+def test_real_auth_does_not_accept_public_http_or_spoofed_proxy(client):
+    settings = replace(client.app.state.settings, oauth_mode="github", origin="https://m2.invalid", secure_cookie=True)
+    with TestClient(create_app(settings), base_url="http://m2.invalid", follow_redirects=False) as other:
+        denied = other.get("/api/auth/github/start", headers={"X-Forwarded-Proto": "https"})
+        assert denied.status_code == 303 and "auth_error=server_error" in denied.headers["location"]
+        assert "anxious_oauth=" not in denied.headers.get("set-cookie", "") or "Max-Age=0" in denied.headers["set-cookie"]
+
+
+def test_real_callback_wrong_host_never_issues_session(client):
+    settings = replace(client.app.state.settings, oauth_mode="github", origin="https://m2.invalid", secure_cookie=True)
+    with TestClient(create_app(settings), base_url="https://other.invalid", follow_redirects=False) as other:
+        denied = other.get("/api/auth/github/callback?state=forged&code=forged")
+        assert denied.status_code == 303 and "server_error" in denied.headers["location"]
+        assert "anxious_session=" not in denied.headers.get("set-cookie", "")
+
+
+@pytest.mark.parametrize("host", ["m2.invalid/extra", "m2.invalid?query", "user@m2.invalid"])
+def test_malformed_auth_host_rejected(client, host):
+    settings = replace(client.app.state.settings, oauth_mode="github", origin="https://m2.invalid", secure_cookie=True)
+    with TestClient(create_app(settings), base_url="https://m2.invalid", follow_redirects=False) as other:
+        response = other.get("/api/auth/github/start", headers={"Host": host})
+        assert response.status_code == 303 and "server_error" in response.headers["location"]
