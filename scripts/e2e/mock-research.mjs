@@ -9,6 +9,8 @@ export const researchMode = {
   publish: "pending",
   // "unavailable" | "fixture"
   codex: "unavailable",
+  // "reject": 변경 요청을 403 csrf_invalid로 거절(키 확인 전 단계)
+  csrf: "normal",
 };
 
 const items = new Map(); // id -> item
@@ -374,7 +376,7 @@ export async function handleResearch(req, res, path, url, session) {
   }
 
   if (req.headers.origin !== `http://${req.headers.host}`) return send(res, 403, { error: { code: "origin_not_allowed", message: "Origin not allowed" } });
-  if (req.headers["x-csrf-token"] !== session.csrf) return send(res, 403, { error: { code: "csrf_invalid", message: "Invalid CSRF token" } });
+  if (researchMode.csrf === "reject" || req.headers["x-csrf-token"] !== session.csrf) return send(res, 403, { error: { code: "csrf_invalid", message: "Invalid CSRF token" } });
   const key = req.headers["idempotency-key"];
   if (typeof key !== "string" || !UUID_RE.test(key)) {
     return send(res, 422, { error: { code: "validation_error", message: "Idempotency-Key required", fields: [{ path: "header.Idempotency-Key", message: "uuid" }] } });

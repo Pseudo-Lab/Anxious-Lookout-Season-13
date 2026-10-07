@@ -9,7 +9,9 @@ const NEXT = { host: "127.0.0.1", port: Number(process.env.NEXT_PORT ?? 3000) };
 const PORT = Number(process.env.GATEWAY_PORT ?? 8080);
 
 const sessions = new Map(); // sid -> { user, csrf }
-const mode = { me: "normal", health: "normal", nextLogin: "pending", logout: "normal" };
+// reuse=1: 다음 로그인이 직전 계정(같은 accountId)으로 다시 로그인한다(세션 만료 후 재로그인 검증용).
+const mode = { me: "normal", health: "normal", nextLogin: "pending", logout: "normal", reuse: "0" };
+let lastUser = null;
 const calls = []; // 검증용 요청 기록
 
 function json(res, status, body, extra = {}) {
@@ -49,16 +51,18 @@ function api(req, res, path, url) {
       return res.end();
     }
     const id = crypto.randomUUID();
-    sessions.set(id, {
-      csrf: crypto.randomUUID(),
-      user: {
-        accountId: crypto.randomUUID(),
-        githubId: "1234567",
-        login: "mock-user",
-        role: "commenter",
-        isApproved: mode.nextLogin === "approved",
-      },
-    });
+    const user =
+      mode.reuse === "1" && lastUser
+        ? lastUser
+        : {
+            accountId: crypto.randomUUID(),
+            githubId: "1234567",
+            login: "mock-user",
+            role: "commenter",
+            isApproved: mode.nextLogin === "approved",
+          };
+    lastUser = user;
+    sessions.set(id, { csrf: crypto.randomUUID(), user });
     res.writeHead(303, {
       Location: `${BASE}/`,
       "Set-Cookie": `mock_sid=${id}; Path=${BASE}/api; HttpOnly; SameSite=Lax`,
@@ -114,8 +118,10 @@ http
   .createServer((req, res) => {
     const url = new URL(req.url, "http://x");
     if (url.pathname === "/__mock/set") {
-      for (const k of ["me", "health", "nextLogin", "logout"]) if (url.searchParams.has(k)) mode[k] = url.searchParams.get(k);
-      for (const k of ["access", "publish", "codex"]) if (url.searchParams.has(k)) researchMode[k] = url.searchParams.get(k);
+      for (const k of ["me", "health", "nextLogin", "logout", "reuse"]) if (url.searchParams.has(k)) mode[k] = url.searchParams.get(k);
+      // expire=1: 모든 로그인 session 만료(서버 측 폐기)
+      if (url.searchParams.get("expire") === "1") sessions.clear();
+      for (const k of ["access", "publish", "codex", "csrf"]) if (url.searchParams.has(k)) researchMode[k] = url.searchParams.get(k);
       return json(res, 200, { ...mode, ...researchMode });
     }
     if (url.pathname === "/__mock/counts") return json(res, 200, researchCounts());

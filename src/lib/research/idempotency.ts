@@ -24,23 +24,42 @@ export function isUncertain(failure: FetchFailure): boolean {
 }
 
 /**
+ * 이전 시도의 결과를 모르는 요청을 다시 보낸 뒤, 그 응답이 이전 시도의 결과를 확정하는지.
+ * 인증·Origin·CSRF·정책 거절(401/403/503 policy_pending 등)은 서버가 key를 확인하기 전 단계라
+ * 이전 시도가 처리되지 않았다는 증거가 아니다. 같은 key로 서버가 판단한 결과(성공 replay, 409)만 확정이다.
+ */
+export function settlesRetry(failure: FetchFailure | null): boolean {
+  if (failure === null) return true;
+  return failure.kind === "http" && failure.status === 409;
+}
+
+/**
  * 요청 하나(같은 대상·같은 내용)에 Idempotency-Key 하나를 대응시킨다.
- * 결과가 불확실한 실패 뒤 같은 내용을 다시 보내면 같은 key를 재사용해 서버가 중복 처리하지 않게 하고,
- * 내용이 바뀌었거나 결과가 확정되면 새 key를 쓴다.
+ * 결과가 불확실한 실패 뒤 같은 내용을 다시 보내면 같은 key를 재사용해 서버가 중복 처리하지 않게 한다.
+ * 불확실한 시도가 있었던 key는 같은 key에 대한 서버 판단(성공·409)이 올 때까지 유지한다.
+ * 내용이 바뀌면 새 요청으로 보고 새 key를 쓴다. key는 컴포넌트 메모리에만 있다.
  */
 export function useIdempotencyKey() {
-  const pending = useRef<{ fingerprint: string; key: string } | null>(null);
+  const pending = useRef<{ fingerprint: string; key: string; unconfirmed: boolean } | null>(null);
 
   const keyFor = useCallback((fingerprint: string): string => {
     if (pending.current?.fingerprint !== fingerprint) {
-      pending.current = { fingerprint, key: uuidV4() };
+      pending.current = { fingerprint, key: uuidV4(), unconfirmed: false };
     }
     return pending.current.key;
   }, []);
 
-  // 응답을 받은 뒤 호출. 확정된 결과(성공·거절)면 key를 버린다.
+  // 응답을 받은 뒤 호출. 결과가 확정되면 key를 버린다.
   const settle = useCallback((failure: FetchFailure | null) => {
-    if (failure === null || !isUncertain(failure)) pending.current = null;
+    const p = pending.current;
+    if (!p) return;
+    if (p.unconfirmed) {
+      if (settlesRetry(failure)) pending.current = null;
+    } else if (failure === null || !isUncertain(failure)) {
+      pending.current = null;
+    } else {
+      p.unconfirmed = true;
+    }
   }, []);
 
   return { keyFor, settle };

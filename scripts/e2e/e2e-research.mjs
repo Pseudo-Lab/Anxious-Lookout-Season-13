@@ -118,7 +118,9 @@ check("R3. external image shown as link only", (await prose.getByRole("link", { 
 await main.getByRole("button", { name: "내용 수정" }).click();
 await main.getByLabel("내용").fill("두 번째 내용");
 await main.getByRole("button", { name: "새 버전으로 저장" }).click();
-check("R4. updated content shown", await appears(main.getByText("두 번째 내용")));
+// 편집 중 textarea도 같은 문구를 담으므로, 저장 완료(편집 종료 후 v2 표시)를 기다린다.
+await main.getByRole("button", { name: "내용 수정" }).waitFor();
+check("R4. updated content shown", await appears(main.locator(".prose").getByText("두 번째 내용")));
 check("R4. version number v2", (await main.locator("header").innerText()).includes("v2"));
 await main.getByRole("button", { name: /v1\s/ }).click();
 check("R4. v1 snapshot readable", await appears(main.getByText("첫 번째 내용")));
@@ -301,6 +303,59 @@ async function dropFirstMessagePost() {
   check("R12b. pending send cleared after confirmation", store === "{}", store);
 }
 
+// R12c~e. 인증 오류는 이전 전송의 미처리를 증명하지 않는다: 보관 유지 → 같은 계정 재시도는 replay
+const pendingStore = () => page.evaluate(() => JSON.stringify({ ...sessionStorage }));
+async function makeUnconfirmedSend(text) {
+  await dropFirstMessagePost();
+  await main.getByLabel("메시지").fill(text);
+  await main.getByRole("button", { name: "보내기" }).click();
+  await main.getByText("이전 전송의 결과를 확인하지 못했습니다").waitFor();
+  await page.unroute("**/api/research/sessions/*/messages");
+  await main.getByText(`모의 응답: ${text}`).first().waitFor({ timeout: 15000 });
+}
+async function confirmSingleTurn(label, text) {
+  await main.getByRole("button", { name: "다시 보내기" }).click();
+  await main.getByRole("button", { name: "보내기", exact: true }).waitFor();
+  await page.waitForTimeout(3500);
+  await page.reload();
+  await main.getByText(`모의 응답: ${text}`).first().waitFor();
+  check(`${label}: exactly one user message`, (await userMessages(text).count()) === 1, String(await userMessages(text).count()));
+}
+{
+  // R12c. 재시도가 CSRF 403으로 거절돼도 보관 유지
+  await makeUnconfirmedSend("CSRF 질문");
+  await setMock("csrf=reject");
+  await main.getByRole("button", { name: "다시 보내기" }).click();
+  check("R12c. csrf_invalid shown", await appears(main.getByText("요청을 확인하지 못했습니다")));
+  check("R12c. unconfirmed send kept after 403", (await pendingStore()).includes("CSRF 질문"));
+  check("R12c. still offers same-request retry", await appears(main.getByRole("button", { name: "다시 보내기" })));
+  await setMock("csrf=normal");
+  await confirmSingleTurn("R12c. retry after csrf recovery", "CSRF 질문");
+}
+{
+  // R12d. 재시도가 401(session 만료)이어도 보관 유지 → 같은 계정 재로그인 후 같은 key로 replay
+  await makeUnconfirmedSend("만료 질문");
+  await setMock("expire=1");
+  await main.getByRole("button", { name: "다시 보내기" }).click();
+  check("R12d. expired session -> login required", await appears(main.getByText("로그인이 필요합니다")));
+  check("R12d. unconfirmed send kept after 401", (await pendingStore()).includes("만료 질문"));
+  await setMock("reuse=1");
+  await login(page);
+  await page.goto(sessionUrl);
+  await main.getByLabel("메시지").waitFor();
+  check("R12d. same account restores pending text", (await main.getByLabel("메시지").inputValue()) === "만료 질문");
+  await confirmSingleTurn("R12d. retry after re-login", "만료 질문");
+}
+{
+  // R12e. 명시적 로그아웃은 미확인 전송(입력 포함)을 지운다
+  await makeUnconfirmedSend("로그아웃 질문");
+  await page.locator("header").getByRole("button", { name: "로그아웃", exact: true }).first().click();
+  await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
+  check("R12e. logout clears unconfirmed sends", (await pendingStore()) === "{}", await pendingStore());
+  await login(page); // reuse=1: 같은 계정으로 이후 단계 계속
+  await setMock("reuse=0");
+}
+
 // R13. 좁은 화면: 가로 스크롤 없이 표시
 await page.setViewportSize({ width: 360, height: 800 });
 for (const [label, url] of [
@@ -315,6 +370,74 @@ for (const [label, url] of [
   check(`R13. ${label} fits 360px`, overflow <= 0, `overflow ${overflow}px`);
 }
 await page.setViewportSize({ width: 1280, height: 800 });
+
+// R14. 같은 브라우저에서 다른 계정으로 바뀌면 이전 계정의 개인 화면·미저장 입력을 버린다(리뷰 blocker)
+{
+  await page.goto(docUrl);
+  await main.getByRole("button", { name: "내용 수정" }).click();
+  await main.getByLabel("본문").fill("A의 미저장 초안");
+  // 같은 browser context에서 로그인을 다시 시작해 cookie를 새 계정(B)으로 바꾼다(로그아웃 없이).
+  const tab2 = await context.newPage();
+  await tab2.goto(U("/api/auth/github/start"));
+  await tab2.waitForURL(U("/"));
+  await tab2.close();
+  await main.getByRole("button", { name: "새 버전으로 저장" }).click(); // A의 CSRF → 403 → me 재조회 → B
+  check("R14. switched account sees not found", await appears(main.getByText("항목을 찾을 수 없습니다")));
+  check("R14. previous account draft discarded", (await main.locator("textarea").count()) === 0 && !(await main.innerText()).includes("A의 미저장 초안"));
+  check("R14. previous account title not shown", (await main.getByRole("heading", { name: "문서 D", exact: true }).count()) === 0);
+}
+
+// R15. 일반 생성 요청: 응답 유실 → CSRF 403 → 정상 재시도, 같은 key·1건 생성(리뷰 major)
+let docEUrl;
+{
+  const before15 = await counts();
+  await page.goto(U("/research/document/new/"));
+  await main.getByLabel("제목").fill("CSRF 재시도 문서");
+  await main.getByLabel("본문").fill("원래 본문");
+  let dropped15 = false;
+  await page.route("**/api/research/documents", async (route) => {
+    if (route.request().method() === "POST" && !dropped15) {
+      dropped15 = true;
+      await route.fetch();
+      return route.abort();
+    }
+    return route.continue();
+  });
+  await main.getByRole("button", { name: "문서 저장" }).click();
+  await main.getByText("서버에 연결할 수 없습니다").waitFor();
+  await setMock("csrf=reject");
+  await main.getByRole("button", { name: "문서 저장" }).click();
+  check("R15. csrf rejection shown", await appears(main.getByText("요청을 확인하지 못했습니다")));
+  await setMock("csrf=normal");
+  await main.getByRole("button", { name: "문서 저장" }).click();
+  await page.waitForURL(/\/research\/document\/\?id=/);
+  await page.unroute("**/api/research/documents");
+  docEUrl = page.url();
+  const posts15 = (await mockCalls()).filter((c) => c.method === "POST" && c.path === "/research/documents").slice(-3);
+  check("R15. same key across lost/403/retry", posts15.length === 3 && new Set(posts15.map((c) => c.idempotencyKey)).size === 1, JSON.stringify(posts15.map((c) => c.idempotencyKey)));
+  check("R15. exactly one document created", (await counts()).documents === before15.documents + 1);
+}
+
+// R16. 충돌 후 최신 다시 불러오기가 일시 실패해도 미저장 입력 유지(리뷰 major)
+{
+  const id = new URL(docEUrl).searchParams.get("id");
+  await main.getByRole("button", { name: "내용 수정" }).click();
+  await main.getByLabel("본문").fill("B 초안");
+  const cur = await api.get(`/research/documents/${id}`);
+  await api.send("PATCH", `/research/documents/${id}`, { title: cur.title, content: "외부 수정", expectedVersion: cur.version });
+  await main.getByRole("button", { name: "새 버전으로 저장" }).click();
+  await main.getByText("다른 곳에서 먼저 변경되었습니다").waitFor();
+  await page.route(`**/api/research/documents/${id}`, (route) => (route.request().method() === "GET" ? route.abort() : route.continue()));
+  await main.getByRole("button", { name: /최신 내용 다시 불러오기/ }).click();
+  check("R16. reload failure shown", await appears(main.getByText("최신 내용을 불러오지 못했습니다")));
+  check("R16. draft kept after reload failure", (await main.getByLabel("본문").inputValue()) === "B 초안");
+  await page.unroute(`**/api/research/documents/${id}`);
+  await main.getByRole("button", { name: /최신 내용 다시 불러오기/ }).click();
+  await page.waitForFunction(() => !document.body.innerText.includes("최신 내용을 불러오지 못했습니다"));
+  await main.getByRole("button", { name: "새 버전으로 저장" }).click();
+  await main.getByRole("button", { name: "내용 수정" }).waitFor();
+  check("R16. save after reload succeeds with draft", await appears(main.locator(".prose").getByText("B 초안")));
+}
 
 // R10. 다른 사용자: 타인 ID는 404로 숨김
 {

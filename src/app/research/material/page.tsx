@@ -18,7 +18,7 @@ import SafeMarkdown, { safeHref } from "@/components/research/SafeMarkdown";
 import VersionHistory from "@/components/research/VersionHistory";
 
 function MaterialDetail({ id }: { id: string }) {
-  const { result, reload, setResult } = useLoad(`material:${id}`, () => getMaterial(id));
+  const { result, refreshFailure, reload, setResult } = useLoad(`material:${id}`, () => getMaterial(id));
   const { run, busy } = useMutation();
   const [editing, setEditing] = useState(false);
   const [failure, setFailure] = useState<FetchFailure | null>(null);
@@ -89,9 +89,15 @@ function MaterialDetail({ id }: { id: string }) {
               최신 내용 다시 불러오기 (작성 중인 입력은 유지됩니다)
             </button>
           )}
+          {refreshFailure && (
+            <ErrorNotice failure={refreshFailure} prefix="최신 내용을 불러오지 못했습니다. 작성 중인 입력은 그대로 있습니다." />
+          )}
         </section>
       ) : (
-        <SafeMarkdown content={m.content} />
+        <>
+          {refreshFailure && <ErrorNotice failure={refreshFailure} prefix="최신 상태를 불러오지 못했습니다. 마지막으로 받은 내용을 표시합니다." />}
+          <SafeMarkdown content={m.content} />
+        </>
       )}
 
       <RelationPanel self={{ type: "material", id: m.id, title: m.title }} editable={!m.archived} />

@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import Link from "next/link";
 import { useAuth } from "@/hooks/useAuth";
 import { describeFailure } from "@/lib/api/client";
@@ -9,8 +9,10 @@ import Notice from "@/components/research/Notice";
 
 // 개인 자료 화면의 공통 진입 조건. 로그인 여부만 확인하고,
 // 승인·역할에 따른 이용 가능 여부는 추정하지 않고 각 API의 401/403 응답으로 표시한다.
+// 하위 화면은 계정(accountId)에 묶인다. 같은 탭에서 다른 계정으로 바뀌면 이전 계정의 조회 결과·입력·
+// 진행 중 요청의 늦은 응답을 모두 버리고 새로 그린다.
 export default function AuthGate({ children }: { children: ReactNode }) {
-  const { status, failure, refresh } = useAuth();
+  const { status, user, failure, refresh } = useAuth();
 
   if (status === "disabled") {
     return <Notice tone="info">이 정적 사이트에는 API 서버가 없어 개인 자료 기능을 제공하지 않습니다.</Notice>;
@@ -40,5 +42,6 @@ export default function AuthGate({ children }: { children: ReactNode }) {
       </Notice>
     );
   }
-  return <>{children}</>;
+  if (!user) return null;
+  return <Fragment key={user.accountId}>{children}</Fragment>;
 }

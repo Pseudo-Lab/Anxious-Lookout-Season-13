@@ -6,8 +6,13 @@ import { useRouter, useSearchParams } from "next/navigation";
 import type { FetchFailure } from "@/lib/api/client";
 import { archiveSession, getSession, getSessionItemRaw, sendSessionMessage } from "@/lib/research/api";
 import { useLoad, useMutation } from "@/lib/research/hooks";
-import { isUncertain, uuidV4 } from "@/lib/research/idempotency";
-import { clearPendingSend, loadPendingSend, savePendingSend, type PendingSend } from "@/lib/research/pendingSend";
+import { isUncertain, settlesRetry, uuidV4 } from "@/lib/research/idempotency";
+import {
+  clearPendingSend,
+  loadPendingSend,
+  savePendingSend,
+  type PendingSend,
+} from "@/lib/research/pendingSend";
 import { useAuth } from "@/hooks/useAuth";
 import type { SessionDetail, SessionItem } from "@/lib/research/types";
 import { formatDateTime, toDisplayText } from "@/lib/research/format";
@@ -100,10 +105,10 @@ function Message({ sessionId, item }: { sessionId: string; item: Extract<Session
   );
 }
 
-function Composer({ session, onSent }: { session: SessionDetail; onSent: () => void }) {
+function Composer({ session, accountId, onSent }: { session: SessionDetail; accountId: string; onSent: () => void }) {
   const { csrfToken, refresh } = useAuth();
   // Composer는 세션을 불러온 뒤 브라우저에서만 그려지므로 sessionStorage를 바로 읽어도 된다.
-  const [pending, setPending] = useState<PendingSend | null>(() => loadPendingSend(session.id));
+  const [pending, setPending] = useState<PendingSend | null>(() => loadPendingSend(accountId, session.id));
   const [text, setText] = useState(() => pending?.text ?? "");
   const [failure, setFailure] = useState<FetchFailure | null>(null);
   const [busy, setBusy] = useState(false);
@@ -119,9 +124,9 @@ function Composer({ session, onSent }: { session: SessionDetail; onSent: () => v
     }
     // 결과를 모르는 이전 전송과 같은 내용이면 처음 요청을 그대로 다시 보낸다(같은 key·같은 expectedVersion).
     // 서버는 같은 key의 원래 응답을 돌려주므로 모델 turn이 두 번 시작되지 않는다.
-    const request: PendingSend =
-      pending && pending.text === body ? pending : { key: uuidV4(), text: body, expectedVersion: session.version };
-    savePendingSend(session.id, request);
+    const isRetry = pending !== null && pending.text === body;
+    const request: PendingSend = isRetry ? pending : { key: uuidV4(), text: body, expectedVersion: session.version };
+    savePendingSend(accountId, session.id, request);
     setPending(request);
     setBusy(true);
     const res = await sendSessionMessage(session.id, request.text, request.expectedVersion, {
@@ -129,8 +134,11 @@ function Composer({ session, onSent }: { session: SessionDetail; onSent: () => v
       idempotencyKey: request.key,
     });
     setBusy(false);
-    if (res.ok || !isUncertain(res.failure)) {
-      clearPendingSend(session.id);
+    // 재전송이면 같은 key에 대한 서버 판단(성공 replay·409)만 이전 전송의 결과를 확정한다.
+    // 401/CSRF/Origin/정책 거절은 이전 전송이 처리되지 않았다는 증거가 아니므로 보관을 유지한다.
+    const settled = isRetry ? settlesRetry(res.ok ? null : res.failure) : res.ok || !isUncertain(res.failure);
+    if (settled) {
+      clearPendingSend(accountId, session.id);
       setPending(null);
     }
     if (res.ok) {
@@ -179,7 +187,8 @@ function Composer({ session, onSent }: { session: SessionDetail; onSent: () => v
 
 function SessionView({ id }: { id: string }) {
   const router = useRouter();
-  const { result, reload } = useLoad(`session:${id}`, () => getSession(id));
+  const { user } = useAuth();
+  const { result, refreshFailure, reload } = useLoad(`session:${id}`, () => getSession(id));
   const { run, busy } = useMutation();
   const [archiveFailure, setArchiveFailure] = useState<FetchFailure | null>(null);
   const running = result?.ok === true && result.data.state === "running";
@@ -189,7 +198,8 @@ function SessionView({ id }: { id: string }) {
     if (!running) return;
     const timer = setTimeout(() => void reload(), POLL_MS);
     return () => clearTimeout(timer);
-  }, [running, result, reload]);
+    // 일시적 조회 실패(refreshFailure)에도 마지막 기록을 유지한 채 계속 확인한다.
+  }, [running, result, refreshFailure, reload]);
 
   if (!result) return <p className="text-sm text-stone-500">불러오는 중...</p>;
   // 개인 세션 조회 실패. 공개 문서 조회와는 별개다.
@@ -232,6 +242,9 @@ function SessionView({ id }: { id: string }) {
         </ol>
       )}
 
+      {refreshFailure && (
+        <ErrorNotice failure={refreshFailure} prefix="최신 대화 상태를 불러오지 못했습니다. 마지막으로 받은 기록을 표시합니다." />
+      )}
       {running && <Notice tone="info">Codex가 응답하는 중입니다. 페이지를 닫았다가 다시 열어도 이어서 확인할 수 있습니다.</Notice>}
       {s.state === "failed" && (
         <Notice tone="error">
@@ -240,7 +253,7 @@ function SessionView({ id }: { id: string }) {
         </Notice>
       )}
 
-      <Composer session={s} onSent={() => void reload()} />
+      {user && <Composer key={user.accountId} session={s} accountId={user.accountId} onSent={() => void reload()} />}
     </div>
   );
 }

@@ -1,17 +1,26 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { FetchResult } from "@/lib/api/client";
+import type { FetchFailure, FetchResult } from "@/lib/api/client";
 import { useAuth } from "@/hooks/useAuth";
-import { useIdempotencyKey } from "@/lib/research/idempotency";
+import { isUncertain, useIdempotencyKey } from "@/lib/research/idempotency";
 import type { MutationContext } from "@/lib/research/api";
+
+interface LoadState<T> {
+  key: string;
+  result: FetchResult<T>;
+  // 성공 데이터를 가진 상태에서 다시 불러오기가 실패한 경우. 마지막 데이터(와 그 위의 입력)는 유지한다.
+  refreshFailure: FetchFailure | null;
+}
 
 /**
  * 조회 결과 상태. key가 바뀌면 다시 불러오고, 늦게 도착한 이전 응답은 버린다.
  * result가 null이면 불러오는 중.
+ * reload가 일시적으로 실패해도 이미 받은 성공 데이터를 실패로 바꾸지 않고 refreshFailure로 따로 알린다.
+ * (계정이 바뀌면 AuthGate가 화면 전체를 새로 그려 이전 계정 상태를 버린다.)
  */
 export function useLoad<T>(key: string, loader: () => Promise<FetchResult<T>>) {
-  const [state, setState] = useState<{ key: string; result: FetchResult<T> } | null>(null);
+  const [state, setState] = useState<LoadState<T> | null>(null);
   const loaderRef = useRef(loader);
   const keyRef = useRef(key);
   // reload 요청 순서. 마지막 요청의 응답만 반영한다.
@@ -25,7 +34,7 @@ export function useLoad<T>(key: string, loader: () => Promise<FetchResult<T>>) {
   useEffect(() => {
     let active = true;
     void loaderRef.current().then((result) => {
-      if (active) setState({ key, result });
+      if (active) setState({ key, result, refreshFailure: null });
     });
     return () => {
       active = false;
@@ -36,18 +45,26 @@ export function useLoad<T>(key: string, loader: () => Promise<FetchResult<T>>) {
     const mine = ++seq.current;
     const forKey = keyRef.current;
     const result = await loaderRef.current();
-    if (mine === seq.current && forKey === keyRef.current) setState({ key: forKey, result });
+    if (mine !== seq.current || forKey !== keyRef.current) return;
+    setState((prev) => {
+      // 일시적 실패(네트워크·timeout·비JSON·5xx)만 마지막 데이터를 유지한다.
+      // 401/403/404 같은 확정 응답은 그대로 반영해 권한이 없어진 데이터를 계속 보여주지 않는다.
+      if (!result.ok && isUncertain(result.failure) && prev && prev.key === forKey && prev.result.ok) {
+        return { ...prev, refreshFailure: result.failure };
+      }
+      return { key: forKey, result, refreshFailure: null };
+    });
   }, []);
 
   const setResult = useCallback((result: FetchResult<T>) => {
     // 진행 중인 reload 응답이 이 결과를 덮어쓰지 않게 한다.
     seq.current++;
-    setState({ key: keyRef.current, result });
+    setState({ key: keyRef.current, result, refreshFailure: null });
   }, []);
 
   // 다른 key의 결과는 보여주지 않는다.
-  const result = state && state.key === key ? state.result : null;
-  return { result, reload, setResult };
+  const current = state && state.key === key ? state : null;
+  return { result: current?.result ?? null, refreshFailure: current?.refreshFailure ?? null, reload, setResult };
 }
 
 /**
