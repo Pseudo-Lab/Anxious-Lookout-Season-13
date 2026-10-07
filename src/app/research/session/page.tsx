@@ -13,6 +13,7 @@ import {
   savePendingSend,
   type PendingSend,
 } from "@/lib/research/pendingSend";
+import { storeGeneration } from "@/lib/research/pendingStore";
 import { useAuth } from "@/hooks/useAuth";
 import type { SessionDetail, SessionItem } from "@/lib/research/types";
 import { formatDateTime, toDisplayText } from "@/lib/research/format";
@@ -129,6 +130,11 @@ function Composer({ session, accountId, onSent }: { session: SessionDetail; acco
   const { csrfToken, refresh } = useAuth();
   // Composer는 세션을 불러온 뒤 브라우저에서만 그려지므로 sessionStorage를 바로 읽어도 된다.
   const [pending, setPending] = useState<PendingSend | null>(() => loadPendingSend(accountId, session.id));
+  // 이 화면이 시작한 보관소 세대와 아는 key들. 로그아웃 뒤 늦게 끝난 전송이 보관소에 다시 쓰지 않게 한다.
+  const [guard] = useState(() => ({
+    generation: storeGeneration(),
+    knownKeys: new Set<string>(pending ? [pending.key] : []),
+  }));
   const [text, setText] = useState(() => pending?.text ?? "");
   const [failure, setFailure] = useState<FetchFailure | null>(null);
   const [busy, setBusy] = useState(false);
@@ -146,7 +152,8 @@ function Composer({ session, accountId, onSent }: { session: SessionDetail; acco
     // 서버는 같은 key의 원래 응답을 돌려주므로 모델 turn이 두 번 시작되지 않는다.
     const isRetry = pending !== null && pending.text === body;
     const request: PendingSend = isRetry ? pending : { key: uuidV4(), text: body, expectedVersion: session.version };
-    savePendingSend(accountId, session.id, request);
+    guard.knownKeys.add(request.key);
+    savePendingSend(accountId, session.id, request, guard);
     setPending(request);
     setBusy(true);
     const res = await sendSessionMessage(session.id, request.text, request.expectedVersion, {
@@ -158,7 +165,7 @@ function Composer({ session, accountId, onSent }: { session: SessionDetail; acco
     // 401/CSRF/Origin/정책 거절은 이전 전송이 처리되지 않았다는 증거가 아니므로 보관을 유지한다.
     const settled = isRetry ? settlesRetry(res.ok ? null : res.failure) : res.ok || !isUncertain(res.failure);
     if (settled) {
-      clearPendingSend(accountId, session.id);
+      clearPendingSend(accountId, session.id, guard);
       setPending(null);
     }
     if (res.ok) {

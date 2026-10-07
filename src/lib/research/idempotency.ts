@@ -2,7 +2,7 @@
 
 import { useCallback, useRef } from "react";
 import type { FetchFailure } from "@/lib/api/client";
-import { clearRequest, loadRequest, saveRequest } from "@/lib/research/pendingStore";
+import { loadRequest, removeRequest, storeGeneration, writeRequest } from "@/lib/research/pendingStore";
 
 // UUID v4. 공인 IP HTTP처럼 secure context가 아닌 origin에서는 crypto.randomUUID가 없으므로
 // 어디서나 쓸 수 있는 crypto.getRandomValues로 만든다.
@@ -44,46 +44,57 @@ export function settlesRetry(failure: FetchFailure | null): boolean {
  * 같은 요청(같은 key·본문)을 복구할 수 있다. 버전 조건(expectedVersion)이 없는 생성 요청에 쓴다.
  */
 export function useIdempotencyKey(persist?: { accountId: string; scope: string } | null) {
-  const pending = useRef<{ fingerprint: string; key: string; unconfirmed: boolean; body?: unknown } | null>(null);
-  const loaded = useRef(false);
-  const accountId = persist?.accountId;
-  const scope = persist?.scope;
+  const accountId = persist?.accountId ?? null;
+  const scope = persist?.scope ?? null;
+  const owner = accountId && scope ? `${accountId}\n${scope}` : null;
+  const state = useRef<{
+    owner: string | null;
+    generation: number;
+    knownKeys: Set<string>;
+    pending: { fingerprint: string; key: string; unconfirmed: boolean; body?: unknown } | null;
+  } | null>(null);
 
+  // 소유자(계정·범위)가 바뀌면 이전 소유자의 key·입력을 재사용하지 않고 새로 불러온다.
   const current = useCallback(() => {
-    if (!loaded.current) {
-      loaded.current = true;
+    if (!state.current || state.current.owner !== owner) {
       const stored = accountId && scope ? loadRequest(accountId, scope) : null;
-      if (stored) pending.current = { fingerprint: stored.fingerprint, key: stored.key, unconfirmed: true, body: stored.body };
+      state.current = {
+        owner,
+        generation: storeGeneration(),
+        knownKeys: new Set(stored ? [stored.key] : []),
+        pending: stored ? { fingerprint: stored.fingerprint, key: stored.key, unconfirmed: true, body: stored.body } : null,
+      };
     }
-    return pending.current;
-  }, [accountId, scope]);
+    return state.current;
+  }, [owner, accountId, scope]);
 
   const keyFor = useCallback(
     (fingerprint: string, body?: unknown): string => {
-      const p = current();
-      if (p?.fingerprint === fingerprint) return p.key;
-      pending.current = { fingerprint, key: uuidV4(), unconfirmed: false, body };
-      return pending.current.key;
+      const s = current();
+      if (s.pending?.fingerprint === fingerprint) return s.pending.key;
+      const key = uuidV4();
+      s.knownKeys.add(key);
+      s.pending = { fingerprint, key, unconfirmed: false, body };
+      return key;
     },
     [current]
   );
 
-  // 응답을 받은 뒤 호출. 결과가 확정되면 key를 버린다.
-  const settle = useCallback(
-    (failure: FetchFailure | null) => {
-      const p = pending.current;
-      if (!p) return;
-      const done = p.unconfirmed ? settlesRetry(failure) : failure === null || !isUncertain(failure);
-      if (done) {
-        pending.current = null;
-        if (accountId && scope) clearRequest(accountId, scope);
-        return;
-      }
-      p.unconfirmed = true;
-      if (accountId && scope) saveRequest(accountId, scope, { fingerprint: p.fingerprint, key: p.key, body: p.body });
-    },
-    [accountId, scope]
-  );
+  // 응답을 받은 뒤 그 요청의 key로 호출한다. 그 사이 다른 요청·소유자로 바뀌었으면 아무것도 하지 않는다.
+  const settle = useCallback((key: string, failure: FetchFailure | null) => {
+    const s = state.current;
+    const p = s?.pending;
+    if (!s || !p || p.key !== key) return;
+    const done = p.unconfirmed ? settlesRetry(failure) : failure === null || !isUncertain(failure);
+    const [acct, sc] = s.owner ? s.owner.split("\n") : [null, null];
+    if (done) {
+      s.pending = null;
+      if (acct && sc) removeRequest(acct, sc, s);
+      return;
+    }
+    s.pending = { ...p, unconfirmed: true };
+    if (acct && sc) writeRequest(acct, sc, { fingerprint: p.fingerprint, key: p.key, body: p.body }, s);
+  }, []);
 
   return { keyFor, settle };
 }

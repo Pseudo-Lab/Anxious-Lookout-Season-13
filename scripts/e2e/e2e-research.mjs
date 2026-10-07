@@ -501,6 +501,76 @@ let docEUrl;
   await setMock("as=");
 }
 
+// R18. 공개 문서 페이지의 개인 대화 생성 폼: 복구된 개인 제목은 계정에 묶여, 같은 탭 계정 전환 시 버린다(리뷰 F3-1)
+{
+  await setMock("publish=allowed&reuse=0&as=");
+  const pubDoc = await api.send("POST", "/research/documents", { title: "공개용 문서", content: "공개 본문" });
+  const pub = await api.send("POST", `/research/documents/${pubDoc.body.id}/publications`, {
+    versionId: pubDoc.body.latestVersion.id,
+    materialVersionIds: [],
+    expectedVersion: pubDoc.body.version,
+  });
+  check("setup. fixture publication", pub.status === 201, String(pub.status));
+  const pubUrl = U(`/public/document/?id=${pubDoc.body.id}`);
+  await page.goto(pubUrl);
+  await main.getByLabel("새 대화 제목").fill("A 개인 대화 제목");
+  let dropped18 = false;
+  await page.route("**/api/research/sessions", async (route) => {
+    if (route.request().method() === "POST" && !dropped18) {
+      dropped18 = true;
+      await route.fetch();
+      return route.abort();
+    }
+    return route.continue();
+  });
+  await main.getByRole("button", { name: "새 대화" }).click();
+  await main.getByText("서버에 연결할 수 없습니다").waitFor();
+  await page.unroute("**/api/research/sessions");
+  await page.reload();
+  await main.getByLabel("새 대화 제목").waitFor();
+  check("R18. same account restores private title", (await main.getByLabel("새 대화 제목").inputValue()) === "A 개인 대화 제목");
+  // 같은 browser context에서 다른 계정 cookie로 교체 → 저장 시 CSRF 403 → me 재조회
+  const tab2 = await context.newPage();
+  await tab2.goto(U("/api/auth/github/start"));
+  await tab2.waitForURL(U("/"));
+  await tab2.close();
+  await main.getByRole("button", { name: "새 대화" }).click();
+  await page.waitForFunction(
+    () => !(document.querySelector('input[aria-label="새 대화 제목"]')?.value ?? "").includes("A 개인 대화 제목"),
+    null,
+    { timeout: 10000 }
+  ).catch(() => {});
+  check("R18. other account does not see previous private title", !(await main.innerText()).includes("A 개인 대화 제목") && (await main.getByLabel("새 대화 제목").inputValue()) !== "A 개인 대화 제목", await main.getByLabel("새 대화 제목").inputValue());
+  check("R18. public document itself still shown", await appears(main.getByRole("heading", { name: "공개용 문서" })));
+}
+
+// R19. 로그아웃 전에 시작된 생성 요청이 로그아웃 뒤 늦게 실패해도 보관소에 다시 쓰지 않는다(리뷰 F3-2)
+{
+  await page.goto(U("/research/document/new/"));
+  await main.getByLabel("제목").fill("로그아웃 경합 문서");
+  await main.getByLabel("본문").fill("로그아웃 경합 본문");
+  let release19;
+  let accepted19;
+  const gate19 = new Promise((r) => (release19 = r));
+  const seen19 = new Promise((r) => (accepted19 = r));
+  await page.route("**/api/research/documents", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    await route.fetch(); // 서버 반영
+    accepted19();
+    await gate19;
+    return route.abort(); // 브라우저는 로그아웃 뒤에 실패를 받는다
+  });
+  void main.getByRole("button", { name: "문서 저장" }).click();
+  await seen19;
+  await page.locator("header").getByRole("button", { name: "로그아웃", exact: true }).first().click();
+  await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
+  check("R19. store empty right after logout", !(await pendingStore()).includes("로그아웃 경합"));
+  release19();
+  await page.waitForTimeout(1500);
+  check("R19. late failure after logout does not rewrite store", !(await pendingStore()).includes("로그아웃 경합"), await pendingStore());
+  await page.unroute("**/api/research/documents");
+}
+
 // R10. 다른 사용자: 타인 ID는 404로 숨김
 {
   const other = await newPage();

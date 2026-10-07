@@ -276,13 +276,41 @@ check("L9. session persists after reload", await appears(main.getByRole("heading
   await B.context.close();
 }
 
-// L11. 로그아웃 후 실제 API 401, 화면은 로그인 안내
+// L11. 생성 요청이 서버에 반영(201)된 뒤 응답이 늦는 동안 명시적 로그아웃 → 늦은 실패가 보관소에 다시 쓰지 않음(리뷰 F3-2 실 API)
+{
+  await page.goto(U("/research/document/new/"));
+  await main.getByLabel("제목").fill("로그아웃 경합 실물 문서");
+  await main.getByLabel("본문").fill("로그아웃 경합 실물 본문");
+  let release;
+  let accepted;
+  const gate = new Promise((r) => (release = r));
+  const seen = new Promise((r) => (accepted = r));
+  let createdStatus = 0;
+  await page.route("**/api/research/documents", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    createdStatus = (await route.fetch()).status();
+    accepted();
+    await gate;
+    return route.abort();
+  });
+  void main.getByRole("button", { name: "문서 저장" }).click();
+  await seen;
+  check("L11. real create committed before logout", createdStatus === 201, String(createdStatus));
+  await page.locator("header").getByRole("button", { name: "로그아웃" }).first().click();
+  await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
+  const store = () => page.evaluate(() => JSON.stringify({ ...sessionStorage }));
+  check("L11. store empty right after logout", (await store()) === "{}", await store());
+  release();
+  await page.waitForTimeout(1500);
+  check("L11. late failure after logout leaves store empty", (await store()) === "{}", await store());
+  await page.unroute("**/api/research/documents");
+}
+
+// L12. 로그아웃 후 실제 API 401, 화면은 로그인 안내
 await page.goto(U("/research/"));
-await page.locator("header").getByRole("button", { name: "로그아웃" }).first().click();
-await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
-check("L11. after logout API 401", (await api.get("/research/materials")).status === 401);
-check("L11. after logout UI asks login", await appears(main.getByText("로그인이 필요합니다")));
-check("L11. nothing left in session/localStorage", (await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))) === "{}");
+check("L12. after logout API 401", (await api.get("/research/materials")).status === 401);
+check("L12. after logout UI asks login", await appears(main.getByText("로그인이 필요합니다")));
+check("L12. nothing left in session/localStorage", (await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))) === "{}");
 
 check("console has no errors", consoleErrors.length === 0, consoleErrors.join(" | "));
 check("no external tracker requests", ![...externalHosts].some((h) => h.includes("tracker") || h.includes("example.com")), [...externalHosts].join(", "));

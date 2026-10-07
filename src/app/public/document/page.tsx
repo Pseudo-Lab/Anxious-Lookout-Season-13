@@ -17,15 +17,16 @@ import SafeMarkdown, { safeHref } from "@/components/research/SafeMarkdown";
 
 // 이 문서를 맥락으로 개인 대화를 시작한다. 대화는 방문자 본인에게만 보이며 작성자는 볼 수 없다.
 function StartConversation({ doc }: { doc: PublicSnapshot }) {
-  const { status } = useAuth();
+  const { status, user } = useAuth();
   return (
     <section className="space-y-3 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-stone-200/60">
       <h2 className="font-semibold text-stone-800">이 문서로 Codex와 대화하기</h2>
       <p className="text-xs text-stone-500">
         대화는 내 개인 기록으로 저장되며 문서 작성자를 포함한 다른 사람은 볼 수 없습니다. 대화 중에 내 다른 자료도 활용할 수 있습니다.
       </p>
-      {status === "authenticated" ? (
-        <NewSessionForm publicDocumentId={doc.documentId} defaultTitle={doc.title.slice(0, 280)} />
+      {status === "authenticated" && user ? (
+        // 개인 입력(복구된 제목 포함)은 계정에 묶는다. 계정이 바뀌면 폼을 새로 그려 이전 계정 입력을 버린다.
+        <NewSessionForm key={user.accountId} publicDocumentId={doc.documentId} defaultTitle={doc.title.slice(0, 280)} />
       ) : status === "unauthenticated" ? (
         <a href={GITHUB_LOGIN_URL} className="text-sm font-medium text-indigo-600 hover:text-indigo-800">
           GitHub로 로그인하고 대화 시작

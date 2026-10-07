@@ -92,8 +92,9 @@ export function useMutation(persistScope?: string) {
       }
       setBusy(true);
       try {
-        const result = await fn({ csrfToken, idempotencyKey: keyFor(fingerprint, body) });
-        settle(result.ok ? null : result.failure);
+        const key = keyFor(fingerprint, body);
+        const result = await fn({ csrfToken, idempotencyKey: key });
+        settle(key, result.ok ? null : result.failure);
         if (!result.ok && result.failure.kind === "http" && (result.failure.status === 401 || result.failure.code === "csrf_invalid")) {
           // session이 바뀌었을 수 있다. 상태만 다시 확인하고 자동 재시도는 하지 않는다.
           void refresh();
