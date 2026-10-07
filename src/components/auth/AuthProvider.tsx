@@ -12,7 +12,7 @@ import {
 import { getMe, logout, type AuthUser, type LogoutResult, type MeResult } from "@/lib/auth/api";
 import type { FetchFailure } from "@/lib/api/client";
 import { API_ENABLED } from "@/lib/constants";
-import { clearAllPendingSends } from "@/lib/research/pendingSend";
+import { clearAllRequests } from "@/lib/research/pendingStore";
 
 // "disabled": API가 없는 배포(GitHub Pages 정적 export). 인증 조회를 하지 않는다.
 export type AuthStatus = "loading" | "authenticated" | "unauthenticated" | "error" | "disabled";
@@ -92,8 +92,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const result = await logout(csrfToken);
     generation.current += 1;
     if (result.ok) {
-      // 명시적 로그아웃: 이 탭에 남은 미확인 메시지 전송(입력 내용 포함)도 지운다.
-      clearAllPendingSends();
+      // 명시적 로그아웃: 이 탭에 남은 미확인 변경 요청(입력 내용 포함)도 지운다.
+      clearAllRequests();
       setUser(null);
       setCsrfToken(null);
       setFailure(null);

@@ -10,8 +10,10 @@ const PORT = Number(process.env.GATEWAY_PORT ?? 8080);
 
 const sessions = new Map(); // sid -> { user, csrf }
 // reuse=1: 다음 로그인이 직전 계정(같은 accountId)으로 다시 로그인한다(세션 만료 후 재로그인 검증용).
-const mode = { me: "normal", health: "normal", nextLogin: "pending", logout: "normal", reuse: "0" };
+// as=<accountId>: 다음 로그인이 그 계정으로 로그인한다.
+const mode = { me: "normal", health: "normal", nextLogin: "pending", logout: "normal", reuse: "0", as: "" };
 let lastUser = null;
+const users = new Map(); // accountId -> user
 const calls = []; // 검증용 요청 기록
 
 function json(res, status, body, extra = {}) {
@@ -52,7 +54,9 @@ function api(req, res, path, url) {
     }
     const id = crypto.randomUUID();
     const user =
-      mode.reuse === "1" && lastUser
+      mode.as && users.has(mode.as)
+        ? users.get(mode.as)
+        : mode.reuse === "1" && lastUser
         ? lastUser
         : {
             accountId: crypto.randomUUID(),
@@ -62,6 +66,7 @@ function api(req, res, path, url) {
             isApproved: mode.nextLogin === "approved",
           };
     lastUser = user;
+    users.set(user.accountId, user);
     sessions.set(id, { csrf: crypto.randomUUID(), user });
     res.writeHead(303, {
       Location: `${BASE}/`,
@@ -118,7 +123,7 @@ http
   .createServer((req, res) => {
     const url = new URL(req.url, "http://x");
     if (url.pathname === "/__mock/set") {
-      for (const k of ["me", "health", "nextLogin", "logout", "reuse"]) if (url.searchParams.has(k)) mode[k] = url.searchParams.get(k);
+      for (const k of ["me", "health", "nextLogin", "logout", "reuse", "as"]) if (url.searchParams.has(k)) mode[k] = url.searchParams.get(k);
       // expire=1: 모든 로그인 session 만료(서버 측 폐기)
       if (url.searchParams.get("expire") === "1") sessions.clear();
       for (const k of ["access", "publish", "codex", "csrf"]) if (url.searchParams.has(k)) researchMode[k] = url.searchParams.get(k);

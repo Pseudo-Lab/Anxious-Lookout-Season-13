@@ -251,6 +251,24 @@ check("R9. tool input shown inert", await appears(main.locator("pre", { hasText:
 await main.getByRole("button", { name: "저장된 원본 기록 보기" }).click();
 check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: '"kind": "function_call"' })));
 
+// R9b. runner 명확 거절: 202 후 failed/codex_rejected, 입력은 '미기록 입력'으로 보존(모델 이력·성공으로 표시 안 함)
+{
+  await setMock("codex=reject");
+  await main.getByLabel("메시지").fill("거절 질문");
+  await main.getByRole("button", { name: "보내기" }).click();
+  check("R9b. failed codex_rejected shown", await appears(main.getByText("Codex가 이 요청을 받지 않았습니다")));
+  const rejected = main.locator("li.bg-indigo-50", { hasText: "거절 질문" });
+  check("R9b. platform input labeled 미기록", await appears(rejected.getByText("미기록 입력")));
+  check("R9b. not presented as Codex record", await appears(rejected.getByText("Codex 대화 기록에 반영되지 않은 입력입니다")));
+  await rejected.getByRole("button", { name: "보존된 입력 기록" }).click();
+  check("R9b. raw shows platformInput, not Codex original", await appears(rejected.locator("pre", { hasText: '"type": "platformInput"' })) && (await rejected.getByText("Codex 원본 아님").count()) === 1);
+  await setMock("codex=fixture");
+  await main.getByLabel("메시지").fill("거절 후 새 질문");
+  await main.getByRole("button", { name: "보내기" }).click();
+  check("R9b. new explicit message after failure works", await appears(main.getByText("모의 응답: 거절 후 새 질문"), 15000));
+  check("R9b. rejected input still preserved after new turn", (await main.locator("li.bg-indigo-50", { hasText: "거절 질문" }).count()) === 1);
+}
+
 // R12. 메시지 응답 유실 → polling으로 서버 version 변경 → 같은 내용 재전송: 모델 turn 중복 없음
 const userMessages = (t) => main.locator("li.bg-indigo-50", { hasText: t });
 async function dropFirstMessagePost() {
@@ -437,6 +455,50 @@ let docEUrl;
   await main.getByRole("button", { name: "새 버전으로 저장" }).click();
   await main.getByRole("button", { name: "내용 수정" }).waitFor();
   check("R16. save after reload succeeds with draft", await appears(main.locator(".prose").getByText("B 초안")));
+}
+
+// R17. 생성 요청 응답 유실 → 401 → 같은 계정 재로그인: 같은 요청 복구로 중복 없음 / 다른 계정에는 비노출(PM 보완)
+{
+  const accountX = (await api.get("/auth/me")).user.accountId;
+  const before17 = await counts();
+  await page.goto(U("/research/document/new/"));
+  await main.getByLabel("제목").fill("재인증 문서");
+  await main.getByLabel("본문").fill("재인증 본문");
+  let dropped17 = false;
+  await page.route("**/api/research/documents", async (route) => {
+    if (route.request().method() === "POST" && !dropped17) {
+      dropped17 = true;
+      await route.fetch();
+      return route.abort();
+    }
+    return route.continue();
+  });
+  await main.getByRole("button", { name: "문서 저장" }).click();
+  await main.getByText("서버에 연결할 수 없습니다").waitFor();
+  await page.unroute("**/api/research/documents");
+  await setMock("expire=1");
+  await main.getByRole("button", { name: "문서 저장" }).click();
+  check("R17. 401 -> login required", await appears(main.getByText("로그인이 필요합니다")));
+  check("R17. unconfirmed create kept for account", (await pendingStore()).includes("재인증 문서"));
+  // 같은 탭의 다른 계정(Y)에는 복구되지 않는다
+  await setMock("reuse=0&as=");
+  await login(page);
+  await page.goto(U("/research/document/new/"));
+  await main.getByLabel("제목").waitFor();
+  check("R17. other account sees empty form", (await main.getByLabel("제목").inputValue()) === "" && (await main.getByText("이전 저장 요청의 결과를 확인하지 못했습니다").count()) === 0);
+  // 원래 계정(X)으로 재로그인 → 같은 요청 복구 → 1건만 생성
+  await setMock(`expire=1&as=${accountX}`);
+  await login(page);
+  await page.goto(U("/research/document/new/"));
+  await main.getByLabel("제목").waitFor();
+  check("R17. same account restores request", (await main.getByLabel("제목").inputValue()) === "재인증 문서" && (await appears(main.getByText("이전 저장 요청의 결과를 확인하지 못했습니다"))));
+  await main.getByRole("button", { name: "문서 저장" }).click();
+  await page.waitForURL(/\/research\/document\/\?id=/);
+  const posts17 = (await mockCalls()).filter((c) => c.method === "POST" && c.path === "/research/documents").slice(-3);
+  check("R17. lost/401/restored retry share one key", new Set(posts17.map((c) => c.idempotencyKey)).size === 1, JSON.stringify(posts17.map((c) => c.idempotencyKey)));
+  check("R17. exactly one document created", (await counts()).documents === before17.documents + 1, `${before17.documents} -> ${(await counts()).documents}`);
+  check("R17. stored request cleared after confirmation", !(await pendingStore()).includes("재인증 문서"));
+  await setMock("as=");
 }
 
 // R10. 다른 사용자: 타인 ID는 404로 숨김

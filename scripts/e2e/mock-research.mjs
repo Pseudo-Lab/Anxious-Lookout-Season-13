@@ -7,7 +7,7 @@ export const researchMode = {
   access: "approved",
   // "pending": 공개 쓰기 503 policy_pending / "allowed"
   publish: "pending",
-  // "unavailable" | "fixture"
+  // "unavailable" | "fixture" | "reject"(예약 202 후 runner가 명확히 거절 → failed/codex_rejected)
   codex: "unavailable",
   // "reject": 변경 요청을 403 csrf_invalid로 거절(키 확인 전 단계)
   csrf: "normal",
@@ -277,7 +277,25 @@ function handleMutation(owner, method, path, b, user) {
       return ok(200, { id: s.id, archived: true, version: s.version });
     }
     if (method === "POST" && m[2]) {
+      if (researchMode.codex === "reject") {
+        const item = { id: uuid(), type: "message", role: "user", text: b.text, source: "platform", status: "pending" };
+        item.raw = { type: "platformInput", source: "platform", text: b.text, status: "pending" };
+        s.items.push(item);
+        s.state = "running";
+        s.version++;
+        s.updatedAt = now();
+        setTimeout(() => {
+          item.status = "not_recorded";
+          item.raw.status = "not_recorded";
+          s.state = "failed";
+          s.error = { code: "codex_rejected", message: "Codex rejected the turn" };
+          s.version++;
+          s.updatedAt = now();
+        }, 1500);
+        return ok(202, sessionSummary(s));
+      }
       if (researchMode.codex !== "fixture") return fail(503, "codex_unavailable", "Codex unavailable");
+      s.error = null;
       s.items.push({ id: uuid(), type: "message", role: "user", text: b.text, raw: { kind: "user_message", text: b.text } });
       s.state = "running";
       s.version++;

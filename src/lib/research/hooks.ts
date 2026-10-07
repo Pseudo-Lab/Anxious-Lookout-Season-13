@@ -5,6 +5,7 @@ import type { FetchFailure, FetchResult } from "@/lib/api/client";
 import { useAuth } from "@/hooks/useAuth";
 import { isUncertain, useIdempotencyKey } from "@/lib/research/idempotency";
 import type { MutationContext } from "@/lib/research/api";
+import { loadRequest } from "@/lib/research/pendingStore";
 
 interface LoadState<T> {
   key: string;
@@ -70,20 +71,28 @@ export function useLoad<T>(key: string, loader: () => Promise<FetchResult<T>>) {
 /**
  * 변경 요청 실행기. 현재 session의 CSRF nonce와 요청 내용별 Idempotency-Key를 붙인다.
  * fingerprint는 "같은 요청"을 판별하는 문자열(대상·내용)이다.
+ * persistScope를 주면 결과 미확인 요청을 계정별로 보관해 재인증 뒤에도 같은 요청으로 복구한다
+ * (버전 조건이 없는 생성 요청용. body는 복구할 입력값).
  */
-export function useMutation() {
-  const { csrfToken, refresh } = useAuth();
-  const { keyFor, settle } = useIdempotencyKey();
+export function useMutation(persistScope?: string) {
+  const { csrfToken, user, refresh } = useAuth();
+  const { keyFor, settle } = useIdempotencyKey(
+    persistScope && user ? { accountId: user.accountId, scope: persistScope } : null
+  );
   const [busy, setBusy] = useState(false);
 
   const run = useCallback(
-    async <T,>(fingerprint: string, fn: (ctx: MutationContext) => Promise<FetchResult<T>>): Promise<FetchResult<T>> => {
+    async <T,>(
+      fingerprint: string,
+      fn: (ctx: MutationContext) => Promise<FetchResult<T>>,
+      body?: unknown
+    ): Promise<FetchResult<T>> => {
       if (!csrfToken) {
         return { ok: false, failure: { kind: "http", status: 401, code: "unauthenticated" } };
       }
       setBusy(true);
       try {
-        const result = await fn({ csrfToken, idempotencyKey: keyFor(fingerprint) });
+        const result = await fn({ csrfToken, idempotencyKey: keyFor(fingerprint, body) });
         settle(result.ok ? null : result.failure);
         if (!result.ok && result.failure.kind === "http" && (result.failure.status === 401 || result.failure.code === "csrf_invalid")) {
           // session이 바뀌었을 수 있다. 상태만 다시 확인하고 자동 재시도는 하지 않는다.
@@ -98,4 +107,11 @@ export function useMutation() {
   );
 
   return { run, busy };
+}
+
+/** 결과 미확인으로 보관된 생성 요청의 입력값(같은 계정만). 폼 초기값으로 복구한다. */
+export function useRestoredRequest<T>(scope: string): T | null {
+  const { user } = useAuth();
+  const [restored] = useState<T | null>(() => (user ? (loadRequest<T>(user.accountId, scope)?.body ?? null) : null));
+  return restored;
 }

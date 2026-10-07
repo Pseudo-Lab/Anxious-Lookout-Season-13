@@ -2,6 +2,7 @@
 
 import { useCallback, useRef } from "react";
 import type { FetchFailure } from "@/lib/api/client";
+import { clearRequest, loadRequest, saveRequest } from "@/lib/research/pendingStore";
 
 // UUID v4. 공인 IP HTTP처럼 secure context가 아닌 origin에서는 crypto.randomUUID가 없으므로
 // 어디서나 쓸 수 있는 crypto.getRandomValues로 만든다.
@@ -37,30 +38,52 @@ export function settlesRetry(failure: FetchFailure | null): boolean {
  * 요청 하나(같은 대상·같은 내용)에 Idempotency-Key 하나를 대응시킨다.
  * 결과가 불확실한 실패 뒤 같은 내용을 다시 보내면 같은 key를 재사용해 서버가 중복 처리하지 않게 한다.
  * 불확실한 시도가 있었던 key는 같은 key에 대한 서버 판단(성공·409)이 올 때까지 유지한다.
- * 내용이 바뀌면 새 요청으로 보고 새 key를 쓴다. key는 컴포넌트 메모리에만 있다.
+ * 내용이 바뀌면 새 요청으로 보고 새 key를 쓴다.
+ *
+ * persist를 주면 불확실한 요청을 계정별 보관소에도 둔다. 401로 화면이 바뀌었다가 같은 계정으로 돌아와도
+ * 같은 요청(같은 key·본문)을 복구할 수 있다. 버전 조건(expectedVersion)이 없는 생성 요청에 쓴다.
  */
-export function useIdempotencyKey() {
-  const pending = useRef<{ fingerprint: string; key: string; unconfirmed: boolean } | null>(null);
+export function useIdempotencyKey(persist?: { accountId: string; scope: string } | null) {
+  const pending = useRef<{ fingerprint: string; key: string; unconfirmed: boolean; body?: unknown } | null>(null);
+  const loaded = useRef(false);
+  const accountId = persist?.accountId;
+  const scope = persist?.scope;
 
-  const keyFor = useCallback((fingerprint: string): string => {
-    if (pending.current?.fingerprint !== fingerprint) {
-      pending.current = { fingerprint, key: uuidV4(), unconfirmed: false };
+  const current = useCallback(() => {
+    if (!loaded.current) {
+      loaded.current = true;
+      const stored = accountId && scope ? loadRequest(accountId, scope) : null;
+      if (stored) pending.current = { fingerprint: stored.fingerprint, key: stored.key, unconfirmed: true, body: stored.body };
     }
-    return pending.current.key;
-  }, []);
+    return pending.current;
+  }, [accountId, scope]);
+
+  const keyFor = useCallback(
+    (fingerprint: string, body?: unknown): string => {
+      const p = current();
+      if (p?.fingerprint === fingerprint) return p.key;
+      pending.current = { fingerprint, key: uuidV4(), unconfirmed: false, body };
+      return pending.current.key;
+    },
+    [current]
+  );
 
   // 응답을 받은 뒤 호출. 결과가 확정되면 key를 버린다.
-  const settle = useCallback((failure: FetchFailure | null) => {
-    const p = pending.current;
-    if (!p) return;
-    if (p.unconfirmed) {
-      if (settlesRetry(failure)) pending.current = null;
-    } else if (failure === null || !isUncertain(failure)) {
-      pending.current = null;
-    } else {
+  const settle = useCallback(
+    (failure: FetchFailure | null) => {
+      const p = pending.current;
+      if (!p) return;
+      const done = p.unconfirmed ? settlesRetry(failure) : failure === null || !isUncertain(failure);
+      if (done) {
+        pending.current = null;
+        if (accountId && scope) clearRequest(accountId, scope);
+        return;
+      }
       p.unconfirmed = true;
-    }
-  }, []);
+      if (accountId && scope) saveRequest(accountId, scope, { fingerprint: p.fingerprint, key: p.key, body: p.body });
+    },
+    [accountId, scope]
+  );
 
   return { keyFor, settle };
 }

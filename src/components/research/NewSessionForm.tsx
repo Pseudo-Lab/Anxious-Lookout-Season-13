@@ -4,7 +4,7 @@ import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import type { FetchFailure } from "@/lib/api/client";
 import { createSession } from "@/lib/research/api";
-import { useMutation } from "@/lib/research/hooks";
+import { useMutation, useRestoredRequest } from "@/lib/research/hooks";
 import { LIMITS } from "@/lib/research/types";
 import ErrorNotice from "@/components/research/ErrorNotice";
 
@@ -17,14 +17,16 @@ export default function NewSessionForm({
   defaultTitle?: string;
 }) {
   const router = useRouter();
-  const { run, busy } = useMutation();
-  const [title, setTitle] = useState(defaultTitle);
+  const scope = `create:session:${publicDocumentId ?? "-"}`;
+  const restored = useRestoredRequest<{ title?: string }>(scope);
+  const { run, busy } = useMutation(scope);
+  const [title, setTitle] = useState(restored?.title ?? defaultTitle);
   const [failure, setFailure] = useState<FetchFailure | null>(null);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     const input = { title: title.trim(), ...(publicDocumentId && { publicDocumentId }) };
-    const res = await run(`session:create:${JSON.stringify(input)}`, (ctx) => createSession(input, ctx));
+    const res = await run(`session:create:${JSON.stringify(input)}`, (ctx) => createSession(input, ctx), input);
     if (res.ok) {
       router.push(`/research/session/?id=${encodeURIComponent(res.data.id)}`);
     } else {
@@ -53,6 +55,11 @@ export default function NewSessionForm({
         </button>
       </div>
       {failure && <ErrorNotice failure={failure} prefix="대화를 만들지 못했습니다." />}
+      {restored && !failure && (
+        <p className="text-xs text-amber-700">
+          이전 대화 만들기 요청의 결과를 확인하지 못했습니다. 같은 제목으로 다시 만들면 중복으로 만들어지지 않습니다.
+        </p>
+      )}
     </form>
   );
 }
