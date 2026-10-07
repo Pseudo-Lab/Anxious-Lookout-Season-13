@@ -2,6 +2,8 @@
 
 This directory prepares reviewable deployment for issue [#4](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/4). **PM owns actual operation; no script automatically applies k3s resources.** Back authors tools/code and runs isolated Docker checks. See PREAPPLY.md for the current public-IP HTTP/Alembic sequence and VERIFICATION.md for actual results; prepared YAML is not a live pass.
 
+Probe configuration lives in probes.env. API exec deadlines are 10s (startup10s×20, readiness10s/liveness20s with three failures); web exec5s (startup5s×30, readiness5s) with a 2s fetch deadline. This accounts for interpreter startup at the declared CPU limits. See PROBE-RESUME.md for isolated resource/failure verification and PM's Deployment-only resume procedure; images/schema/Secrets are reused.
+
 ## Build and release
 
 Set actual RELEASE_SHA and RELEASE_BUILT_AT in an ignored worktree `.env` copied from `.env.example`. Compose project is `anxious-s13-back`, loopback API/web/gateway ports default to 28080/23000/28000. Root Compose commits no container_name, mounts no Docker socket and exposes no PostgreSQL port.

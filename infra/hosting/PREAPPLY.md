@@ -1,5 +1,7 @@
 # M2 public IPv4 / Alembic pre-application packet
 
+2026-10-07 PM deployment reached PG/Alembic but paused API at replicas=0 after default 1s exec-probe timeouts, with web/route not yet created. Current configuration/resume amendment is [PROBE-RESUME.md](PROBE-RESUME.md): API exec10s with reduced fork frequency, web exec5s and bounded fetch, reusing the same reviewed 684d627 images. PM-reported operations are distinct from back's isolated verification. Review this amendment before resuming Deployment stages; the original full-render apply is not the probe-only reapplication target.
+
 Issue [#4](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/4), branch `task/web-api-hosting`. The public-IP HTTP and Alembic decision supersedes the old mandatory loopback/SSH plan. **PM owns actual operation**; back provides code, isolated Docker evidence and this proposed sequence, review independently checks it. Source/plan approval at 4d57d92 covered the previous scope and does not approve these amendments or establish live acceptance.
 
 ## Required operator inputs

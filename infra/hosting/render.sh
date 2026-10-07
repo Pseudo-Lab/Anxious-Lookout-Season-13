@@ -23,6 +23,7 @@ for image in "$WEB_IMAGE" "$API_IMAGE"; do
 done
 hosting_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$hosting_dir/versions.env"
+source "$hosting_dir/probes.env"
 cat <<YAML
 apiVersion: v1
 kind: Namespace
@@ -189,7 +190,7 @@ spec:
             - {name: tmp, mountPath: /tmp}
 YAML
   if [[ "$app" == api ]]; then
-    cat <<'YAML'
+    cat <<YAML
             - {name: credentials, mountPath: /run/secrets, readOnly: true}
           envFrom: [{configMapRef: {name: hosting-config}}]
           env:
@@ -198,14 +199,19 @@ YAML
             - {name: GITHUB_CLIENT_SECRET_FILE, value: /run/secrets/github-secret}
           startupProbe:
             exec: {command: [python, -m, app.probe, /healthz]}
-            periodSeconds: 2
-            failureThreshold: 30
+            timeoutSeconds: $M2_API_PROBE_TIMEOUT_SECONDS
+            periodSeconds: $M2_API_STARTUP_PERIOD_SECONDS
+            failureThreshold: $M2_API_STARTUP_FAILURE_THRESHOLD
           readinessProbe:
             exec: {command: [python, -m, app.probe, /readyz]}
-            periodSeconds: 5
+            timeoutSeconds: $M2_API_PROBE_TIMEOUT_SECONDS
+            periodSeconds: $M2_API_READINESS_PERIOD_SECONDS
+            failureThreshold: 3
           livenessProbe:
             exec: {command: [python, -m, app.probe, /healthz]}
-            periodSeconds: 10
+            timeoutSeconds: $M2_API_PROBE_TIMEOUT_SECONDS
+            periodSeconds: $M2_API_LIVENESS_PERIOD_SECONDS
+            failureThreshold: 3
       volumes:
         - name: credentials
           secret:
@@ -215,19 +221,22 @@ YAML
           emptyDir: {sizeLimit: 32Mi}
 YAML
   else
-    cat <<'YAML'
+    cat <<YAML
           env:
             - {name: PORT, value: "8080"}
             - {name: HOSTNAME, value: "0.0.0.0"}
           startupProbe:
             exec:
-              command: [node, -e, "fetch('http://127.0.0.1:8080/version.json').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
-            periodSeconds: 2
-            failureThreshold: 60
+              command: [node, -e, "$M2_WEB_PROBE_JS"]
+            timeoutSeconds: $M2_WEB_PROBE_TIMEOUT_SECONDS
+            periodSeconds: $M2_WEB_STARTUP_PERIOD_SECONDS
+            failureThreshold: $M2_WEB_STARTUP_FAILURE_THRESHOLD
           readinessProbe:
             exec:
-              command: [node, -e, "fetch('http://127.0.0.1:8080/version.json').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+              command: [node, -e, "$M2_WEB_PROBE_JS"]
+            timeoutSeconds: $M2_WEB_PROBE_TIMEOUT_SECONDS
             periodSeconds: 5
+            failureThreshold: 3
       volumes:
         - name: tmp
           emptyDir: {sizeLimit: 32Mi}

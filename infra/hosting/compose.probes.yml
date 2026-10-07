@@ -1,0 +1,27 @@
+# Overlay on compose.test.yml, always with a new explicit probes-only project.
+services:
+  db:
+    command: [postgres, -c, shared_buffers=64MB, -c, max_connections=30]
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 256M}
+  api:
+    image: ${API_RUNTIME_IMAGE:?Set the reviewed immutable runtime API}
+    environment:
+      OAUTH_MODE: disabled
+    user: "10001:10001"
+    deploy:
+      resources:
+        limits: {cpus: "0.25", memory: 256M}
+  web:
+    image: ${WEB_RUNTIME_IMAGE:?Set the reviewed immutable runtime web}
+    environment: {PORT: "8080", HOSTNAME: "0.0.0.0"}
+    user: "10001:10001"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 512M}
+    networks: [testing]
