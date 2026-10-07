@@ -1,0 +1,53 @@
+# Fresh project only; no host ports/live credentials. Actual immutable app images.
+services:
+  db:
+    command: [postgres, -c, shared_buffers=64MB, -c, max_connections=30]
+    healthcheck:
+      test: [CMD, pg_isready, -h, "127.0.0.1", -U, postgres, -d, hosting_test]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 256M}
+  api:
+    image: ${API_RUNTIME_IMAGE:?Set immutable runtime API}
+    environment:
+      AUTH_ORIGIN: http://127.0.0.1:8080
+      ADMIN_DATABASE_URL: ""
+      API_DATABASE_PASSWORD: ""
+    user: "10001:10001"
+    deploy:
+      resources:
+        limits: {cpus: "0.25", memory: 256M}
+  web:
+    image: ${WEB_RUNTIME_IMAGE:?Set immutable runtime web}
+    environment: {PORT: "8080", HOSTNAME: "0.0.0.0"}
+    user: "10001:10001"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 512M}
+    networks: [testing]
+  gateway:
+    image: rancher/mirrored-library-traefik:3.7.8@sha256:4299bbed850421258fc5448c2e0e6ad350981d4d335a68de11b92448aedbefe5
+    command: [--entrypoints.web.address=:8080, --providers.file.filename=/etc/traefik/routes.yml, --api.dashboard=false]
+    volumes: [./compose-routes.yml:/etc/traefik/routes.yml:ro]
+    read_only: true
+    tmpfs: [/tmp]
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [testing]
+  test:
+    # Private disposable mock cookie/snapshot volume; never a live user token.
+    user: "0:0"
+    environment: {PYTHONPATH: /app}
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes: [./:/ops:ro, release-proof:/evidence]
+volumes:
+  release-proof:

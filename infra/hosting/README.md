@@ -4,6 +4,8 @@ This directory prepares reviewable deployment for issue [#4](https://github.com/
 
 Probe configuration lives in probes.env. API exec deadlines are 10s (startup10s×20, readiness10s/liveness20s with three failures); web exec5s (startup5s×30, readiness5s) with a 2s fetch deadline. This accounts for interpreter startup at the declared CPU limits. See PROBE-RESUME.md for isolated resource/failure verification and PM's Deployment-only resume procedure; images/schema/Secrets are reused.
 
+For active-OAuth compatible release changes, RELEASE-ROUNDTRIP.md uses render-image-patch.sh to modify only one named app container image, retaining operational configuration/data/probes. verify-release-roundtrip.sh exercises actual distinct old/candidate digests, mixed-version sequential stages, approved administrator/session/DB preservation, candidate Chromium and exact original-image recovery in a fresh Docker project. It does not apply the initial disabled-OAuth renderer to a live service.
+
 ## Build and release
 
 Set actual RELEASE_SHA and RELEASE_BUILT_AT in an ignored worktree `.env` copied from `.env.example`. Compose project is `anxious-s13-back`, loopback API/web/gateway ports default to 28080/23000/28000. Root Compose commits no container_name, mounts no Docker socket and exposes no PostgreSQL port.
