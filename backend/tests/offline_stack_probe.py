@@ -142,8 +142,33 @@ def resumed(root, origin):
         assert post(a, auth, saved["path"] + "/messages", saved["original"], saved["key"]) == saved["response"]
         assert len(a.get("/api/research/documents").json()["items"]) == saved["beforeDocuments"]
         post(a, auth, saved["path"] + "/messages", {"text": "Explicit after adapter process restart", "expectedVersion": current["version"]})
-        assert len([item for item in poll(a, saved["path"])["items"] if item["type"] == "tool_call"]) == 2
+        completed = poll(a, saved["path"])
+        tools = [item for item in completed["items"] if item["type"] == "tool_call"]
+        assert completed["state"] == "idle" and len(tools) == 2 and tools[-1]["status"] == "completed"
+        assert len(a.get("/api/research/documents").json()["items"]) == saved["beforeDocuments"] + 1
         print("PASS offline adapter/API process restart: retained full history, same-key no dispatch, explicit followup uses original fixture thread")
+    finally:
+        a.close()
+
+
+def followups(root, origin):
+    a, auth = client_for(root, "a", origin)
+    saved = json.loads((root / "restart.json").read_text())
+    path = saved["path"]
+    try:
+        current = a.get(path).json()
+        documents = len(a.get("/api/research/documents").json()["items"])
+        tools = len([item for item in current["items"] if item["type"] == "tool_call"])
+        for index in range(15):
+            # Each is a new explicit turn, sent once and immediately polled.
+            # No admission retry or inter-request sleep masks the read race.
+            post(a, auth, path + "/messages", {"text": f"Explicit immediate-poll followup {index}", "expectedVersion": current["version"]})
+            current = poll(a, path)
+            latest = [item for item in current["items"] if item["type"] == "tool_call"]
+            assert current["state"] == "idle" and len(latest) == tools + index + 1
+            assert latest[-1]["status"] == "completed"
+            assert len(a.get("/api/research/documents").json()["items"]) == documents + index + 1
+        print("PASS 15 distinct explicit followups/immediate polling; every turn idle/latest tool completed/document +1; no submission retry")
     finally:
         a.close()
 
@@ -157,5 +182,7 @@ if __name__ == "__main__":
         exercise(root, sys.argv[3])
     elif mode == "resumed":
         resumed(root, sys.argv[3])
+    elif mode == "followups":
+        followups(root, sys.argv[3])
     else:
         raise RuntimeError("Unknown offline probe mode")

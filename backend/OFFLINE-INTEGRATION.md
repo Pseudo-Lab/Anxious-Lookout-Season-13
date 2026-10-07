@@ -42,6 +42,8 @@ Reconnect the same authenticated browser, read original history, replay the old 
 
 Backend validation: Docker targeted9 (new guard/setup plus affected protocol) passed. Separate real HTTP stack passed full IO, failed-input retention, rejection/busy, reconnect/replay and two-account isolation. API+both adapters were restarted; original history, old-key no-dispatch and explicit followup passed. Runtime controls exclusion and runner network/mount/credential exclusion passed. New UI scenarios remain front/review validation; real provider is unverified.
 
+O1 follow-up: the adapter separates short admission/ledger state locking from native RPC serialization. A history read cannot cause a false busy rejection; one admitted turn waits for that RPC while other distinct turns remain busy and matching request IDs remain deduplicated. A deterministic Event-held history read verifies a single concurrent admission, cache/reservation retention, true busy and exactly one additional callback. Restart probes require idle, latest tool completed and document count+1. Fifteen separate new explicit turns with immediate polling also check those three conditions without submission retry/inter-request sleeps. The original04629da restart/followup observation was superseded by reviewer O1 and must not be treated as a concurrency guarantee.
+
 Cleanup only your explicitly owned disposable project after preserving evidence:
 
 ```sh

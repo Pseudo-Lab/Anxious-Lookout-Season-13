@@ -1,6 +1,7 @@
 import json
 import queue
 import shutil
+import threading
 import time
 import uuid
 
@@ -142,3 +143,53 @@ def test_native_turn_binding_waits_for_start_response_and_rejects_stale_calls(mo
     native.reply_tool({"id": "late", "params": {"callId": "late", "threadId": "same-thread", "turnId": "current-turn",
                       "tool": "research_list", "arguments": {"type": "document"}}}, turn)
     assert len(calls) == 1
+
+
+def test_history_rpc_does_not_reject_admission_and_keeps_true_busy_dedup(tmp_path, monkeypatch):
+    calls = []
+    original_client = httpx.Client
+    def callback(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": str(uuid.uuid4()), "saved": True})
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: original_client(transport=httpx.MockTransport(callback), **kwargs))
+    native = Native(tmp_path / "owner", "fixture-no-provider", "/usr/local/bin/codex-fixture", "https://fixture.invalid/tools")
+    reading, release = threading.Event(), threading.Event()
+    reader_result, reader_errors = [], []
+    session = str(uuid.uuid4())
+    first = Turn(requestId=uuid.uuid4(), text="first", tools=definitions(), toolToken="t" * 40)
+    second = Turn(requestId=uuid.uuid4(), text="explicit followup", tools=definitions(), toolToken="u" * 40)
+    try:
+        native.accept(session, first)
+        assert wait_idle(native, session)["state"] == "idle"
+        original_rpc = native.rpc
+        def held_read(method, params, turn=None):
+            if method == "thread/read" and threading.current_thread().name == "history-reader":
+                reading.set()
+                assert release.wait(5), "Test history barrier was not released"
+            return original_rpc(method, params, turn)
+        monkeypatch.setattr(native, "rpc", held_read)
+        def read_history():
+            try:
+                reader_result.append(native.read(session))
+            except Exception as exc:
+                reader_errors.append(exc)
+        reader = threading.Thread(target=read_history, name="history-reader")
+        reader.start()
+        assert reading.wait(5) and native.active_session is None and native.lock.locked()
+        # One admission, while the real history RPC owns the protocol lock.
+        native.accept(session, second)
+        assert native.active_session == session
+        native.accept(session, second)  # Same request remains deduplicated while queued.
+        with pytest.raises(RuntimeError, match="busy"):
+            native.accept(str(uuid.uuid4()), Turn(requestId=uuid.uuid4(), text="different turn", tools=definitions(), toolToken="v" * 40))
+        release.set()
+        reader.join(5)
+        assert not reader.is_alive() and not reader_errors
+        assert reader_result[0]["requestId"] == str(second.requestId)
+        completed = wait_idle(native, session)
+        assert completed["state"] == "idle"
+        assert len(completed["record"]["turns"]) == 2 and len(calls) == 2
+        assert completed["record"]["turns"][-1]["items"][1]["status"] == "completed"
+    finally:
+        release.set()
+        native.close()

@@ -63,6 +63,7 @@ class Native:
     def __init__(self, root, model, binary, callback_url, api_key_file=None):
         self.root, self.model, self.callback_url = root, model, callback_url
         self.lock, self.messages, self.next_id = threading.Lock(), queue.Queue(), 1
+        self.state_lock = threading.Lock()
         self.completed = {}
         self.active_session = None
         self.mapping_file = root / "broker.json"
@@ -172,41 +173,43 @@ class Native:
     def accept(self, session, body):
         request = str(body.requestId)
         fingerprint = hashlib.sha256(json.dumps({"text": body.text, "tools": body.tools, "context": body.context}, sort_keys=True).encode()).hexdigest()
-        entry = self.mapping.get(session)
-        recorded = entry.get("requests", {}).get(request) if entry else None
-        if recorded:
-            if not hmac.compare_digest(recorded, fingerprint):
-                raise RuntimeError("Request ID was used for different input")
-            return
-        if not self.lock.acquire(blocking=False):
-            raise RuntimeError("Runner is busy")
-        self.active_session = session
-        requests = dict(entry.get("requests", {})) if entry else {}
-        requests[request] = fingerprint
-        self.mapping[session] = {"thread": entry.get("thread") if entry else None, "request": request,
-                                 "requests": requests, "turn_id": None, "state": "running", "record": entry.get("record", {"turns": []}) if entry else {"turns": []}}
-        try:
-            self.save()  # Durable reservation before any potentially paid turn.
-        except Exception:
-            if entry:
-                self.mapping[session] = entry
-            else:
-                del self.mapping[session]
-            self.active_session = None
-            self.lock.release()
-            raise RuntimeError("Could not reserve the turn") from None
-        try:
-            threading.Thread(target=self.run_turn, args=(session, body), daemon=True).start()
-        except Exception:
-            self.mapping[session]["state"] = "failed"
+        # Admission depends on a reserved turn, not a history RPC holding the
+        # protocol mutex. The worker waits for that RPC without resubmission.
+        with self.state_lock:
+            entry = self.mapping.get(session)
+            recorded = entry.get("requests", {}).get(request) if entry else None
+            if recorded:
+                if not hmac.compare_digest(recorded, fingerprint):
+                    raise RuntimeError("Request ID was used for different input")
+                return
+            if self.active_session is not None:
+                raise RuntimeError("Runner is busy")
+            self.active_session = session
+            requests = dict(entry.get("requests", {})) if entry else {}
+            requests[request] = fingerprint
+            self.mapping[session] = {"thread": entry.get("thread") if entry else None, "request": request,
+                                     "requests": requests, "turn_id": None, "state": "running", "record": entry.get("record", {"turns": []}) if entry else {"turns": []}}
             try:
-                self.save()
-            finally:
+                self.save()  # Durable reservation before any potentially paid turn.
+            except Exception:
+                if entry:
+                    self.mapping[session] = entry
+                else:
+                    del self.mapping[session]
                 self.active_session = None
-                self.lock.release()
-            raise RuntimeError("Could not start the reserved turn") from None
+                raise RuntimeError("Could not reserve the turn") from None
+            try:
+                threading.Thread(target=self.run_turn, args=(session, body), daemon=True).start()
+            except Exception:
+                self.mapping[session]["state"] = "failed"
+                try:
+                    self.save()
+                finally:
+                    self.active_session = None
+                raise RuntimeError("Could not start the reserved turn") from None
 
     def run_turn(self, session, body):
+        self.lock.acquire()  # Serialize native RPCs after any in-flight history read.
         entry = self.mapping[session]
         try:
             if entry["thread"]:
@@ -244,25 +247,37 @@ class Native:
                     pass
         finally:
             try:
-                self.save()
+                with self.state_lock:
+                    try:
+                        self.save()
+                    finally:
+                        self.active_session = None
             finally:
-                self.active_session = None
                 self.lock.release()
 
     def read(self, session):
-        entry = self.mapping.get(session)
-        if entry is None:
-            return None
-        if entry.get("state") != "running" and entry.get("thread") and self.lock.acquire(blocking=False):
+        with self.state_lock:
+            entry = self.mapping.get(session)
+            if entry is None:
+                return None
+            refresh = self.active_session is None and entry.get("state") != "running" and entry.get("thread")
+        if refresh and self.lock.acquire(blocking=False):
             try:
-                entry["record"] = self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"]
-                self.save()
+                record = self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"]
+                with self.state_lock:
+                    # A turn can be admitted while this RPC is in flight. Its
+                    # new reservation/cache must not be overwritten by the read.
+                    if self.mapping.get(session) is entry and self.active_session is None:
+                        entry["record"] = record
+                        self.save()
             finally:
                 self.lock.release()
         # Return the private conversation cache, not paths/config/auth metadata.
-        state = "running" if self.active_session == session else entry["state"]
-        return {"requestId": entry["request"], "turnId": entry.get("turn_id"), "state": state,
-                "record": {"turns": entry["record"].get("turns", [])}}
+        with self.state_lock:
+            entry = self.mapping[session]
+            state = "running" if self.active_session == session else entry["state"]
+            return {"requestId": entry["request"], "turnId": entry.get("turn_id"), "state": state,
+                    "record": {"turns": entry["record"].get("turns", [])}}
 
     def close(self):
         self.process.terminate()
