@@ -2,13 +2,14 @@ import { notFound } from "next/navigation";
 import { getAllPosts, getPostBySlug } from "@/lib/posts/mdx";
 import PostContent from "@/components/posts/PostContent";
 import TagBadge from "@/components/posts/TagBadge";
-import CommentSection from "@/components/comments/CommentSection";
-import LikeButton from "@/components/posts/LikeButton";
 import type { Metadata } from "next";
 
 interface PageProps {
   params: Promise<{ slug: string }>;
 }
+
+// 저장소 mdx에서 만든 경로만 제공한다. 빌드에 없는 값은 404이며 런타임 렌더링·캐시 쓰기를 하지 않는다.
+export const dynamicParams = false;
 
 export async function generateStaticParams() {
   const posts = getAllPosts();
@@ -62,10 +63,9 @@ export default async function PostPage({ params }: PageProps) {
         </div>
       </header>
       <PostContent content={post.content} />
-      <div className="mt-10 flex items-center justify-center border-t border-stone-200 pt-8">
-        <LikeButton postSlug={slug} />
-      </div>
-      <CommentSection postSlug={slug} />
+      <p className="mt-10 border-t border-stone-200 pt-8 text-center text-sm text-stone-500">
+        좋아요와 댓글 기능은 새 서버로 옮기는 중입니다(준비 중).
+      </p>
     </article>
   );
 }

@@ -1,0 +1,119 @@
+services:
+  db:
+    image: postgres:18.6-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c
+    environment:
+      POSTGRES_DB: hosting
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_admin_password
+    secrets: [db_admin_password]
+    volumes:
+      - hosting-db:/var/lib/postgresql
+    networks: [database]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres -d hosting"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    security_opt: [no-new-privileges:true]
+  api:
+    image: anxious-hosting-api:${RELEASE_SHA:?Set RELEASE_SHA}
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: runtime
+      args:
+        APP_GIT_SHA: ${RELEASE_SHA}
+        APP_BUILT_AT: ${RELEASE_BUILT_AT:?Set RELEASE_BUILT_AT}
+    environment:
+      DATABASE_URL_FILE: /run/secrets/api_database_url
+      AUTH_TRANSACTION_KEY_FILE: /run/secrets/auth_transaction_key
+      GITHUB_CLIENT_SECRET_FILE: /run/secrets/github_client_secret
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      OAUTH_MODE: ${OAUTH_MODE:-disabled}
+      AUTH_ORIGIN: ${AUTH_ORIGIN:-https://m2.invalid}
+      APP_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-}
+      ALLOW_INSECURE_LOOPBACK: ${ALLOW_INSECURE_LOOPBACK:-false}
+      ALLOW_PUBLIC_IP_HTTP: ${ALLOW_PUBLIC_IP_HTTP:-false}
+    secrets: [api_database_url, auth_transaction_key, github_client_secret]
+    ports: ["127.0.0.1:${API_PORT:-28080}:8080"]
+    depends_on:
+      db: {condition: service_healthy}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [database, outbound]
+    healthcheck:
+      test: [CMD, python, -m, app.probe, /readyz]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+  web:
+    image: anxious-hosting-web:${RELEASE_SHA:?Set RELEASE_SHA}
+    build:
+      context: .
+      dockerfile: infra/hosting/web.Dockerfile
+      args:
+        NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-}
+        WEB_GIT_SHA: ${RELEASE_SHA}
+        WEB_BUILT_AT: ${RELEASE_BUILT_AT}
+    ports: ["127.0.0.1:${WEB_PORT:-23000}:8080"]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [outbound]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8080/version.json').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+  gateway:
+    image: rancher/mirrored-library-traefik:3.7.8@sha256:4299bbed850421258fc5448c2e0e6ad350981d4d335a68de11b92448aedbefe5
+    command: [--entrypoints.web.address=:8080, --providers.file.filename=/etc/traefik/routes.yml, --api.dashboard=false]
+    ports: ["127.0.0.1:${GATEWAY_PORT:-28000}:8080"]
+    volumes:
+      - ./infra/hosting/compose-routes.yml:/etc/traefik/routes.yml:ro
+    read_only: true
+    tmpfs: [/tmp]
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [outbound]
+  migrate:
+    image: anxious-hosting-api:${RELEASE_SHA:?Set RELEASE_SHA}
+    profiles: [ops]
+    command: [python, -m, app.migrate]
+    environment:
+      ADMIN_DATABASE_URL_FILE: /run/secrets/admin_database_url
+      API_DATABASE_PASSWORD_FILE: /run/secrets/api_database_password
+    secrets: [admin_database_url, api_database_password]
+    networks: [database]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  admin:
+    image: anxious-hosting-api:${RELEASE_SHA:?Set RELEASE_SHA}
+    profiles: [ops]
+    entrypoint: [python, -m, app.admin]
+    environment:
+      ADMIN_DATABASE_URL_FILE: /run/secrets/admin_database_url
+    secrets: [admin_database_url]
+    networks: [database]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+secrets:
+  db_admin_password: {file: .local/hosting/db-admin-password}
+  api_database_url: {file: .local/hosting/api-database-url}
+  admin_database_url: {file: .local/hosting/admin-database-url}
+  api_database_password: {file: .local/hosting/api-database-password}
+  auth_transaction_key: {file: .local/hosting/auth-transaction-key}
+  github_client_secret: {file: .local/hosting/github-client-secret}
+volumes:
+  hosting-db:
+networks:
+  database:
+    internal: true
+  outbound:

@@ -1,4 +1,3 @@
-import Link from "next/link";
 import type { Post } from "@/types/post";
 import PostCard from "./PostCard";
 
@@ -26,15 +25,6 @@ export default function PostList({ posts }: PostListProps) {
         <p className="mt-4 text-lg font-medium text-stone-500">
           아직 게시된 글이 없습니다
         </p>
-        <p className="mt-1 text-sm text-stone-400">
-          첫 번째 글을 작성해보세요!
-        </p>
-        <Link
-          href="/write/"
-          className="mt-6 inline-block rounded-lg bg-indigo-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700"
-        >
-          글 쓰기
-        </Link>
       </div>
     );
   }

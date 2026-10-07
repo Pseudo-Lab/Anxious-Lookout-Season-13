@@ -1,28 +1,14 @@
-"use client";
+import type { Metadata } from "next";
+import ComingSoon from "@/components/layout/ComingSoon";
 
-import { Suspense } from "react";
-import { useSearchParams } from "next/navigation";
-import DynamicPostView from "@/components/posts/DynamicPostView";
+export const metadata: Metadata = { title: "글 보기" };
 
-function ViewContent() {
-  const searchParams = useSearchParams();
-  const id = searchParams.get("id");
-
-  if (!id) {
-    return (
-      <div className="py-20 text-center text-stone-500">
-        글을 찾을 수 없습니다.
-      </div>
-    );
-  }
-
-  return <DynamicPostView slug={id} />;
-}
-
+// 웹에서 작성해 저장하던 글(/view/?id=)의 보기 화면. 저장소를 새 API로 옮긴 뒤 다시 제공한다.
 export default function ViewPage() {
   return (
-    <Suspense>
-      <ViewContent />
-    </Suspense>
+    <ComingSoon
+      title="작성한 글 보기"
+      description="웹에서 작성한 글을 불러오는 기능을 준비하고 있습니다. 저장소에 포함된 글은 글 목록에서 볼 수 있습니다."
+    />
   );
 }

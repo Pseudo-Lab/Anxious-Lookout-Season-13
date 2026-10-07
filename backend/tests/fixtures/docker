@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# A fake producer used only in the Docker test stage; no real Docker/DB access.
+set -euo pipefail
+case "${BACKUP_FIXTURE_MODE:-success}" in
+  fail) printf 'partial fixture dump'; exit 1 ;;
+  block)
+    touch "$BACKUP_FIXTURE_DIR/started"
+    for _ in {1..500}; do
+      [[ -e "$BACKUP_FIXTURE_DIR/release" ]] && break
+      sleep 0.01
+    done
+    [[ -e "$BACKUP_FIXTURE_DIR/release" ]] || exit 1 ;;
+esac
+printf 'new fixture dump'

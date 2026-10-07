@@ -4,17 +4,20 @@ import { useState } from "react";
 import Link from "next/link";
 import { SITE_NAME } from "@/lib/constants";
 import LoginButton from "@/components/auth/LoginButton";
-import { useProfile } from "@/hooks/useProfile";
+import { useAuth } from "@/hooks/useAuth";
 
 export default function Header() {
-  const { isApproved, isAdmin } = useProfile();
+  const { user } = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
 
+  // 메뉴 노출은 화면 안내용일 뿐이며 실제 권한은 backend가 검증한다.
+  // 글 쓰기·관리는 아직 새 API로 대체되지 않아 "준비 중" 안내 화면으로 연결된다.
   const navLinks = [
     { href: "/", label: "홈", show: true },
     { href: "/posts/", label: "글 목록", show: true },
-    { href: "/write/", label: "글 쓰기", show: isApproved },
-    { href: "/admin/", label: "관리", show: isAdmin },
+    { href: "/write/", label: "글 쓰기", show: user?.isApproved === true },
+    { href: "/admin/", label: "관리", show: user?.role === "admin" && user.isApproved },
+    { href: "/status/", label: "상태", show: true },
   ].filter((l) => l.show);
 
   return (

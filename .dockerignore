@@ -1,0 +1,15 @@
+.git
+.agents
+.codex
+.claude
+.env
+.env.*
+.local
+**/node_modules
+**/.next
+**/out
+**/.pnpm-store
+**/.pytest_cache
+**/__pycache__
+**/*.pem
+public/version.json

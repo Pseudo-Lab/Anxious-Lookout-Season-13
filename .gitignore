@@ -53,5 +53,10 @@ gitpages_method_second.txt
 # dev/ops (not for GitHub Pages)
 .mcp.json
 admintodo.md
-Dockerfile
-docker-compose.yml
+docker-compose.override.yml
+/public/version.json
+!.env.example
+.local/
+__pycache__/
+.pytest_cache/
+*.pyc
