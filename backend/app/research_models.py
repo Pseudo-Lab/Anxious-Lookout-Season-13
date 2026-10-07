@@ -64,3 +64,24 @@ class Idempotency(Base):
     status: Mapped[int] = mapped_column(Integer)
     response: Mapped[dict] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+    __table_args__ = {"schema": "research"}
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, server_default=text("gen_random_uuid()"))
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID)
+    title: Mapped[str] = mapped_column(String(300))
+    state: Mapped[str] = mapped_column(String(16), server_default="idle")
+    version: Mapped[int] = mapped_column(Integer, server_default="1")
+    archived: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    native_record: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    context: Mapped[dict | None] = mapped_column(JSONB)
+    pending_text: Mapped[str | None] = mapped_column(Text)
+    request_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
+    tool_token_hash: Mapped[str | None] = mapped_column(String(64))
+    tool_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    login_hash: Mapped[str | None] = mapped_column(String(64))
+    error_code: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))

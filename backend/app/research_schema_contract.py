@@ -8,19 +8,30 @@ from .schema_contract import normalize
 
 
 def table_contract(connection, name):
+    return table_contracts(connection, [name])[name]
+
+
+def table_contracts(connection, names):
     inspector = inspect(connection)
-    return {
+    options = {"schema": "research", "filter_names": list(names)}
+    columns = inspector.get_multi_columns(**options)
+    primary = inspector.get_multi_pk_constraint(**options)
+    checks = inspector.get_multi_check_constraints(**options)
+    foreign = inspector.get_multi_foreign_keys(**options)
+    unique = inspector.get_multi_unique_constraints(**options)
+    indexes = inspector.get_multi_indexes(**options)
+    return {name: {
         "columns": {column["name"]: [str(column["type"].compile(dialect=connection.dialect)), column["nullable"], column["default"]]
-                    for column in inspector.get_columns(name, schema="research")},
-        "primary": inspector.get_pk_constraint(name, schema="research")["constrained_columns"],
-        "checks": {value["name"]: value["sqltext"] for value in inspector.get_check_constraints(name, schema="research")},
+                    for column in columns[("research", name)]},
+        "primary": primary[("research", name)]["constrained_columns"],
+        "checks": {value["name"]: value["sqltext"] for value in checks[("research", name)]},
         "foreign": [{key: value[key] for key in ("constrained_columns", "referred_schema", "referred_table", "referred_columns")}
-                    for value in inspector.get_foreign_keys(name, schema="research")],
-        "unique": {value["name"]: value["column_names"] for value in inspector.get_unique_constraints(name, schema="research")},
+                    for value in foreign[("research", name)]],
+        "unique": {value["name"]: value["column_names"] for value in unique[("research", name)]},
         "indexes": {value["name"]: {"columns": value["column_names"], "unique": value["unique"],
                     "where": value.get("dialect_options", {}).get("postgresql_where")}
-                    for value in inspector.get_indexes(name, schema="research")},
-    }
+                    for value in indexes[("research", name)]},
+    } for name in names}
 
 
 def canonical(contract):
@@ -40,10 +51,15 @@ def validate_research(connection):
     if not {"alembic_version", *expected}.issubset(tables):
         raise RuntimeError("Research schema is incomplete")
     marker = connection.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one()
-    if marker != "0002_research":
+    if marker not in {"0002_research", "0003_sessions"}:
         raise RuntimeError("Research revision is unsupported")
+    if marker == "0003_sessions":
+        expected.update(json.loads((Path(__file__).resolve().parent.parent / "db" / "003_sessions_contract.json").read_text()))
+        if not set(expected).issubset(tables):
+            raise RuntimeError("Conversation schema is incomplete")
+    actual = table_contracts(connection, expected)
     for name, contract in expected.items():
-        if canonical(table_contract(connection, name)) != canonical(contract):
+        if canonical(actual[name]) != canonical(contract):
             raise RuntimeError("Research structure does not match reviewed migration")
     if connection.execute(text("""
         SELECT count(*) FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace
@@ -60,10 +76,26 @@ def validate_research(connection):
         raise RuntimeError("Research schema grant is missing")
     required = {"items": {"SELECT", "INSERT", "UPDATE"}, "relations": {"SELECT", "INSERT", "UPDATE"},
                 "versions": {"SELECT", "INSERT"}, "idempotency": {"SELECT", "INSERT"}, "alembic_version": {"SELECT"}}
-    for name, permissions in required.items():
-        for permission in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
-            granted = connection.execute(text("SELECT has_table_privilege('anxious_api',:name,:permission)"),
-                        {"name": "research." + name, "permission": permission}).scalar_one()
-            if granted != (permission in permissions):
-                raise RuntimeError("Research application privileges do not match reviewed grants")
+    if marker == "0003_sessions":
+        if "conversations" not in tables:
+            raise RuntimeError("Conversation schema is incomplete")
+        required["conversations"] = {"SELECT", "INSERT", "UPDATE"}
+    # Check effective table AND column privileges (including inherited grants).
+    # Batch the matrix rather than issuing a separate query for every cell.
+    privileges = connection.execute(text("""
+        SELECT c.relname, p.permission,
+               has_table_privilege('anxious_api',c.oid,p.permission) AS table_granted,
+               CASE WHEN p.permission IN ('SELECT','INSERT','UPDATE')
+                    THEN has_any_column_privilege('anxious_api',c.oid,p.permission)
+                    ELSE false END AS column_granted
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE')) p(permission)
+        WHERE n.nspname='research' AND c.relname = ANY(:tables)
+    """), {"tables": list(required)}).all()
+    if len(privileges) != 5 * len(required):
+        raise RuntimeError("Research privilege matrix is incomplete")
+    for row in privileges:
+        allowed = row.permission in required[row.relname]
+        if row.table_granted != allowed or (not allowed and row.column_granted):
+            raise RuntimeError("Research application privileges do not match reviewed grants")
     return marker

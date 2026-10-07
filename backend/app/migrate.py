@@ -12,12 +12,13 @@ from .schema_contract import AUTH_REVISION, validate_v1
 from .settings import secret
 
 RESEARCH_REVISION = "0002_research"
+SESSION_REVISION = "0003_sessions"
 
 
 def migrate(revision=AUTH_REVISION):
     url = secret("ADMIN_DATABASE_URL")
     password = secret("API_DATABASE_PASSWORD")
-    if not url or len(password) < 16 or revision not in {AUTH_REVISION, RESEARCH_REVISION}:
+    if not url or len(password) < 16 or revision not in {AUTH_REVISION, RESEARCH_REVISION, SESSION_REVISION}:
         raise ValueError("Migration credentials are required")
     engine = create_engine(url, poolclass=NullPool, hide_parameters=True, connect_args={"connect_timeout": 3})
     try:
@@ -39,14 +40,16 @@ def migrate(revision=AUTH_REVISION):
                 raise RuntimeError("Authentication Alembic revision mismatch")
             connection.execute(text("REVOKE ALL ON auth.alembic_version FROM PUBLIC"))
             connection.execute(text("GRANT SELECT ON auth.alembic_version TO anxious_api"))
-            if revision == RESEARCH_REVISION:
+            if revision in {RESEARCH_REVISION, SESSION_REVISION}:
                 research_tables = set(inspect(connection).get_table_names(schema="research"))
                 if research_tables and "alembic_version" not in research_tables:
                     raise RuntimeError("Unversioned research schema cannot be adopted")
                 if research_tables:
                     marker = connection.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one()
-                    if marker != RESEARCH_REVISION:
+                    if marker not in {RESEARCH_REVISION, SESSION_REVISION}:
                         raise RuntimeError("Unknown research revision")
+                    if marker == SESSION_REVISION and revision == RESEARCH_REVISION:
+                        revision = SESSION_REVISION  # Ensure the minimum revision; never downgrade a known follow-up.
                     from .research_schema_contract import validate_research
                     validate_research(connection)  # Reject incomplete existing schema/grants; never repair silently.
                 connection.execute(text("CREATE SCHEMA IF NOT EXISTS research"))

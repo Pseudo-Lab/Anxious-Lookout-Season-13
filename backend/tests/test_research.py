@@ -229,7 +229,7 @@ def test_m2_marker_and_data_preserved_by_followup(client, admin):
     with admin.connect() as db:
         assert db.execute(text("SELECT * FROM auth.accounts WHERE id=:id"), {"id": owner}).one() == before
         assert db.execute(text("SELECT version_num FROM auth.alembic_version")).scalar_one() == "0001_auth"
-        assert db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() == "0002_research"
+        assert db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() in {"0002_research", "0003_sessions"}
     assert client.get("/readyz").status_code == 200
     assert client.get("/api/research/materials/" + row["id"]).status_code == 200
 
@@ -269,6 +269,10 @@ def test_nul_document_and_relation_text_are_422(client, admin):
     ("REVOKE INSERT ON research.versions FROM anxious_api", "GRANT INSERT ON research.versions TO anxious_api"),
     ("ALTER TABLE research.relations DROP CONSTRAINT relations_check", "ALTER TABLE research.relations ADD CONSTRAINT relations_check CHECK(source_id<>target_id)"),
     ("GRANT UPDATE ON research.versions TO anxious_api", "REVOKE UPDATE ON research.versions FROM anxious_api"),
+    ("GRANT UPDATE(content) ON research.versions TO anxious_api", "REVOKE UPDATE(content) ON research.versions FROM anxious_api"),
+    ("GRANT UPDATE(response) ON research.idempotency TO anxious_api", "REVOKE UPDATE(response) ON research.idempotency FROM anxious_api"),
+    ("GRANT UPDATE(version_num) ON research.alembic_version TO anxious_api", "REVOKE UPDATE(version_num) ON research.alembic_version FROM anxious_api"),
+    ("GRANT INSERT(version_num) ON research.alembic_version TO anxious_api", "REVOKE INSERT(version_num) ON research.alembic_version FROM anxious_api"),
 ])
 def test_incomplete_schema_or_wrong_privileges_rejected_without_repair(client, admin, damage, repair):
     _, auth = identity(client, admin)

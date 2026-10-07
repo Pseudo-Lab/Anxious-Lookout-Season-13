@@ -1,0 +1,126 @@
+{
+  "conversations": {
+    "checks": {
+      "conversations_state_check": "state::text = ANY (ARRAY['idle'::character varying, 'running'::character varying, 'failed'::character varying]::text[])",
+      "conversations_title_check": "length(btrim(title::text)) > 0",
+      "conversations_version_check": "version > 0"
+    },
+    "columns": {
+      "archived": [
+        "BOOLEAN",
+        false,
+        "false"
+      ],
+      "context": [
+        "JSONB",
+        true,
+        null
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "error_code": [
+        "VARCHAR(40)",
+        true,
+        null
+      ],
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "login_hash": [
+        "VARCHAR(64)",
+        true,
+        null
+      ],
+      "native_record": [
+        "JSONB",
+        false,
+        "'{}'::jsonb"
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "pending_text": [
+        "TEXT",
+        true,
+        null
+      ],
+      "request_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "state": [
+        "VARCHAR(16)",
+        false,
+        "'idle'::character varying"
+      ],
+      "title": [
+        "VARCHAR(300)",
+        false,
+        null
+      ],
+      "tool_expires_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        true,
+        null
+      ],
+      "tool_token_hash": [
+        "VARCHAR(64)",
+        true,
+        null
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "version": [
+        "INTEGER",
+        false,
+        "1"
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_columns": [
+          "id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts"
+      }
+    ],
+    "indexes": {
+      "research_conversations_owner": {
+        "columns": [
+          "owner_id",
+          "archived",
+          "updated_at",
+          "id"
+        ],
+        "unique": false,
+        "where": null
+      },
+      "research_conversations_tool_token": {
+        "columns": [
+          "tool_token_hash"
+        ],
+        "unique": true,
+        "where": "(tool_token_hash IS NOT NULL)"
+      }
+    },
+    "primary": [
+      "id"
+    ],
+    "unique": {}
+  }
+}

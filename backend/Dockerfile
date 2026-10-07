@@ -4,6 +4,7 @@ WORKDIR /app
 COPY backend/requirements.lock /tmp/requirements.lock
 RUN pip install --no-cache-dir --disable-pip-version-check -r /tmp/requirements.lock
 COPY backend/app /app/app
+COPY backend/runner /app/runner
 COPY backend/db /app/db
 COPY backend/alembic /app/alembic
 COPY backend/research_alembic /app/research_alembic
@@ -21,5 +22,14 @@ RUN pip install --no-cache-dir --disable-pip-version-check -r /tmp/requirements-
 COPY backend/tests /app/tests
 COPY infra/hosting/db-backup.sh /app/ops/db-backup.sh
 COPY --chmod=755 backend/tests/fixtures/docker /usr/local/bin/docker
+COPY --chmod=755 backend/tests/fixtures/codex.mock.py /usr/local/bin/codex-fixture
 USER 10001:10001
 CMD ["pytest", "-q", "-p", "no:cacheprovider", "/app/tests"]
+
+FROM runtime AS runner
+USER root
+RUN python /app/runner/install_codex.py \
+    && mkdir -p /state \
+    && chown 10001:10001 /state
+USER 10001:10001
+CMD ["uvicorn", "runner.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log", "--no-proxy-headers"]

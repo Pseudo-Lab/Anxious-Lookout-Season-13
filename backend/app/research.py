@@ -498,7 +498,5 @@ def register_research(app, sessions, settings, current_session, error):
             store.owned_item(identity, "document", active=True)
             fail("policy_pending", "Publication policy is pending", 503)
 
-    @app.get(prefix + "/codex/status")
-    def codex_status(request: Request):
-        with authorized(request):
-            return response({"available": False, "reason": "not_configured", "verification": "unverified"})
+    from .conversations import register_conversations
+    register_conversations(app, authorized, sessions, settings, response, write)
