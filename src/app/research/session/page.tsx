@@ -6,6 +6,9 @@ import { useRouter, useSearchParams } from "next/navigation";
 import type { FetchFailure } from "@/lib/api/client";
 import { archiveSession, getSession, getSessionItemRaw, sendSessionMessage } from "@/lib/research/api";
 import { useLoad, useMutation } from "@/lib/research/hooks";
+import { isUncertain, uuidV4 } from "@/lib/research/idempotency";
+import { clearPendingSend, loadPendingSend, savePendingSend, type PendingSend } from "@/lib/research/pendingSend";
+import { useAuth } from "@/hooks/useAuth";
 import type { SessionDetail, SessionItem } from "@/lib/research/types";
 import { formatDateTime, toDisplayText } from "@/lib/research/format";
 import AuthGate from "@/components/research/AuthGate";
@@ -98,28 +101,50 @@ function Message({ sessionId, item }: { sessionId: string; item: Extract<Session
 }
 
 function Composer({ session, onSent }: { session: SessionDetail; onSent: () => void }) {
-  const { run, busy } = useMutation();
-  const [text, setText] = useState("");
+  const { csrfToken, refresh } = useAuth();
+  // Composer는 세션을 불러온 뒤 브라우저에서만 그려지므로 sessionStorage를 바로 읽어도 된다.
+  const [pending, setPending] = useState<PendingSend | null>(() => loadPendingSend(session.id));
+  const [text, setText] = useState(() => pending?.text ?? "");
   const [failure, setFailure] = useState<FetchFailure | null>(null);
+  const [busy, setBusy] = useState(false);
   const running = session.state === "running";
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     const body = text.trim();
-    if (!body) return;
-    // 같은 내용 재시도는 같은 key라 모델 turn이 두 번 시작되지 않는다.
-    const res = await run(`session:send:${session.id}:${session.version}:${body}`, (ctx) =>
-      sendSessionMessage(session.id, body, session.version, ctx)
-    );
+    if (!body || busy) return;
+    if (!csrfToken) {
+      setFailure({ kind: "http", status: 401, code: "unauthenticated" });
+      return;
+    }
+    // 결과를 모르는 이전 전송과 같은 내용이면 처음 요청을 그대로 다시 보낸다(같은 key·같은 expectedVersion).
+    // 서버는 같은 key의 원래 응답을 돌려주므로 모델 turn이 두 번 시작되지 않는다.
+    const request: PendingSend =
+      pending && pending.text === body ? pending : { key: uuidV4(), text: body, expectedVersion: session.version };
+    savePendingSend(session.id, request);
+    setPending(request);
+    setBusy(true);
+    const res = await sendSessionMessage(session.id, request.text, request.expectedVersion, {
+      csrfToken,
+      idempotencyKey: request.key,
+    });
+    setBusy(false);
+    if (res.ok || !isUncertain(res.failure)) {
+      clearPendingSend(session.id);
+      setPending(null);
+    }
     if (res.ok) {
       setText("");
       setFailure(null);
     } else {
       // 실패해도 입력은 남겨 둔다. 이전 기록은 서버에 보존된다.
       setFailure(res.failure);
+      if (res.failure.kind === "http" && (res.failure.status === 401 || res.failure.code === "csrf_invalid")) void refresh();
     }
     onSent();
   }
+
+  const retrying = pending !== null && pending.text === text.trim();
 
   return (
     <form onSubmit={submit} className="space-y-2">
@@ -133,12 +158,20 @@ function Composer({ session, onSent }: { session: SessionDetail; onSent: () => v
         className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm disabled:bg-stone-50"
       />
       {failure && <ErrorNotice failure={failure} prefix="메시지를 보내지 못했습니다." />}
+      {pending && (
+        <Notice tone="warn">
+          이전 전송의 결과를 확인하지 못했습니다. 위 대화 기록에 메시지가 이미 있는지 확인하세요.{" "}
+          {retrying
+            ? "같은 내용으로 다시 보내면 이미 처리된 요청은 중복 실행되지 않습니다."
+            : "내용을 바꿔 보내면 새 요청으로 처리됩니다."}
+        </Notice>
+      )}
       <button
         type="submit"
         disabled={busy || running || text.trim() === ""}
         className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
       >
-        {busy ? "보내는 중..." : "보내기"}
+        {busy ? "보내는 중..." : retrying ? "다시 보내기" : "보내기"}
       </button>
     </form>
   );

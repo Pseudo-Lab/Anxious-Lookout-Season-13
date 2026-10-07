@@ -104,10 +104,19 @@ function RelationRow({ rel, self, onChanged }: { rel: Relation; self: Endpoint; 
         </div>
         {!editing && (
           <div className="flex shrink-0 gap-2 text-xs">
-            <button onClick={() => setEditing(true)} className="text-stone-500 hover:text-stone-800">
+            <button
+              onClick={() => setEditing(true)}
+              aria-label={`관계 수정: ${other.title}`}
+              className="text-stone-500 hover:text-stone-800"
+            >
               수정
             </button>
-            <button onClick={() => void remove()} disabled={busy} className="text-red-600 hover:text-red-800 disabled:opacity-50">
+            <button
+              onClick={() => void remove()}
+              disabled={busy}
+              aria-label={`관계 삭제: ${other.title}`}
+              className="text-red-600 hover:text-red-800 disabled:opacity-50"
+            >
               삭제
             </button>
           </div>

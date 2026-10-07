@@ -51,7 +51,7 @@ function DocumentDetail({ id }: { id: string }) {
         {!d.archived && !editing && (
           <div className="flex gap-4 pt-1">
             <button onClick={() => setEditing(true)} className="text-sm font-medium text-indigo-600 hover:text-indigo-800">
-              수정
+              내용 수정
             </button>
             <ArchiveButton type="document" id={d.id} version={d.version} onArchived={() => void reload()} />
           </div>

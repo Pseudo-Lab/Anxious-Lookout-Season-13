@@ -1,7 +1,8 @@
-// front 검증용 모의 게이트웨이. Traefik처럼 같은 origin에서 `${BASE}/api`는 모의 API(계약 v1)로,
+// front 검증용 모의 게이트웨이. Traefik처럼 같은 origin에서 `${BASE}/api`는 모의 API(M2 계약 v1 + M3 research)로,
 // 나머지는 Next standalone 서버로 전달한다. 실제 backend/GitHub/DB를 대체하는 테스트 도구일 뿐이다.
 import http from "node:http";
 import crypto from "node:crypto";
+import { handleResearch, researchCounts, researchMode } from "./mock-research.mjs";
 
 const BASE = process.env.BASE_PATH ?? "";
 const NEXT = { host: "127.0.0.1", port: Number(process.env.NEXT_PORT ?? 3000) };
@@ -22,8 +23,17 @@ function sid(req) {
   return m ? m[1] : null;
 }
 
-function api(req, res, path) {
-  calls.push({ method: req.method, path, csrf: req.headers["x-csrf-token"] ?? null, origin: req.headers.origin ?? null });
+function api(req, res, path, url) {
+  calls.push({
+    method: req.method,
+    path,
+    csrf: req.headers["x-csrf-token"] ?? null,
+    origin: req.headers.origin ?? null,
+    idempotencyKey: req.headers["idempotency-key"] ?? null,
+  });
+  if (path.startsWith("/research/") || path.startsWith("/public/")) {
+    return handleResearch(req, res, path, url, sessions.get(sid(req)) ?? null);
+  }
   if (path === "/health") {
     if (mode.health === "503") return err(res, 503, "not_ready", "Service is not ready");
     return json(res, 200, { status: "ok" });
@@ -105,13 +115,15 @@ http
     const url = new URL(req.url, "http://x");
     if (url.pathname === "/__mock/set") {
       for (const k of ["me", "health", "nextLogin", "logout"]) if (url.searchParams.has(k)) mode[k] = url.searchParams.get(k);
-      return json(res, 200, mode);
+      for (const k of ["access", "publish", "codex"]) if (url.searchParams.has(k)) researchMode[k] = url.searchParams.get(k);
+      return json(res, 200, { ...mode, ...researchMode });
     }
+    if (url.pathname === "/__mock/counts") return json(res, 200, researchCounts());
     if (url.pathname === "/__mock/calls") return json(res, 200, calls);
     const apiRoot = `${BASE}/api`;
     // Traefik 규칙 후보: Path(`/api`) || PathPrefix(`/api/`)
     if (url.pathname === apiRoot || url.pathname.startsWith(`${apiRoot}/`)) {
-      return api(req, res, url.pathname.slice(apiRoot.length));
+      return api(req, res, url.pathname.slice(apiRoot.length), url);
     }
     return proxy(req, res);
   })

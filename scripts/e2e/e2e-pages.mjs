@@ -20,7 +20,7 @@ function check(name, ok, detail = "") {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? `  — ${detail}` : ""}`);
 }
 
-for (const p of ["/", "/posts/", "/posts/welcome-to-observatory/", "/tags/", "/tags/AI/", "/status/", "/write/", "/admin/", "/view/", "/auth/login/"]) {
+for (const p of ["/", "/posts/", "/posts/welcome-to-observatory/", "/tags/", "/tags/AI/", "/status/", "/write/", "/admin/", "/view/", "/auth/login/", "/research/", "/research/material/", "/research/document/", "/research/session/", "/research/material/new/", "/research/document/new/", "/public/", "/public/document/"]) {
   const r = await fetch(U(p));
   check(`GET ${p} -> 200`, r.status === 200, `status ${r.status}`);
 }
@@ -61,6 +61,17 @@ await page.waitForFunction(() => !document.body.innerText.includes("확인 중..
 const st = await page.locator("main").innerText();
 check("status shows no-API for API rows", st.includes("이 배포(정적 사이트)에는 API 서버가 없습니다."));
 check("status shows login not provided", st.includes("이 배포에서는 로그인을 제공하지 않습니다."));
+
+// M3 개인/공개 화면: API 없는 배포 안내만 표시하고 조회하지 않는다.
+for (const p of ["/research/", "/research/material/?id=x", "/research/session/?id=x"]) {
+  await page.goto(U(p));
+  check(`${p} shows no-API notice`, await appears(page.getByText("API 서버가 없어 개인 자료 기능을 제공하지 않습니다")));
+}
+for (const p of ["/public/", "/public/document/?id=x"]) {
+  await page.goto(U(p));
+  check(`${p} shows no-API notice`, await appears(page.getByText("API 서버가 없어 공개 문서를 제공하지 않습니다")));
+}
+check("header has no 내 연구/공개 문서 nav", (await header.getByRole("link", { name: /내 연구|공개 문서/ }).count()) === 0);
 
 await page.goto(U("/posts/welcome-to-observatory/"));
 await page.waitForLoadState("networkidle");

@@ -59,6 +59,11 @@ function PublishForm({ doc, onDone, onCancel }: { doc: ResearchDocument; onDone:
           ))}
         </select>
       </label>
+      {versions.nextCursor && !versions.loading && (
+        <button type="button" onClick={() => void versions.loadMore()} className="text-xs text-indigo-600 hover:text-indigo-800">
+          이전 버전 더 불러오기
+        </button>
+      )}
       {versions.failure && <ErrorNotice failure={versions.failure} prefix="버전 목록을 불러오지 못했습니다." />}
 
       <fieldset className="space-y-2 text-sm">
@@ -89,6 +94,12 @@ function PublishForm({ doc, onDone, onCancel }: { doc: ResearchDocument; onDone:
             </label>
           );
         })}
+        {(() => {
+          const unseen = Object.keys(selected).filter((id) => !materials.items.some((m) => m.id === id)).length;
+          return unseen > 0 ? (
+            <p className="text-xs text-stone-500">목록에 아직 보이지 않는 선택 자료 {unseen}개도 기존 버전 그대로 유지됩니다.</p>
+          ) : null;
+        })()}
         {materials.nextCursor && !materials.loading && (
           <button type="button" onClick={() => void materials.loadMore()} className="text-xs text-indigo-600 hover:text-indigo-800">
             자료 더 불러오기

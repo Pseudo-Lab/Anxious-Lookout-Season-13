@@ -1,6 +1,6 @@
 #!/bin/sh
 # 웹 산출물 Docker 검증: 빌드 → 운영과 같은 조건으로 실행 → Playwright(Chromium) 화면 검증.
-# 실제 FastAPI/PostgreSQL/GitHub가 아니라 계약(api-contracts/m2-api-v1.md)을 흉내 내는 모의 API를 쓴다.
+# 실제 FastAPI/PostgreSQL/GitHub/Codex가 아니라 계약(api-contracts/m2-api-v1.md, m3-research-data.md)을 흉내 내는 모의 API를 쓴다.
 #
 #   sh scripts/e2e/run.sh node  [base]   # k3s용 standalone. 예: sh scripts/e2e/run.sh node /m2
 #   sh scripts/e2e/run.sh pages [base]   # GitHub Pages용 정적 export(API 없음). 기본 base /Anxious-Lookout-Season-13
@@ -57,11 +57,11 @@ if [ "$MODE" = node ]; then
     -e NODE_ENV=production -e NEXT_TELEMETRY_DISABLED=1 -e PORT=3000 -e HOSTNAME=0.0.0.0 -e BASE_PATH="$BASE" \
     -v "$WORK/app:/app:ro" -v "$E2E_DIR:/e2e:ro" -w /app "$NODE_IMAGE" \
     sh -c 'node server.js & exec node /e2e/mock-gateway.mjs' >/dev/null
-  SCRIPT=e2e.mjs
+  SCRIPTS="e2e.mjs e2e-research.mjs"
 else
   docker run -d --rm --name "$NAME" --read-only --user 1000:1000 -e OUT_DIR=/out -e PREFIX="$BASE" \
     -v "$WORK/app:/out:ro" -v "$E2E_DIR:/e2e:ro" "$NODE_IMAGE" node /e2e/pages-static.mjs >/dev/null
-  SCRIPT=e2e-pages.mjs
+  SCRIPTS=e2e-pages.mjs
 fi
 trap 'docker stop "$NAME" >/dev/null 2>&1 || true' EXIT
 sleep 4
@@ -80,7 +80,7 @@ docker run --rm --network "container:$NAME" --ipc=host -e HOME=/tmp \
   -e ORIGIN="http://$ORIGIN_HOST:8080" -e EXPECT_INSECURE="$EXPECT_INSECURE" -e BASE_PATH="$BASE" -e EXPECT_SHA="$SHA" \
   -v "$E2E_DIR:/e2e:ro" "$PW_IMAGE" sh -c "
     mkdir -p /tmp/t && cd /tmp/t && npm i --silent playwright@$PW_VERSION >/dev/null 2>&1 &&
-    cp /e2e/$SCRIPT . && node $SCRIPT" || STATUS=$?
+    rc=0; for s in $SCRIPTS; do echo \"== \$s\"; cp /e2e/\$s . && node \$s || rc=1; done; exit \$rc" || STATUS=$?
 
 if [ "$MODE" = node ]; then
   echo "== server log: EACCES=$(docker logs "$NAME" 2>&1 | grep -c EACCES || true) NoFallbackError=$(docker logs "$NAME" 2>&1 | grep -c NoFallbackError || true)"
