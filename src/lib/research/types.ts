@@ -160,8 +160,18 @@ export interface SessionSummary {
   version: number;
 }
 
+export interface MessageItem {
+  id: string;
+  type: "message";
+  role: "user" | "assistant";
+  text: string;
+  // Codex 원본에 아직/끝내 기록되지 않은 사용자 입력(플랫폼이 보존). 모델이 본 이력이 아니다.
+  source?: "platform";
+  status?: "pending" | "not_recorded";
+}
+
 export type SessionItem =
-  | { id: string; type: "message"; role: "user" | "assistant"; text: string }
+  | MessageItem
   | { id: string; type: "tool_call"; name: string; input: unknown; output: unknown; status: string };
 
 export interface SessionDetail extends SessionSummary {

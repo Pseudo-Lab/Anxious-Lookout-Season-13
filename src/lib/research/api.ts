@@ -9,6 +9,7 @@ import {
   type ItemType,
   type Material,
   type MaterialSummary,
+  type MessageItem,
   type Page,
   type PublicDocumentSummary,
   type PublicSnapshot,
@@ -281,7 +282,13 @@ function parseSessionSummary(v: unknown): SessionSummary | null {
 function parseSessionItem(v: unknown): SessionItem | null {
   if (!isObj(v) || !isId(v.id)) return null;
   if (v.type === "message" && (v.role === "user" || v.role === "assistant") && isStr(v.text)) {
-    return { id: v.id, type: "message", role: v.role, text: v.text };
+    const item: MessageItem = { id: v.id, type: "message", role: v.role, text: v.text };
+    if (v.source !== undefined) {
+      if (v.source !== "platform" || (v.status !== "pending" && v.status !== "not_recorded")) return null;
+      item.source = "platform";
+      item.status = v.status;
+    }
+    return item;
   }
   if (v.type === "tool_call" && isStr(v.name) && isStr(v.status)) {
     return { id: v.id, type: "tool_call", name: v.name, input: v.input, output: v.output, status: v.status };
@@ -483,6 +490,8 @@ export function researchErrorMessage(failure: FetchFailure): string | null {
       return "이용 정책이 확정되기 전이라 아직 사용할 수 없습니다.";
     case "codex_unavailable":
       return "Codex에 연결할 수 없어 대화를 진행할 수 없습니다. 이전 기록은 보존됩니다.";
+    case "codex_rejected":
+      return "Codex가 이 요청을 받지 않았습니다. 입력은 대화에 보존되어 있으며 새 메시지로 다시 보낼 수 있습니다.";
     case "not_ready":
       return "서비스가 준비되지 않았습니다. 잠시 후 다시 시도해 주세요.";
     default:

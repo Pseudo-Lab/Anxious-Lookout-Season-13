@@ -4,7 +4,7 @@ import { Suspense, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { FetchFailure } from "@/lib/api/client";
-import { archiveSession, getSession, getSessionItemRaw, sendSessionMessage } from "@/lib/research/api";
+import { archiveSession, getSession, getSessionItemRaw, researchErrorMessage, sendSessionMessage } from "@/lib/research/api";
 import { useLoad, useMutation } from "@/lib/research/hooks";
 import { isUncertain, settlesRetry, uuidV4 } from "@/lib/research/idempotency";
 import {
@@ -34,13 +34,13 @@ function Inert({ value }: { value: unknown }) {
   );
 }
 
-function RawItem({ sessionId, itemId }: { sessionId: string; itemId: string }) {
+function RawItem({ sessionId, itemId, label = "저장된 원본 전체" }: { sessionId: string; itemId: string; label?: string }) {
   const { result } = useLoad(`raw:${sessionId}:${itemId}`, () => getSessionItemRaw(sessionId, itemId));
   if (!result) return <p className="text-xs text-stone-500">원본을 불러오는 중...</p>;
   if (!result.ok) return <ErrorNotice failure={result.failure} prefix="원본 기록을 불러오지 못했습니다." />;
   return (
     <div className="space-y-1">
-      <p className="text-xs font-medium text-stone-600">저장된 원본 전체</p>
+      <p className="text-xs font-medium text-stone-600">{label}</p>
       <Inert value={result.data.raw} />
     </div>
   );
@@ -85,19 +85,39 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: Extract<Sessio
   );
 }
 
+const PLATFORM_STATUS_LABELS = { pending: "전달 확인 중", not_recorded: "미기록 입력" } as const;
+
 function Message({ sessionId, item }: { sessionId: string; item: Extract<SessionItem, { type: "message" }> }) {
   const [raw, setRaw] = useState(false);
   const mine = item.role === "user";
+  // 플랫폼이 보존한 입력: Codex 원본 이력에 기록되지 않았으므로 모델이 본 대화나 성공으로 표시하지 않는다.
+  const platform = item.source === "platform";
   return (
-    <li className={`rounded-lg px-4 py-3 ${mine ? "bg-indigo-50" : "bg-white ring-1 ring-stone-200"}`}>
-      <p className="mb-1 text-xs font-medium text-stone-500">{mine ? "나" : "Codex"}</p>
+    <li
+      className={`rounded-lg px-4 py-3 ${mine ? "bg-indigo-50" : "bg-white ring-1 ring-stone-200"} ${
+        platform ? "border border-dashed border-amber-400" : ""
+      }`}
+    >
+      <p className="mb-1 flex flex-wrap items-center gap-2 text-xs font-medium text-stone-500">
+        {mine ? "나" : "Codex"}
+        {platform && item.status && (
+          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-800">{PLATFORM_STATUS_LABELS[item.status]}</span>
+        )}
+      </p>
       {mine ? <p className="whitespace-pre-wrap text-sm text-stone-800">{item.text}</p> : <SafeMarkdown content={item.text} />}
+      {platform && (
+        <p className="mt-1 text-xs text-amber-800">
+          {item.status === "pending"
+            ? "Codex 대화 기록에 반영되었는지 아직 확인되지 않았습니다."
+            : "Codex 대화 기록에 반영되지 않은 입력입니다. 내 대화에는 보존되며, 필요하면 새 메시지로 다시 보내세요."}
+        </p>
+      )}
       <div className="mt-2">
         {raw ? (
-          <RawItem sessionId={sessionId} itemId={item.id} />
+          <RawItem sessionId={sessionId} itemId={item.id} label={platform ? "보존된 입력 기록 (Codex 원본 아님)" : undefined} />
         ) : (
           <button onClick={() => setRaw(true)} className="text-xs text-stone-400 hover:text-stone-700">
-            원본 기록
+            {platform ? "보존된 입력 기록" : "원본 기록"}
           </button>
         )}
       </div>
@@ -248,8 +268,10 @@ function SessionView({ id }: { id: string }) {
       {running && <Notice tone="info">Codex가 응답하는 중입니다. 페이지를 닫았다가 다시 열어도 이어서 확인할 수 있습니다.</Notice>}
       {s.state === "failed" && (
         <Notice tone="error">
-          마지막 요청이 실패했습니다{s.error ? `: ${s.error.message} (${s.error.code})` : "."} 이전 기록은 보존되어 있으며 다시 이어서
-          질문할 수 있습니다.
+          마지막 요청이 실패했습니다.{" "}
+          {s.error &&
+            (researchErrorMessage({ kind: "http", status: 0, code: s.error.code }) ?? `${s.error.message} (${s.error.code})`)}{" "}
+          이전 기록은 보존되어 있으며 새 메시지로 이어서 질문할 수 있습니다. 실패한 요청은 자동으로 다시 실행되지 않습니다.
         </Notice>
       )}
 
