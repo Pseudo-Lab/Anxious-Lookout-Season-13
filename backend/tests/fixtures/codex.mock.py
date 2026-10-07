@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -36,6 +37,12 @@ for line in sys.stdin:
     elif method == "thread/read":
         emit({"id": identity, "result": {"thread": records[params["threadId"]]}})
     elif method == "turn/start":
+        prompt = params["input"][0]["text"]
+        if prompt == "/fixture/unrecorded":
+            emit({"id": identity, "error": {"code": -32000, "message": "Offline fixture failure before native input recording"}})
+            continue
+        if prompt == "/fixture/hold":
+            time.sleep(5)
         thread, turn = params["threadId"], str(uuid.uuid4())
         args = {"title": "Fixture document", "content": "Complete fixture tool input", "mutationId": str(uuid.uuid4())}
         tool_id = "tool-" + turn

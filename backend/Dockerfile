@@ -23,6 +23,7 @@ COPY backend/tests /app/tests
 COPY infra/hosting/db-backup.sh /app/ops/db-backup.sh
 COPY --chmod=755 backend/tests/fixtures/docker /usr/local/bin/docker
 COPY --chmod=755 backend/tests/fixtures/codex.mock.py /usr/local/bin/codex-fixture
+RUN mkdir -p /state && chown 10001:10001 /state && chmod 700 /state
 USER 10001:10001
 CMD ["pytest", "-q", "-p", "no:cacheprovider", "/app/tests"]
 

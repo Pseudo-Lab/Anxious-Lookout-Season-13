@@ -1,5 +1,7 @@
 # Isolated front/API fixture
 
+Optional actual API/adapter tool-path and failure fixture: [OFFLINE-INTEGRATION.md](OFFLINE-INTEGRATION.md). Real provider verification remains separate.
+
 Use the shared task SHA in your own worktree. This is a disposable test recipe, not deployment or real OAuth/Codex validation. It never reuses back's test DB/volume. It explicitly uses RESEARCH_ACCESS_POLICY=approved only as a fixture; publication writes stay policy_pending and Codex stays unavailable/unverified without an authorized account runner.
 
 ```sh
