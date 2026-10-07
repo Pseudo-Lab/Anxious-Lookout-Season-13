@@ -15,6 +15,7 @@ from urllib.parse import urlencode, urlsplit
 import httpx
 from cryptography.fernet import Fernet
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
@@ -77,7 +78,7 @@ def create_app(settings=None):
     async def auth_transport(request, call_next):
         # Mock transport is confined to APP_ENV=test. Never let a public HTTP
         # callback issue a real app session merely because configured origin is HTTPS.
-        is_auth = request.url.path.startswith(prefix + "/auth/")
+        is_auth = request.url.path.startswith((prefix + "/auth/", prefix + "/research/"))
         needs_protection = settings.oauth_mode == "github" or bool(request.cookies.get(SESSION_COOKIE))
         if is_auth and needs_protection and settings.oauth_mode != "mock":
             protocol = request.url.scheme
@@ -102,7 +103,13 @@ def create_app(settings=None):
                 if request.url.path.endswith(("/github/start", "/github/callback")):
                     return callback_failure("server_error")
                 return error("not_ready", "Service is not ready", 503)
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request, exc):
+        return error("validation_error", "Invalid request fields", 422)
 
     @app.exception_handler(SQLAlchemyError)
     async def database_error(request, exc):
@@ -252,4 +259,6 @@ def create_app(settings=None):
         clear_cookie(response, SESSION_COOKIE, settings.cookie_path)
         return response
 
+    from .research import register_research
+    register_research(app, sessions, settings, current_session, error)
     return app

@@ -6,6 +6,7 @@ RUN pip install --no-cache-dir --disable-pip-version-check -r /tmp/requirements.
 COPY backend/app /app/app
 COPY backend/db /app/db
 COPY backend/alembic /app/alembic
+COPY backend/research_alembic /app/research_alembic
 ARG APP_GIT_SHA
 ARG APP_BUILT_AT
 RUN APP_GIT_SHA="$APP_GIT_SHA" APP_BUILT_AT="$APP_BUILT_AT" python -m app.write_release

@@ -1,0 +1,30 @@
+name: anxious-s13-back-m3-test
+services:
+  db:
+    extends:
+      file: ../infra/hosting/compose.test.yml
+      service: db
+  mock-github:
+    extends:
+      file: ../infra/hosting/compose.test.yml
+      service: mock-github
+    image: anxious-hosting-api-m3-test
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+      target: test
+      args:
+        APP_GIT_SHA: "0000000000000000000000000000000000000000"
+        APP_BUILT_AT: "2026-10-07T00:00:00Z"
+  test:
+    extends:
+      file: ../infra/hosting/compose.test.yml
+      service: test
+    image: anxious-hosting-api-m3-test
+    environment:
+      RESEARCH_ACCESS_POLICY: approved  # Disposable fixture policy, not deployment approval.
+networks:
+  testing:
+    internal: true
+volumes:
+  db-test-data:
