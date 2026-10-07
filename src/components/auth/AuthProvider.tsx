@@ -21,6 +21,8 @@ interface AuthContextValue {
   user: AuthUser | null;
   // status가 "error"일 때의 원인(5xx·비JSON·네트워크). 비로그인으로 취급하지 않는다.
   failure: FetchFailure | null;
+  // 변경 요청(X-CSRF-Token)에 쓰는 session nonce. 메모리에만 있고 로그아웃·확인 실패 시 null.
+  csrfToken: string | null;
   refresh: () => Promise<void>;
   signOut: () => Promise<LogoutResult>;
 }
@@ -29,6 +31,7 @@ const AuthContext = createContext<AuthContextValue>({
   status: "loading",
   user: null,
   failure: null,
+  csrfToken: null,
   refresh: async () => {},
   signOut: async () => ({ ok: false, failure: { kind: "network" } }),
 });
@@ -100,7 +103,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [csrfToken, refresh]);
 
   return (
-    <AuthContext.Provider value={{ status, user, failure, refresh, signOut }}>
+    <AuthContext.Provider value={{ status, user, failure, csrfToken, refresh, signOut }}>
       {children}
     </AuthContext.Provider>
   );

@@ -9,9 +9,15 @@ export type FetchFailure =
   | { kind: "network" }
   | { kind: "timeout" }
   // 200이 아닌 응답. JSON 오류 본문이면 code를 담는다(Traefik 502 HTML 등은 code 없음).
-  | { kind: "http"; status: number; code?: string }
+  // fields는 422 validation_error의 필드별 안내(입력값은 포함되지 않음).
+  | { kind: "http"; status: number; code?: string; fields?: FieldError[] }
   // 2xx이지만 JSON이 아니거나 형식이 맞지 않음
   | { kind: "invalid"; status: number };
+
+export interface FieldError {
+  path: string;
+  message: string;
+}
 
 export type FetchResult<T> =
   | { ok: true; status: number; data: T }
@@ -23,14 +29,21 @@ function isJson(res: Response): boolean {
   return (res.headers.get("content-type") ?? "").toLowerCase().includes("application/json");
 }
 
-async function readErrorCode(res: Response): Promise<string | undefined> {
-  if (!isJson(res)) return undefined;
+async function readError(res: Response): Promise<{ code?: string; fields?: FieldError[] }> {
+  if (!isJson(res)) return {};
   try {
     const body: unknown = await res.json();
-    const code = (body as { error?: { code?: unknown } } | null)?.error?.code;
-    return typeof code === "string" ? code : undefined;
+    const error = (body as { error?: { code?: unknown; fields?: unknown } } | null)?.error;
+    const code = typeof error?.code === "string" ? error.code : undefined;
+    const fields = Array.isArray(error?.fields)
+      ? error.fields.filter(
+          (f): f is FieldError =>
+            typeof (f as FieldError)?.path === "string" && typeof (f as FieldError)?.message === "string"
+        )
+      : undefined;
+    return { code, fields: fields?.length ? fields : undefined };
   } catch {
-    return undefined;
+    return {};
   }
 }
 
@@ -55,7 +68,7 @@ export async function fetchJson<T>(
       signal: controller.signal,
     });
     if (!res.ok) {
-      return { ok: false, failure: { kind: "http", status: res.status, code: await readErrorCode(res) } };
+      return { ok: false, failure: { kind: "http", status: res.status, ...(await readError(res)) } };
     }
     if (!isJson(res)) {
       return { ok: false, failure: { kind: "invalid", status: res.status } };

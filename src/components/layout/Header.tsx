@@ -2,12 +2,12 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { SITE_NAME } from "@/lib/constants";
+import { API_ENABLED, SITE_NAME } from "@/lib/constants";
 import LoginButton from "@/components/auth/LoginButton";
 import { useAuth } from "@/hooks/useAuth";
 
 export default function Header() {
-  const { user } = useAuth();
+  const { user, status } = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
 
   // 메뉴 노출은 화면 안내용일 뿐이며 실제 권한은 backend가 검증한다.
@@ -15,6 +15,9 @@ export default function Header() {
   const navLinks = [
     { href: "/", label: "홈", show: true },
     { href: "/posts/", label: "글 목록", show: true },
+    { href: "/public/", label: "공개 문서", show: API_ENABLED },
+    // 로그인한 사용자에게 안내만 한다. 이용 가능 여부는 각 API 응답으로 판단한다.
+    { href: "/research/", label: "내 연구", show: status === "authenticated" },
     { href: "/write/", label: "글 쓰기", show: user?.isApproved === true },
     { href: "/admin/", label: "관리", show: user?.role === "admin" && user.isApproved },
     { href: "/status/", label: "상태", show: true },
