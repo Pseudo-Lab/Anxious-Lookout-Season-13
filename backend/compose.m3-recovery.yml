@@ -1,0 +1,22 @@
+# Overlay only for the explicitly named backend integration-smoke fixture.
+services:
+  m2-api:
+    extends:
+      file: ../infra/hosting/compose.test.yml
+      service: api
+    image: anxious-hosting-m2-baseline-be59191
+    environment:
+      AUTH_ORIGIN: http://127.0.0.1:${M3_GATEWAY_PORT:-28110}
+      OAUTH_MODE: disabled
+      ADMIN_DATABASE_URL: ""
+      API_DATABASE_PASSWORD: ""
+  recovery:
+    extends:
+      file: compose.m3-test.yml
+      service: test
+    image: ${M3_FIXTURE_IMAGE:-anxious-hosting-api-m3-test}
+    profiles: [ops]
+    environment:
+      AUTH_ORIGIN: http://127.0.0.1:${M3_GATEWAY_PORT:-28110}
+      M2_BASELINE_SHA: be5919120d2762c1c3849b8380da72d95a7b1793
+    command: [python, -m, tests.recovery_probe, m2]

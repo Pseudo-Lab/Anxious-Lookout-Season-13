@@ -98,7 +98,27 @@ def native_items(row):
 
 def display_items(row):
     result = []
-    for item in native_items(row):
+    unrecorded = row.native_record.get("unrecordedInputs", [])
+    turns = row.native_record.get("turns", [])
+    def add_unrecorded(index):
+        for item in unrecorded:
+            if item["beforeTurn"] == index or (index == len(turns) and item["beforeTurn"] > index):
+                result.append({"id": item["id"], "type": "message", "role": "user", "text": item["text"],
+                               "source": "platform", "status": "not_recorded"})
+    for index, turn in enumerate(turns):
+        add_unrecorded(index)
+        for item in turn.get("items", []):
+            result.extend(display_native_item(item))
+    add_unrecorded(len(turns))
+    if row.pending_text:
+        result.append({"id": "pending-" + str(row.request_id), "type": "message", "role": "user", "text": row.pending_text,
+                       "source": "platform", "status": "pending" if row.state == "running" else "not_recorded"})
+    return result
+
+
+def display_native_item(item):
+    result = []
+    if item:
         kind, identity = item.get("type"), item.get("id")
         if kind == "userMessage":
             value = "\n".join(part.get("text", "") for part in item.get("content", []) if part.get("type") == "text")
@@ -109,8 +129,6 @@ def display_items(row):
             result.append({"id": identity, "type": "tool_call", "name": item.get("tool", ""),
                            "input": item.get("arguments"), "output": item.get("contentItems", item.get("result")),
                            "status": item.get("status", "unknown")})
-    if row.pending_text:
-        result.append({"id": "pending-" + str(row.request_id), "type": "message", "role": "user", "text": row.pending_text})
     return result
 
 
@@ -149,7 +167,8 @@ def register_conversations(app, authorized, sessions, settings, response, write)
         record = result.get("record")
         if not isinstance(record, dict) or not isinstance(record.get("turns", []), list):
             fail("codex_unavailable", "Codex history is unavailable", 503)
-        row.native_record = record
+        # Native snapshots cannot overwrite platform-retained failed inputs.
+        row.native_record = {**record, "unrecordedInputs": row.native_record.get("unrecordedInputs", [])}
         if result["state"] != row.state:
             row.state = result["state"]
             row.error_code = "codex_failed" if row.state == "failed" else None
@@ -174,12 +193,20 @@ def register_conversations(app, authorized, sessions, settings, response, write)
                 payload = {"requestId": str(request_id), "text": row.pending_text,
                            "tools": definitions(), "toolToken": token, "context": row.context}
             runner_for(owner).submit(identity, payload)
-        except Exception:
+        except Exception as exc:
             with sessions.begin() as db:
                 row = db.scalar(select(Conversation).where(Conversation.id == identity, Conversation.owner_id == owner).with_for_update())
                 if row and row.request_id == request_id and row.state == "running":
-                    # Dispatch result may be ambiguous; do not send again or claim success.
-                    row.error_code = "codex_unavailable"
+                    definite = isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {400, 401, 403, 404, 409, 413, 422, 429}
+                    if definite:
+                        # Explicit rejection means this turn was not accepted.
+                        row.state, row.error_code = "failed", "codex_rejected"
+                        row.version += 1
+                        row.updated_at = datetime.now(timezone.utc)
+                        row.tool_token_hash, row.tool_expires_at = None, None
+                    else:
+                        # Ambiguous network/5xx failure must never be auto-replayed.
+                        row.error_code = "codex_unavailable"
 
     @app.get(prefix + "/codex/status")
     def status(request: Request):
@@ -231,6 +258,12 @@ def register_conversations(app, authorized, sessions, settings, response, write)
             for raw in native_items(row):
                 if raw.get("id") == item_id and raw.get("type") in {"userMessage", "agentMessage", "dynamicToolCall", "mcpToolCall"}:
                     return response({"id": item_id, "format": "json", "raw": raw})
+            for raw in row.native_record.get("unrecordedInputs", []):
+                if raw["id"] == item_id:
+                    return response({"id": item_id, "format": "json", "raw": {**raw, "type": "platformInput", "status": "not_recorded"}})
+            if row.pending_text and item_id == "pending-" + str(row.request_id):
+                return response({"id": item_id, "format": "json", "raw": {"type": "platformInput", "source": "platform",
+                                 "text": row.pending_text, "status": "pending" if row.state == "running" else "not_recorded"}})
             fail("not_found", "Not found", 404)
 
     @app.post(prefix + "/sessions/{identity}/messages")
@@ -244,6 +277,11 @@ def register_conversations(app, authorized, sessions, settings, response, write)
                 if row.state == "running":
                     fail("conflict", "A turn is already running", 409)
                 runner_for(store.owner)
+                if row.pending_text:
+                    prior = {"id": "unrecorded-" + str(row.request_id), "requestId": str(row.request_id),
+                             "text": row.pending_text, "beforeTurn": len(row.native_record.get("turns", [])),
+                             "source": "platform", "errorCode": row.error_code or "codex_failed"}
+                    row.native_record = {**row.native_record, "unrecordedInputs": row.native_record.get("unrecordedInputs", []) + [prior]}
                 from .main import session_digest
                 token = secrets.token_urlsafe(32)
                 row.login_hash = session_digest(request.cookies["anxious_session"], settings.origin)

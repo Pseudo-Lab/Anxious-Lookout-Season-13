@@ -2,6 +2,7 @@ import hashlib
 import json
 import uuid
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -134,3 +135,77 @@ def test_tool_token_binds_owner_session_turn_live_login_and_current_authority(cl
         db.execute(text("UPDATE auth.accounts SET is_approved=true WHERE id=:owner"), {"owner": owner})
         db.execute(text("DELETE FROM auth.sessions WHERE account_id=:owner"), {"owner": owner})
     assert client.post("/api/internal/research/tools", json=body, headers=bearer).status_code == 403
+
+
+class RejectedFixtureRunner:
+    def submit(self, identity, body):
+        request = httpx.Request("POST", "http://fixture.invalid/turn")
+        raise httpx.HTTPStatusError("not accepted", request=request, response=httpx.Response(409, request=request))
+
+    def read(self, identity):
+        raise httpx.ConnectError("fixture only")
+
+
+class UnrecordedFixtureRunner:
+    def submit(self, identity, body):
+        self.request = body["requestId"]
+
+    def read(self, identity):
+        return {"requestId": self.request, "state": "failed", "turnId": None, "record": {"turns": []}}
+
+
+def test_definite_rejection_revokes_tool_grant_and_allows_next_explicit_input(client, admin):
+    owner, auth = identity(client, admin)
+    client.app.state.research_runners[owner] = RejectedFixtureRunner()
+    row = create_session(client, auth)
+    root = "/api/research/sessions/" + row["id"]
+    sent = client.post(root + "/messages", json={"text": "first rejection", "expectedVersion": 1}, headers=headers(auth))
+    assert sent.status_code == 202
+    detail = client.get(root).json()
+    assert detail["state"] == "failed" and detail["error"]["code"] == "codex_rejected"
+    with admin.connect() as db:
+        assert db.execute(text("SELECT tool_token_hash FROM research.conversations WHERE id=:id"), {"id": row["id"]}).scalar_one() is None
+    again = client.post(root + "/messages", json={"text": "next explicit input", "expectedVersion": detail["version"]}, headers=headers(auth))
+    assert again.status_code == 202
+    messages = client.get(root).json()["items"]
+    assert [entry["text"] for entry in messages] == ["first rejection", "next explicit input"]
+    assert all(entry["status"] == "not_recorded" for entry in messages)
+
+
+def test_unrecorded_failures_survive_followup_refresh_and_api_reconnect(client, admin):
+    owner, auth = identity(client, admin)
+    client.app.state.research_runners[owner] = UnrecordedFixtureRunner()
+    row = create_session(client, auth)
+    root = "/api/research/sessions/" + row["id"]
+    version = 1
+    for message in ("first unsent", "second unsent", "third unsent"):
+        assert client.post(root + "/messages", json={"text": message, "expectedVersion": version}, headers=headers(auth)).status_code == 202
+        detail = client.get(root).json()
+        version = detail["version"]
+    assert [entry["text"] for entry in detail["items"]] == ["first unsent", "second unsent", "third unsent"]
+    first = detail["items"][0]
+    assert client.get(root + "/items/" + first["id"]).json()["raw"]["source"] == "platform"
+    with TestClient(create_app(), base_url=auth["Origin"], cookies=dict(client.cookies)) as reconnected:
+        assert reconnected.get(root).json()["items"] == detail["items"]
+
+
+def test_ambiguous_dispatch_failure_does_not_auto_retry_or_release_active_turn(client, admin):
+    class Ambiguous(UnrecordedFixtureRunner):
+        count = 0
+        def submit(self, identity, body):
+            self.count += 1
+            raise httpx.ConnectError("ambiguous fixture result")
+        def read(self, identity):
+            raise httpx.ConnectError("fixture offline")
+    owner, auth = identity(client, admin)
+    runner = Ambiguous()
+    client.app.state.research_runners[owner] = runner
+    row = create_session(client, auth)
+    root = "/api/research/sessions/" + row["id"]
+    body, key = {"text": "maybe accepted", "expectedVersion": 1}, str(uuid.uuid4())
+    assert client.post(root + "/messages", json=body, headers=headers(auth, key)).status_code == 202
+    current = client.get(root).json()
+    assert current["state"] == "running"
+    assert client.post(root + "/messages", json=body, headers=headers(auth, key)).status_code == 202
+    assert runner.count == 1
+    assert client.post(root + "/messages", json={"text": "new", "expectedVersion": current["version"]}, headers=headers(auth)).status_code == 409

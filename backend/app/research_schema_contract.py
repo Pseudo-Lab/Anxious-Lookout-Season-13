@@ -45,7 +45,7 @@ def canonical(contract):
     return result
 
 
-def validate_research(connection):
+def validate_research(connection, check_privileges=True):
     tables = set(inspect(connection).get_table_names(schema="research"))
     expected = json.loads((Path(__file__).resolve().parent.parent / "db" / "002_research_contract.json").read_text())
     if not {"alembic_version", *expected}.issubset(tables):
@@ -72,6 +72,8 @@ def validate_research(connection):
         WHERE n.nspname='research' AND (NOT i.indisvalid OR NOT i.indisready OR NOT i.indimmediate)
     """)).scalar_one():
         raise RuntimeError("Research indexes must be valid and immediate")
+    if not check_privileges:
+        return marker  # Explicit isolated restore operator only; runtime callers always check grants.
     if not connection.execute(text("SELECT has_schema_privilege('anxious_api','research','USAGE')")).scalar_one():
         raise RuntimeError("Research schema grant is missing")
     required = {"items": {"SELECT", "INSERT", "UPDATE"}, "relations": {"SELECT", "INSERT", "UPDATE"},

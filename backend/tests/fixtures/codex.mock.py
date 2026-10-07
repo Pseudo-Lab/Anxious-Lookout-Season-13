@@ -41,9 +41,9 @@ for line in sys.stdin:
         tool_id = "tool-" + turn
         pending = {"thread": thread, "turn": turn, "items": [{"id": "user-" + turn, "type": "userMessage", "content": params["input"]},
                    {"id": tool_id, "type": "dynamicToolCall", "tool": "research_document_save", "arguments": args}]}
-        emit({"id": identity, "result": {"turn": {"id": turn}}})
         emit({"id": tool_id, "method": "item/tool/call", "params": {"threadId": thread, "turnId": turn,
                     "callId": tool_id, "tool": "research_document_save", "arguments": args}})
+        emit({"id": identity, "result": {"turn": {"id": turn}}})  # Deliberately deliver a tool request before the start response.
     elif pending and identity == "tool-" + pending["turn"]:
         result = body["result"]
         pending["items"][-1].update(contentItems=result["contentItems"], status="completed" if result["success"] else "failed")

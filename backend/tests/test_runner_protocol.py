@@ -1,4 +1,5 @@
 import json
+import queue
 import shutil
 import time
 import uuid
@@ -112,3 +113,32 @@ def test_same_volume_cannot_run_two_native_processes(tmp_path):
                 raise AssertionError("A second adapter must not share the paid-turn ledger")
     with volume_lease(tmp_path):
         pass
+
+
+def test_native_turn_binding_waits_for_start_response_and_rejects_stale_calls(monkeypatch):
+    calls, sent = [], []
+    original = httpx.Client
+    def callback(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json={"saved": True})
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: original(transport=httpx.MockTransport(callback), **kwargs))
+    native = Native.__new__(Native)
+    native.messages, native.completed, native.next_id = queue.Queue(), {}, 7
+    native.callback_url, native.send = "https://fixture.invalid/tools", sent.append
+    turn = {"thread": "same-thread", "turnId": None, "pendingTools": [], "session": str(uuid.uuid4()),
+            "request": str(uuid.uuid4()), "token": "private-current-token"}
+    for identity, native_turn in (("old-call", "previous-turn"), ("new-call", "current-turn")):
+        native.messages.put({"id": identity, "method": "item/tool/call", "params": {"callId": identity,
+                            "threadId": "same-thread", "turnId": native_turn, "tool": "research_list", "arguments": {"type": "document"}}})
+    native.messages.put({"id": 7, "result": {"turn": {"id": "current-turn"}}})
+    started = native.rpc("turn/start", {"threadId": "same-thread", "input": []}, turn)
+    assert calls == [] and len(turn["pendingTools"]) == 2
+    turn["turnId"] = started["turn"]["id"]
+    for pending in turn.pop("pendingTools"):
+        native.reply_tool(pending, turn)
+    assert len(calls) == 1 and calls[0]["requestId"] == turn["request"]
+    assert next(reply for reply in sent if reply.get("id") == "old-call")["result"]["success"] is False
+    native.completed[("same-thread", "current-turn")] = {"status": "completed"}
+    native.reply_tool({"id": "late", "params": {"callId": "late", "threadId": "same-thread", "turnId": "current-turn",
+                      "tool": "research_list", "arguments": {"type": "document"}}}, turn)
+    assert len(calls) == 1

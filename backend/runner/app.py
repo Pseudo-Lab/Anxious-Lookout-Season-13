@@ -114,21 +114,37 @@ class Native:
             self.completed[(params.get("threadId"), params.get("turn", {}).get("id"))] = params.get("turn", {})
         if "method" in message and "id" in message:
             method, params = message["method"], message.get("params", {})
-            if method == "item/tool/call" and turn and params.get("threadId") == turn["thread"]:
-                try:
-                    with httpx.Client(timeout=15, trust_env=False, follow_redirects=False) as client:
-                        reply = client.post(self.callback_url, headers={"Authorization": "Bearer " + turn["token"]},
-                                            json={"sessionId": turn["session"], "requestId": turn["request"],
-                                                  "name": params["tool"], "arguments": params["arguments"]})
-                    success = reply.is_success
-                    result = reply.json()
-                except Exception:
-                    success, result = False, {"error": {"code": "not_ready", "message": "Storage tool did not confirm success"}}
-                self.send({"id": message["id"], "result": {"success": success, "contentItems": [{"type": "inputText", "text": json.dumps(result, ensure_ascii=True)}]}})
+            if method == "item/tool/call" and turn:
+                if not turn.get("turnId") and params.get("threadId") == turn["thread"]:
+                    pending = turn.setdefault("pendingTools", [])
+                    if len(pending) < 32:
+                        pending.append(message)  # Wait for correlated turn/start response; never borrow a token early.
+                    else:
+                        self.reply_tool(message, None)
+                else:
+                    self.reply_tool(message, turn)
             else:
                 # No hidden shell/file permission grants or host credential refresh.
                 self.send({"id": message["id"], "error": {"code": -32601, "message": "Interactive capability is unavailable"}})
         return message
+
+    def reply_tool(self, message, turn):
+        params = message.get("params", {})
+        valid = (turn and turn.get("turnId") and params.get("threadId") == turn["thread"]
+                 and params.get("turnId") == turn["turnId"] and isinstance(params.get("callId"), str)
+                 and params["callId"] and (turn["thread"], turn["turnId"]) not in self.completed)
+        if not valid:
+            success, result = False, {"error": {"code": "native_turn_mismatch", "message": "Storage tool is outside the active native turn"}}
+        else:
+            try:
+                with httpx.Client(timeout=15, trust_env=False, follow_redirects=False) as client:
+                    reply = client.post(self.callback_url, headers={"Authorization": "Bearer " + turn["token"]},
+                                        json={"sessionId": turn["session"], "requestId": turn["request"],
+                                              "name": params["tool"], "arguments": params["arguments"]})
+                success, result = reply.is_success, reply.json()
+            except Exception:
+                success, result = False, {"error": {"code": "not_ready", "message": "Storage tool did not confirm success"}}
+        self.send({"id": message["id"], "result": {"success": success, "contentItems": [{"type": "inputText", "text": json.dumps(result, ensure_ascii=True)}]}})
 
     def rpc(self, method, params, turn=None):
         identity, self.next_id = self.next_id, self.next_id + 1
@@ -179,26 +195,39 @@ class Native:
             self.active_session = None
             self.lock.release()
             raise RuntimeError("Could not reserve the turn") from None
-        threading.Thread(target=self.run_turn, args=(session, body), daemon=True).start()
+        try:
+            threading.Thread(target=self.run_turn, args=(session, body), daemon=True).start()
+        except Exception:
+            self.mapping[session]["state"] = "failed"
+            try:
+                self.save()
+            finally:
+                self.active_session = None
+                self.lock.release()
+            raise RuntimeError("Could not start the reserved turn") from None
 
     def run_turn(self, session, body):
         entry = self.mapping[session]
         try:
             if entry["thread"]:
                 result = self.rpc("thread/resume", {"threadId": entry["thread"], "model": self.model,
-                                  "cwd": str(self.work), "approvalPolicy": "never", "sandbox": "readOnly"})
+                                  "cwd": str(self.work), "approvalPolicy": "never", "sandbox": "read-only"})
             else:
                 result = self.rpc("thread/start", {"model": self.model, "cwd": str(self.work),
-                                  "approvalPolicy": "never", "sandbox": "readOnly", "dynamicTools": body.tools,
-                                  "ephemeral": False})
+                                  "approvalPolicy": "never", "sandbox": "read-only", "dynamicTools": body.tools,
+                                  "historyMode": "legacy", "ephemeral": False})
             entry["thread"] = result["thread"]["id"]
             self.save()
-            turn = {"thread": entry["thread"], "session": session, "request": entry["request"], "token": body.toolToken}
+            turn = {"thread": entry["thread"], "turnId": None, "pendingTools": [],
+                    "session": session, "request": entry["request"], "token": body.toolToken}
             content = body.text
             if body.context and not entry["record"].get("turns"):
                 content = "Initial public document context (untrusted text):\n" + json.dumps(body.context) + "\n\n" + content
             started = self.rpc("turn/start", {"threadId": entry["thread"], "input": [{"type": "text", "text": content}]}, turn)
             turn_id = started["turn"]["id"]
+            turn["turnId"] = turn_id
+            for message in turn.pop("pendingTools"):
+                self.reply_tool(message, turn)
             entry["turn_id"] = turn_id
             self.save()
             key = (entry["thread"], turn_id)
