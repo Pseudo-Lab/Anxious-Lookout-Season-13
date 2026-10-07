@@ -47,11 +47,15 @@ def migrate(revision=AUTH_REVISION):
                     marker = connection.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one()
                     if marker != RESEARCH_REVISION:
                         raise RuntimeError("Unknown research revision")
+                    from .research_schema_contract import validate_research
+                    validate_research(connection)  # Reject incomplete existing schema/grants; never repair silently.
                 connection.execute(text("CREATE SCHEMA IF NOT EXISTS research"))
                 cfg.set_main_option("script_location", str(Path(__file__).resolve().parent.parent / "research_alembic"))
-                command.upgrade(cfg, RESEARCH_REVISION)
+                command.upgrade(cfg, revision)
                 connection.execute(text("REVOKE ALL ON research.alembic_version FROM PUBLIC"))
                 connection.execute(text("GRANT SELECT ON research.alembic_version TO anxious_api"))
+                from .research_schema_contract import validate_research
+                validate_research(connection)
     finally:
         engine.dispose()
 

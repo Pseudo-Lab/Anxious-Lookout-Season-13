@@ -17,6 +17,8 @@ Run `python -m app.migrate --revision 0002_research` only in the reviewed operat
 
 Research uses a separate Alembic history after verified `0001_auth`. `auth.alembic_version` remains `0001_auth`; `research.alembic_version` becomes `0002_research`. This lets the unchanged M2 image/readiness and tooling operate during app rollback while preserving M3 data. Research data tables use auth.accounts.id and composite ownership/type foreign keys. The app can append but cannot update/delete content versions or retry records and cannot write either Alembic marker. Operator authority remains absent from the API.
 
+`/readyz` deliberately checks M2 compatibility. `/api/research/health` separately checks the actual reviewed research table/column/default/PK/FK/CHECK/unique/index contract, constraint/index validation and immediate timing, schema access, required DML and prohibited destructive/immutable privileges. Private research calls perform that same check. A matching migration marker alone is insufficient. Re-running migration rejects incomplete schema or grants without silently repairing them. The immutable `002_research_contract.json` accompanies the frozen DDL; it is not generated from mutable ORM models at startup.
+
 Deploying is not authorized by the development request. An eventual reviewed rollout must record the image SHA, acquire a pre-migration backup, migrate explicitly, deploy API before a dependent UI, and verify both namespaces. Application rollback reverts API/web images to the known M2 release, retaining research schema/data; UI must stop calling M3 endpoints. Returning to M3 then reuses the retained versions and relationships.
 
 ## Authorization, retries and policy gates

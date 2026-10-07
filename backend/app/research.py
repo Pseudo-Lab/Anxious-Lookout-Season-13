@@ -34,6 +34,18 @@ def fail(code, message, status):
 class Input(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
+    @field_validator("*", mode="before")
+    @classmethod
+    def postgres_text(cls, value):
+        if isinstance(value, str):
+            if "\x00" in value:
+                raise ValueError("NUL is not a valid stored text character")
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError("Valid UTF-8 text is required") from None
+        return value
+
 
 class DocumentInput(Input):
     title: str = Field(min_length=1, max_length=300)
@@ -72,9 +84,10 @@ class MaterialInput(DocumentInput):
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
             if parsed.tzinfo is None:
                 raise ValueError()
-        except ValueError:
+            normalized = parsed.astimezone(timezone.utc).isoformat()
+        except (ValueError, OverflowError):
             raise ValueError("A timezone-aware collection timestamp is required") from None
-        return parsed.astimezone(timezone.utc).isoformat()
+        return normalized
 
 
 class Expected(Input):
@@ -143,12 +156,16 @@ def page_query(statement, model, limit, cursor):
         try:
             if len(cursor) > 512:
                 raise ValueError()
-            time, identity = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+            values = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+            if not isinstance(values, list) or len(values) != 2 or not all(isinstance(value, str) for value in values):
+                raise ValueError()
+            time, identity = values
             time = datetime.fromisoformat(time.replace("Z", "+00:00"))
             if time.tzinfo is None:
                 raise ValueError()
+            time = time.astimezone(timezone.utc)
             identity = uuid.UUID(identity)
-        except (ValueError, TypeError, UnicodeError, json.JSONDecodeError):
+        except (ValueError, TypeError, UnicodeError, OverflowError):
             fail("validation_error", "Invalid cursor", 422)
         statement = statement.where(or_(model.updated_at < time, and_(model.updated_at == time, model.id < identity)))
     return statement.order_by(model.updated_at.desc(), model.id.desc()).limit(limit + 1)
@@ -379,12 +396,24 @@ def register_research(app, sessions, settings, current_session, error):
                     fail("origin_not_allowed", "Origin not allowed", 403)
                 if not hmac.compare_digest(request.headers.get("x-csrf-token", ""), login.csrf_token):
                     fail("csrf_invalid", "Invalid CSRF token", 403)
-            marker = db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one()
-            if marker != RESEARCH_REVISION:
+            from .research_schema_contract import validate_research
+            try:
+                validate_research(db.connection())
+            except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
             yield Store(db, account.id)
 
     app.state.research_authorized = authorized
+
+    @app.get(prefix + "/health")
+    def research_health():
+        from .research_schema_contract import validate_research
+        with sessions() as db:
+            try:
+                validate_research(db.connection())
+            except RuntimeError:
+                fail("not_ready", "Research schema is not ready", 503)
+        return JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})
 
     def response(result, status=200):
         return JSONResponse(result, status_code=status, headers={"Cache-Control": "no-store"})

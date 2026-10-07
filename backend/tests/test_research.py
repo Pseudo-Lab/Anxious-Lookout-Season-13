@@ -1,3 +1,5 @@
+import base64
+import json
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -230,3 +232,56 @@ def test_m2_marker_and_data_preserved_by_followup(client, admin):
         assert db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() == "0002_research"
     assert client.get("/readyz").status_code == 200
     assert client.get("/api/research/materials/" + row["id"]).status_code == 200
+
+
+@pytest.mark.parametrize("value", [[None, str(uuid.uuid4())], [123, str(uuid.uuid4())],
+                                  ["2026-10-07T00:00:00Z", None], {}, [], ["bad"],
+                                  ["0001-01-01T00:00:00+14:00", str(uuid.uuid4())]])
+def test_cursor_structure_types_and_utc_overflow_are_validation_errors(client, admin, value):
+    identity(client, admin)
+    cursor = base64.urlsafe_b64encode(json.dumps(value).encode()).decode()
+    assert client.get("/api/research/materials", params={"cursor": cursor}).status_code == 422
+
+
+@pytest.mark.parametrize("field,value", [("content", "bad\x00text"), ("title", "bad\x00title"),
+                ("sourceUrl", "https://example.com/\x00"), ("content", "bad\ud800text"),
+                ("collectedAt", "0001-01-01T00:00:00+14:00"), ("collectedAt", "9999-12-31T23:59:59-14:00")])
+def test_unstorable_material_text_and_timestamp_are_422(client, admin, field, value):
+    _, auth = identity(client, admin)
+    assert client.post("/api/research/materials", content=json.dumps(material(**{field: value})),
+                       headers={**headers(auth), "Content-Type": "application/json"}).status_code == 422
+
+
+def test_nul_document_and_relation_text_are_422(client, admin):
+    _, auth = identity(client, admin)
+    for field in ("title", "content"):
+        body = {"title": "Draft", "content": "body", field: "bad\x00text"}
+        assert client.post("/api/research/documents", json=body, headers=headers(auth)).status_code == 422
+    a, b = create(client, auth), create(client, auth)
+    for field in ("kind", "description"):
+        body = {"source": {"type": "material", "id": a["id"]}, "target": {"type": "material", "id": b["id"]},
+                "kind": "related", "description": "text", "directed": False, field: "bad\x00text"}
+        assert client.post("/api/research/relations", json=body, headers=headers(auth)).status_code == 422
+
+
+@pytest.mark.parametrize("damage,repair", [
+    ("ALTER TABLE research.relations RENAME TO hidden_relations", "ALTER TABLE research.hidden_relations RENAME TO relations"),
+    ("REVOKE INSERT ON research.versions FROM anxious_api", "GRANT INSERT ON research.versions TO anxious_api"),
+    ("ALTER TABLE research.relations DROP CONSTRAINT relations_check", "ALTER TABLE research.relations ADD CONSTRAINT relations_check CHECK(source_id<>target_id)"),
+    ("GRANT UPDATE ON research.versions TO anxious_api", "REVOKE UPDATE ON research.versions FROM anxious_api"),
+])
+def test_incomplete_schema_or_wrong_privileges_rejected_without_repair(client, admin, damage, repair):
+    _, auth = identity(client, admin)
+    with admin.begin() as db:
+        db.execute(text(damage))
+    try:
+        with pytest.raises(RuntimeError):
+            migrate("0002_research")
+        assert client.get("/readyz").status_code == 200  # M2 rollback compatibility remains explicit.
+        assert client.get("/api/research/health").status_code == 503
+        assert client.get("/api/research/materials").status_code == 503
+        assert client.post("/api/research/materials", json=material(), headers=headers(auth)).status_code == 503
+    finally:
+        with admin.begin() as db:
+            db.execute(text(repair))
+    assert client.get("/api/research/health").status_code == 200
