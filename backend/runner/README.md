@@ -11,7 +11,7 @@ Protocol references: [official App Server](https://learn.chatgpt.com/docs/app-se
 - RUNNER_ACCOUNT_ID: one auth.accounts UUID, matching the API's operator-owned mapping.
 - RUNNER_TOKEN_FILE: separate private >=32-char secret for each runner; API mapping points to its private copy. Do not reuse between accounts.
 - CODEX_MODEL: an explicitly authorized model; there is no assumed entitlement or selected deployment model.
-- CODEX_API_KEY_FILE: optional user-specific, explicitly authorized API key file. It is read only by the adapter, sent through native login and never copied from an agent home or returned in JSON. The current prototype uses ephemeral native credential storage. New personal ChatGPT login integration remains pending the user/PM-selected auth direction; local PM login is never imported.
+- CODEX_API_KEY_FILE: optional explicitly authorized API key file, separately mounted for each account runner. It is read only by the adapter, sent through native login and never copied from an agent home or returned in JSON. The current prototype uses ephemeral native credential storage. Credential funding does not select data ownership: the server account UUID and private runner/home remain authoritative. Operator-funded project authentication is currently an investigation only; see [AUTH-FEASIBILITY.md](../AUTH-FEASIBILITY.md). No operator credential or personal ChatGPT login direction has been selected or exercised.
 - RESEARCH_TOOL_CALLBACK_URL: fixed internal API URL, normally `http://api:8080/api/internal/research/tools`; include APP_BASE_PATH when present.
 - RUNNER_STATE_DIR: `/state`, one separate retained volume and work/home directory per account.
 

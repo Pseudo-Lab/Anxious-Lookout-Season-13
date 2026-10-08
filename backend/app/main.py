@@ -78,7 +78,7 @@ def create_app(settings=None):
     async def auth_transport(request, call_next):
         # Mock transport is confined to APP_ENV=test. Never let a public HTTP
         # callback issue a real app session merely because configured origin is HTTPS.
-        is_auth = request.url.path.startswith((prefix + "/auth/", prefix + "/research/"))
+        is_auth = request.url.path.startswith((prefix + "/auth/", prefix + "/research/", prefix + "/admin/"))
         needs_protection = settings.oauth_mode == "github" or bool(request.cookies.get(SESSION_COOKIE))
         if is_auth and needs_protection and settings.oauth_mode != "mock":
             protocol = request.url.scheme

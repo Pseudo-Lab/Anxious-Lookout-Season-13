@@ -215,7 +215,8 @@ class Store:
         if row.kind == "material":
             result.update(sourceUrl=latest.source_url, collectedAt=stamp(latest.collected_at), contentKind=latest.content_kind)
         else:
-            result["publication"] = None  # Publication policy remains pending.
+            from .publications import owned_publication_info
+            result["publication"] = owned_publication_info(self, row)
         return result
 
     def add_snapshot(self, row, body):
@@ -227,6 +228,7 @@ class Store:
         self.db.flush()
 
     def create_item(self, kind, body):
+        self.graph_lock()
         row = Item(owner_id=self.owner, kind=kind)
         self.db.add(row)
         self.db.flush()
@@ -234,6 +236,7 @@ class Store:
         return self.serialize_item(row)
 
     def change_item(self, identity, kind, body):
+        self.graph_lock()
         row = self.owned_item(identity, kind, active=True, lock=True)
         self.expect(row, body.expectedVersion)
         row.version += 1
@@ -248,6 +251,7 @@ class Store:
             fail("conflict", "The resource changed; reload before retrying", 409)
 
     def archive_item(self, identity, kind, body):
+        self.graph_lock()
         row = self.owned_item(identity, kind, active=True, lock=True)
         self.expect(row, body.expectedVersion)
         row.archived, row.version, row.updated_at = True, row.version + 1, datetime.now(timezone.utc)
@@ -277,14 +281,14 @@ class Store:
         return {"items": [self.serialize_version(row, content=False) for row in rows[:limit]],
                 "nextCursor": str(rows[limit - 1].number) if len(rows) > limit else None}
 
-    def owned_relation(self, identity, lock=False):
+    def owned_relation(self, identity, lock=False, archived_targets=False):
         query = select(Relation).where(Relation.id == parse_id(identity), Relation.owner_id == self.owner, Relation.archived.is_(False))
         row = self.db.scalar(query.with_for_update() if lock else query)
         if row is None:
             fail("not_found", "Not found", 404)
         # Relations to archived items are inaccessible in the active graph.
-        self.owned_item(row.source_id, active=True)
-        self.owned_item(row.target_id, active=True)
+        self.owned_item(row.source_id, active=not archived_targets)
+        self.owned_item(row.target_id, active=not archived_targets)
         return row
 
     def serialize_relation(self, row, relative=None):
@@ -298,6 +302,7 @@ class Store:
         return result
 
     def create_relation(self, body):
+        self.graph_lock()
         if body.source.id == body.target.id:
             fail("validation_error", "Self relations are not allowed", 422)
         if body.source.type != body.target.type and not (body.source.type == "document" and body.target.type == "material" and body.directed):
@@ -315,7 +320,8 @@ class Store:
         return self.serialize_relation(row)
 
     def change_relation(self, identity, body, archive=False):
-        row = self.owned_relation(identity, lock=True)
+        self.graph_lock()
+        row = self.owned_relation(identity, lock=True, archived_targets=archive)
         self.expect(row, body.expectedVersion)
         row.version += 1
         row.updated_at = datetime.now(timezone.utc)
@@ -336,6 +342,10 @@ class Store:
         return {"items": [self.serialize_relation(row, item.id) for row in rows[:limit]],
                 "nextCursor": encode_cursor(rows[limit - 1]) if len(rows) > limit else None}
 
+    def graph_lock(self):
+        value = int.from_bytes(hashlib.sha256((str(self.owner) + "research-graph-v1").encode()).digest()[:8], "big", signed=True)
+        self.db.execute(text("SELECT pg_advisory_xact_lock(:lock)"), {"lock": value})
+
     def mutate(self, key, operation, payload, action, status=200):
         identity = parse_id(key)
         fingerprint = hashlib.sha256(json.dumps([operation, payload], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
@@ -353,7 +363,7 @@ class Store:
 
 
 def register_research(app, sessions, settings, current_session, error):
-    policy = os.getenv("RESEARCH_ACCESS_POLICY", "pending")
+    policy = os.getenv("RESEARCH_ACCESS_POLICY", "editors")
     if policy not in {"pending", "approved", "editors"}:
         raise ValueError("Invalid research access policy")
     app.state.research_policy = policy
@@ -376,7 +386,7 @@ def register_research(app, sessions, settings, current_session, error):
         return error("not_ready", "The change could not be saved", 503)
 
     @contextmanager
-    def authorized(request, mutate=False):
+    def authorized(request, mutate=False, membership=False):
         # Authorization and CSRF checks precede any cached idempotency response.
         if not request.cookies.get("anxious_session"):
             fail("unauthenticated", "Authentication required", 401)
@@ -384,12 +394,17 @@ def register_research(app, sessions, settings, current_session, error):
             login = current_session(db, request)
             if not login:
                 fail("unauthenticated", "Authentication required", 401)
-            account = db.get(Account, login.account_id)
+            # Order membership revocation against already-admitted operations.
+            # Membership writes acquire the actor exclusively from the outset,
+            # avoiding a SHARE→UPDATE lock conversion between admin requests.
+            account = db.scalar(select(Account).where(Account.id == login.account_id).with_for_update(read=not membership))
+            if not current_session(db, request):
+                fail("unauthenticated", "Authentication required", 401)
             if not account or not account.is_approved:
                 fail("forbidden", "Research access is not permitted", 403)
             if app.state.research_policy == "pending":
                 fail("policy_pending", "Research access policy is pending", 503)
-            if app.state.research_policy == "editors" and account.role not in {"editor", "admin"}:
+            if account.role not in {"editor", "admin"}:
                 fail("forbidden", "Research access is not permitted", 403)
             if mutate:
                 if request.headers.get("origin") != settings.origin:
@@ -491,12 +506,9 @@ def register_research(app, sessions, settings, current_session, error):
         with authorized(request, True) as store:
             return write(store, request, Expected, body, lambda parsed: store.change_relation(identity, parsed, archive=True))
 
-    @app.post(prefix + "/documents/{identity}/publications")
-    @app.delete(prefix + "/documents/{identity}/publication")
-    def publication_pending(identity: uuid.UUID, request: Request):
-        with authorized(request, True) as store:
-            store.owned_item(identity, "document", active=True)
-            fail("policy_pending", "Publication policy is pending", 503)
-
+    from .publications import register_publications
+    register_publications(app, authorized, sessions, settings, response, write)
+    from .membership import register_membership
+    register_membership(app, authorized, settings, response, write)
     from .conversations import register_conversations
     register_conversations(app, authorized, sessions, settings, response, write)

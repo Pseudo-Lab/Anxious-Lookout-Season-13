@@ -33,8 +33,10 @@ def restore_candidate(url, password, expected_database):
                 connection.connection.driver_connection.execute(sql.SQL("CREATE ROLE anxious_api LOGIN PASSWORD {}").format(sql.Literal(password)))
             frozen = Path(__file__).resolve().parent.parent / "db"
             inputs = ["001_auth.sql", "002_research.sql"]
-            if marker == "0003_sessions":
+            if marker in {"0003_sessions", "0004_publication"}:
                 inputs.append("003_sessions.sql")
+            if marker == "0004_publication":
+                inputs.append("004_publication.sql")
             for filename in inputs:
                 for statement in (frozen / filename).read_text().split(";"):
                     statement = statement.strip()
@@ -48,7 +50,7 @@ def restore_candidate(url, password, expected_database):
             # personal conversations, versions, relations or original homes.
             connection.execute(text("DELETE FROM auth.sessions"))
             connection.execute(text("DELETE FROM auth.oauth_transactions"))
-            if marker == "0003_sessions":
+            if marker in {"0003_sessions", "0004_publication"}:
                 connection.execute(text("""
                     UPDATE research.conversations
                     SET tool_token_hash=NULL, tool_expires_at=NULL, login_hash=NULL,

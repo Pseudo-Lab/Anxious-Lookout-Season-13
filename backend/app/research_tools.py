@@ -57,7 +57,12 @@ class VersionLookup(Lookup):
     versionId: str
 
 
+class PageContext(Input):
+    materialId: str | None = None
+
+
 TOOLS = {
+    "research_page_context": (PageContext, "Read this owned session's saved public document and direct reference list; supply materialId to read one reference's complete stored content. Other private materials remain available through your own storage tools."),
     "research_list": (Listing, "List your own materials or documents (type material/document)."),
     "research_get": (Lookup, "Read your own material/document/relation by type and id."),
     "research_versions": (Versions, "List immutable snapshots of your own material/document."),
@@ -78,10 +83,20 @@ def definitions():
             for name, (model, description) in TOOLS.items()]
 
 
-def dispatch(store, name, arguments):
+def dispatch(store, name, arguments, context=None):
     if name not in TOOLS:
         fail("validation_error", "Unknown storage tool", 422)
     body = TOOLS[name][0].model_validate(arguments)
+    if name == "research_page_context":
+        if not context:
+            fail("not_found", "No saved page context", 404)
+        if body.materialId is not None:
+            identity = str(parse_id(body.materialId))
+            for material in context["materials"]:
+                if material["id"] == identity:
+                    return material
+            fail("not_found", "Not found", 404)
+        return {**context, "materials": [{key: value for key, value in material.items() if key != "content"} for material in context["materials"]]}
     kind = getattr(body, "type", None)
     if kind is not None and kind not in {"material", "document", "relation"}:
         fail("validation_error", "Invalid resource type", 422)

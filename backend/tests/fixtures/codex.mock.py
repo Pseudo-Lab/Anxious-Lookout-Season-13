@@ -44,12 +44,15 @@ for line in sys.stdin:
         if prompt == "/fixture/hold":
             time.sleep(5)
         thread, turn = params["threadId"], str(uuid.uuid4())
-        args = {"title": "Fixture document", "content": "Complete fixture tool input", "mutationId": str(uuid.uuid4())}
+        tool = "research_page_context" if "/fixture/page-context" in prompt or "/fixture/page-reference " in prompt else "research_document_save"
+        args = {} if tool == "research_page_context" else {"title": "Fixture document", "content": "Complete fixture tool input", "mutationId": str(uuid.uuid4())}
+        if "/fixture/page-reference " in prompt:
+            args = {"materialId": prompt.split("/fixture/page-reference ", 1)[1].strip()}
         tool_id = "tool-" + turn
         pending = {"thread": thread, "turn": turn, "items": [{"id": "user-" + turn, "type": "userMessage", "content": params["input"]},
-                   {"id": tool_id, "type": "dynamicToolCall", "tool": "research_document_save", "arguments": args}]}
+                   {"id": tool_id, "type": "dynamicToolCall", "tool": tool, "arguments": args}]}
         emit({"id": tool_id, "method": "item/tool/call", "params": {"threadId": thread, "turnId": turn,
-                    "callId": tool_id, "tool": "research_document_save", "arguments": args}})
+                    "callId": tool_id, "tool": tool, "arguments": args}})
         emit({"id": identity, "result": {"turn": {"id": turn}}})  # Deliberately deliver a tool request before the start response.
     elif pending and identity == "tool-" + pending["turn"]:
         result = body["result"]

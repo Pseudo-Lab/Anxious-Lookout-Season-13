@@ -2,7 +2,7 @@
 
 Optional actual API/adapter tool-path and failure fixture: [OFFLINE-INTEGRATION.md](OFFLINE-INTEGRATION.md). Real provider verification remains separate.
 
-Use the shared task SHA in your own worktree. This is a disposable test recipe, not deployment or real OAuth/Codex validation. It never reuses back's test DB/volume. It explicitly uses RESEARCH_ACCESS_POLICY=approved only as a fixture; publication writes stay policy_pending and Codex stays unavailable/unverified without an authorized account runner.
+Use the shared task SHA in your own worktree. This is a disposable test recipe, not deployment or real OAuth/Codex validation. It never reuses back's test DB/volume. Private research and page questions require an approved editor/admin, including when the legacy RESEARCH_ACCESS_POLICY=approved fixture setting is present. Migration0004 enables immutable publication bundles and constrained administrator membership changes. Codex stays unavailable/unverified without an authorized account runner.
 
 ```sh
 export API_RUNTIME_IMAGE=anxious-s13-front-it-api
@@ -35,9 +35,11 @@ sudo -E docker compose -p anxious-s13-front-it -f backend/compose.m3-integration
 
 The operator command invalidates existing app sessions; sign in again in the same browser. A different browser context remains a distinct unapproved account until explicitly approved. No first-user admin or automatic approval exists.
 
-Browser tests run inside Docker. For a host loopback ORIGIN use the browser test container's `--network host`; set `ORIGIN=http://127.0.0.1:18100` and empty BASE_PATH. API mutations must retain this exact Origin and the auth/me CSRF nonce. Never use a front UI mock (`__mock`) to claim an actual API response. Session endpoints require migration 0003_sessions; storage-only 0002 leaves them not_ready. Same-key/payload retries retain original expectedVersion and return the original 202 without dispatching twice.
+For the new administrator UI fixture, bootstrap one already verified disposable identity with the same explicit operator command and `--role admin`. That approved admin can then list and grant/revoke existing editor/commenter accounts through `/api/admin/accounts`; no operator credential enters the browser/API. Membership changes use the exact returned account version string, an audit reason and normal Origin/CSRF/idempotency headers. Changed target accounts must sign in again. Existing admins and the actor cannot be modified by the web membership endpoint.
 
-Backend smoke recipe uses the same compose with project `anxious-s13-back-m3-integration-smoke` and port 28110, no web image, and Docker-only `tests.integration_probe` with private fixture cookie files. It checks real runtime storage/version/relation/retry/conflict, pending publication, unavailable sessions, separate browser ownership and logout. It does not prove browser Markdown rendering or front UI behavior; front validates those separately.
+Browser tests run inside Docker. For a host loopback ORIGIN use the browser test container's `--network host`; set `ORIGIN=http://127.0.0.1:18100` and empty BASE_PATH. API mutations must retain this exact Origin and the auth/me CSRF nonce. Never use a front UI mock (`__mock`) to claim an actual API response. Session endpoints require at least0003_sessions, and publication/admin/page contexts require0004_publication; storage-only0002 leaves sessions not_ready. Same-key/payload retries retain original expectedVersion and return the original202 without dispatching twice.
+
+Backend smoke recipe uses the same compose with project `anxious-s13-back-m3-integration-smoke` and port28110, no web image, and Docker-only `tests.integration_probe` with private fixture cookie files. It checks actual runtime storage/version/relation/retry/conflict, fixed publication/withdrawal, unavailable sessions, separate browser ownership and logout. It does not prove browser Markdown rendering or front UI behavior; front validates those separately. New confirmed-policy evidence and probe reproduction are in [POLICY-VALIDATION.md](POLICY-VALIDATION.md).
 
 Cleanup only your disposable project after preserving evidence:
 

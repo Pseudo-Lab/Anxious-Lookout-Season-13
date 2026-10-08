@@ -2,7 +2,7 @@
 
 Optional test-only extension of [INTEGRATION.md](INTEGRATION.md), issue #6. It connects the actual API/router, actual adapter and storage callback to the offline protocol executable. No model credential, provider/inference, operating resources or real Codex resume is used. API reports verification=fixture; the assistant reply explicitly says Offline fixture answer.
 
-Each role uses its own project, images, port, temporary directory and volumes. Front example: anxious-s13-front-it/18100; reviewer selects its own project/3xxxx port; backend evidence used anxious-s13-back-m3-offline/28120. Never attach another role's DB/token/home/project. First complete the base recipe with0003 and two explicitly approved disposable browser accounts; from each authenticated auth/me obtain accountId UUID (not githubId). Build the new backend/Dockerfile test stage under your own M3_FIXTURE_IMAGE tag. Retain base API_RUNTIME_IMAGE/WEB_RUNTIME_IMAGE/M3_FIXTURE_IMAGE/M3_GATEWAY_PORT variables.
+Each role uses its own project, images, port, temporary directory and volumes. Front example: anxious-s13-front-it/18100; reviewer selects its own project/3xxxx port; backend evidence used anxious-s13-back-m3-offline/28120. Never attach another role's DB/token/home/project. First complete the base recipe with0004 and two explicitly approved disposable browser accounts; from each authenticated auth/me obtain accountId UUID (not githubId). Build the new backend/Dockerfile test stage under your own M3_FIXTURE_IMAGE tag. Retain base API_RUNTIME_IMAGE/WEB_RUNTIME_IMAGE/M3_FIXTURE_IMAGE/M3_GATEWAY_PORT variables.
 
 ```sh
 export OFFLINE_ACCOUNT_A=VERIFIED_APPROVED_ACCOUNT_UUID_A
@@ -27,6 +27,8 @@ Overlay API uses the guarded test-image factory calling the unchanged production
 | /fixture/unrecorded | Protocol fails before native input recording; poll failed, source=platform/status=not_recorded. A new explicit ordinary message succeeds and retains the earlier input/raw platformInput. |
 | /fixture/reject | Test-only intake409 before native work; platform reserves202, poll failed/codex_rejected with token revoked. New explicit input uses current version; original key/body still returns original202. |
 | /fixture/hold | Protocol waits5 seconds; submit to another session of that same account during this interval for busy/codex_rejected. Account B's separate runner remains independent. |
+| /fixture/page-context | In a saved public-page session, actual research_page_context reads its document and direct-reference metadata, including after public withdrawal. |
+| /fixture/page-reference UUID | Actual research_page_context retrieves one saved reference's complete stored text; unknown/other-page reference IDs fail. |
 
 Use actual cookie/Origin/CSRF/UUID Idempotency-Key. Discard one202 response, poll until settled, retry the same original key/text/expectedVersion; exactly one tool document is created. Repeat after browser refresh, retaining that tuple. Verify full tool JSON, platform labels, B's404 for A's session/document and B's own independent conversation. Do not automatically replay ambiguous requests.
 

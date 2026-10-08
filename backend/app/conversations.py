@@ -89,7 +89,8 @@ def owned(store, identity, lock=False):
 
 def summary(row):
     return {"id": str(row.id), "title": row.title, "state": row.state, "version": row.version,
-            "createdAt": stamp(row.created_at), "updatedAt": stamp(row.updated_at)}
+            "createdAt": stamp(row.created_at), "updatedAt": stamp(row.updated_at),
+            "context": {"documentId": row.context["documentId"], "publicationId": row.context["id"], "title": row.context["title"]} if row.context else None}
 
 
 def native_items(row):
@@ -138,7 +139,7 @@ def register_conversations(app, authorized, sessions, settings, response, write)
     app.state.codex_verification = "unverified"
 
     def require_schema(store):
-        if store.db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() != "0003_sessions":
+        if store.db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() not in {"0003_sessions", "0004_publication"}:
             fail("not_ready", "Conversation schema is not ready", 503)
 
     def runner_for(owner):
@@ -231,10 +232,13 @@ def register_conversations(app, authorized, sessions, settings, response, write)
             def action(parsed):
                 if not parsed.title.strip():
                     fail("validation_error", "Title is required", 422)
-                if parsed.publicDocumentId:
+                context = None
+                if parsed.publicDocumentId is not None:
                     parse_id(parsed.publicDocumentId)
-                    fail("policy_pending", "Public context policy is pending", 503)
-                row = Conversation(owner_id=store.owner, title=parsed.title.strip())
+                    from .publications import require_publication_schema, current_publication
+                    require_publication_schema(store.db)
+                    context = current_publication(store.db, document_id=parsed.publicDocumentId, lock=True).snapshot
+                row = Conversation(owner_id=store.owner, title=parsed.title.strip(), context=context)
                 store.db.add(row)
                 store.db.flush()
                 return summary(row)
@@ -324,15 +328,14 @@ def register_conversations(app, authorized, sessions, settings, response, write)
                          Conversation.tool_expires_at > datetime.now(timezone.utc)))
             if not row:
                 fail("not_found", "Not found", 404)
-            account = db.get(Account, row.owner_id)
+            account = db.scalar(select(Account).where(Account.id == row.owner_id).with_for_update(read=True))
             login = db.scalar(select(LoginSession).where(LoginSession.token_hash == row.login_hash,
                         LoginSession.account_id == row.owner_id, LoginSession.expires_at > datetime.now(timezone.utc)))
-            if not login or not account.is_approved or app.state.research_policy == "pending" or (
-                    app.state.research_policy == "editors" and account.role not in {"editor", "admin"}):
+            if not login or not account.is_approved or app.state.research_policy == "pending" or account.role not in {"editor", "admin"}:
                 fail("forbidden", "Storage tool permission was revoked", 403)
             from .research_schema_contract import validate_research
             try:
                 validate_research(db.connection())
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
-            return response(dispatch(Store(db, row.owner_id), body.name, body.arguments))
+            return response(dispatch(Store(db, row.owner_id), body.name, body.arguments, context=row.context))

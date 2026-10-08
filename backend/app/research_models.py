@@ -85,3 +85,25 @@ class Conversation(Base):
     error_code: Mapped[str | None] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class Publication(Base):
+    __tablename__ = "publications"
+    __table_args__ = {"schema": "research"}
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True)
+    document_id: Mapped[uuid.UUID] = mapped_column(UUID)
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID)
+    version_id: Mapped[uuid.UUID] = mapped_column(UUID)
+    version_kind: Mapped[str] = mapped_column(String(16), server_default="document")
+    snapshot: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class PublicationHead(Base):
+    __tablename__ = "publication_heads"
+    __table_args__ = {"schema": "research"}
+    document_id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True)
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID)
+    kind: Mapped[str] = mapped_column(String(16), server_default="document")
+    publication_id: Mapped[uuid.UUID | None] = mapped_column(UUID)

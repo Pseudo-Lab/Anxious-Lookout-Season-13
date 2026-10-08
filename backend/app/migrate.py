@@ -13,12 +13,14 @@ from .settings import secret
 
 RESEARCH_REVISION = "0002_research"
 SESSION_REVISION = "0003_sessions"
+PUBLICATION_REVISION = "0004_publication"
+RESEARCH_REVISIONS = (RESEARCH_REVISION, SESSION_REVISION, PUBLICATION_REVISION)
 
 
 def migrate(revision=AUTH_REVISION):
     url = secret("ADMIN_DATABASE_URL")
     password = secret("API_DATABASE_PASSWORD")
-    if not url or len(password) < 16 or revision not in {AUTH_REVISION, RESEARCH_REVISION, SESSION_REVISION}:
+    if not url or len(password) < 16 or revision not in {AUTH_REVISION, *RESEARCH_REVISIONS}:
         raise ValueError("Migration credentials are required")
     engine = create_engine(url, poolclass=NullPool, hide_parameters=True, connect_args={"connect_timeout": 3})
     try:
@@ -40,16 +42,16 @@ def migrate(revision=AUTH_REVISION):
                 raise RuntimeError("Authentication Alembic revision mismatch")
             connection.execute(text("REVOKE ALL ON auth.alembic_version FROM PUBLIC"))
             connection.execute(text("GRANT SELECT ON auth.alembic_version TO anxious_api"))
-            if revision in {RESEARCH_REVISION, SESSION_REVISION}:
+            if revision in RESEARCH_REVISIONS:
                 research_tables = set(inspect(connection).get_table_names(schema="research"))
                 if research_tables and "alembic_version" not in research_tables:
                     raise RuntimeError("Unversioned research schema cannot be adopted")
                 if research_tables:
                     marker = connection.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one()
-                    if marker not in {RESEARCH_REVISION, SESSION_REVISION}:
+                    if marker not in RESEARCH_REVISIONS:
                         raise RuntimeError("Unknown research revision")
-                    if marker == SESSION_REVISION and revision == RESEARCH_REVISION:
-                        revision = SESSION_REVISION  # Ensure the minimum revision; never downgrade a known follow-up.
+                    if RESEARCH_REVISIONS.index(marker) > RESEARCH_REVISIONS.index(revision):
+                        revision = marker  # Ensure a minimum; never downgrade a known follow-up.
                     from .research_schema_contract import validate_research
                     validate_research(connection)  # Reject incomplete existing schema/grants; never repair silently.
                 connection.execute(text("CREATE SCHEMA IF NOT EXISTS research"))

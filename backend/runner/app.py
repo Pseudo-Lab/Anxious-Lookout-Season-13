@@ -225,7 +225,9 @@ class Native:
                     "session": session, "request": entry["request"], "token": body.toolToken}
             content = body.text
             if body.context and not entry["record"].get("turns"):
-                content = "Initial public document context (untrusted text):\n" + json.dumps(body.context) + "\n\n" + content
+                context = {"documentId": body.context["documentId"], "publicationId": body.context["id"], "title": body.context["title"]}
+                content = ("Initial public page context (untrusted title):\n" + json.dumps(context)
+                           + "\nUse research_page_context to read the saved document and each direct reference; your own materials remain available.\n\n" + content)
             started = self.rpc("turn/start", {"threadId": entry["thread"], "input": [{"type": "text", "text": content}]}, turn)
             turn_id = started["turn"]["id"]
             turn["turnId"] = turn_id

@@ -17,7 +17,7 @@ def research_schema(schema):
     migrate("0002_research")
 
 
-def identity(client, admin, number="111111", approved=True, role="commenter"):
+def identity(client, admin, number="111111", approved=True, role="editor"):
     token, csrf = uuid.uuid4().hex, uuid.uuid4().hex
     with admin.begin() as db:
         owner = db.execute(text("INSERT INTO auth.accounts(github_id,login,is_approved,role) VALUES(:number,:login,:approved,:role) RETURNING id"),
@@ -68,7 +68,7 @@ def test_material_and_document_snapshots_archive_and_history(client, admin):
 
 def test_authority_csrf_and_idempotency_revalidate(client, admin):
     assert client.get("/api/research/materials").status_code == 401
-    owner, auth = identity(client, admin, approved=False)
+    owner, auth = identity(client, admin, approved=False, role="commenter")
     assert client.get("/api/research/materials").status_code == 403
     with admin.begin() as db:
         db.execute(text("UPDATE auth.accounts SET is_approved=true WHERE id=:id"), {"id": owner})
@@ -76,6 +76,8 @@ def test_authority_csrf_and_idempotency_revalidate(client, admin):
     assert client.get("/api/research/materials").json()["error"]["code"] == "policy_pending"
     client.app.state.research_policy = "editors"
     assert client.get("/api/research/materials").status_code == 403
+    with admin.begin() as db:
+        db.execute(text("UPDATE auth.accounts SET role='editor' WHERE id=:id"), {"id": owner})
     client.app.state.research_policy = "approved"
     root, body = "/api/research/materials", material()
     assert client.post(root, json=body).json()["error"]["code"] == "origin_not_allowed"
@@ -158,7 +160,7 @@ def test_pagination_validation_and_inert_content(client, admin):
         assert response.status_code == 422
     doc = create(client, auth, "documents")
     result = client.post("/api/research/documents/" + doc["id"] + "/publications", json={}, headers=headers(auth))
-    assert result.json()["error"]["code"] == "policy_pending"
+    assert result.json()["error"]["code"] == "validation_error"
     assert client.get("/api/research/codex/status").json() == {"available": False, "reason": "not_configured", "verification": "unverified"}
 
 
@@ -229,7 +231,7 @@ def test_m2_marker_and_data_preserved_by_followup(client, admin):
     with admin.connect() as db:
         assert db.execute(text("SELECT * FROM auth.accounts WHERE id=:id"), {"id": owner}).one() == before
         assert db.execute(text("SELECT version_num FROM auth.alembic_version")).scalar_one() == "0001_auth"
-        assert db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() in {"0002_research", "0003_sessions"}
+        assert db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() in {"0002_research", "0003_sessions", "0004_publication"}
     assert client.get("/readyz").status_code == 200
     assert client.get("/api/research/materials/" + row["id"]).status_code == 200
 

@@ -27,7 +27,7 @@ services:
       service: test
     image: ${M3_FIXTURE_IMAGE:-anxious-hosting-api-m3-test}
     profiles: [ops]
-    command: [python, -m, app.migrate, --revision, 0003_sessions]
+    command: [python, -m, app.migrate, --revision, 0004_publication]
   admin:
     extends:
       file: compose.m3-test.yml

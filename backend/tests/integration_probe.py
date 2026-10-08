@@ -67,8 +67,13 @@ def run(mode, origin, filename):
                              "target": {"type": "material", "id": material["id"]}, "kind": "references", "directed": True})
             assert relation.status_code == 201
             assert client.get("/api/research/documents/" + document["id"] + "/relations").json()["items"][0]["direction"] == "outgoing"
-            pending = write("POST", "/api/research/documents/" + document["id"] + "/publications", {})
-            assert pending.status_code == 503 and pending.json()["error"]["code"] == "policy_pending"
+            document_root = "/api/research/documents/" + document["id"]
+            shown = client.get(document_root + "/publication-preview").json()
+            released = write("POST", document_root + "/publications", {key: shown[key] for key in ("versionId", "expectedVersion", "previewToken")})
+            assert released.status_code == 201 and released.json()["materials"][0]["id"] == material["id"]
+            assert client.get("/api/public/releases/" + released.json()["id"]).status_code == 200
+            assert write("DELETE", document_root + "/publication", {"expectedVersion": 2}).status_code == 200
+            assert client.get("/api/public/releases/" + released.json()["id"]).status_code == 404
             session = write("POST", "/api/research/sessions", {"title": "Unavailable native fixture"})
             assert session.status_code == 201
             session_root = "/api/research/sessions/" + session.json()["id"]
