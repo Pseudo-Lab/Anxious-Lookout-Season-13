@@ -10,6 +10,9 @@ import {
   type Material,
   type MaterialSummary,
   type MessageItem,
+  type AdminAccount,
+  type PreviewMaterial,
+  type PublicationPreview,
   type Page,
   type PublicDocumentSummary,
   type PublicSnapshot,
@@ -210,16 +213,18 @@ function parsePublishedMaterial(v: unknown): PublishedMaterial | null {
   ) {
     return null;
   }
-  // 노출 범위 정책(전체/메타데이터만/발췌)이 미정이라 content가 없을 수 있다.
-  return {
+  if (!isStr(v.content)) return null;
+  const out: PublishedMaterial = {
     id: v.id,
     versionId: v.versionId,
     title: v.title,
     sourceUrl: v.sourceUrl,
     collectedAt: v.collectedAt,
     contentKind: v.contentKind,
-    content: isStr(v.content) ? v.content : null,
+    content: v.content,
   };
+  if (isInt(v.number)) out.number = v.number;
+  return out;
 }
 
 function parsePublicSnapshot(v: unknown): PublicSnapshot | null {
@@ -257,6 +262,91 @@ function parsePublicSummary(v: unknown): PublicDocumentSummary | null {
   return { id: v.id, documentId: v.documentId, title: v.title, publishedAt: v.publishedAt, author };
 }
 
+function parsePreviewMaterial(v: unknown): PreviewMaterial | null {
+  if (
+    !isObj(v) ||
+    !isId(v.id) ||
+    !isId(v.versionId) ||
+    !isInt(v.number) ||
+    !isStr(v.title) ||
+    !isStr(v.sourceUrl) ||
+    !isStr(v.collectedAt) ||
+    !isKind(v.contentKind) ||
+    !isStr(v.content) ||
+    typeof v.archived !== "boolean" ||
+    !Array.isArray(v.relations) ||
+    !v.relations.every((r) => isObj(r) && isId(r.id) && isInt(r.version))
+  ) {
+    return null;
+  }
+  return {
+    id: v.id,
+    versionId: v.versionId,
+    number: v.number,
+    title: v.title,
+    sourceUrl: v.sourceUrl,
+    collectedAt: v.collectedAt,
+    contentKind: v.contentKind,
+    content: v.content,
+    archived: v.archived,
+    relations: (v.relations as Obj[]).map((r) => ({ id: r.id as string, version: r.version as number })),
+  };
+}
+
+function parsePreview(v: unknown): PublicationPreview | null {
+  if (
+    !isObj(v) ||
+    !isId(v.documentId) ||
+    !isId(v.versionId) ||
+    !isStr(v.title) ||
+    !isStr(v.content) ||
+    !isInt(v.expectedVersion) ||
+    !isId(v.previewToken) ||
+    typeof v.publishable !== "boolean" ||
+    !Array.isArray(v.materials)
+  ) {
+    return null;
+  }
+  const materials = v.materials.map(parsePreviewMaterial);
+  if (materials.some((m) => m === null)) return null;
+  return {
+    documentId: v.documentId,
+    versionId: v.versionId,
+    title: v.title,
+    content: v.content,
+    expectedVersion: v.expectedVersion,
+    previewToken: v.previewToken,
+    publishable: v.publishable,
+    materials: materials as PreviewMaterial[],
+  };
+}
+
+function parseAdminAccount(v: unknown): AdminAccount | null {
+  if (
+    !isObj(v) ||
+    !isId(v.accountId) ||
+    !isStr(v.githubId) ||
+    !isStr(v.login) ||
+    (v.role !== "admin" && v.role !== "editor" && v.role !== "commenter") ||
+    typeof v.isApproved !== "boolean" ||
+    !isStr(v.createdAt) ||
+    !isStr(v.updatedAt) ||
+    !isId(v.version)
+  ) {
+    return null;
+  }
+  return {
+    accountId: v.accountId,
+    githubId: v.githubId,
+    login: v.login,
+    role: v.role,
+    isApproved: v.isApproved,
+    createdAt: v.createdAt,
+    updatedAt: v.updatedAt,
+    version: v.version,
+  };
+}
+
 function parseCodexStatus(v: unknown): CodexStatus | null {
   if (!isObj(v) || typeof v.available !== "boolean") return null;
   if (v.reason !== null && v.reason !== "not_configured" && v.reason !== "unavailable") return null;
@@ -276,7 +366,13 @@ function parseSessionSummary(v: unknown): SessionSummary | null {
   ) {
     return null;
   }
-  return { id: v.id, title: v.title, state: v.state, createdAt: v.createdAt, updatedAt: v.updatedAt, version: v.version };
+  const out: SessionSummary = { id: v.id, title: v.title, state: v.state, createdAt: v.createdAt, updatedAt: v.updatedAt, version: v.version };
+  if (v.context !== undefined && v.context !== null) {
+    const c = v.context;
+    if (!isObj(c) || !isId(c.documentId) || !isId(c.publicationId) || !isStr(c.title)) return null;
+    out.context = { documentId: c.documentId, publicationId: c.publicationId, title: c.title };
+  }
+  return out;
 }
 
 function parseSessionItem(v: unknown): SessionItem | null {
@@ -323,7 +419,7 @@ export interface MutationContext {
 
 function mutate<T>(
   path: `/${string}`,
-  method: "POST" | "PATCH" | "DELETE",
+  method: "POST" | "PATCH" | "PUT" | "DELETE",
   body: unknown,
   parse: (v: unknown) => T | null,
   ctx: MutationContext
@@ -425,13 +521,22 @@ export const deleteRelation = (id: string, expectedVersion: number, ctx: Mutatio
 
 // ---- 공개 (정책 확정 전에는 서버가 쓰기를 503 policy_pending으로 거절) ----
 
-export const publishDocument = (
-  id: string,
-  input: { versionId: string; materialVersionIds: string[] },
-  expectedVersion: number,
-  ctx: MutationContext
-) =>
-  mutate(`/research/documents/${enc(id)}/publications`, "POST", { ...input, expectedVersion }, parsePublicSnapshot, ctx);
+/** 공개 전 미리보기. versionId를 생략하면 최신 문서 버전 기준. */
+export const getPublicationPreview = (id: string, versionId?: string) =>
+  fetchJson(
+    apiUrl(`/research/documents/${enc(id)}/publication-preview${versionId ? `?versionId=${enc(versionId)}` : ""}`),
+    parsePreview
+  );
+
+/** 미리보기에 보인 문서 버전과 직접 연결 자료 전체를 공개한다(자료는 서버가 도출·고정). */
+export const publishDocument = (id: string, preview: PublicationPreview, ctx: MutationContext) =>
+  mutate(
+    `/research/documents/${enc(id)}/publications`,
+    "POST",
+    { versionId: preview.versionId, expectedVersion: preview.expectedVersion, previewToken: preview.previewToken },
+    parsePublicSnapshot,
+    ctx
+  );
 
 export const revokePublication = (id: string, expectedVersion: number, ctx: MutationContext) =>
   mutate(`/research/documents/${enc(id)}/publication`, "DELETE", { expectedVersion }, (v) => (isObj(v) ? v : null), ctx);
@@ -498,3 +603,15 @@ export function researchErrorMessage(failure: FetchFailure): string | null {
       return null;
   }
 }
+
+// ---- 관리자 (승인된 admin 전용) ----
+
+export const listAdminAccounts = (cursor?: string | null) =>
+  fetchJson(apiUrl(`/admin/accounts${listQuery(cursor)}`), parsePage(parseAdminAccount));
+
+export const setMembership = (
+  accountId: string,
+  input: { role: "editor" | "commenter"; isApproved: boolean; reason: string },
+  expectedVersion: string,
+  ctx: MutationContext
+) => mutate(`/admin/accounts/${enc(accountId)}/membership`, "PUT", { ...input, expectedVersion }, parseAdminAccount, ctx);

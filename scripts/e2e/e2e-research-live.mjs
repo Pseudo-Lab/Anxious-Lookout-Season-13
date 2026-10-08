@@ -237,14 +237,53 @@ check("L6. save after reload succeeds", await appears(main.locator(".prose").get
   check("L7. exactly one document created", (await countDocs()) === before + 1);
 }
 
-// L8. 공개: 정책 확정 전 실제 서버 policy_pending
+// L8. 공개(확정 정책, 실제 API): 미리보기에 글→자료 직접 연결만(자료↔자료 간접 연결 제외) → 공개 → 방문자 열람
+//     → 수정 후 재공개 시 최신 공개본만, 이전 release ID 404
+const publishButton = () => main.getByRole("button", { name: /글과 참고 자료 \d+개 공개/ });
 await page.goto(docUrl);
 await main.getByRole("button", { name: "공개하기" }).click();
-await main.getByRole("checkbox", { name: "실물 자료 A" }).check();
-await main.getByRole("button", { name: "이 내용으로 공개" }).click();
-check("L8. publish policy_pending from real API", await appears(main.getByText("이용 정책이 확정되기 전")));
-await main.getByRole("button", { name: "취소" }).click();
-check("L8. still private", await appears(main.getByText("비공개 문서입니다")));
+await publishButton().waitFor();
+{
+  const preview = await main.locator("section").filter({ has: page.getByRole("heading", { name: "함께 공개될 참고 자료" }) }).last().innerText();
+  check("L8. real preview lists direct material", preview.includes("실물 자료 A"));
+  check("L8. real preview excludes indirect material", !preview.includes("실물 자료 B"));
+  check("L8. real preview count 1", (await publishButton().innerText()).includes("1개"));
+}
+await publishButton().click();
+check("L8. published via real API", await appears(main.getByText("공개 중", { exact: true })));
+const publicUrl = U(`/public/document/?id=${docD.body.id}`);
+{
+  const V = await newPage();
+  await V.page.goto(publicUrl);
+  const vm = V.page.locator("main");
+  check("L8. visitor reads public document", await appears(vm.getByRole("heading", { name: "실물 문서 D", exact: true })));
+  const t = await vm.innerText();
+  check("L8. direct material public, indirect not", t.includes("실물 자료 A") && !t.includes("실물 자료 B"));
+  await vm.getByText("저장된 내용 보기").first().click();
+  check("L8. public material stored content shown", await appears(vm.locator(".prose").nth(1)));
+  check("L8. visitor (logged out) sees question restriction", await appears(vm.getByText("승인된 편집자·관리자만 질문할 수 있습니다")));
+  const first = (await api.get(`/research/documents/${docD.body.id}`)).body;
+  const firstRelease = first.publication.id;
+  const r = await api.send("PATCH", `/research/documents/${docD.body.id}`, { title: "실물 문서 D", content: "# D 두 번째 공개본", expectedVersion: first.version });
+  check("setup. document edited", r.status === 200, String(r.status));
+  await page.goto(docUrl);
+  await main.getByRole("button", { name: "새 내용으로 다시 공개" }).click();
+  await publishButton().click();
+  await main.getByText("공개 중", { exact: true }).waitFor();
+  await V.page.reload();
+  check("L8. readers see latest release only", await appears(vm.getByText("D 두 번째 공개본")));
+  const old = await V.page.request.get(U(`/api/public/releases/${firstRelease}`));
+  check("L8. previous release id -> 404 (real)", old.status() === 404, String(old.status()));
+  await V.context.close();
+}
+
+// L8b. 공개 글 기반 개인 질문 세션(편집자 A): 맥락 표시, Codex는 미연결
+await page.goto(publicUrl);
+await main.getByLabel("새 대화 제목").waitFor();
+await main.getByRole("button", { name: "새 대화" }).click();
+await page.waitForURL(/\/research\/session\/\?id=/);
+check("L8b. session context from public document shown", await appears(main.getByText("공개 글에서 시작:")));
+const publicSessionUrl = page.url();
 
 // L9. 세션: 실제 Codex 미연결 상태 표시, 전송 실패 시 입력 보존
 await page.goto(U("/research/?tab=sessions"));
@@ -274,6 +313,41 @@ check("L9. session persists after reload", await appears(main.getByRole("heading
   await B.page.goto(U("/research/"));
   check("L10. B list empty", await appears(bm.getByText("아직 저장한 자료가 없습니다")));
   await B.context.close();
+}
+
+// L13. 관리자 화면(실제 API): ops CLI로 bootstrap한 관리자가 승인 대기 계정을 편집자로 지정 → 대상 재로그인 후 이용
+{
+  const P = await newPage();
+  await signIn(P.page); // 승인 대기 계정
+  const pMe = await (await P.page.request.get(U("/api/auth/me"))).json();
+  await P.page.goto(U("/research/"));
+  check("L13. pending account forbidden before grant", await appears(P.page.locator("main").getByText("이 기능을 이용할 권한이 없습니다")));
+  const ADM = await newPage();
+  const adminUser = await approvedAccount("ADM", ADM.page);
+  check("L13. operator-bootstrapped admin", adminUser.role === "admin" && adminUser.isApproved);
+  await ADM.page.goto(U("/admin/"));
+  const am = ADM.page.locator("main");
+  const row = am.getByRole("listitem").filter({ hasText: new RegExp(`${pMe.user.login}\\b`) });
+  await row.first().waitFor();
+  check("L13. admin own row locked", await appears(am.getByRole("listitem").filter({ hasText: "(나)" }).getByText("본인 계정은 바꿀 수 없습니다")));
+  await row.getByRole("button", { name: /^편집자로 지정/ }).click();
+  await row.getByLabel("변경 사유").fill("실물 통합 편집자 지정");
+  await row.getByRole("button", { name: "적용" }).click();
+  check("L13. real membership change applied", await appears(row.getByText("대상 사용자는 다시 로그인해야 합니다")));
+  check("L13. target session revoked (real)", (await P.page.request.get(U("/api/auth/me"))).status() === 401);
+  await signIn(P.page);
+  const pAfter = await (await P.page.request.get(U("/api/auth/me"))).json();
+  check("L13. target is approved editor after re-login", pAfter.user.role === "editor" && pAfter.user.isApproved);
+  check("L13. target sees research nav", await appears(P.page.locator("header").getByRole("link", { name: "내 연구" })));
+  await page.goto(U("/admin/"));
+  check("L13. editor cannot use admin screen", await appears(main.getByText("승인된 관리자만 이용할 수 있습니다")));
+  const forbidden = await api.get("/admin/accounts");
+  check("L13. editor admin API -> 403 (real)", forbidden.status === 403, String(forbidden.status));
+  // 작성자는 방문자 세션을 볼 수 없다: 새 편집자 P가 A의 공개 글 질문 세션 URL로 접근 → 404
+  await P.page.goto(publicSessionUrl);
+  check("L13. other editor cannot open A's question session", await appears(P.page.locator("main").getByText("항목을 찾을 수 없습니다")));
+  await P.context.close();
+  await ADM.context.close();
 }
 
 // L11. 생성 요청이 서버에 반영(201)된 뒤 응답이 늦는 동안 명시적 로그아웃 → 늦은 실패가 보관소에 다시 쓰지 않음(리뷰 F3-2 실 API)

@@ -110,12 +110,40 @@ export interface Page<T> {
 export interface PublishedMaterial {
   id: string;
   versionId: string;
+  // 공개에 고정된 자료 내용 버전 번호
+  number?: number;
   title: string;
   sourceUrl: string;
   collectedAt: string;
   contentKind: ContentKind;
-  // 공개 노출 범위가 미정이다. 메타데이터만 공개하는 정책이면 null.
-  content: string | null;
+  // 확정 정책: 공개 자료는 저장 내용과 출처를 항상 포함한다.
+  content: string;
+}
+
+/** 공개 전 미리보기: 지금 공개하면 함께 노출될 직접 연결 자료(서버 도출). */
+export interface PreviewMaterial {
+  id: string;
+  versionId: string;
+  number: number;
+  title: string;
+  sourceUrl: string;
+  collectedAt: string;
+  contentKind: ContentKind;
+  content: string;
+  // 보관된 자료는 미리보기에 보이지만 관계를 해제하기 전까지 공개를 막는다.
+  archived: boolean;
+  relations: { id: string; version: number }[];
+}
+
+export interface PublicationPreview {
+  documentId: string;
+  versionId: string;
+  title: string;
+  content: string;
+  expectedVersion: number;
+  previewToken: string;
+  publishable: boolean;
+  materials: PreviewMaterial[];
 }
 
 export interface PublicSnapshot {
@@ -158,6 +186,8 @@ export interface SessionSummary {
   createdAt: string;
   updatedAt: string;
   version: number;
+  // 공개 글에서 시작한 질문 세션의 처음 저장 맥락(당시 공개본)
+  context?: { documentId: string; publicationId: string; title: string };
 }
 
 export interface MessageItem {
@@ -192,4 +222,17 @@ export interface RawSessionItem {
   id: string;
   format: "json";
   raw: unknown;
+}
+
+// 관리자 화면: 계정 승인·역할
+export interface AdminAccount {
+  accountId: string;
+  githubId: string;
+  login: string;
+  role: "admin" | "editor" | "commenter";
+  isApproved: boolean;
+  createdAt: string;
+  updatedAt: string;
+  // 동시 변경 감지 값(updatedAt의 정확한 문자열). 그대로 expectedVersion으로 보낸다.
+  version: string;
 }

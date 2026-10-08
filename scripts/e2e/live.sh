@@ -36,7 +36,7 @@ cleanup() {
   docker rm -f "$BROWSER" >/dev/null 2>&1 || true
   if [ "${E2E_KEEP:-0}" != 1 ]; then $COMPOSE down --volumes >/dev/null 2>&1 || true; fi
   # 이 실행이 만든 임시 승인 교환 디렉터리만 지운다
-  if [ "$OWN_SHARED" = 1 ]; then rm -f "$SHARED"/A.id "$SHARED"/A.ok "$SHARED"/B.id "$SHARED"/B.ok; rmdir "$SHARED" 2>/dev/null || true; fi
+  if [ "$OWN_SHARED" = 1 ]; then rm -f "$SHARED"/A.id "$SHARED"/A.ok "$SHARED"/B.id "$SHARED"/B.ok "$SHARED"/ADM.id "$SHARED"/ADM.ok; rmdir "$SHARED" 2>/dev/null || true; fi
 }
 trap cleanup EXIT
 
@@ -60,7 +60,8 @@ docker run -d --name "$BROWSER" --network host --ipc=host -e HOME=/tmp \
     cp /e2e/e2e-research-live.mjs . && node e2e-research-live.mjs" >/dev/null
 
 # 4) 운영자 승인(fixture 계정만). 승인은 기존 session을 폐기하므로 브라우저가 같은 identity로 다시 로그인한다.
-for name in A B; do
+#    A·B는 편집자, ADM은 관리 화면 검증용 관리자(ops admin CLI로만 bootstrap; 웹 API는 admin 지정 불가).
+for name in A B ADM; do
   j=0
   while [ ! -s "$SHARED/$name.id" ]; do
     if [ "$(docker inspect -f '{{.State.Running}}' "$BROWSER" 2>/dev/null)" != true ]; then break 2; fi
@@ -69,7 +70,8 @@ for name in A B; do
   done
   ID=$(cat "$SHARED/$name.id")
   case "$ID" in *[!0-9]*|'') echo "invalid fixture id"; exit 1;; esac
-  $COMPOSE run --rm admin --github-id "$ID" --approved true --role editor \
+  ROLE=editor; [ "$name" = ADM ] && ROLE=admin
+  $COMPOSE run --rm admin --github-id "$ID" --approved true --role "$ROLE" \
     --actor fixture:front-it --reason "Verified disposable test identity ($name)" >/dev/null
   touch "$SHARED/$name.ok"
   echo "== approved fixture account $name ($ID)"

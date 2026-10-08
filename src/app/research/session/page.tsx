@@ -247,6 +247,15 @@ function SessionView({ id }: { id: string }) {
         <p className="text-xs text-stone-500">
           {SESSION_STATE_LABELS[s.state]} · 시작 {formatDateTime(s.createdAt)} · 최근 {formatDateTime(s.updatedAt)}
         </p>
+        {s.context && (
+          <p className="text-xs text-stone-500">
+            공개 글에서 시작:{" "}
+            <Link href={`/public/document/?id=${encodeURIComponent(s.context.documentId)}`} className="text-indigo-600 hover:text-indigo-800">
+              {s.context.title || "(제목 없음)"}
+            </Link>{" "}
+            — 시작 당시 공개본과 그 참고 자료가 이 대화의 맥락으로 저장되어 있습니다. 글이 철회되거나 다시 공개돼도 이 대화는 유지됩니다.
+          </p>
+        )}
         <button onClick={() => void archive()} disabled={busy || running} className="text-sm text-stone-500 hover:text-red-700 disabled:opacity-50">
           보관
         </button>

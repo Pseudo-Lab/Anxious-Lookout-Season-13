@@ -5,8 +5,8 @@ import crypto from "node:crypto";
 export const researchMode = {
   // "approved": 승인 계정 허용 / "pending": 모든 개인 API 503 policy_pending
   access: "approved",
-  // "pending": 공개 쓰기 503 policy_pending / "allowed"
-  publish: "pending",
+  // 확정 정책(0004 이후): 공개 쓰기 허용. "pending"은 이전 정책 대기 상태 재현용.
+  publish: "allowed",
   // "unavailable" | "fixture" | "reject"(예약 202 후 runner가 명확히 거절 → failed/codex_rejected)
   codex: "unavailable",
   // "reject": 변경 요청을 403 csrf_invalid로 거절(키 확인 전 단계)
@@ -234,23 +234,23 @@ function handleMutation(owner, method, path, b, user) {
     if (researchMode.publish !== "allowed") return fail(503, "policy_pending", "Policy pending");
     if (stale(b, doc.version)) return fail(409, "conflict", "Version conflict");
     if (method === "DELETE") {
+      retiredReleases.add(doc.publication?.id);
       doc.publication = null;
       doc.version++;
       return ok(200, { id: doc.id, revoked: true, version: doc.version });
     }
     const v = doc.versions.find((x) => x.id === b.versionId);
     if (!v) return fail(404, "not_found", "Not found");
-    const mats = [];
-    for (const vid of b.materialVersionIds ?? []) {
-      const mat = [...items.values()].find((i) => i.owner === owner && i.type === "material" && !i.archived && i.versions.some((x) => x.id === vid));
-      if (!mat || mats.some((x) => x.id === mat.id)) return fail(422, "validation_error", "Invalid material", { fields: [{ path: "body.materialVersionIds", message: "invalid" }] });
-      const mv = mat.versions.find((x) => x.id === vid);
-      mats.push({
-        id: mat.id,
-        versionId: vid,
-        snapshot: { id: mat.id, versionId: vid, title: mv.title, sourceUrl: mv.sourceUrl, collectedAt: mv.collectedAt, contentKind: mv.contentKind, content: mv.content },
-      });
-    }
+    const pv = previewOf(doc, v);
+    if (b.previewToken !== pv.previewToken) return fail(409, "conflict", "Preview is stale");
+    if (!pv.publishable) return fail(422, "validation_error", "Archived reference", { fields: [{ path: "body.previewToken", message: "archived reference" }] });
+    const mats = pv.materials.map((m) => ({
+      id: m.id,
+      versionId: m.versionId,
+      snapshot: { id: m.id, versionId: m.versionId, number: m.number, title: m.title, sourceUrl: m.sourceUrl, collectedAt: m.collectedAt, contentKind: m.contentKind, content: m.content },
+    }));
+    // 이전 공개본은 기록만 남기고 더 이상 열람되지 않는다(최신만)
+    if (doc.publication) retiredReleases.add(doc.publication.id);
     doc.publication = { id: uuid(), versionId: v.id, publishedAt: now(), materials: mats, authorLogin: user.login };
     doc.version++;
     return ok(201, snapshot(doc));
@@ -262,7 +262,8 @@ function handleMutation(owner, method, path, b, user) {
     if (b.publicDocumentId) {
       const doc = items.get(b.publicDocumentId);
       if (!doc || !doc.publication) return fail(404, "not_found", "Not found");
-      s.context = b.publicDocumentId;
+      // 당시 공개본과 그 참고자료를 맥락으로 저장
+      s.context = { documentId: doc.id, publicationId: doc.publication.id, title: snapshot(doc).title };
     }
     sessions.set(s.id, s);
     return ok(201, sessionSummary(s));
@@ -316,7 +317,54 @@ function handleMutation(owner, method, path, b, user) {
 }
 
 function sessionSummary(s) {
-  return { id: s.id, title: s.title, state: s.state, createdAt: s.createdAt, updatedAt: s.updatedAt, version: s.version };
+  const out = { id: s.id, title: s.title, state: s.state, createdAt: s.createdAt, updatedAt: s.updatedAt, version: s.version };
+  if (s.context) out.context = s.context;
+  return out;
+}
+
+const retiredReleases = new Set();
+
+// 공개 미리보기: 글→자료 직접 관계 전체(보관되지 않은 관계), 자료의 현재 버전. 간접 연결은 따라가지 않는다.
+function previewOf(doc, v) {
+  const byMaterial = new Map();
+  for (const r of relations.values()) {
+    if (r.archived || r.source.id !== doc.id || r.target.type !== "material") continue;
+    const entry = byMaterial.get(r.target.id) ?? [];
+    entry.push({ id: r.id, version: r.version });
+    byMaterial.set(r.target.id, entry);
+  }
+  const materials = [...byMaterial.entries()].map(([id, rels]) => {
+    const mat = items.get(id);
+    const mv = latest(mat);
+    return {
+      id,
+      versionId: mv.id,
+      number: mv.number,
+      title: mv.title,
+      sourceUrl: mv.sourceUrl,
+      collectedAt: mv.collectedAt,
+      contentKind: mv.contentKind,
+      content: mv.content,
+      archived: mat.archived,
+      relations: rels,
+    };
+  });
+  const token = crypto
+    .createHash("sha256")
+    .update(JSON.stringify([doc.version, v.id, materials.map((m) => [m.id, m.versionId, m.archived, m.relations])]))
+    .digest("hex");
+  // 계약: 서버가 발급한 64자리 소문자 hex 문자열
+  const previewToken = token;
+  return {
+    documentId: doc.id,
+    versionId: v.id,
+    title: v.title,
+    content: v.content,
+    expectedVersion: doc.version,
+    previewToken,
+    publishable: materials.every((m) => !m.archived),
+    materials,
+  };
 }
 
 function handleRead(owner, path, url) {
@@ -340,6 +388,13 @@ function handleRead(owner, path, url) {
       const list = [...relations.values()].filter((r) => r.owner === owner && !r.archived && (r.source.id === item.id || r.target.id === item.id));
       return ok(200, page(list.map((r) => relationView(r, item.id)), url));
     }
+  }
+  if ((m = /^\/research\/documents\/([^/]+)\/publication-preview$/.exec(path))) {
+    const doc = owned(m[1], owner, "document");
+    if (!doc) return fail(404, "not_found", "Not found");
+    const vid = url.searchParams.get("versionId");
+    const v = vid ? doc.versions.find((x) => x.id === vid) : latest(doc);
+    return v ? ok(200, previewOf(doc, v)) : fail(404, "not_found", "Not found");
   }
   if (path === "/research/codex/status") {
     return ok(200, researchMode.codex === "fixture" ? { available: true, reason: null, verification: "fixture" } : { available: false, reason: "not_configured", verification: "unverified" });
@@ -373,6 +428,11 @@ export async function handleResearch(req, res, path, url, session) {
         return { id: s.id, documentId: d.id, title: s.title, publishedAt: s.publishedAt, author: s.author };
       });
       return send(res, 200, page(list, url));
+    }
+    const rel = /^\/public\/releases\/([^/]+)$/.exec(path);
+    if (rel) {
+      const d = published.find((x) => x.publication.id === rel[1] && !retiredReleases.has(rel[1]));
+      return d ? send(res, 200, snapshot(d)) : send(res, 404, { error: { code: "not_found", message: "Not found" } });
     }
     const m = /^\/public\/documents\/([^/]+)$/.exec(path);
     const doc = m && published.find((d) => d.id === m[1]);

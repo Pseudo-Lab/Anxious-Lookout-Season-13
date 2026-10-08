@@ -35,6 +35,7 @@ function api(req, res, path, url) {
     origin: req.headers.origin ?? null,
     idempotencyKey: req.headers["idempotency-key"] ?? null,
   });
+  if (path.startsWith("/admin/")) return handleAdmin(req, res, path, url);
   if (path.startsWith("/research/") || path.startsWith("/public/")) {
     return handleResearch(req, res, path, url, sessions.get(sid(req)) ?? null);
   }
@@ -48,7 +49,7 @@ function api(req, res, path, url) {
     return res.end();
   }
   if (path === "/auth/github/callback") {
-    if (mode.nextLogin !== "pending" && mode.nextLogin !== "approved" && mode.nextLogin !== "approved-commenter") {
+    if (!["pending", "approved", "approved-commenter", "admin"].includes(mode.nextLogin)) {
       res.writeHead(303, { Location: `${BASE}/auth/login/?auth_error=${mode.nextLogin}` });
       return res.end();
     }
@@ -60,11 +61,14 @@ function api(req, res, path, url) {
         ? lastUser
         : {
             accountId: crypto.randomUUID(),
-            githubId: "1234567",
-            login: "mock-user",
+            githubId: String(1234567 + users.size),
+            // 관리자 화면에서 구분되도록 계정마다 다른 표시 이름(헤더 검증은 "mock-user" 포함 여부)
+            login: `mock-user-${users.size + 1}`,
             // approved: 승인된 편집자(M3 정책 대상) / approved-commenter: 승인됐지만 편집자가 아님
-            role: mode.nextLogin === "approved" ? "editor" : "commenter",
-            isApproved: mode.nextLogin === "approved" || mode.nextLogin === "approved-commenter",
+            role: mode.nextLogin === "approved" ? "editor" : mode.nextLogin === "admin" ? "admin" : "commenter",
+            isApproved: ["approved", "approved-commenter", "admin"].includes(mode.nextLogin),
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
           };
     lastUser = user;
     users.set(user.accountId, user);
@@ -103,6 +107,59 @@ function api(req, res, path, url) {
     return res.end();
   }
   return err(res, 404, "not_found", "Not found");
+}
+
+// 관리자 API(계약: Administrator membership). 승인된 admin만, 자기/admin 변경·admin 지정 403, 변경 시 대상 session 폐기.
+const adminIdem = new Map();
+const accountView = (u) => ({
+  accountId: u.accountId,
+  githubId: u.githubId,
+  login: u.login,
+  role: u.role,
+  isApproved: u.isApproved,
+  createdAt: u.createdAt,
+  updatedAt: u.updatedAt,
+  version: u.updatedAt,
+});
+async function handleAdmin(req, res, path, url) {
+  const s = sessions.get(sid(req));
+  if (!s) return err(res, 401, "unauthenticated", "Authentication required");
+  if (!(s.user.isApproved && s.user.role === "admin")) return err(res, 403, "forbidden", "Admin only");
+  if (req.method === "GET" && path === "/admin/accounts") {
+    const list = [...users.values()].map(accountView);
+    const limit = Number(url.searchParams.get("limit") ?? 30);
+    const start = Number(url.searchParams.get("cursor") ?? 0);
+    return json(res, 200, { items: list.slice(start, start + limit), nextCursor: start + limit < list.length ? String(start + limit) : null });
+  }
+  const m = /^\/admin\/accounts\/([^/]+)\/membership$/.exec(path);
+  if (req.method !== "PUT" || !m) return err(res, 404, "not_found", "Not found");
+  if (req.headers.origin !== `http://${req.headers.host}`) return err(res, 403, "origin_not_allowed", "Origin not allowed");
+  if (req.headers["x-csrf-token"] !== s.csrf) return err(res, 403, "csrf_invalid", "Invalid CSRF token");
+  const key = req.headers["idempotency-key"];
+  if (!key) return err(res, 422, "validation_error", "Idempotency-Key required");
+  const chunks = [];
+  for await (const c of req) chunks.push(c);
+  const b = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+  const fp = `${path} ${JSON.stringify(b)}`;
+  const prev = adminIdem.get(`${s.user.accountId}:${key}`);
+  if (prev) return prev.fp === fp ? json(res, prev.status, prev.body) : err(res, 409, "idempotency_conflict", "Idempotency conflict");
+  const target = users.get(m[1]);
+  let status = 200;
+  let body;
+  if (!target) [status, body] = [404, { error: { code: "not_found", message: "Not found" } }];
+  else if (target.accountId === s.user.accountId || target.role === "admin" || b.role === "admin" || !["editor", "commenter"].includes(b.role))
+    [status, body] = [403, { error: { code: "forbidden", message: "Not allowed" } }];
+  else if (b.expectedVersion !== target.updatedAt) [status, body] = [409, { error: { code: "conflict", message: "Version conflict" } }];
+  else if (typeof b.reason !== "string" || !b.reason.trim()) [status, body] = [422, { error: { code: "validation_error", message: "reason required" } }];
+  else {
+    target.role = b.role;
+    target.isApproved = !!b.isApproved;
+    target.updatedAt = new Date(Date.now() + 1).toISOString();
+    for (const [id, ses] of sessions) if (ses.user.accountId === target.accountId) sessions.delete(id);
+    body = accountView(target);
+  }
+  adminIdem.set(`${s.user.accountId}:${key}`, { fp, status, body });
+  return json(res, status, body);
 }
 
 function proxy(req, res) {

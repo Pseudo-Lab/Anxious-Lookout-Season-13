@@ -69,7 +69,7 @@ function apiClient(page) {
   };
 }
 
-await setMock("me=normal&health=normal&logout=normal&nextLogin=approved&access=pending&publish=pending&codex=unavailable");
+await setMock("me=normal&health=normal&logout=normal&nextLogin=approved&access=pending&publish=allowed&codex=unavailable");
 const { context, page } = await newPage();
 const main = page.locator("main");
 const api = apiClient(page);
@@ -79,7 +79,7 @@ await page.goto(U("/research/"));
 check("R1. logged out /research/ asks login", await appears(main.getByText("로그인이 필요합니다")));
 check("R1. no 내 연구 nav when logged out", (await page.locator("header").getByRole("link", { name: "내 연구" }).count()) === 0);
 
-// R2. 정책 확정 전: 서버 policy_pending을 그대로 안내(역할 추정 없음)
+// R2. 서버가 policy_pending을 주는 상태(이전 정책 대기 재현)도 그대로 안내한다
 await login(page);
 check("R2. 내 연구 nav when logged in", await appears(page.locator("header").getByRole("link", { name: "내 연구" })));
 await page.goto(U("/research/"));
@@ -201,24 +201,79 @@ const posts = (await mockCalls()).filter((c) => c.method === "POST" && c.path ==
 check("R7. retry reused Idempotency-Key", posts.length === 2 && posts[0].idempotencyKey === posts[1].idempotencyKey, JSON.stringify(posts.map((p) => p.idempotencyKey)));
 check("R7. exactly one document created", after.documents === before.documents + 1, `${before.documents} -> ${after.documents}`);
 
-// R8. 공개: 정책 대기 → 허용 후 선택 자료만 공개 → 철회
+// R8. 공개(확정 정책): 글→자료 직접 연결 전체를 미리보기 후 공개, 간접 연결 제외, 미리보기 뒤 변경은 409 → 재미리보기,
+//     보관 자료는 공개 차단(연결 해제로 해소), 최신 공개본만 열람, 철회
 const docUrl = U(`/research/document/?id=${docD.body.id}`);
-await page.goto(docUrl);
-await main.getByRole("button", { name: "공개하기" }).click();
-await main.getByRole("checkbox", { name: "자료 A" }).check();
-await main.getByRole("button", { name: "이 내용으로 공개" }).click();
-check("R8. publish policy_pending shown", await appears(main.getByText("이용 정책이 확정되기 전")));
-await setMock("publish=allowed");
-await main.getByRole("button", { name: "이 내용으로 공개" }).click();
-check("R8. published state", await appears(main.getByText("공개 중")));
+const newMaterial = (title) =>
+  api.send("POST", "/research/materials", {
+    title,
+    sourceUrl: "https://example.com/" + encodeURIComponent(title),
+    collectedAt: new Date().toISOString(),
+    contentKind: "excerpt",
+    content: `${title} 저장 내용`,
+  });
+const relate = (sourceType, sourceId, targetId, kind) =>
+  api.send("POST", "/research/relations", {
+    source: { type: sourceType, id: sourceId },
+    target: { type: "material", id: targetId },
+    kind,
+    description: "",
+    directed: true,
+  });
+const publishButton = () => main.getByRole("button", { name: /글과 참고 자료 \d+개 공개/ });
+{
+  const matC = await newMaterial("자료 C 간접");
+  await relate("material", materialAId, matC.body.id, "간접"); // 자료 A → 자료 C (글 D와 직접 연결 없음)
+  await page.goto(docUrl);
+  await main.getByRole("button", { name: "공개하기" }).click();
+  await publishButton().waitFor();
+  const previewSection = main.locator("section").filter({ has: page.getByRole("heading", { name: "함께 공개될 참고 자료" }) }).last();
+  const previewText = await previewSection.innerText();
+  check("R8. preview lists direct materials", previewText.includes("자료 A") && previewText.includes("자료 B"));
+  check("R8. preview excludes indirect material", !previewText.includes("자료 C 간접"));
+  check("R8. preview counts 2", (await publishButton().innerText()).includes("2개"));
+  // 미리보기 뒤 새 직접 연결 → 공개 시 409 → 최신 미리보기 자동 재조회(공개 재전송 없음)
+  const matE = await newMaterial("자료 E");
+  await relate("document", docD.body.id, matE.body.id, "추가");
+  await publishButton().click();
+  check("R8. stale preview -> refreshed notice", await appears(main.getByText("최신 미리보기를 다시 불러왔습니다")));
+  check("R8. refreshed preview includes new material", await appears(main.getByRole("button", { name: "글과 참고 자료 3개 공개" })));
+  // 보관된 직접 연결 자료 → 공개 차단, 연결 해제로 해소
+  const matF = await newMaterial("자료 F 보관");
+  await relate("document", docD.body.id, matF.body.id, "보관 예정");
+  await api.send("DELETE", `/research/materials/${matF.body.id}`, { expectedVersion: matF.body.version });
+  await main.getByRole("button", { name: "취소" }).click();
+  await main.getByRole("button", { name: "공개하기" }).click();
+  check("R8. archived reference shown", await appears(main.getByText("보관됨")));
+  check("R8. archived reference blocks publish", await publishButton().isDisabled());
+  await main.getByRole("button", { name: "이 글과의 연결 해제" }).click();
+  check("R8. unlink restores publishable", await appears(main.getByRole("button", { name: "글과 참고 자료 3개 공개" })) && (await publishButton().isEnabled()));
+  await publishButton().click();
+  check("R8. published state", await appears(main.getByText("공개 중", { exact: true })));
+}
 {
   const visitor = await newPage();
   await visitor.page.goto(U(`/public/document/?id=${docD.body.id}`));
   const vm = visitor.page.locator("main");
   check("R8. public page shows document", await appears(vm.getByRole("heading", { name: "문서 D", exact: true })));
-  check("R8. selected material shown", await appears(vm.getByText("자료 A")));
-  check("R8. relation-only material not exposed", !(await vm.innerText()).includes("자료 B"));
+  const pubText = await vm.innerText();
+  check("R8. all direct materials public", ["자료 A", "자료 B", "자료 E"].every((t) => pubText.includes(t)));
+  check("R8. indirect/archived not public", !pubText.includes("자료 C 간접") && !pubText.includes("자료 F 보관"));
+  await vm.getByText("저장된 내용 보기").first().click();
+  check("R8. material stored content public", await appears(vm.getByText("저장 내용").first()) || (await vm.innerText()).includes("내용"));
   check("R8. public page offers login to chat", await appears(vm.getByRole("link", { name: /로그인하고 대화 시작/ })));
+  // 최신 공개본만: 글 수정 후 다시 공개 → 이전 공개본 ID로는 열람 불가
+  const before = await api.get(`/research/documents/${docD.body.id}`);
+  const firstRelease = before.publication.id;
+  await api.send("PATCH", `/research/documents/${docD.body.id}`, { title: "문서 D", content: "# 문서 D 두 번째 공개", expectedVersion: before.version });
+  await page.goto(docUrl);
+  await main.getByRole("button", { name: "새 내용으로 다시 공개" }).click();
+  await publishButton().click();
+  await main.getByText("공개 중", { exact: true }).waitFor();
+  await visitor.page.reload();
+  check("R8. readers see latest release", await appears(vm.getByText("문서 D 두 번째 공개")));
+  const oldRelease = await visitor.page.request.get(U(`/api/public/releases/${firstRelease}`));
+  check("R8. previous release id -> 404", oldRelease.status() === 404, String(oldRelease.status()));
   await page.goto(docUrl);
   await main.getByRole("button", { name: "공개 철회" }).click();
   check("R8. revoked -> 비공개", await appears(main.getByText("비공개 문서입니다")));
@@ -503,12 +558,13 @@ let docEUrl;
 
 // R18. 공개 문서 페이지의 개인 대화 생성 폼: 복구된 개인 제목은 계정에 묶여, 같은 탭 계정 전환 시 버린다(리뷰 F3-1)
 {
-  await setMock("publish=allowed&reuse=0&as=");
+  await setMock("reuse=0&as=");
   const pubDoc = await api.send("POST", "/research/documents", { title: "공개용 문서", content: "공개 본문" });
+  const pv = await api.get(`/research/documents/${pubDoc.body.id}/publication-preview`);
   const pub = await api.send("POST", `/research/documents/${pubDoc.body.id}/publications`, {
-    versionId: pubDoc.body.latestVersion.id,
-    materialVersionIds: [],
-    expectedVersion: pubDoc.body.version,
+    versionId: pv.versionId,
+    expectedVersion: pv.expectedVersion,
+    previewToken: pv.previewToken,
   });
   check("setup. fixture publication", pub.status === 201, String(pub.status));
   const pubUrl = U(`/public/document/?id=${pubDoc.body.id}`);
@@ -590,6 +646,56 @@ let docEUrl;
   }
   await c.context.close();
   await setMock("nextLogin=approved");
+}
+
+// R21. 관리자 화면: admin이 승인된 일반 회원을 편집자로 지정(사유 필수) → 대상 session 폐기 → 재로그인 시 편집자 메뉴,
+//      본인·관리자 계정 변경 불가 표시, 다른 곳 변경 뒤 적용은 409 안내, 비관리자는 안내만
+{
+  await setMock("nextLogin=approved-commenter&reuse=0&as=");
+  const target = await newPage();
+  await login(target.page);
+  const tMe = await (await target.page.request.get(U("/api/auth/me"))).json();
+  await setMock("nextLogin=admin&reuse=0&as=");
+  const adm = await newPage();
+  await login(adm.page);
+  check("R21. admin sees 관리 nav", await appears(adm.page.locator("header").getByRole("link", { name: "관리" })));
+  await adm.page.goto(U("/admin/"));
+  const am = adm.page.locator("main");
+  const rowOf = (login) => am.getByRole("listitem").filter({ hasText: new RegExp(`${login}\\b`) });
+  const row = rowOf(tMe.user.login);
+  await row.first().waitFor();
+  check("R21. own row cannot be changed", await appears(am.getByRole("listitem").filter({ hasText: "(나)" }).getByText("본인 계정은 바꿀 수 없습니다")));
+  await row.getByRole("button", { name: /^편집자로 지정/ }).click();
+  await row.getByLabel("변경 사유").fill("M3 편집자 지정 확인");
+  await row.getByRole("button", { name: "적용" }).click();
+  check("R21. grant applied with re-login notice", await appears(row.getByText("대상 사용자는 다시 로그인해야 합니다")));
+  check("R21. row shows editor", (await row.innerText()).includes("편집자") && (await row.innerText()).includes("승인됨"));
+  check("R21. target session revoked", (await target.page.request.get(U("/api/auth/me"))).status() === 401);
+  await setMock(`as=${tMe.user.accountId}`);
+  await login(target.page);
+  check("R21. target is editor after re-login", await appears(target.page.locator("header").getByRole("link", { name: "내 연구" })));
+  // 다른 곳에서 먼저 변경 → 화면의 이전 version으로 적용 시 409
+  const admApi = apiClient(adm.page);
+  const listNow = await admApi.get("/admin/accounts?limit=100");
+  const cur = listNow.items.find((a) => a.accountId === tMe.user.accountId);
+  const ext = await admApi.send("PUT", `/admin/accounts/${tMe.user.accountId}/membership`, {
+    role: "editor",
+    isApproved: true,
+    reason: "다른 곳에서 먼저 변경",
+    expectedVersion: cur.version,
+  });
+  check("setup. external membership change 200", ext.status === 200, String(ext.status));
+  await row.getByRole("button", { name: /^편집자 해제/ }).click();
+  await row.getByLabel("변경 사유").fill("오래된 화면에서 적용");
+  await row.getByRole("button", { name: "적용" }).click();
+  check("R21. stale version -> conflict guidance", await appears(row.getByText("다른 곳에서 먼저 변경되었습니다")));
+  // 비관리자(편집자)는 관리 화면에서 안내만. 위 외부 변경도 대상 session을 폐기했으므로 다시 로그인한다.
+  await login(target.page);
+  await target.page.goto(U("/admin/"));
+  check("R21. non-admin sees admin-only notice", await appears(target.page.locator("main").getByText("승인된 관리자만 이용할 수 있습니다")));
+  await target.context.close();
+  await adm.context.close();
+  await setMock("as=&nextLogin=approved");
 }
 
 // R10. 다른 사용자: 타인 ID는 404로 숨김
