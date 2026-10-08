@@ -16,7 +16,7 @@ from .research_models import ContentVersion, Item, Publication, PublicationHead,
 
 class Publish(Expected):
     versionId: str
-    previewToken: str = Field(min_length=64, max_length=64)
+    previewToken: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
 
 def require_publication_schema(db):

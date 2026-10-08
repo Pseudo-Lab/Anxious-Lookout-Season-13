@@ -35,6 +35,32 @@ def publish(client, auth, document):
     return reply.json()
 
 
+def test_invalid_preview_token_returns_validation_error_without_publication_or_retry_reservation(client, admin):
+    _, auth = identity(client, admin)
+    doc = create(client, auth, "documents")
+    root = "/api/research/documents/" + doc["id"]
+    shown = client.get(root + "/publication-preview").json()
+    body = {key: shown[key] for key in ("versionId", "expectedVersion", "previewToken")}
+    retry_headers = headers(auth)
+    for token in ("가" * 64, "é" * 64, "g" * 64, "A" * 64, "a" * 63, "a" * 65):
+        rejected = client.post(root + "/publications", json={**body, "previewToken": token}, headers=retry_headers)
+        assert rejected.status_code == 422, rejected.text
+        assert rejected.json()["error"]["code"] == "validation_error"
+        assert rejected.headers["cache-control"] == "no-store"
+    assert client.get(root).json()["version"] == 1
+    assert client.get("/api/public/documents/" + doc["id"]).status_code == 404
+    # A well-formed but stale token remains a conflict, rather than a format error.
+    stale = client.post(root + "/publications", json={**body, "previewToken": "0" * 64}, headers=retry_headers)
+    assert stale.status_code == 409 and stale.json()["error"]["code"] == "conflict"
+    # Rejected inputs did not reserve the key or make any public/private change.
+    accepted = client.post(root + "/publications", json=body, headers=retry_headers)
+    assert accepted.status_code == 201, accepted.text
+    assert client.post(root + "/publications", json=body, headers=retry_headers).json() == accepted.json()
+    assert client.get(root).json()["version"] == 2
+    with admin.connect() as db:
+        assert db.execute(text("SELECT count(*) FROM research.publications WHERE document_id=:id"), {"id": doc["id"]}).scalar_one() == 1
+
+
 def test_direct_reference_snapshot_latest_only_and_withdrawal_preserve_private(client, admin):
     _, auth = identity(client, admin)
     doc = create(client, auth, "documents", content="Original [source](https://example.com)")
