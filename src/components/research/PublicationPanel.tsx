@@ -27,15 +27,19 @@ function PreviewMaterialRow({ m, onRelationRemoved }: { m: PreviewMaterial; onRe
   const source = safeHref(m.sourceUrl);
 
   // 보관된 자료는 공개를 막는다. 관계만 해제하며 자료·버전은 그대로 남는다.
+  // 일부만 성공해도 미리보기를 다시 읽어 남은 관계만 표시한다(다음 시도는 남은 관계만 지운다).
+  // 이미 지워진 관계(404)는 해제된 것으로 보고 계속한다. 결과를 모르는 삭제는 같은 key로 다시 보낸다.
   async function unlink() {
     if (!window.confirm("이 보관된 자료와 글의 연결을 해제할까요? 자료와 버전 기록은 그대로 남습니다.")) return;
+    let failed: FetchFailure | null = null;
     for (const r of m.relations) {
       const res = await run(`relation:delete:${r.id}:${r.version}`, (ctx) => deleteRelation(r.id, r.version, ctx));
-      if (!res.ok) {
-        setFailure(res.failure);
-        return;
+      if (!res.ok && !(res.failure.kind === "http" && res.failure.status === 404)) {
+        failed = res.failure;
+        break;
       }
     }
+    setFailure(failed);
     onRelationRemoved();
   }
 
@@ -77,8 +81,9 @@ function PreviewMaterialRow({ m, onRelationRemoved }: { m: PreviewMaterial; onRe
 function PublishForm({ doc, onDone, onCancel }: { doc: ResearchDocument; onDone: () => void; onCancel: () => void }) {
   const versions = usePagedList(`pub-versions:${doc.id}:${doc.latestVersion.id}`, (c) => listVersions("document", doc.id, c));
   const [versionId, setVersionId] = useState(doc.latestVersion.id);
-  const [rev, setRev] = useState(0);
-  const preview = useLoad(`preview:${doc.id}:${versionId}:${rev}`, () => getPublicationPreview(doc.id, versionId));
+  // 다시 불러오기는 reload로 한다: 새 결과가 올 때까지 기존 목록을 유지해야 자료 행(진행 중 실패 표시·결과 미확인
+  // 삭제의 Idempotency-Key)이 사라지지 않는다.
+  const preview = useLoad(`preview:${doc.id}:${versionId}`, () => getPublicationPreview(doc.id, versionId));
   const [failure, setFailure] = useState<FetchFailure | null>(null);
   const [refreshed, setRefreshed] = useState(false);
   const { run, busy } = useMutation();
@@ -98,7 +103,7 @@ function PublishForm({ doc, onDone, onCancel }: { doc: ResearchDocument; onDone:
     if (res.failure.kind === "http" && res.failure.status === 409) {
       // 미리보기 이후 연결·자료·문서가 바뀌었다. 공개를 다시 보내지 않고 최신 미리보기만 불러온다.
       setRefreshed(true);
-      setRev((r) => r + 1);
+      void preview.reload();
     }
   }
 
@@ -147,11 +152,14 @@ function PublishForm({ doc, onDone, onCancel }: { doc: ResearchDocument; onDone:
         {preview.result && !preview.result.ok && (
           <ErrorNotice failure={preview.result.failure} prefix="공개 미리보기를 불러오지 못했습니다." />
         )}
+        {preview.refreshFailure && (
+          <ErrorNotice failure={preview.refreshFailure} prefix="최신 미리보기를 불러오지 못했습니다. 마지막 미리보기를 표시합니다." />
+        )}
         {p && p.materials.length === 0 && <p className="text-xs text-stone-500">직접 연결된 참고 자료가 없습니다. 글만 공개됩니다.</p>}
         {p && p.materials.length > 0 && (
           <ul className="space-y-2">
             {p.materials.map((m) => (
-              <PreviewMaterialRow key={m.id} m={m} onRelationRemoved={() => setRev((r) => r + 1)} />
+              <PreviewMaterialRow key={m.id} m={m} onRelationRemoved={() => void preview.reload()} />
             ))}
           </ul>
         )}
@@ -215,11 +223,19 @@ export default function PublicationPanel({ doc, onChanged }: { doc: ResearchDocu
       ) : (
         <p className="text-sm text-stone-600">비공개 문서입니다. 공개하기 전까지 본인만 볼 수 있습니다.</p>
       )}
-      {!doc.archived && !editing && (
+      {doc.archived && pub && (
+        <p className="text-xs text-amber-700">
+          보관한 문서이지만 공개는 유지되고 있습니다. 더 이상 공개하지 않으려면 공개를 철회하세요.
+        </p>
+      )}
+      {!editing && (!doc.archived || pub) && (
         <div className="flex gap-3 text-sm">
-          <button onClick={() => setEditing(true)} className="font-medium text-emerald-700 hover:text-emerald-900">
-            {pub ? "새 내용으로 다시 공개" : "공개하기"}
-          </button>
+          {/* 보관한 문서는 다시 공개할 수 없지만, 이미 공개 중이면 보관 여부와 상관없이 철회할 수 있어야 한다. */}
+          {!doc.archived && (
+            <button onClick={() => setEditing(true)} className="font-medium text-emerald-700 hover:text-emerald-900">
+              {pub ? "새 내용으로 다시 공개" : "공개하기"}
+            </button>
+          )}
           {pub && (
             <button onClick={() => void revoke()} disabled={busy} className="text-red-600 hover:text-red-800 disabled:opacity-50">
               공개 철회

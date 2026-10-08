@@ -282,6 +282,77 @@ const publishButton = () => main.getByRole("button", { name: /글과 참고 자�
   await visitor.context.close();
 }
 
+// R8c. 공개 중 문서를 보관해도 철회할 수 있다(리뷰 F1): 보관 → 철회 버튼 유지 → 철회 → 익명 404
+{
+  const g = await api.send("POST", "/research/documents", { title: "모의 보관 공개 문서", content: "보관 공개 본문" });
+  const gid = g.body.id;
+  const pvG = await api.get(`/research/documents/${gid}/publication-preview`);
+  const pubG = await api.send("POST", `/research/documents/${gid}/publications`, { versionId: pvG.versionId, expectedVersion: pvG.expectedVersion, previewToken: pvG.previewToken });
+  check("R8c. setup published", pubG.status === 201, String(pubG.status));
+  await page.goto(U(`/research/document/?id=${gid}`));
+  await main.getByRole("button", { name: "보관", exact: true }).click();
+  await main.getByText("보관한 문서입니다").waitFor();
+  check("R8c. archived+published still offers withdraw", await appears(main.getByRole("button", { name: "공개 철회" })));
+  check("R8c. archived doc cannot be republished", (await main.getByRole("button", { name: /다시 공개|공개하기/ }).count()) === 0);
+  const anonBefore = await (await browser.newContext()).request.get(U(`/api/public/documents/${gid}`));
+  check("R8c. still public while archived", anonBefore.status() === 200, String(anonBefore.status()));
+  await main.getByRole("button", { name: "공개 철회" }).click();
+  check("R8c. withdrawn", await appears(main.getByText("비공개 문서입니다")));
+  const anonCtx = await browser.newContext();
+  const anonAfter = await anonCtx.request.get(U(`/api/public/documents/${gid}`));
+  check("R8c. anonymous public read 404 after withdraw", anonAfter.status() === 404, String(anonAfter.status()));
+  await anonCtx.close();
+  const own = await api.get(`/research/documents/${gid}`);
+  check("R8c. owner record preserved after withdraw", own.archived === true && own.publication === null && own.content === "보관 공개 본문");
+}
+
+// R8d. 보관 자료의 직접 관계 2개 해제 중 두 번째만 503 → 미리보기 재조회 → 남은 관계만 같은 key로 재시도(리뷰 F2)
+{
+  const h = await api.send("POST", "/research/documents", { title: "모의 연결 정리 문서", content: "본문" });
+  const x = await api.send("POST", "/research/materials", {
+    title: "모의 보관 자료 X",
+    sourceUrl: "https://example.com/x",
+    collectedAt: new Date().toISOString(),
+    contentKind: "summary",
+    content: "X 내용",
+  });
+  for (const kind of ["근거", "배경"]) {
+    await api.send("POST", "/research/relations", {
+      source: { type: "document", id: h.body.id },
+      target: { type: "material", id: x.body.id },
+      kind,
+      description: "",
+      directed: true,
+    });
+  }
+  await api.send("DELETE", `/research/materials/${x.body.id}`, { expectedVersion: x.body.version });
+  await page.goto(U(`/research/document/?id=${h.body.id}`));
+  await main.getByRole("button", { name: "공개하기" }).click();
+  await main.getByText("보관됨").waitFor();
+  const deletes = [];
+  let n = 0;
+  await page.route("**/api/research/relations/*", async (route) => {
+    if (route.request().method() !== "DELETE") return route.continue();
+    n += 1;
+    deletes.push({ path: new URL(route.request().url()).pathname, key: route.request().headers()["idempotency-key"] });
+    if (n === 2) {
+      return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "not_ready", message: "Service is not ready" } }) });
+    }
+    return route.continue();
+  });
+  await main.getByRole("button", { name: "이 글과의 연결 해제" }).click();
+  check("R8d. partial failure shown", await appears(main.getByText("연결을 해제하지 못했습니다")));
+  await main.getByRole("button", { name: "이 글과의 연결 해제" }).click();
+  check("R8d. retry clears remaining relation", await appears(main.getByRole("button", { name: "글과 참고 자료 0개 공개" })));
+  check("R8d. publish no longer blocked", await main.getByRole("button", { name: "글과 참고 자료 0개 공개" }).isEnabled());
+  await page.unroute("**/api/research/relations/*");
+  check(
+    "R8d. retry targeted only the failed relation with its original key",
+    deletes.length === 3 && deletes[2].path === deletes[1].path && deletes[2].key === deletes[1].key && deletes[0].path !== deletes[1].path,
+    JSON.stringify(deletes.map((d) => d.path.split("/").pop().slice(0, 8) + ":" + d.key.slice(0, 8)))
+  );
+}
+
 // R9. 세션: Codex 미연결 안내 → 전송 실패 시 입력 보존 → 모의 연결 후 이어하기·도구 이력·원본
 await page.goto(U("/research/?tab=sessions"));
 check("R9. codex unavailable banner", await appears(main.getByText("Codex에 연결되어 있지 않아")));

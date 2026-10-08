@@ -233,6 +233,7 @@ function handleMutation(owner, method, path, b, user) {
     if (!doc) return fail(404, "not_found", "Not found");
     if (researchMode.publish !== "allowed") return fail(503, "policy_pending", "Policy pending");
     if (stale(b, doc.version)) return fail(409, "conflict", "Version conflict");
+    if (method === "POST" && doc.archived) return fail(409, "conflict", "Archived document cannot be published");
     if (method === "DELETE") {
       retiredReleases.add(doc.publication?.id);
       doc.publication = null;
@@ -421,7 +422,8 @@ function handleRead(owner, path, url) {
 export async function handleResearch(req, res, path, url, session) {
   if (path.startsWith("/public/")) {
     if (req.method !== "GET") return send(res, 405, { error: { code: "method_not_allowed", message: "Method not allowed" } });
-    const published = [...items.values()].filter((i) => i.type === "document" && i.publication && !i.archived);
+    // 실제 계약: 공개는 문서 보관과 독립적이다(보관해도 철회 전까지 공개 유지).
+    const published = [...items.values()].filter((i) => i.type === "document" && i.publication);
     if (path === "/public/documents") {
       const list = published.map((d) => {
         const s = snapshot(d);

@@ -43,7 +43,7 @@ function DocumentDetail({ id }: { id: string }) {
   return (
     <article className="space-y-10">
       <header className="space-y-2">
-        {d.archived && <Notice tone="info">보관한 문서입니다. 내용과 버전 기록을 볼 수 있지만 수정·연결·공개할 수 없습니다.</Notice>}
+        {d.archived && <Notice tone="info">보관한 문서입니다. 내용과 버전 기록을 볼 수 있지만 수정·연결·새로 공개할 수 없습니다. 공개 중이라면 아래에서 철회할 수 있습니다.</Notice>}
         <h1 className="text-2xl font-bold text-stone-900">{d.title || "(제목 없음)"}</h1>
         <p className="text-xs text-stone-500">
           v{d.latestVersion.number} · 수정 {formatDateTime(d.updatedAt)} · 작성 {formatDateTime(d.createdAt)}
