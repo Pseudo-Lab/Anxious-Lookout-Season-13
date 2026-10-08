@@ -24,6 +24,9 @@ import SafeMarkdown, { safeHref } from "@/components/research/SafeMarkdown";
 function PreviewMaterialRow({ m, onRelationRemoved }: { m: PreviewMaterial; onRelationRemoved: () => void }) {
   const { run, busy } = useMutation();
   const [failure, setFailure] = useState<FetchFailure | null>(null);
+  // 이 행에서 이미 해제를 확인한 관계(성공·404). 미리보기를 다시 읽지 못해 목록이 오래돼도 다시 보내지 않는다.
+  // 그래야 결과를 모르는 삭제가 다른 관계 요청에 key를 빼앗기지 않고 다음 시도에서 같은 key로 재전송된다.
+  const [removed, setRemoved] = useState<ReadonlySet<string>>(() => new Set());
   const source = safeHref(m.sourceUrl);
 
   // 보관된 자료는 공개를 막는다. 관계만 해제하며 자료·버전은 그대로 남는다.
@@ -32,13 +35,18 @@ function PreviewMaterialRow({ m, onRelationRemoved }: { m: PreviewMaterial; onRe
   async function unlink() {
     if (!window.confirm("이 보관된 자료와 글의 연결을 해제할까요? 자료와 버전 기록은 그대로 남습니다.")) return;
     let failed: FetchFailure | null = null;
+    const done = new Set(removed);
     for (const r of m.relations) {
+      if (done.has(r.id)) continue;
       const res = await run(`relation:delete:${r.id}:${r.version}`, (ctx) => deleteRelation(r.id, r.version, ctx));
-      if (!res.ok && !(res.failure.kind === "http" && res.failure.status === 404)) {
-        failed = res.failure;
-        break;
+      if (res.ok || (res.failure.kind === "http" && res.failure.status === 404)) {
+        done.add(r.id);
+        continue;
       }
+      failed = res.failure;
+      break;
     }
+    setRemoved(done);
     setFailure(failed);
     onRelationRemoved();
   }

@@ -353,6 +353,63 @@ const publishButton = () => main.getByRole("button", { name: /글과 참고 자�
   );
 }
 
+// R8e. 두 번째 DELETE 503 + 이어지는 미리보기 재조회도 503 → 오래된 목록에서도 완료한 관계는 건너뛰고 실패 관계만 같은 key로(리뷰 F2 잔여)
+{
+  const h = await api.send("POST", "/research/documents", { title: "모의 재조회 실패 문서", content: "본문" });
+  const x = await api.send("POST", "/research/materials", {
+    title: "모의 보관 자료 Y",
+    sourceUrl: "https://example.com/y",
+    collectedAt: new Date().toISOString(),
+    contentKind: "summary",
+    content: "Y 내용",
+  });
+  for (const kind of ["근거", "배경"]) {
+    await api.send("POST", "/research/relations", {
+      source: { type: "document", id: h.body.id },
+      target: { type: "material", id: x.body.id },
+      kind,
+      description: "",
+      directed: true,
+    });
+  }
+  await api.send("DELETE", `/research/materials/${x.body.id}`, { expectedVersion: x.body.version });
+  await page.goto(U(`/research/document/?id=${h.body.id}`));
+  await main.getByRole("button", { name: "공개하기" }).click();
+  await main.getByText("보관됨").waitFor();
+  const deletes = [];
+  let n = 0;
+  let failNextPreview = false;
+  await page.route("**/api/research/relations/*", async (route) => {
+    if (route.request().method() !== "DELETE") return route.continue();
+    n += 1;
+    deletes.push({ path: new URL(route.request().url()).pathname, key: route.request().headers()["idempotency-key"] });
+    if (n === 2) {
+      failNextPreview = true;
+      return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "not_ready", message: "Service is not ready" } }) });
+    }
+    return route.continue();
+  });
+  await page.route("**/api/research/documents/*/publication-preview*", async (route) => {
+    if (failNextPreview) {
+      failNextPreview = false;
+      return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "not_ready", message: "Service is not ready" } }) });
+    }
+    return route.continue();
+  });
+  await main.getByRole("button", { name: "이 글과의 연결 해제" }).click();
+  check("R8e. delete failure shown", await appears(main.getByText("연결을 해제하지 못했습니다")));
+  check("R8e. preview refresh failure shown, last preview kept", await appears(main.getByText("최신 미리보기를 불러오지 못했습니다")) && (await main.getByText("보관됨").count()) > 0);
+  await main.getByRole("button", { name: "이 글과의 연결 해제" }).click();
+  check("R8e. retry clears remaining relation", await appears(main.getByRole("button", { name: "글과 참고 자료 0개 공개" })));
+  await page.unroute("**/api/research/relations/*");
+  await page.unroute("**/api/research/documents/*/publication-preview*");
+  check(
+    "R8e. stale list: completed relation skipped, failed relation resent with original key",
+    deletes.length === 3 && deletes[2].path === deletes[1].path && deletes[2].key === deletes[1].key && deletes[0].path !== deletes[1].path,
+    JSON.stringify(deletes.map((d) => d.path.split("/").pop().slice(0, 8) + ":" + d.key.slice(0, 8)))
+  );
+}
+
 // R9. 세션: Codex 미연결 안내 → 전송 실패 시 입력 보존 → 모의 연결 후 이어하기·도구 이력·원본
 await page.goto(U("/research/?tab=sessions"));
 check("R9. codex unavailable banner", await appears(main.getByText("Codex에 연결되어 있지 않아")));
