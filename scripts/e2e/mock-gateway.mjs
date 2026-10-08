@@ -48,7 +48,7 @@ function api(req, res, path, url) {
     return res.end();
   }
   if (path === "/auth/github/callback") {
-    if (mode.nextLogin !== "pending" && mode.nextLogin !== "approved") {
+    if (mode.nextLogin !== "pending" && mode.nextLogin !== "approved" && mode.nextLogin !== "approved-commenter") {
       res.writeHead(303, { Location: `${BASE}/auth/login/?auth_error=${mode.nextLogin}` });
       return res.end();
     }
@@ -62,8 +62,9 @@ function api(req, res, path, url) {
             accountId: crypto.randomUUID(),
             githubId: "1234567",
             login: "mock-user",
-            role: "commenter",
-            isApproved: mode.nextLogin === "approved",
+            // approved: 승인된 편집자(M3 정책 대상) / approved-commenter: 승인됐지만 편집자가 아님
+            role: mode.nextLogin === "approved" ? "editor" : "commenter",
+            isApproved: mode.nextLogin === "approved" || mode.nextLogin === "approved-commenter",
           };
     lastUser = user;
     users.set(user.accountId, user);

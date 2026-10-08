@@ -571,6 +571,27 @@ let docEUrl;
   await page.unroute("**/api/research/documents");
 }
 
+// R20. 확정 정책: 승인됐지만 편집자·관리자가 아닌 계정 — 메뉴 없음, 서버 403 안내, 공개 글 질문 폼 대신 안내
+{
+  await setMock("nextLogin=approved-commenter&reuse=0&as=");
+  const c = await newPage();
+  await login(c.page);
+  const cm = c.page.locator("main");
+  check("R20. commenter has no 내 연구 nav", (await c.page.locator("header").getByRole("link", { name: "내 연구" }).count()) === 0);
+  await c.page.goto(U("/research/"));
+  check("R20. commenter gets forbidden guidance", await appears(cm.getByText("관리자가 승인한 편집자·관리자만 이용할 수 있습니다")));
+  const pubList = await (await c.page.request.get(U("/api/public/documents"))).json();
+  if (pubList.items?.length) {
+    await c.page.goto(U(`/public/document/?id=${pubList.items[0].documentId}`));
+    check("R20. commenter can read public document", await appears(cm.getByRole("heading").first()));
+    check("R20. commenter sees question restriction, no form", (await appears(cm.getByText("Codex 질문은 관리자가 승인한 편집자·관리자만"))) && (await cm.getByLabel("새 대화 제목").count()) === 0);
+  } else {
+    check("R20. public fixture available", false, "no public document");
+  }
+  await c.context.close();
+  await setMock("nextLogin=approved");
+}
+
 // R10. 다른 사용자: 타인 ID는 404로 숨김
 {
   const other = await newPage();

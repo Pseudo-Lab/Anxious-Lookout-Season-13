@@ -472,7 +472,7 @@ export function researchErrorMessage(failure: FetchFailure): string | null {
     case "unauthenticated":
       return "로그인이 필요합니다. 다시 로그인해 주세요.";
     case "forbidden":
-      return "이 기능을 이용할 권한이 없습니다.";
+      return "이 기능을 이용할 권한이 없습니다. 개인 자료·문서와 Codex 질문은 관리자가 승인한 편집자·관리자만 이용할 수 있습니다.";
     case "csrf_invalid":
     case "origin_not_allowed":
       return "요청을 확인하지 못했습니다. 페이지를 새로고침한 뒤 다시 시도해 주세요.";

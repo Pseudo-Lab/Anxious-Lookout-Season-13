@@ -384,8 +384,12 @@ export async function handleResearch(req, res, path, url, session) {
     return send(res, 200, { status: "ok" });
   }
   if (!session) return send(res, 401, { error: { code: "unauthenticated", message: "Authentication required" } });
-  if (researchMode.access !== "approved" || !session.user.isApproved) {
+  if (researchMode.access !== "approved") {
     return send(res, 503, { error: { code: "policy_pending", message: "Policy pending" } });
+  }
+  // 확정 정책: 승인된 editor/admin만
+  if (!session.user.isApproved || !["editor", "admin"].includes(session.user.role)) {
+    return send(res, 403, { error: { code: "forbidden", message: "Research access is not permitted" } });
   }
   const owner = session.user.accountId;
   if (req.method === "GET") {
