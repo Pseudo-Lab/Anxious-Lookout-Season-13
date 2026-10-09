@@ -292,6 +292,38 @@ async function dropFirstSend(p) {
 }
 
 console.log(`INFO dropped message POST timings: ${JSON.stringify(postTimings)}`);
+// O11. #7 C4 조기 모델 불일치(turn/start 응답 전, turn ID 미확정) — 계정 B의 독립 runner에서:
+//      assistant 제외, 입력은 미기록/불일치 배지로만 남고, 이전 정상 응답 보존, 도구 쓰기 0, 이후 B runner도 차단(후속 POST 503)
+{
+  const bm = B.page.locator("main");
+  const bApi = apiClient(B.page);
+  const bDocsBefore = await fixtureDocs(bApi);
+  await B.page.goto(U("/research/?tab=sessions"));
+  await bm.getByRole("link", { name: "B 세션" }).click();
+  await B.page.waitForURL(/\/research\/session\/\?id=/);
+  await bm.getByLabel("메시지").waitFor();
+  const bAnswersBefore = await bm.getByText("Offline fixture answer").count();
+  await send(bm, "/fixture/early-started-missing-mismatch");
+  check("O11. early mismatch -> fixed-model failure shown", await appears(bm.getByText("고정된 모델을 사용할 수 없어")));
+  await settled(bm);
+  const early = bm.locator("li.bg-indigo-50", { hasText: "/fixture/early-started-missing-mismatch" });
+  const labels = await early.allInnerTexts();
+  check(
+    "O11. early-mismatch input shown only as unrecorded and/or not-normal",
+    labels.length >= 1 && labels.every((t) => t.includes("미기록 입력") || t.includes("정상 응답 아님")),
+    `items=${labels.length}`
+  );
+  check("O11. no assistant result for early-mismatch turn; prior answer kept", (await bm.getByText("Offline fixture answer").count()) === bAnswersBefore && bAnswersBefore >= 1);
+  check("O11. no wrong model text shown", !(await bm.innerText()).includes("fixture-wrong-model"));
+  check("O11. early-mismatch turn added no tool write", (await fixtureDocs(bApi)) === bDocsBefore);
+  const followPost = B.page.waitForResponse((r) => r.request().method() === "POST" && /\/messages$/.test(new URL(r.url()).pathname));
+  await send(bm, "B 차단 뒤 질문");
+  const fp = await followPost;
+  const fpBody = await fp.json().catch(() => null);
+  check("O11. B runner blocked after early mismatch (503 codex_model_unavailable)", fp.status() === 503 && fpBody?.error?.code === "codex_model_unavailable", `${fp.status()} ${fpBody?.error?.code}`);
+  check("O11. follow-up input kept", (await bm.getByLabel("메시지").inputValue()) === "B 차단 뒤 질문");
+}
+
 check("console has no errors", consoleErrors.length === 0, consoleErrors.join(" | "));
 await browser.close();
 const failed = results.filter((r) => !r.ok);

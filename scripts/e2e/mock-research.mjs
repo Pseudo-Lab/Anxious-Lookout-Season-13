@@ -284,6 +284,8 @@ function handleMutation(owner, method, path, b, user) {
     }
     if (method === "POST" && m[2]) {
       if (GATED_REASONS.includes(researchMode.codex)) return fail(503, `codex_${researchMode.codex}`, "Codex is not available");
+      // 계약에 없는 codex_* 503: 결과 불명으로 취급되어야 한다(서버는 아무것도 하지 않음)
+      if (researchMode.codex === "unknown_code") return fail(503, "codex_upstream_timeout", "Upstream timeout");
       if (researchMode.codex === "mismatch") {
         // 계약: 응답 모델 불일치/우회 → 해당 turn의 assistant 결과는 projection에서 제외, 남는 user/tool 항목에 modelMismatch,
         // polling codex_model_unavailable, 계정 runner는 운영자가 해제할 때까지 차단(durable)

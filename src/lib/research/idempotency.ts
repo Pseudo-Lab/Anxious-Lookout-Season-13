@@ -14,17 +14,27 @@ export function uuidV4(): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
+// api-contracts/m3-research-data.md: 예약 전 거절이 보장된 503 코드
+const PRE_ADMISSION_REFUSALS = new Set([
+  "policy_pending",
+  "codex_unavailable",
+  "codex_not_enabled_for_account",
+  "codex_auth_expired",
+  "codex_auth_revoked",
+  "codex_model_unavailable",
+  "codex_policy_refused",
+  "codex_budget_exhausted",
+]);
+
 /** 결과를 알 수 없는 실패(서버에 반영됐을 수 있음): 같은 내용의 재시도는 같은 key를 써야 한다. */
 export function isUncertain(failure: FetchFailure): boolean {
   return (
     failure.kind === "network" ||
     failure.kind === "timeout" ||
     failure.kind === "invalid" ||
-    // 5xx라도 정책 대기·Codex 선접수 실패(codex_*)는 서버가 요청을 예약하기 전에 거절한 확정 응답이다.
-    (failure.kind === "http" &&
-      failure.status >= 500 &&
-      failure.code !== "policy_pending" &&
-      !(failure.code ?? "").startsWith("codex_"))
+    // 5xx라도 계약에 명시된 정책 대기·Codex 선접수 거절 코드는 서버가 요청을 예약하기 전에 거절한 확정 응답이다.
+    // 그 밖의 코드(새 codex_* 포함)·코드 없는 5xx는 결과를 모르는 것으로 보고 같은 key 재시도를 위해 보관한다.
+    (failure.kind === "http" && failure.status >= 500 && !PRE_ADMISSION_REFUSALS.has(failure.code ?? ""))
   );
 }
 

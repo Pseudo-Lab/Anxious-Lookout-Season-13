@@ -480,6 +480,30 @@ check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: 
       (await main.getByRole("button", { name: "다시 보내기" }).count()) === 0 && !(await page.evaluate(() => JSON.stringify({ ...sessionStorage }))).includes(`${mode} 질문`)
     );
   }
+  // 계약에 없는 codex_* 503은 결과 불명: 같은 key·본문 보관, "다시 보내기" 제공, 새로고침 뒤 입력 복구(리뷰 F7-1)
+  {
+    await setMock("codex=unknown_code");
+    await page.reload();
+    await main.getByLabel("메시지").waitFor();
+    const keys = [];
+    await page.route("**/api/research/sessions/*/messages", async (route) => {
+      keys.push(route.request().headers()["idempotency-key"]);
+      return route.continue();
+    });
+    await main.getByLabel("메시지").fill("미지 코드 질문");
+    await main.getByRole("button", { name: "보내기" }).click();
+    check("R9g. unknown codex_* 503 -> same-request retry offered", await appears(main.getByRole("button", { name: "다시 보내기" })));
+    await page.reload();
+    await main.getByLabel("메시지").waitFor();
+    check("R9g. unknown codex_* 503 -> input restored after reload", (await main.getByLabel("메시지").inputValue()) === "미지 코드 질문");
+    await setMock("codex=fixture");
+    await main.getByRole("button", { name: "다시 보내기" }).click();
+    await main.getByRole("button", { name: "보내기", exact: true }).waitFor();
+    check("R9g. retry after unknown code reused original key", keys.length === 2 && keys[0] === keys[1], JSON.stringify(keys.map((k) => k.slice(0, 8))));
+    await page.unroute("**/api/research/sessions/*/messages");
+    await main.getByText("모의 응답: 미지 코드 질문").waitFor({ timeout: 15000 });
+    await main.getByLabel("메시지").and(main.locator(":enabled")).waitFor({ timeout: 15000 });
+  }
   await setMock("codex=mismatch");
   await page.reload();
   await main.getByLabel("메시지").waitFor();
