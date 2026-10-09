@@ -16,7 +16,7 @@ BASE = "/codex-trial"
 POSTGRES = "postgres:18.6-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c"
 ENCODING = {"allowEncoded" + key: False for key in
             ("Slash", "BackSlash", "NullCharacter", "Semicolon", "Percent", "QuestionMark", "Hash")}
-PARTS = ("foundation", "data", "migrate", "web", "access-probe", "app", "ingress", "runner")
+PARTS = ("foundation", "policy", "data", "migrate", "web", "access-probe", "app", "ingress", "runner")
 
 
 def require(condition):
@@ -108,9 +108,21 @@ def policy(c):
                          "k8s:app.kubernetes.io/name": "traefik"}}], "toPorts": ports(8080)}
     specs = []
     def add(app, ingress, egress):
-        specs.append({"endpointSelector": {"matchLabels": {"app": "trial-" + app}},
-                      "enableDefaultDeny": {"ingress": True, "egress": True},
-                      "ingress": ingress, "egress": egress})
+        spec = {"endpointSelector": {"matchLabels": {"app": "trial-" + app}},
+                "enableDefaultDeny": {"ingress": True, "egress": True}}
+        # Empty allow lists are not valid direction rules in Cilium1.20.2.
+        # A wholly closed direction gets an explicit deny, never an empty
+        # allow object (which would allow every peer). Denies also take
+        # precedence over additive allow policies on these trial endpoints.
+        if ingress:
+            spec["ingress"] = ingress
+        else:
+            spec["ingressDeny"] = [{"fromEntities": ["all"]}]
+        if egress:
+            spec["egress"] = egress
+        else:
+            spec["egressDeny"] = [{"toEntities": ["all"]}]
+        specs.append(spec)
     runner = c.get("runner")
     api_ingress = [traefik]
     if runner:
@@ -196,8 +208,8 @@ def routes(c):
                     "tls": {"secretName": c["tlsSecret"]}}, version="traefik.io/v1alpha1")
 
 
-def render(c, part="review"):
-    c = config(c)
+def foundation(c=None):
+    """Fixed prerequisite resources, no OAuth/access/credential inputs needed."""
     namespace = resource("Namespace", NS)
     namespace["metadata"] = {"name": NS, "labels": {"pod-security.kubernetes.io/enforce": "restricted",
                                                    "app.kubernetes.io/part-of": "codex-trial"}}
@@ -205,7 +217,14 @@ def render(c, part="review"):
         provisioner="rancher.io/local-path", reclaimPolicy="Retain", volumeBindingMode="WaitForFirstConsumer",
         allowVolumeExpansion=False)
     del storage["metadata"]["namespace"]
-    foundation = [namespace, storage, resource("ServiceAccount", "trial", automountServiceAccountToken=False), policy(c)]
+    return [namespace, storage, resource("ServiceAccount", "trial", automountServiceAccountToken=False), policy(c or {})]
+
+
+def render(c, part="review"):
+    c = config(c)
+    if part == "policy":
+        return {"apiVersion": "v1", "kind": "List", "items": [policy(c)]}
+    prerequisites = foundation(c)
     db = pod("postgres", {"name": "postgres", "image": POSTGRES,
         "args": ["-c", "shared_buffers=128MB", "-c", "max_connections=30"],
         "env": [{"name": "POSTGRES_DB", "value": "codex_trial"},
@@ -273,7 +292,7 @@ def render(c, part="review"):
             extra_volumes=[{"name": name, "persistentVolumeClaim": {"claimName": "trial-" + name}} for name in ("native", "control")]
                 + [credential("transport", "trial-transport", ["transport-token"])])
         native = [pvc("trial-native", "1Gi"), pvc("trial-control", "1Gi"), deployment("runner", native_pod), service("runner")]
-    groups = dict(foundation=foundation, data=data, migrate=[migration], app=app, ingress=ingress, runner=native)
+    groups = dict(foundation=prerequisites, data=data, migrate=[migration], app=app, ingress=ingress, runner=native)
     access_probe = resource("IngressRoute", "trial-access-probe", {"entryPoints": ["websecure"],
         "tls": {"secretName": c["tlsSecret"]}, "routes": [{"kind": "Rule", "priority": 130,
             "match": "Host(`" + urlsplit(c["origin"]).hostname + "`) && Path(`/codex-trial/version.json`)",
@@ -290,12 +309,16 @@ def render(c, part="review"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input")
+    parser.add_argument("input", nargs="?")
     parser.add_argument("--part", choices=("review", *PARTS), default="review")
     args = parser.parse_args()
     try:
-        with open(args.input) as source:
-            output = render(json.load(source), args.part)
+        if args.input is None:
+            require(args.part in {"foundation", "policy"})
+            output = {"apiVersion": "v1", "kind": "List", "items": foundation() if args.part == "foundation" else [policy({})]}
+        else:
+            with open(args.input) as source:
+                output = render(json.load(source), args.part)
         print(json.dumps(output, indent=2))
     except Exception:
         print("Trial render refused; input values are not printed", file=sys.stderr)

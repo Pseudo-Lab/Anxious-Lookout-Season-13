@@ -105,13 +105,92 @@ docker run --rm --network none --read-only --tmpfs /tmp \
   /checks/render.py /private/config.json --part foundation > "$TRIAL_PRIVATE_DIR/foundation.json"
 ```
 
-The renderer accepts `foundation`, `data`, `migrate`, `web`, `access-probe`, `app`, `ingress`, `runner`,
+The renderer accepts `foundation`, `policy`, `data`, `migrate`, `web`, `access-probe`, `app`, `ingress`, `runner`,
 or aggregate `review`. Fresh bootstrap config has **no `runner` object**, no UUID,
 no source auth/control mount, no remote/provider enable. Approval can be rendered
 with `/checks/render_approval.py /private/config.json /private/decision.json`:
 decision contains privately verified `githubId`, boolean `approved`, `role`,
 `actor`, `reason`. It emits a single trial-only generateName Job, same reviewed
 API image and ops Secret. Shape validation does not authorize an identity.
+
+`render.py --part foundation` now needs **no input file** and emits only fixed
+Namespace/StorageClass/SA/bootstrap CNP, without dummy OAuth/access/source fields.
+`render.py --part policy` without a file emits only bootstrap CNP for a reviewed
+repair of the existing trial-owned policy. With a real validated input file,
+policy includes the selected bootstrap/enabled rules. App/runner/ingress/migration
+and aggregate review still require the full validated input; they cannot use this
+prerequisite interface to bypass their gates. Preserve existing resource identities
+and dry-run/diff a policy-only repair; do not recreate namespace/storage/SA.
+
+## Cilium1.20.2 semantic validation and closed directions
+
+Actual PM execution of the previous b19fafe policy reached Valid=False with
+`rule must have at least one of Ingress, IngressDeny, Egress, EgressDeny`.
+The loader had both allow arrays empty; structural equality and Kubernetes server
+dry-run accepted it but did not run Cilium's semantic sanitizer. The fixed source
+uses explicit `ingressDeny: [{fromEntities: [all]}]` / `egressDeny:
+[{toEntities: [all]}]` for completely closed directions. There are no `{}` allow
+placeholders. Existing necessary direction allow-lists remain unchanged.
+
+Loader denies both directions; web/Postgres deny egress; ops denies ingress;
+bootstrap runner denies egress until the separately reviewed enable policy replaces
+it with exact allowed destinations. Explicit denies take precedence over additive
+allow policies on those selected trial endpoints. Other namespace/selectors and
+shared controller settings remain untouched. This precedence is stronger than
+an empty allow list plus default-deny and is intentional for wholly closed roles.
+
+The pinned Docker validator in `cilium-validator/` imports upstream Ciliumv1.20.2
+and calls the actual `Rule.Sanitize()` used by operator and agent. It verifies
+bootstrap/enabled full policy and fails the old loader/full-policy expressions,
+under both non-default-deny flag settings. Run tests only through Docker:
+
+```bash
+sudo docker build -t anxious-s13-back-cilium-validator:1.20.2 infra/codex-trial/cilium-validator
+# A synthetic output directory must already be writable by the Docker fixture UID.
+sudo docker run --rm --network none --read-only --tmpfs /tmp \
+  --mount "type=bind,src=$TRIAL_SOURCE_DIR/infra/codex-trial,dst=/checks,readonly" \
+  --entrypoint python <existing-test-image> /checks/cilium-validator/cases.py \
+  > "$TRIAL_SYNTHETIC_DIR/cilium-cases.json"
+sudo docker run --rm --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --mount "type=bind,src=$TRIAL_SYNTHETIC_DIR,dst=/cases,readonly" \
+  anxious-s13-back-cilium-validator:1.20.2 /cases/cilium-cases.json
+```
+
+This is real-version library validation, not actual agent/datapath execution.
+After exact fix review PM applies only the repaired owned CNP, waits for Valid=True
+on the updated generation, checks rendered spec and actual agent policy/revisions
+and records real denied traffic/endpoint realization before PV operations advance.
+Failure or ambiguous/stale status preserves policy/namespace/SC/SA and evidence;
+do not create PV/Job/Secret/native state to make validation proceed. No global
+agent flags, other policies or allow-all exceptions are changed.
+
+`policy_probe.py emit <audited-b19fafe-API-ref>` supplies an independently reviewable
+no-credential canary stage for that traffic evidence: three bounded150s TCP-only
+Pods (two controls plus trial-state-loader), a script ConfigMap, and a separate
+control-role policy allowing only those same-namespace peers on TCP18080. It mounts
+no PVC/Secret and overrides the API startup with Python only. The loader remains
+selected by the repaired explicit deny; the new control policy does not select it.
+Control-to-control and each server's loopback ACK are positive controls. Control
+to loader and loader to control must fail; failed connections alone are not proof,
+so PM must correlate actual ingress/egress policy drops/endpoint identity/revision
+and unchanged destination served-counts. Review/execute this stage before PVs,
+then delete all three canary Pods and confirm termination before removing its
+temporary control policy/ConfigMap. Keep trial-boundary and all evidence. Missing
+drop attribution, server readiness, or expired canary lifetime closes the stage.
+Only internal IPv4/loopback targets are accepted; an IPv6 datapath needs separate
+applicable evidence. No Cilium agent or public/provider endpoint is started.
+
+Old checksum-pinned prerequisite emitters reproduce the rejected policy and cannot
+be used for that repair. Freeze their evidence and identify a new source fingerprint
+and review package. Already imported b19fafe runtime images and their provenance
+remain historical valid artifacts; the policy-only source change does not alter
+backend/frontend runtime payload. Applicability must explicitly distinguish new
+policy source from an approved runtime/PV-template release, with exact unchanged
+helper/runtime evidence; do not silently accept an arbitrary newer/older release.
+
+Primary evidence: [Cilium1.20.2 sanitizer](https://github.com/cilium/cilium/blob/v1.20.2/pkg/policy/api/rule_validation.go),
+[Cilium deny precedence](https://docs.cilium.io/en/stable/security/policy/deny/).
 
 ## Staged operator procedure (actual execution still held)
 

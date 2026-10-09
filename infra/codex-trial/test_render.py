@@ -1,11 +1,13 @@
 """Structural checks for boundaries that are meaningful before actual apply."""
 from copy import deepcopy
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from render import NS, BASE, ENCODING, render
+from render import NS, BASE, ENCODING, render, foundation
 from render_approval import approval
 
 
@@ -75,9 +77,10 @@ def test_policies_keep_trial_selectors_and_no_default_external_allow(inputs):
         assert spec["enableDefaultDeny"] == {"ingress": True, "egress": True}
     api = specs[0]
     assert api["egress"][2]["toFQDNs"] == [{"matchName": "github.com"}, {"matchName": "api.github.com"}]
-    assert specs[-1]["egress"] == [] and specs[1]["egress"] == []
+    assert specs[-1]["egressDeny"] == [{"toEntities": ["all"]}]
+    assert specs[1]["egressDeny"] == [{"toEntities": ["all"]}]
     for spec in specs:
-        for rule in spec["ingress"] + spec["egress"]:
+        for rule in spec.get("ingress", []) + spec.get("egress", []):
             assert not any(key in rule for key in ("toEntities", "fromEntities", "toCIDR", "toCIDRSet"))
             for key in ("toEndpoints", "fromEndpoints"):
                 for target in rule.get(key, []):
@@ -85,6 +88,28 @@ def test_policies_keep_trial_selectors_and_no_default_external_allow(inputs):
                     assert namespace in {NS, "kube-system"}
     assert render(inputs, "foundation")["items"][-1]["kind"] == "CiliumNetworkPolicy"
     assert all(i["kind"] != "IngressRoute" for i in render(inputs, "app")["items"])
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_completely_closed_directions_use_explicit_deny_without_allow_all(inputs, enabled):
+    if enabled:
+        inputs["runner"] = {"owner": "00000000-0000-4000-8000-000000000007", "image": inputs["apiImage"],
+            "providerHosts": ["native.example.invalid"], "procedureRef": "private-review/reference"}
+    specs = keyed(render(inputs))["CiliumNetworkPolicy", "trial-boundary"]["specs"]
+    by_app = {spec["endpointSelector"]["matchLabels"]["app"]: spec for spec in specs}
+    closed = {"trial-state-loader": {"ingress", "egress"}, "trial-web": {"egress"},
+              "trial-postgres": {"egress"}, "trial-ops": {"ingress"},
+              "trial-runner": set() if enabled else {"egress"}, "trial-api": set()}
+    for app, directions in closed.items():
+        spec = by_app[app]
+        for direction in ("ingress", "egress"):
+            if direction in directions:
+                assert direction not in spec
+                key = "fromEntities" if direction == "ingress" else "toEntities"
+                assert spec[direction + "Deny"] == [{key: ["all"]}]
+            else:
+                assert spec[direction] and {} not in spec[direction]
+                assert direction + "Deny" not in spec
 
 
 def test_initial_access_probe_exposes_only_nonsensitive_version_and_no_api(inputs):
@@ -95,6 +120,19 @@ def test_initial_access_probe_exposes_only_nonsensitive_version_and_no_api(input
     assert route["middlewares"] == [{"name": "trial-encoding"}, {"name": "trial-access"}]
     web = keyed(render(inputs, "web"))
     assert set(web) == {("Deployment", "web"), ("Service", "web")}
+
+
+def test_config_free_foundation_exact_and_other_cli_stages_require_input(inputs):
+    assert foundation() == render(inputs, "foundation")["items"]
+    program = Path(__file__).with_name("render.py")
+    result = subprocess.run([sys.executable, str(program), "--part", "foundation"], capture_output=True, text=True)
+    assert result.returncode == 0 and json.loads(result.stdout)["items"] == foundation()
+    result = subprocess.run([sys.executable, str(program), "--part", "policy"], capture_output=True, text=True)
+    assert result.returncode == 0 and json.loads(result.stdout)["items"] == [foundation()[-1]]
+    assert render(inputs, "policy")["items"] == [foundation()[-1]]
+    for part in ("app", "runner", "ingress", "migrate", "review"):
+        result = subprocess.run([sys.executable, str(program), "--part", part], capture_output=True, text=True)
+        assert result.returncode != 0 and not result.stdout
 
 
 @pytest.mark.parametrize("field,value", [("origin", "http://trial.example.invalid"), ("origin", "https://trial.example.invalid:443"),
