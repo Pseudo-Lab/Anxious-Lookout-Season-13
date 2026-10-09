@@ -485,7 +485,10 @@ check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: 
   await main.getByLabel("메시지").waitFor();
   await main.getByLabel("메시지").fill("모델 불일치 질문");
   await main.getByRole("button", { name: "보내기" }).click();
-  check("R9g. model mismatch -> explicit failure, no auto switch", await appears(main.getByText("다른 모델로 바꾸지 않습니다")));
+  check(
+    "R9g. model mismatch -> explicit model failure, no auto switch",
+    (await appears(main.getByText("마지막 요청이 실패했습니다"))) && (await appears(main.getByText("고정된 모델을 사용할 수 없어")))
+  );
   check("R9g. raw provider text not shown", !(await main.innerText()).includes("gpt-other"));
   check("R9g. mismatched input kept as unrecorded", await appears(main.locator("li.bg-indigo-50", { hasText: "모델 불일치 질문" }).getByText("미기록 입력")));
   await setMock("codex=fixture");

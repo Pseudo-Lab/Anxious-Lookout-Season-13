@@ -296,7 +296,8 @@ function handleMutation(owner, method, path, b, user) {
           item.status = "not_recorded";
           item.raw.status = "not_recorded";
           s.state = "failed";
-          s.error = { code: "codex_failed", message: "Provider returned model gpt-other" };
+          // 계약: 접수 후 응답 모델 불일치/우회는 codex_model_unavailable(원문 provider 문구는 화면에 쓰지 않는다)
+          s.error = { code: "codex_model_unavailable", message: "Provider returned model gpt-other" };
           s.version++;
           s.updatedAt = now();
         }, 1500);
