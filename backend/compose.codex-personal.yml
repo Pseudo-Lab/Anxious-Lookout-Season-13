@@ -1,30 +1,15 @@
-# Proposed personal-only overlay. Do not start with real inputs before procedure review.
-# Combine with compose.m3-integration.yml under a NEW disposable private project.
-name: ${PERSONAL_PROJECT_NAME:?Set a new privately reviewed project name}
+# Single-runner enable overlay on compose.codex-bootstrap.yml, never on fixtures.
+# Include only AFTER platform UUID/binding, source and full-lifetime ownership review.
 services:
   api:
-    image: ${PERSONAL_API_IMAGE:?Set the independently reviewed runtime image}
-    command: [uvicorn, app.main:create_app, --factory, --host, 0.0.0.0, --port, "8080", --no-access-log, --no-proxy-headers]
     environment:
-      APP_ENV: personal-test
-      OAUTH_MODE: github
       CODEX_PERSONAL_ENABLE: "true"
       CODEX_PERSONAL_ACCOUNT_ID: ${PERSONAL_PLATFORM_ACCOUNT_ID:?Set the privately verified platform UUID}
       CODEX_RUNNERS_FILE: /run/personal-api/runners.json
-      GITHUB_CLIENT_ID: ${PERSONAL_GITHUB_CLIENT_ID:?Set the reviewed private-origin GitHub OAuth client}
-      GITHUB_CLIENT_SECRET: ""
-      GITHUB_CLIENT_SECRET_FILE: /run/personal-github/client-secret
-      AUTH_TRANSACTION_KEY: ""
-      AUTH_TRANSACTION_KEY_FILE: /run/personal-github/transaction-key
-      GITHUB_AUTHORIZE_URL: https://github.com/login/oauth/authorize
-      GITHUB_TOKEN_URL: https://github.com/login/oauth/access_token
-      GITHUB_USER_URL: https://api.github.com/user
-    volumes:
-      - "${PERSONAL_API_INPUT_DIR:?Set private map/transport input directory}:/run/personal-api:ro"
-      - "${PERSONAL_GITHUB_INPUT_DIR:?Set private GitHub input directory}:/run/personal-github:ro"
-    networks: [testing, personal-api, personal-github-egress]
+    networks: [data, web-api, github-egress, api-runner]
   personal-runner:
-    image: ${PERSONAL_RUNNER_IMAGE:?Set the reviewed pinned0.160.1 runner image}
+    image: ${PERSONAL_RUNNER_IMAGE:?Set the reviewed pinned0.160.1 runtime image}
+    user: "10001:10001"
     command: [uvicorn, runner.app:create_app, --factory, --host, 0.0.0.0, --port, "8080", --workers, "1", --no-access-log, --no-proxy-headers]
     environment:
       APP_ENV: personal-test
@@ -38,17 +23,27 @@ services:
       RESEARCH_TOOL_CALLBACK_URL: http://api:8080/api/internal/research/tools
       RUNNER_STATE_DIR: /state
     volumes:
-      - "${PERSONAL_CONTROL_DIR:?Set reviewed private control directory outside native state}:/run/personal-control"
-      - "${PERSONAL_API_INPUT_DIR}/transport-token:/run/secrets/runner-token:ro"
+      - type: bind
+        source: ${PERSONAL_CONTROL_DIR:?Set the approved private control directory outside native state}
+        target: /run/personal-control
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${PERSONAL_API_INPUT_DIR}/transport-token
+        target: /run/secrets/runner-token
+        read_only: true
+        bind: {create_host_path: false}
       - personal-native-state:/state
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    networks: [personal-api, personal-provider-egress]
+    networks: [api-runner, provider-egress]
+    cpus: ${PERSONAL_RUNNER_CPUS:?Set the reviewed single-runner CPU limit}
+    mem_limit: ${PERSONAL_RUNNER_MEMORY:?Set the reviewed single-runner memory limit}
 networks:
-  personal-api: {internal: true}
-  personal-github-egress: {}
-  personal-provider-egress: {}
+  api-runner: {internal: true}
+  provider-egress:
+    external: true
+    name: ${PERSONAL_PROVIDER_EGRESS_NETWORK:?Set the externally managed reviewed provider egress network}
 volumes:
   personal-native-state:

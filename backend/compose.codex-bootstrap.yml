@@ -1,0 +1,125 @@
+# Personal-only GitHub/API bootstrap. No provider runner or platform UUID input.
+# Actual target/support/egress review and private inputs are required before up.
+name: ${PERSONAL_PROJECT_NAME:?Set a new private project name}
+x-operator: &operator
+  image: ${PERSONAL_API_IMAGE:?Set the reviewed runtime image, not a test image}
+  user: "10001:10001"
+  profiles: [ops]
+  environment:
+    APP_ENV: personal-test
+    ADMIN_DATABASE_URL_FILE: /run/personal-ops/admin-url
+    API_DATABASE_PASSWORD_FILE: /run/personal-ops/api-password
+  volumes:
+    - type: bind
+      source: ${PERSONAL_OPS_INPUT_DIR:?Set the private operator input directory}
+      target: /run/personal-ops
+      read_only: true
+      bind: {create_host_path: false}
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  networks: [data]
+  cpus: ${PERSONAL_API_CPUS:?Set the reviewed API/ops CPU limit}
+  mem_limit: ${PERSONAL_API_MEMORY:?Set the reviewed API/ops memory limit}
+services:
+  db:
+    image: postgres:18.6-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: ${PERSONAL_DATABASE_NAME:?Set the new private database name}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    volumes:
+      - personal-db-data:/var/lib/postgresql
+      - type: bind
+        source: ${PERSONAL_DB_PASSWORD_FILE:?Set the private PostgreSQL password file}
+        target: /run/secrets/postgres-password
+        read_only: true
+        bind: {create_host_path: false}
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U postgres -d "$$POSTGRES_DB"']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    security_opt: [no-new-privileges:true]
+    networks: [data]
+    cpus: ${PERSONAL_DB_CPUS:?Set the reviewed database CPU limit}
+    mem_limit: ${PERSONAL_DB_MEMORY:?Set the reviewed database memory limit}
+  migrate:
+    <<: *operator
+    command: [python, -m, app.migrate, --revision, 0004_publication]
+  admin:
+    <<: *operator
+    entrypoint: [python, -m, app.admin]
+    command: []
+  api:
+    image: ${PERSONAL_API_IMAGE}
+    user: "10001:10001"
+    command: [uvicorn, app.main:create_app, --factory, --host, 0.0.0.0, --port, "8080", --workers, "1", --no-access-log, --no-proxy-headers]
+    environment:
+      APP_ENV: personal-test
+      AUTH_ORIGIN: http://127.0.0.1:${PERSONAL_GATEWAY_PORT:?Set the reviewed loopback port}
+      ALLOW_INSECURE_LOOPBACK: "true"
+      OAUTH_MODE: github
+      GITHUB_CLIENT_ID: ${PERSONAL_GITHUB_CLIENT_ID:?Set the private-origin GitHub client}
+      GITHUB_CLIENT_SECRET_FILE: /run/personal-github/client-secret
+      AUTH_TRANSACTION_KEY_FILE: /run/personal-github/transaction-key
+      GITHUB_AUTHORIZE_URL: https://github.com/login/oauth/authorize
+      GITHUB_TOKEN_URL: https://github.com/login/oauth/access_token
+      GITHUB_USER_URL: https://api.github.com/user
+      DATABASE_URL_FILE: /run/personal-api/database-url
+      RESEARCH_ACCESS_POLICY: approved
+      CODEX_PERSONAL_ENABLE: "false"
+      CODEX_RUNNERS_FILE: ""
+    volumes:
+      - type: bind
+        source: ${PERSONAL_API_INPUT_DIR:?Set the private API input directory}
+        target: /run/personal-api
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${PERSONAL_GITHUB_INPUT_DIR:?Set the private GitHub input directory}
+        target: /run/personal-github
+        read_only: true
+        bind: {create_host_path: false}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [data, web-api, github-egress]
+    cpus: ${PERSONAL_API_CPUS}
+    mem_limit: ${PERSONAL_API_MEMORY}
+  web:
+    image: ${PERSONAL_WEB_IMAGE:?Set the frontend supplied reviewed runtime image}
+    environment: {PORT: "8080", HOSTNAME: "0.0.0.0"}
+    user: "10001:10001"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [web-api]
+    cpus: ${PERSONAL_WEB_CPUS:?Set the reviewed frontend CPU limit}
+    mem_limit: ${PERSONAL_WEB_MEMORY:?Set the reviewed frontend memory limit}
+  gateway:
+    image: rancher/mirrored-library-traefik:3.7.8@sha256:4299bbed850421258fc5448c2e0e6ad350981d4d335a68de11b92448aedbefe5
+    command: [--entrypoints.web.address=:8080, --providers.file.filename=/etc/traefik/routes.yml, --api.dashboard=false]
+    volumes:
+      - ./config/codex-personal-routes.yml:/etc/traefik/routes.yml:ro
+    ports: ["127.0.0.1:${PERSONAL_GATEWAY_PORT}:8080"]
+    user: "10001:10001"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [web-api, ingress]
+    cpus: ${PERSONAL_GATEWAY_CPUS:?Set the reviewed gateway CPU limit}
+    mem_limit: ${PERSONAL_GATEWAY_MEMORY:?Set the reviewed gateway memory limit}
+networks:
+  data: {internal: true}
+  web-api: {internal: true}
+  ingress: {}  # Only the uncredentialed gateway joins; host publish is loopback.
+  github-egress:
+    external: true
+    name: ${PERSONAL_GITHUB_EGRESS_NETWORK:?Set the externally managed reviewed GitHub egress network}
+volumes:
+  personal-db-data:

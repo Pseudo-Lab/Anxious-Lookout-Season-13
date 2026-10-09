@@ -5,6 +5,7 @@ COPY backend/requirements.lock /tmp/requirements.lock
 RUN pip install --no-cache-dir --disable-pip-version-check -r /tmp/requirements.lock
 COPY backend/app /app/app
 COPY backend/runner /app/runner
+COPY backend/ops /app/ops
 COPY backend/db /app/db
 COPY backend/alembic /app/alembic
 COPY backend/research_alembic /app/research_alembic
