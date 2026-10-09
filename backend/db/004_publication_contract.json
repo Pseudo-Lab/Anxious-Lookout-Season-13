@@ -1,0 +1,151 @@
+{
+  "publication_heads": {
+    "checks": {
+      "publication_heads_kind_check": "kind::text = 'document'::text"
+    },
+    "columns": {
+      "document_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "kind": [
+        "VARCHAR(16)",
+        false,
+        "'document'::character varying"
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "publication_id": [
+        "UUID",
+        true,
+        null
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "document_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_columns": [
+          "id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "items"
+      },
+      {
+        "constrained_columns": [
+          "publication_id",
+          "document_id",
+          "owner_id"
+        ],
+        "referred_columns": [
+          "id",
+          "document_id",
+          "owner_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "publications"
+      }
+    ],
+    "indexes": {},
+    "primary": [
+      "document_id"
+    ],
+    "unique": {}
+  },
+  "publications": {
+    "checks": {
+      "publications_snapshot_check": "jsonb_typeof(snapshot) = 'object'::text",
+      "publications_version_kind_check": "version_kind::text = 'document'::text"
+    },
+    "columns": {
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "document_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "id": [
+        "UUID",
+        false,
+        null
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "snapshot": [
+        "JSONB",
+        false,
+        null
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "version_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "version_kind": [
+        "VARCHAR(16)",
+        false,
+        "'document'::character varying"
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "version_id",
+          "document_id",
+          "owner_id",
+          "version_kind"
+        ],
+        "referred_columns": [
+          "id",
+          "item_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "versions"
+      }
+    ],
+    "indexes": {
+      "publications_id_document_id_owner_id_key": {
+        "columns": [
+          "id",
+          "document_id",
+          "owner_id"
+        ],
+        "unique": true,
+        "where": null
+      }
+    },
+    "primary": [
+      "id"
+    ],
+    "unique": {
+      "publications_id_document_id_owner_id_key": [
+        "id",
+        "document_id",
+        "owner_id"
+      ]
+    }
+  }
+}

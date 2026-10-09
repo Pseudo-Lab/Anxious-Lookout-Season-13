@@ -12,6 +12,7 @@ import {
 import { getMe, logout, type AuthUser, type LogoutResult, type MeResult } from "@/lib/auth/api";
 import type { FetchFailure } from "@/lib/api/client";
 import { API_ENABLED } from "@/lib/constants";
+import { clearAllRequests } from "@/lib/research/pendingStore";
 
 // "disabled": API가 없는 배포(GitHub Pages 정적 export). 인증 조회를 하지 않는다.
 export type AuthStatus = "loading" | "authenticated" | "unauthenticated" | "error" | "disabled";
@@ -21,6 +22,8 @@ interface AuthContextValue {
   user: AuthUser | null;
   // status가 "error"일 때의 원인(5xx·비JSON·네트워크). 비로그인으로 취급하지 않는다.
   failure: FetchFailure | null;
+  // 변경 요청(X-CSRF-Token)에 쓰는 session nonce. 메모리에만 있고 로그아웃·확인 실패 시 null.
+  csrfToken: string | null;
   refresh: () => Promise<void>;
   signOut: () => Promise<LogoutResult>;
 }
@@ -29,6 +32,7 @@ const AuthContext = createContext<AuthContextValue>({
   status: "loading",
   user: null,
   failure: null,
+  csrfToken: null,
   refresh: async () => {},
   signOut: async () => ({ ok: false, failure: { kind: "network" } }),
 });
@@ -88,6 +92,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const result = await logout(csrfToken);
     generation.current += 1;
     if (result.ok) {
+      // 명시적 로그아웃: 이 탭에 남은 미확인 변경 요청(입력 내용 포함)도 지운다.
+      clearAllRequests();
       setUser(null);
       setCsrfToken(null);
       setFailure(null);
@@ -100,7 +106,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [csrfToken, refresh]);
 
   return (
-    <AuthContext.Provider value={{ status, user, failure, refresh, signOut }}>
+    <AuthContext.Provider value={{ status, user, failure, csrfToken, refresh, signOut }}>
       {children}
     </AuthContext.Provider>
   );

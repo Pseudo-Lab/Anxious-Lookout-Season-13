@@ -1,0 +1,32 @@
+http:
+  routers:
+    fixture-github:
+      rule: "PathPrefix(`/_fixture/github/`)"
+      priority: 30
+      entryPoints: [web]
+      service: mock-github
+      middlewares: [fixture-prefix]
+    api:
+      rule: "Path(`/api`) || PathPrefix(`/api/`)"
+      priority: 20
+      entryPoints: [web]
+      service: api
+    web:
+      rule: "PathPrefix(`/`) && !(Path(`/api`) || PathPrefix(`/api/`))"
+      priority: 10
+      entryPoints: [web]
+      service: web
+  middlewares:
+    fixture-prefix:
+      stripPrefix:
+        prefixes: ["/_fixture/github"]
+  services:
+    api:
+      loadBalancer:
+        servers: [{url: "http://api:8080"}]
+    web:
+      loadBalancer:
+        servers: [{url: "http://web:8080"}]
+    mock-github:
+      loadBalancer:
+        servers: [{url: "http://mock-github:8080"}]

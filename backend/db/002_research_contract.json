@@ -1,0 +1,426 @@
+{
+  "idempotency": {
+    "checks": {},
+    "columns": {
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "fingerprint": [
+        "VARCHAR(64)",
+        false,
+        null
+      ],
+      "key": [
+        "UUID",
+        false,
+        null
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "response": [
+        "JSONB",
+        false,
+        null
+      ],
+      "status": [
+        "INTEGER",
+        false,
+        null
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_columns": [
+          "id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts"
+      }
+    ],
+    "indexes": {},
+    "primary": [
+      "owner_id",
+      "key"
+    ],
+    "unique": {}
+  },
+  "items": {
+    "checks": {
+      "items_content_number_check": "content_number > 0",
+      "items_kind_check": "kind::text = ANY (ARRAY['material'::character varying, 'document'::character varying]::text[])",
+      "items_version_check": "version > 0"
+    },
+    "columns": {
+      "archived": [
+        "BOOLEAN",
+        false,
+        "false"
+      ],
+      "content_number": [
+        "INTEGER",
+        false,
+        "1"
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "kind": [
+        "VARCHAR(16)",
+        false,
+        null
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "version": [
+        "INTEGER",
+        false,
+        "1"
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_columns": [
+          "id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts"
+      }
+    ],
+    "indexes": {
+      "items_id_owner_id_key": {
+        "columns": [
+          "id",
+          "owner_id"
+        ],
+        "unique": true,
+        "where": null
+      },
+      "items_id_owner_id_kind_key": {
+        "columns": [
+          "id",
+          "owner_id",
+          "kind"
+        ],
+        "unique": true,
+        "where": null
+      },
+      "research_items_owner": {
+        "columns": [
+          "owner_id",
+          "kind",
+          "archived",
+          "updated_at",
+          "id"
+        ],
+        "unique": false,
+        "where": null
+      }
+    },
+    "primary": [
+      "id"
+    ],
+    "unique": {
+      "items_id_owner_id_key": [
+        "id",
+        "owner_id"
+      ],
+      "items_id_owner_id_kind_key": [
+        "id",
+        "owner_id",
+        "kind"
+      ]
+    }
+  },
+  "relations": {
+    "checks": {
+      "relations_check": "source_id <> target_id",
+      "relations_check1": "source_kind::text = target_kind::text OR source_kind::text = 'document'::text AND target_kind::text = 'material'::text AND directed",
+      "relations_check2": "directed OR source_id < target_id",
+      "relations_description_check": "length(description) <= 4000",
+      "relations_kind_check": "length(btrim(kind::text)) > 0",
+      "relations_version_check": "version > 0"
+    },
+    "columns": {
+      "archived": [
+        "BOOLEAN",
+        false,
+        "false"
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "description": [
+        "TEXT",
+        false,
+        null
+      ],
+      "directed": [
+        "BOOLEAN",
+        false,
+        null
+      ],
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "kind": [
+        "VARCHAR(80)",
+        false,
+        null
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "source_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "source_kind": [
+        "VARCHAR(16)",
+        false,
+        null
+      ],
+      "target_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "target_kind": [
+        "VARCHAR(16)",
+        false,
+        null
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "version": [
+        "INTEGER",
+        false,
+        "1"
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_columns": [
+          "id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts"
+      },
+      {
+        "constrained_columns": [
+          "source_id",
+          "owner_id",
+          "source_kind"
+        ],
+        "referred_columns": [
+          "id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "items"
+      },
+      {
+        "constrained_columns": [
+          "target_id",
+          "owner_id",
+          "target_kind"
+        ],
+        "referred_columns": [
+          "id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "items"
+      }
+    ],
+    "indexes": {
+      "research_relation_source": {
+        "columns": [
+          "owner_id",
+          "source_id"
+        ],
+        "unique": false,
+        "where": null
+      },
+      "research_relation_target": {
+        "columns": [
+          "owner_id",
+          "target_id"
+        ],
+        "unique": false,
+        "where": null
+      },
+      "research_relation_unique": {
+        "columns": [
+          "owner_id",
+          "source_id",
+          "target_id",
+          "kind",
+          "directed"
+        ],
+        "unique": true,
+        "where": "(NOT archived)"
+      }
+    },
+    "primary": [
+      "id"
+    ],
+    "unique": {}
+  },
+  "versions": {
+    "checks": {
+      "versions_check": "kind::text = 'material'::text AND source_url IS NOT NULL AND collected_at IS NOT NULL AND (content_kind::text = ANY (ARRAY['full'::character varying, 'excerpt'::character varying, 'summary'::character varying]::text[])) OR kind::text = 'document'::text AND source_url IS NULL AND collected_at IS NULL AND content_kind IS NULL",
+      "versions_content_check": "length(content) >= 1 AND length(content) <= 200000",
+      "versions_number_check": "number > 0",
+      "versions_title_check": "length(btrim(title::text)) > 0"
+    },
+    "columns": {
+      "collected_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        true,
+        null
+      ],
+      "content": [
+        "TEXT",
+        false,
+        null
+      ],
+      "content_kind": [
+        "VARCHAR(16)",
+        true,
+        null
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "item_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "kind": [
+        "VARCHAR(16)",
+        false,
+        null
+      ],
+      "number": [
+        "INTEGER",
+        false,
+        null
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "source_url": [
+        "TEXT",
+        true,
+        null
+      ],
+      "title": [
+        "VARCHAR(300)",
+        false,
+        null
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "item_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_columns": [
+          "id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "items"
+      }
+    ],
+    "indexes": {
+      "versions_id_item_id_owner_id_kind_key": {
+        "columns": [
+          "id",
+          "item_id",
+          "owner_id",
+          "kind"
+        ],
+        "unique": true,
+        "where": null
+      },
+      "versions_item_id_number_key": {
+        "columns": [
+          "item_id",
+          "number"
+        ],
+        "unique": true,
+        "where": null
+      }
+    },
+    "primary": [
+      "id"
+    ],
+    "unique": {
+      "versions_id_item_id_owner_id_kind_key": [
+        "id",
+        "item_id",
+        "owner_id",
+        "kind"
+      ],
+      "versions_item_id_number_key": [
+        "item_id",
+        "number"
+      ]
+    }
+  }
+}

@@ -103,6 +103,13 @@ export function authErrorMessage(code: string): string {
     : "로그인에 실패했습니다. 다시 시도해 주세요.";
 }
 
+/**
+ * 개인 자료·문서·Codex 기능 대상(승인된 편집자·관리자). 메뉴·안내 표시용이며 실제 허용 여부는 서버가 판단한다.
+ */
+export function canUseResearch(user: AuthUser | null | undefined): boolean {
+  return !!user && user.isApproved && (user.role === "editor" || user.role === "admin");
+}
+
 export const ROLE_LABELS: Record<UserRole, string> = {
   admin: "관리자",
   editor: "편집자",

@@ -26,6 +26,8 @@ interface Checks {
   web: FetchResult<VersionInfo>;
   // API가 없는 배포(정적 export)에서는 null
   health: FetchResult<true> | null;
+  // M3 연구 기능 저장소(schema/권한) 준비 상태. M2 health와 별개다.
+  research: FetchResult<true> | null;
   api: FetchResult<VersionInfo> | null;
 }
 
@@ -53,12 +55,13 @@ function VersionText({ result }: { result: FetchResult<VersionInfo> }) {
 }
 
 async function loadChecks(): Promise<Checks> {
-  const [web, health, api] = await Promise.all([
+  const [web, health, research, api] = await Promise.all([
     fetchJson(`${BASE_PATH}/version.json`, parseVersion),
     API_ENABLED ? fetchJson(apiUrl("/health"), parseHealth) : null,
+    API_ENABLED ? fetchJson(apiUrl("/research/health"), parseHealth) : null,
     API_ENABLED ? fetchJson(apiUrl("/version"), parseVersion) : null,
   ]);
-  return { web, health, api };
+  return { web, health, research, api };
 }
 
 const NO_API = "이 배포(정적 사이트)에는 API 서버가 없습니다.";
@@ -91,6 +94,16 @@ export default function StatusPanel() {
     else if (checks.health.failure.kind === "http" && checks.health.failure.code === "not_ready")
       healthText = "준비되지 않음 (not_ready)";
     else healthText = describeFailure(checks.health.failure);
+  }
+
+  let researchText: ReactNode = "확인 중...";
+  if (checks?.research === null) {
+    researchText = NO_API;
+  } else if (checks) {
+    if (checks.research.ok) researchText = "정상 (자료·문서 저장소 준비됨)";
+    else if (checks.research.failure.kind === "http" && checks.research.failure.code === "not_ready")
+      researchText = "준비되지 않음 (not_ready)";
+    else researchText = describeFailure(checks.research.failure);
   }
 
   let accountOk: boolean | null = null;
@@ -126,6 +139,9 @@ export default function StatusPanel() {
         </Row>
         <Row label="API 상태" ok={checks?.health ? checks.health.ok : null}>
           {healthText}
+        </Row>
+        <Row label="연구 기능" ok={checks?.research ? checks.research.ok : null}>
+          {researchText}
         </Row>
         <Row label="API 버전" ok={checks?.api ? checks.api.ok : null}>
           {!checks ? "확인 중..." : checks.api === null ? NO_API : <VersionText result={checks.api} />}

@@ -1,0 +1,57 @@
+# Optional test-image-only overlay; never use in an operating/deployed project.
+services:
+  api:
+    image: ${M3_FIXTURE_IMAGE:-anxious-hosting-api-m3-test}
+    command: [uvicorn, tests.offline_services:create_api, --factory, --host, 0.0.0.0, --port, "8080", --no-access-log, --no-proxy-headers]
+    environment:
+      OFFLINE_RUNNER_FIXTURE: "true"
+      CODEX_RUNNERS_FILE: /run/fixtures/runners.json
+    volumes: ["${OFFLINE_FIXTURE_DIR:?Set a fresh fixture staging directory}/private:/run/fixtures:ro"]
+    networks: [testing, offline-a, offline-b]
+  fixture-setup:
+    extends:
+      file: compose.m3-integration.yml
+      service: migrate
+    command: [python, -m, tests.offline_fixture_setup, --account-a, "${OFFLINE_ACCOUNT_A:?Set verified fixture account UUID A}", --account-b, "${OFFLINE_ACCOUNT_B:?Set verified fixture account UUID B}", --output, /fixture/private]
+    environment: {OFFLINE_RUNNER_FIXTURE: "true"}
+    volumes: ["${OFFLINE_FIXTURE_DIR}:/fixture"]
+  offline-a:
+    image: ${M3_FIXTURE_IMAGE:-anxious-hosting-api-m3-test}
+    command: [uvicorn, tests.offline_services:create_runner, --factory, --host, 0.0.0.0, --port, "8080", --workers, "1", --no-access-log, --no-proxy-headers]
+    environment:
+      APP_ENV: test
+      OFFLINE_RUNNER_FIXTURE: "true"
+      RUNNER_ACCOUNT_ID: ${OFFLINE_ACCOUNT_A}
+      RUNNER_TOKEN_FILE: /run/secrets/runner-token
+      CODEX_MODEL: fixture-no-provider
+      CODEX_BIN: /usr/local/bin/codex-fixture
+      RESEARCH_TOOL_CALLBACK_URL: http://api:8080/api/internal/research/tools
+    volumes: ["${OFFLINE_FIXTURE_DIR}/private/runner-a.token:/run/secrets/runner-token:ro", "offline-a-state:/state"]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [offline-a]
+  offline-b:
+    image: ${M3_FIXTURE_IMAGE:-anxious-hosting-api-m3-test}
+    command: [uvicorn, tests.offline_services:create_runner, --factory, --host, 0.0.0.0, --port, "8080", --workers, "1", --no-access-log, --no-proxy-headers]
+    environment:
+      APP_ENV: test
+      OFFLINE_RUNNER_FIXTURE: "true"
+      RUNNER_ACCOUNT_ID: ${OFFLINE_ACCOUNT_B}
+      RUNNER_TOKEN_FILE: /run/secrets/runner-token
+      CODEX_MODEL: fixture-no-provider
+      CODEX_BIN: /usr/local/bin/codex-fixture
+      RESEARCH_TOOL_CALLBACK_URL: http://api:8080/api/internal/research/tools
+    volumes: ["${OFFLINE_FIXTURE_DIR}/private/runner-b.token:/run/secrets/runner-token:ro", "offline-b-state:/state"]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [offline-b]
+networks:
+  offline-a: {internal: true}
+  offline-b: {internal: true}
+volumes:
+  offline-a-state:
+  offline-b-state:
