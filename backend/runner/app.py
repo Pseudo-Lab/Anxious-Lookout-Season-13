@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.codex_policy import MODEL, CodexFailure, ERRORS, error_reason
 from .auth import PersonalAuth, read_private, write_private
+from .projection import PROJECTION_VERSION
 
 
 class Turn(BaseModel):
@@ -64,7 +65,7 @@ def volume_lease(root):
 
 
 class Native:
-    PROJECTION_VERSION = 2
+    PROJECTION_VERSION = PROJECTION_VERSION
     def __init__(self, root, model, binary, callback_url, api_key_file=None, auth=None):
         if model != MODEL or api_key_file:
             raise CodexFailure("policy_refused")
@@ -86,7 +87,7 @@ class Native:
                 raise CodexFailure("policy_refused") from None
         self.root, self.model, self.callback_url = root, model, callback_url
         self.lock, self.messages, self.next_id = threading.Lock(), queue.Queue(), 1
-        self.state_lock = threading.Lock()
+        self.state_lock = threading.RLock()
         self.completed = {}
         self.active_session = None
         self.mapping_file = root / "broker.json"
@@ -165,20 +166,37 @@ class Native:
         return None
 
     def verify_projection(self, session, entry):
-        if self.auth and entry.get("record", {}).get("turns"):
+        if self.auth and (entry.get("record", {}).get("turns") or "modelMismatchBaseline" in entry.get("record", {})):
             expected = self.auth.projection_mac(session, entry.get("thread"), entry["record"])
             actual = entry.get("projectionMac")
             if entry.get("projectionVersion") != self.PROJECTION_VERSION or not isinstance(actual, str) or not re.fullmatch(r"[0-9a-f]{64}", actual) or not hmac.compare_digest(expected, actual):
                 raise CodexFailure("policy_refused")
 
     def store_record(self, session, entry, response):
+        # Polling verifies under this same lock. Publish record and MAC as one
+        # state change, including when a worker projects its completed turn.
+        with self.state_lock:
+            self._store_record(session, entry, response)
+
+    def _store_record(self, session, entry, response):
         record = self.record(response)
         mismatches = entry.setdefault("modelMismatchTurns", [])
         for previous in entry.get("record", {}).get("turns", []):
             if previous.get("modelMismatch") is True and previous.get("id") not in mismatches:
                 mismatches.append(previous["id"])
-        if entry.get("error") == "codex_model_unavailable" and entry.get("turn_id") and entry["turn_id"] not in mismatches:
-            mismatches.append(entry["turn_id"])
+        if entry.get("error") == "codex_model_unavailable":
+            # A model event can abort turn/start before its reply supplies an
+            # identity. Freeze the previously projected turns once; quarantine
+            # every new original turn, including ones appearing on later reads
+            # or after restart. An early/stale event never authorizes a tool or
+            # selects an old good turn for exclusion.
+            baseline = entry.get("record", {}).get("modelMismatchBaseline", [
+                previous.get("id") for previous in entry.get("record", {}).get("turns", [])
+            ])
+            record["modelMismatchBaseline"] = baseline  # Private metadata is covered by the projection MAC.
+            for current in record["turns"]:
+                if current.get("id") not in baseline and current.get("id") not in mismatches:
+                    mismatches.append(current.get("id"))
         for turn in record["turns"]:
             if turn.get("id") in mismatches:
                 turn["modelMismatch"] = True

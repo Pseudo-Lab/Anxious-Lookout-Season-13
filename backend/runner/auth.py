@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.codex_policy import CodexFailure
-from .projection import ProjectionJournal
+from .projection import PROJECTION_VERSION, ProjectionJournal
 
 
 def private_directory(path):
@@ -271,10 +271,10 @@ def release_model_block(control, native_root):
         journal = ProjectionJournal(read_private(directory / "projection.json"), auth.owner, grant["trialId"])
         if (root / "broker.json").exists():
             for session, entry in read_private(root / "broker.json").items():
-                if entry.get("record", {}).get("turns"):
+                if entry.get("record", {}).get("turns") or "modelMismatchBaseline" in entry.get("record", {}):
                     expected = journal.projection_mac(session, entry.get("thread"), entry["record"])
                     actual = entry.get("projectionMac")
-                    if entry.get("projectionVersion") != 2 or not isinstance(actual, str) or not hmac.compare_digest(expected, actual):
+                    if entry.get("projectionVersion") != PROJECTION_VERSION or not isinstance(actual, str) or not hmac.compare_digest(expected, actual):
                         raise CodexFailure("policy_refused")
         state["modelBlocked"] = False
         write_private(directory / "ledger.json", state)

@@ -61,6 +61,17 @@ for line in sys.stdin:
         if prompt == "/fixture/hold":
             time.sleep(5)
         thread, turn = params["threadId"], str(uuid.uuid4())
+        if prompt.startswith("/fixture/early-") and prompt.endswith("-mismatch"):
+            event = prompt.split("-", 2)[1]
+            early = {"id": turn, "model": "fixture-wrong-model"}
+            early_thread = thread
+            if "-missing-" in prompt:
+                early.pop("id")
+            elif "-stale-" in prompt:
+                early["id"] = records[thread]["turns"][0]["id"]
+            elif "-foreign-" in prompt:
+                early_thread = "unrelated-thread"
+            emit({"method": "turn/" + event, "params": {"threadId": early_thread, "turn": early}})
         if prompt == "/fixture/rerouted":
             emit({"method": "model/rerouted", "params": {"threadId": thread, "turnId": turn, "fromModel": params["model"], "toModel": "fixture-wrong-model", "reason": "highRiskCyberActivity"}})
         tool = "research_page_context" if "/fixture/page-context" in prompt or "/fixture/page-reference " in prompt else "research_document_save"
