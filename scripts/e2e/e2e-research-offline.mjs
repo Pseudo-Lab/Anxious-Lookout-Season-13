@@ -266,8 +266,15 @@ async function dropFirstSend(p) {
   check("O10. rerouted assistant result excluded", (await main.getByText("Offline fixture answer").count()) === answersBefore, `${answersBefore} -> ${await main.getByText("Offline fixture answer").count()}`);
   const docsAfterReroute = await fixtureDocs();
   check("O10. rerouted turn added no tool write", docsAfterReroute === before, `${before} -> ${docsAfterReroute}`);
+  // 후속 POST 응답 자체로 판정한다(화면의 응답 개수로 추정하지 않는다).
+  const followPost = page.waitForResponse((r) => r.request().method() === "POST" && /\/messages$/.test(new URL(r.url()).pathname));
   await send(main, "우회 뒤 질문");
-  check("O10. account runner stays blocked: follow-up refused", await appears(main.getByText("메시지를 보내지 못했습니다")));
+  const fp = await followPost;
+  const fpBody = await fp.json().catch(() => null);
+  check("O10. follow-up POST refused before admission (503 codex_model_unavailable)", fp.status() === 503 && fpBody?.error?.code === "codex_model_unavailable", `${fp.status()} ${fpBody?.error?.code}`);
+  check("O10. account runner stays blocked: refusal shown", await appears(main.getByText("메시지를 보내지 못했습니다")));
+  check("O10. follow-up not added to conversation", (await userMsgs(main, "우회 뒤 질문").count()) === 0);
+  check("O10. no new tool write after follow-up", (await fixtureDocs()) === before);
   check("O10. follow-up input kept, no auto resend", (await main.getByLabel("메시지").inputValue()) === "우회 뒤 질문" && (await main.getByRole("button", { name: "다시 보내기" }).count()) === 0);
   check("O10. no new-conversation workaround suggested", !(await main.innerText()).includes("새 대화를 시작"));
   await main.getByLabel("메시지").fill("");
