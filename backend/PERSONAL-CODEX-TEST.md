@@ -70,6 +70,30 @@ Back up only after a clean quiescence/cleanup, preserving private DB/native cont
 
 ## Current actual-execution gate
 
+### Round1 code/fixture corrections
+
+Author round2 evidence: expanded affected cases35 passed and a separate network-none retired-history case1 passed. Final exact candidate Docker full suite with the four reviewer counterexamples mounted passed **153 cases** (repository149 + reviewer4). New cases cover projection immediately after rotation, retired literals after restart with partial→completed/same-ID content updates, legacy/cache/journal corruption rejection, idle/active crash and EOF timeout with double-close/no cache promotion, background rejection/replay/new input and durable account-wide reroute release/assistant filtering. The initial targeted crash run showed a Python BrokenPipe stream-finalization warning; explicit stream cleanup was added and the final full run did not show it. These are synthetic results, not real credential leak/provider recovery tests.
+
+The unchanged pinned native0.160.1 additionally initialized without credentials/network in a fresh private HOME and exited0 on the planned EOF close. It made no login/account/model/turn request. Actual-source/private topology/refresh gate approval remains separate. No live metadata or credential was inspected, copied, refreshed or supplied.
+
+C1 was independently reproduced with synthetic rotated literals and old original history. Current/observed credential knowledge is refreshed at each projection boundary. `projection.json` outside native-home backups stores bounded keyed fingerprints/search filters, an integrity MAC and a private non-provider key; **retired credential plaintext is not retained there**. Literal matches are verified with HMAC, including embedded strings. These private metadata/key files must remain protected and are not shared evidence. They cannot authenticate to the provider. This is not a claim of arbitrary encoding recognition or detection of credentials never observed.
+
+Version2 broker projections carry an owner/trial/session/thread/record MAC. Legacy, missing-journal and damaged projections are not automatically trusted; private reconciliation is required. Original native turns can be reprojected after restart or updated from partial to complete using persisted retired-literal fingerprints. Signed snapshots and originals stay separate; raw originals remain sensitive/private. The previous proposal to freeze all cached turns would miss legitimate final updates and was replaced by fingerprint-based revalidation.
+
+C2 clean shutdown is now only a **planned idle EOF that exits0 without timeout/forced termination and with no active/ambiguous worker**. A process already dead (even idle), an active close, termination timeout/SIGTERM escalation/kill or failed cache synchronization retains nativeActive=true. Those paths do not promote the runtime cache as authoritative and remove only the local credential copy. Repeated close does not erase the tombstone. A direct auth.close without a proven native shutdown defaults to unclean. Original host/session remains untouched.
+
+C3 distinguishes no-submit background preflight failure from a submit attempt/network outcome. The former becomes failed immediately with its safe code, clears the tool grant and retains the not_recorded input. Existing202 idempotent replay makes no new call; a later explicit message uses the incremented version. Truly ambiguous submit results remain unreplayed.
+
+Model block persists in the account runner (also in the private control ledger for managed-cache trials), including new sessions and process/native-home restore. Mismatch turns omit assistant output from API/DB projections; retained user/tools have modelMismatch=true. Previous normal turns are preserved; private originals are not deleted. This does not undo an already-admitted callback/upstream reroute.
+
+Only after quiescent stop, private owner/grant/support/model checks and procedure review may the operator explicitly run, inside the reviewed container:
+
+```sh
+python -m runner.auth --control /run/personal-control --release-model-block --native-root /state
+```
+
+It requires both local leases, an inactive/nonrevoked matching trial and valid projection integrity. It removes only model-block state, retaining requests, native history and the3-dispatch budget. It performs no provider authentication/model call and is not a browser action. An unclean/crash tombstone cannot be released through this operation. No actual release or provisioning was performed by the author.
+
 No real provisioning or model call has occurred. Independent procedure review, concrete personal-use classification/topology, private GitHub/account binding, source cache format and external same-grant refresh ownership remain unresolved. If the existing host cannot be kept safe without actions the user has not authorized, report that condition and keep the candidate inactive. Model pin/status/fixture work proceeds independently; this document is not an approval shortcut or hosted deployment guide.
 
 ## Author development evidence

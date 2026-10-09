@@ -10,6 +10,7 @@ from pathlib import Path
 path = Path(os.environ["CODEX_HOME"]) / "fixture-native-record.json"
 records = json.loads(path.read_text()) if path.exists() else {}
 pending = None
+delay_exit = False
 trace = path.parent / "fixture-model-rpc.json"
 observed = json.loads(trace.read_text()) if trace.exists() else []
 
@@ -45,6 +46,8 @@ for line in sys.stdin:
         emit({"id": identity, "result": {"thread": records[params["threadId"]]}})
     elif method == "turn/start":
         prompt = params["input"][0]["text"]
+        if prompt == "/fixture/shutdown-timeout":
+            delay_exit = True
         if prompt in {"/fixture/auth-error", "/fixture/model-error", "/fixture/policy-error"}:
             cache = json.loads((path.parent / "auth.json").read_text())
             secret = cache["tokens"]["access_token"]
@@ -82,3 +85,6 @@ for line in sys.stdin:
         save()
         emit({"method": "turn/completed", "params": {"threadId": pending["thread"], "turn": {"id": pending["turn"], "status": "completed"}}})
         pending = None
+
+if delay_exit:
+    time.sleep(30)  # Synthetic EOF timeout; never a provider operation.

@@ -4,6 +4,7 @@ The control directory is outside native-home backups. Declarations here cannot
 prove that an existing host stopped refreshing the same renewable session.
 """
 import fcntl
+import hmac
 import json
 import os
 import stat
@@ -12,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.codex_policy import CodexFailure
+from .projection import ProjectionJournal
 
 
 def private_directory(path):
@@ -70,6 +72,7 @@ class PersonalAuth:
         self.secrets = set()
         self.lease = None
         self.ready = False
+        self.journal = None
 
     def grant(self):
         try:
@@ -131,11 +134,20 @@ class PersonalAuth:
             state = self.state()
             if state.get("nativeActive") or state.get("revoked"):
                 raise CodexFailure("auth_revoked")  # Crash/restore cannot silently reactivate old cache.
+            journal_file = self.control / "projection.json"
+            if journal_file.exists():
+                self.journal = ProjectionJournal(read_private(journal_file), self.owner, grant["trialId"])
+            elif state["requests"] or (codex_home.parent / "broker.json").exists():
+                raise CodexFailure("policy_refused")
+            else:
+                self.journal = ProjectionJournal.create(self.owner, grant["trialId"])
+                write_private(journal_file, self.journal.payload())
             write_private(self.cache, self.validate_cache(read_private(self.control / "auth.json")))
             self.owns_cache = True
             state["nativeActive"] = True
             write_private(ledger, state)
             self.ready = True
+            self.remember_secrets()
         except CodexFailure:
             self.release()
             raise
@@ -149,6 +161,8 @@ class PersonalAuth:
         state = self.state()
         if state.get("revoked"):
             raise CodexFailure("auth_revoked")
+        if state.get("modelBlocked"):
+            raise CodexFailure("model_unavailable")
         if len(state["requests"]) >= 3:
             raise CodexFailure("budget_exhausted")
 
@@ -166,27 +180,44 @@ class PersonalAuth:
             raise CodexFailure("auth_revoked")
         # Native may have rotated its private tokens. Refresh redaction knowledge.
         self.validate_cache(read_private(self.cache))
-        if any(secret in json.dumps(arguments, ensure_ascii=False) for secret in self.secrets):
+        self.remember_secrets()
+        if self.journal.sanitize(arguments) != arguments:
             raise CodexFailure("policy_refused")
 
-    def sanitize(self, value):
-        if isinstance(value, str):
-            for secret in sorted(self.secrets, key=len, reverse=True):
-                value = value.replace(secret, "[redacted]")
-            return value
-        if isinstance(value, list):
-            return [self.sanitize(entry) for entry in value]
-        if isinstance(value, dict):
-            return {self.sanitize(key): self.sanitize(entry) for key, entry in value.items()}
-        return value
+    def refresh_projection_secrets(self):
+        # Recheck the private managed runtime file at each projection boundary.
+        # Health/tool callbacks are not prerequisites for observing rotation.
+        self.validate_cache(read_private(self.cache))
+        self.remember_secrets()
 
-    def close(self):
+    def remember_secrets(self):
+        if not self.journal:
+            raise CodexFailure("policy_refused")
+        if self.journal.observe(self.secrets):
+            write_private(self.control / "projection.json", self.journal.payload())
+
+    def sanitize(self, value):
+        self.refresh_projection_secrets()
+        return self.journal.sanitize(value)
+
+    def projection_mac(self, session, thread, record):
+        if not self.journal:
+            raise CodexFailure("policy_refused")
+        return self.journal.projection_mac(session, thread, record)
+
+    def block_model(self):
+        state = self.state()
+        state["modelBlocked"] = True
+        write_private(self.control / "ledger.json", state)
+
+    def close(self, clean=False):
         was_ready = self.ready
         try:
-            if self.ready:
+            if self.ready and clean:
                 state = self.state()
                 # Only this approved private export is updated, never host auth.
                 write_private(self.control / "auth.json", self.validate_cache(read_private(self.cache)))
+                self.remember_secrets()
                 state["nativeActive"] = False
                 write_private(self.control / "ledger.json", state)
         except Exception:
@@ -224,6 +255,32 @@ def cleanup(control, native_root=None):
                 (private_directory(home) / "auth.json").unlink(missing_ok=True)
 
 
+def release_model_block(control, native_root):
+    directory, root = private_directory(Path(control)), private_directory(Path(native_root))
+    manifest = read_private(directory / "grant.json")
+    auth = PersonalAuth(directory, manifest["platformAccountId"])
+    grant = auth.grant()
+    if read_private(root / "account-id", json_format=False).strip() != auth.owner:
+        raise CodexFailure("policy_refused")
+    with (directory / "lease.lock").open("a+") as lease, (root / "runner.lock").open("a+") as native_lease:
+        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(native_lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        state = auth.state()
+        if state.get("nativeActive") or state.get("revoked"):
+            raise CodexFailure("auth_revoked")
+        journal = ProjectionJournal(read_private(directory / "projection.json"), auth.owner, grant["trialId"])
+        if (root / "broker.json").exists():
+            for session, entry in read_private(root / "broker.json").items():
+                if entry.get("record", {}).get("turns"):
+                    expected = journal.projection_mac(session, entry.get("thread"), entry["record"])
+                    actual = entry.get("projectionMac")
+                    if entry.get("projectionVersion") != 2 or not isinstance(actual, str) or not hmac.compare_digest(expected, actual):
+                        raise CodexFailure("policy_refused")
+        state["modelBlocked"] = False
+        write_private(directory / "ledger.json", state)
+        (root / "model-block.json").unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     import argparse
     import sys
@@ -231,13 +288,18 @@ if __name__ == "__main__":
     parser.add_argument("--control", required=True)
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--cleanup", action="store_true")
+    parser.add_argument("--release-model-block", action="store_true")
     parser.add_argument("--native-root")
     args = parser.parse_args()
     try:
-        if args.validate == args.cleanup:
+        if sum((args.validate, args.cleanup, args.release_model_block)) != 1:
             raise CodexFailure("policy_refused")
         control = private_directory(Path(args.control))
-        if args.cleanup:
+        if args.release_model_block:
+            if not args.native_root:
+                raise CodexFailure("policy_refused")
+            release_model_block(control, args.native_root)
+        elif args.cleanup:
             cleanup(control, args.native_root)
         else:
             manifest = read_private(control / "grant.json")

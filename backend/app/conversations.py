@@ -14,7 +14,7 @@ from pydantic import Field
 from sqlalchemy import select, text
 
 from .models import Account, LoginSession
-from .research import Expected, Input, Store, fail, page_query, encode_cursor, parse_id, stamp
+from .research import Expected, Input, Store, ResearchError, fail, page_query, encode_cursor, parse_id, stamp
 from .research_models import Conversation
 from .research_tools import definitions, dispatch
 from .codex_policy import MODEL, REASONS, ERRORS
@@ -134,6 +134,9 @@ def display_native_item(item):
             result.append({"id": identity, "type": "tool_call", "name": item.get("tool", ""),
                            "input": item.get("arguments"), "output": item.get("contentItems", item.get("result")),
                            "status": item.get("status", "unknown")})
+        if item.get("modelMismatch") is True:
+            for projected in result:
+                projected["modelMismatch"] = True
     return result
 
 
@@ -223,6 +226,7 @@ def register_conversations(app, authorized, sessions, settings, response, write)
 
     def launch(owner, identity, request_id, token):
         # A post-response background dispatch. A crash never auto-replays a turn.
+        submitting = False
         try:
             with sessions() as db:
                 row = db.scalar(select(Conversation).where(Conversation.id == identity, Conversation.owner_id == owner))
@@ -230,13 +234,24 @@ def register_conversations(app, authorized, sessions, settings, response, write)
                     return
                 payload = {"requestId": str(request_id), "text": row.pending_text,
                            "tools": definitions(), "toolToken": token, "context": row.context}
-            runner_for(owner).submit(identity, payload)
+            runner = runner_for(owner)
+            submitting = True
+            runner.submit(identity, payload)
         except Exception as exc:
             with sessions.begin() as db:
                 row = db.scalar(select(Conversation).where(Conversation.id == identity, Conversation.owner_id == owner).with_for_update())
                 if row and row.request_id == request_id and row.state == "running":
                     definite = isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {400, 401, 403, 404, 409, 413, 422, 429}
-                    if definite:
+                    safe_codes = {*ERRORS.values(), "codex_unavailable"}
+                    if not submitting:
+                        # No submit call was made. A local preflight failure is
+                        # definitive even if its health probe had a network error.
+                        code = exc.code if isinstance(exc, ResearchError) and exc.code in safe_codes else "codex_unavailable"
+                        row.state, row.error_code = "failed", code
+                        row.version += 1
+                        row.updated_at = datetime.now(timezone.utc)
+                        row.tool_token_hash, row.tool_expires_at = None, None
+                    elif definite:
                         # Explicit rejection means this turn was not accepted.
                         row.state, row.error_code = "failed", "codex_rejected"
                         row.version += 1

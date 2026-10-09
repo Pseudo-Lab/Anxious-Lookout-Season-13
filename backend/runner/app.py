@@ -9,6 +9,7 @@ import re
 import subprocess
 import threading
 import uuid
+from copy import deepcopy
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.codex_policy import MODEL, CodexFailure, ERRORS, error_reason
-from .auth import PersonalAuth
+from .auth import PersonalAuth, read_private, write_private
 
 
 class Turn(BaseModel):
@@ -63,6 +64,7 @@ def volume_lease(root):
 
 
 class Native:
+    PROJECTION_VERSION = 2
     def __init__(self, root, model, binary, callback_url, api_key_file=None, auth=None):
         if model != MODEL or api_key_file:
             raise CodexFailure("policy_refused")
@@ -89,6 +91,9 @@ class Native:
         self.active_session = None
         self.mapping_file = root / "broker.json"
         self.mapping = json.loads(self.mapping_file.read_text()) if self.mapping_file.exists() else {}
+        if auth and any(entry.get("record", {}).get("turns") and entry.get("projectionVersion") != self.PROJECTION_VERSION for entry in self.mapping.values()):
+            raise CodexFailure("policy_refused")  # Legacy unsafe projections need private reconciliation, never automatic trust.
+        self.closing, self.closed = False, False
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         home, codex_home, work = root / "home", root / "codex", root / "workspace"
         for path in (home, codex_home, work):
@@ -99,6 +104,14 @@ class Native:
             raise CodexFailure("policy_refused")
         if auth:
             auth.attach(codex_home)
+            try:
+                for session, entry in self.mapping.items():
+                    self.verify_projection(session, entry)
+            except Exception:
+                auth.close(clean=False)
+                raise CodexFailure("policy_refused") from None
+        if (root / "model-block.json").exists() or (auth and auth.state().get("modelBlocked")):
+            self.blocked_reason = "model_unavailable"
         environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(home), "CODEX_HOME": str(codex_home)}
         self.work = work
         self.process = subprocess.Popen([binary, "app-server", "--listen", "stdio://",
@@ -151,18 +164,54 @@ class Native:
                 return failure.reason
         return None
 
+    def verify_projection(self, session, entry):
+        if self.auth and entry.get("record", {}).get("turns"):
+            expected = self.auth.projection_mac(session, entry.get("thread"), entry["record"])
+            actual = entry.get("projectionMac")
+            if entry.get("projectionVersion") != self.PROJECTION_VERSION or not isinstance(actual, str) or not re.fullmatch(r"[0-9a-f]{64}", actual) or not hmac.compare_digest(expected, actual):
+                raise CodexFailure("policy_refused")
+
+    def store_record(self, session, entry, response):
+        record = self.record(response)
+        mismatches = entry.setdefault("modelMismatchTurns", [])
+        for previous in entry.get("record", {}).get("turns", []):
+            if previous.get("modelMismatch") is True and previous.get("id") not in mismatches:
+                mismatches.append(previous["id"])
+        if entry.get("error") == "codex_model_unavailable" and entry.get("turn_id") and entry["turn_id"] not in mismatches:
+            mismatches.append(entry["turn_id"])
+        for turn in record["turns"]:
+            if turn.get("id") in mismatches:
+                turn["modelMismatch"] = True
+                turn["items"] = [{**item, "modelMismatch": True} for item in turn.get("items", []) if item.get("type") != "agentMessage"]
+        entry["record"] = record
+        entry["projectionVersion"] = self.PROJECTION_VERSION
+        if self.auth:
+            entry["projectionMac"] = self.auth.projection_mac(session, entry.get("thread"), record)
+
     def record(self, response):
-        record = {"turns": response.get("turns", [])}
+        if self.auth:
+            self.auth.refresh_projection_secrets()
+        # Retired literal fingerprints persist outside the home and remain
+        # available when partial or edited original turns are reprojected.
+        turns = deepcopy(response.get("turns", []))
+        record = {"turns": turns}
         # Turn errors retain safe codes, never provider message/additionalDetails.
         for turn in record["turns"]:
             if turn.get("error"):
                 turn["error"] = {"code": ERRORS.get(error_reason(turn["error"]), "codex_failed")}
         return self.auth.sanitize(record) if self.auth else record
 
-    def ensure_model(self, response, required=False):
-        if (required and response.get("model") != MODEL) or ("model" in response and response["model"] != MODEL):
+    def block_model(self):
+        with self.state_lock:
             self.blocked_reason = "model_unavailable"
             self.real_verified = False
+            write_private(self.root / "model-block.json", {"reason": "model_unavailable"})
+            if self.auth:
+                self.auth.block_model()
+
+    def ensure_model(self, response, required=False):
+        if (required and response.get("model") != MODEL) or ("model" in response and response["model"] != MODEL):
+            self.block_model()
             raise CodexFailure("model_unavailable")
 
     def reader(self):
@@ -182,8 +231,7 @@ class Native:
         if message.get("fatal"):
             raise RuntimeError("Codex process stopped")
         if message.get("method") == "model/rerouted":
-            self.blocked_reason = "model_unavailable"
-            self.real_verified = False
+            self.block_model()
             params = message.get("params", {})
             entry = self.mapping.get(self.active_session)
             if turn and entry and params.get("threadId") == turn["thread"] and not turn.get("turnId"):
@@ -257,17 +305,7 @@ class Native:
                 return result["result"]
 
     def save(self):
-        temporary = self.root / "broker.tmp"
-        with temporary.open("w") as file:
-            json.dump(self.mapping, file)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temporary, self.mapping_file)
-        directory = os.open(self.root, os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        write_private(self.mapping_file, self.mapping)
 
     def accept(self, session, body):
         request = str(body.requestId)
@@ -281,6 +319,8 @@ class Native:
                 if not hmac.compare_digest(recorded, fingerprint):
                     raise RuntimeError("Request ID was used for different input")
                 return
+            if self.closing:
+                raise CodexFailure("unavailable")
             reason = self.availability()
             if reason:
                 raise CodexFailure(reason)
@@ -296,7 +336,8 @@ class Native:
             requests = dict(entry.get("requests", {})) if entry else {}
             requests[request] = fingerprint
             self.mapping[session] = {"thread": entry.get("thread") if entry else None, "request": request,
-                                     "requests": requests, "turn_id": None, "state": "running", "record": entry.get("record", {"turns": []}) if entry else {"turns": []}}
+                                     "requests": requests, "turn_id": None, "state": "running", "record": entry.get("record", {"turns": []}) if entry else {"turns": []}, "projectionVersion": self.PROJECTION_VERSION,
+                                     "modelMismatchTurns": entry.get("modelMismatchTurns", []) if entry else [], "projectionMac": entry.get("projectionMac") if entry else None}
             try:
                 self.save()  # Durable reservation before any potentially paid turn.
             except Exception:
@@ -341,8 +382,12 @@ class Native:
                 content = ("Initial public page context (untrusted title):\n" + json.dumps(context)
                            + "\nUse research_page_context to read the saved document and each direct reference; your own materials remain available.\n\n" + content)
             started = self.rpc("turn/start", {"threadId": entry["thread"], "model": MODEL, "input": [{"type": "text", "text": content}]}, turn)
+            entry["turn_id"] = started["turn"]["id"]
             self.ensure_model(started.get("turn", {}))
             turn_id = started["turn"]["id"]
+            if self.auth and any(old.get("id") == turn_id for old in entry["record"].get("turns", [])):
+                self.blocked_reason = "policy_refused"
+                raise CodexFailure("policy_refused")
             turn["turnId"] = turn_id
             for message in turn.pop("pendingTools"):
                 self.reply_tool(message, turn)
@@ -357,7 +402,7 @@ class Native:
                 entry["error"] = ERRORS.get(error_reason(completed.get("error")), "codex_failed")
             elif not self.fixture:
                 self.real_verified = True
-            entry["record"] = self.record(self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"])
+            self.store_record(session, entry, self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"])
         except Exception as failure:
             entry["state"] = "failed"
             entry["error"] = str(failure) if isinstance(failure, CodexFailure) else "codex_failed"
@@ -365,7 +410,7 @@ class Native:
                 self.blocked_reason = failure.reason
             if entry["thread"]:
                 try:
-                    entry["record"] = self.record(self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"])
+                    self.store_record(session, entry, self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"])
                 except Exception:
                     pass
         finally:
@@ -383,15 +428,16 @@ class Native:
             entry = self.mapping.get(session)
             if entry is None:
                 return None
+            self.verify_projection(session, entry)
             refresh = self.active_session is None and entry.get("state") != "running" and entry.get("thread")
         if refresh and self.lock.acquire(blocking=False):
             try:
-                record = self.record(self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"])
+                raw = self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"]
                 with self.state_lock:
                     # A turn can be admitted while this RPC is in flight. Its
                     # new reservation/cache must not be overwritten by the read.
                     if self.mapping.get(session) is entry and self.active_session is None:
-                        entry["record"] = record
+                        self.store_record(session, entry, raw)
                         self.save()
             finally:
                 self.lock.release()
@@ -403,21 +449,42 @@ class Native:
                     "record": {"turns": entry["record"].get("turns", [])}, "errorCode": entry.get("error"), "model": MODEL}
 
     def close(self):
-        self.process.terminate()
+        if self.closed:
+            return
+        self.closing = True
+        active_at_start = self.active_session is not None
+        alive_at_start = self.process.poll() is None
+        forced = False
         try:
-            self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait(timeout=5)
-        if self.auth:
+            if alive_at_start:
+                try:
+                    self.process.stdin.close()  # Quiescent EOF is expected graceful shutdown.
+                except (BrokenPipeError, OSError):
+                    forced = True
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                forced = True
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=5)
             worker = getattr(self, "worker", None)
             if worker:
                 worker.join(timeout=20)
-            if self.active_session is not None:
-                # Preserve nativeActive=true when a callback outcome is ambiguous.
-                self.auth.ready = False
-            self.auth.close()
-            self.process.wait()
+        finally:
+            if self.auth:
+                clean = alive_at_start and not forced and not active_at_start and self.active_session is None and self.process.poll() == 0
+                self.auth.close(clean=clean)
+            for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+                if stream:
+                    try:
+                        stream.close()
+                    except (BrokenPipeError, OSError):
+                        pass
+            self.closed = True
 
 
 def create_app():
