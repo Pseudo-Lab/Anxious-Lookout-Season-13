@@ -106,6 +106,7 @@ async function settled(m) {
 // O1. 상태: fixture 연결을 실제 모델처럼 표시하지 않는다
 await page.goto(U("/research/?tab=sessions"));
 check("O1. codex status shown as fixture (not real)", await appears(main.getByText("테스트용 모의 Codex")));
+check("O1. server-fixed model shown display-only", await appears(main.getByText("모델: gpt-6.1-sol (서버에서 고정)")));
 
 // O2. 일반 메시지: 실제 adapter → 실제 storage tool callback → 전체 도구 입력·출력과 원본
 const s1 = await newSession(page, "오프라인 세션 1");
@@ -247,6 +248,24 @@ async function dropFirstSend(p) {
   );
   await settled(main);
   check("O8. continue created exactly one more document", (await fixtureDocs()) === before + 2);
+}
+
+// O10. #7 모델 우회/불일치(model/rerouted): 고정 모델 성공으로 표시하지 않고 codex_model_unavailable, provider 원문 비노출, 후속 명시 입력 가능
+{
+  const before = await fixtureDocs();
+  await page.goto(s1);
+  await main.getByLabel("메시지").waitFor();
+  await send(main, "/fixture/rerouted");
+  check("O10. rerouted -> fixed-model failure shown", await appears(main.getByText("고정된 모델을 사용할 수 없어")));
+  const t = await main.innerText();
+  check("O10. wrong model / provider reason not shown", !t.includes("fixture-wrong-model") && !t.includes("highRiskCyberActivity"));
+  check("O10. rerouted input kept in conversation", (await userMsgs(main, "/fixture/rerouted").count()) === 1);
+  await settled(main);
+  await send(main, "우회 뒤 질문");
+  check("O10. explicit follow-up after reroute succeeds", await appears(userMsgs(main, "우회 뒤 질문")) && (await appears(main.getByText("Offline fixture answer").nth(8), 30000)));
+  await settled(main);
+  const after = await fixtureDocs();
+  check("O10. rerouted turn did not add a tool write; follow-up added one", after === before + 1, `${before} -> ${after}`);
 }
 
 // O9. 계정 격리: B는 A 세션·도구 문서 404, B 목록에 A 세션 없음

@@ -416,6 +416,7 @@ const publicSessionUrl = page.url();
 // L9. 세션: 실제 Codex 미연결 상태 표시, 전송 실패 시 입력 보존
 await page.goto(U("/research/?tab=sessions"));
 check("L9. codex status not shown as available", await appears(main.getByText(/새 대화를 진행할 수 없지만|실제 응답은 아직 확인되지 않았습니다/)));
+check("L9. fixed model shown from real status", await appears(main.getByText("모델: gpt-6.1-sol (서버에서 고정)")));
 await main.getByLabel("새 대화 제목").fill("실물 세션");
 await main.getByRole("button", { name: "새 대화" }).click();
 await page.waitForURL(/\/research\/session\/\?id=/);
