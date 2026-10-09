@@ -11,7 +11,7 @@ const UNAVAILABLE_REASONS: Record<string, string> = {
   not_enabled_for_account: "이 계정에는 아직 Codex가 열려 있지 않습니다. 지정된 시험 계정에서만 사용할 수 있습니다.",
   auth_expired: "서버의 Codex 인증이 만료되었습니다. 운영자가 다시 인증해야 합니다.",
   auth_revoked: "서버의 Codex 인증이 회수되었습니다. 운영자 조치가 필요합니다.",
-  model_unavailable: "고정된 모델을 지금 사용할 수 없습니다.",
+  model_unavailable: "고정된 모델을 확인하지 못해 Codex 실행이 중단되었습니다. 운영자가 확인한 뒤 다시 사용할 수 있습니다.",
   policy_refused: "정책에 따라 Codex 사용이 거부되었습니다.",
   budget_exhausted: "Codex 사용 한도에 도달했습니다.",
   unavailable: "Codex에 일시적으로 연결할 수 없습니다.",

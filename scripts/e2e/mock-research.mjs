@@ -285,21 +285,29 @@ function handleMutation(owner, method, path, b, user) {
     if (method === "POST" && m[2]) {
       if (GATED_REASONS.includes(researchMode.codex)) return fail(503, `codex_${researchMode.codex}`, "Codex is not available");
       if (researchMode.codex === "mismatch") {
-        // 접수 후 응답 모델 불일치/우회 → 고정 모델 성공으로 기록하지 않고 명시 실패
-        const item = { id: uuid(), type: "message", role: "user", text: b.text, source: "platform", status: "pending" };
-        item.raw = { type: "platformInput", source: "platform", text: b.text, status: "pending" };
-        s.items.push(item);
+        // 계약: 응답 모델 불일치/우회 → 해당 turn의 assistant 결과는 projection에서 제외, 남는 user/tool 항목에 modelMismatch,
+        // polling codex_model_unavailable, 계정 runner는 운영자가 해제할 때까지 차단(durable)
+        const user = { id: uuid(), type: "message", role: "user", text: b.text, modelMismatch: true, raw: { type: "userMessage", text: b.text } };
+        s.items.push(user);
         s.state = "running";
         s.version++;
         s.updatedAt = now();
         setTimeout(() => {
-          item.status = "not_recorded";
-          item.raw.status = "not_recorded";
+          s.items.push({
+            id: uuid(),
+            type: "tool_call",
+            name: "research_document_save",
+            input: { title: "blocked" },
+            output: { error: "blocked" },
+            status: "failed",
+            modelMismatch: true,
+            raw: { type: "dynamicToolCall", blocked: true },
+          });
           s.state = "failed";
-          // 계약: 접수 후 응답 모델 불일치/우회는 codex_model_unavailable(원문 provider 문구는 화면에 쓰지 않는다)
           s.error = { code: "codex_model_unavailable", message: "Provider returned model gpt-other" };
           s.version++;
           s.updatedAt = now();
+          researchMode.codex = "model_unavailable";
         }, 1500);
         return ok(202, sessionSummary(s));
       }

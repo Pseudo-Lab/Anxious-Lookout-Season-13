@@ -483,6 +483,7 @@ check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: 
   await setMock("codex=mismatch");
   await page.reload();
   await main.getByLabel("메시지").waitFor();
+  const answersBefore = await main.getByText("모의 응답:").count();
   await main.getByLabel("메시지").fill("모델 불일치 질문");
   await main.getByRole("button", { name: "보내기" }).click();
   check(
@@ -490,7 +491,20 @@ check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: 
     (await appears(main.getByText("마지막 요청이 실패했습니다"))) && (await appears(main.getByText("고정된 모델을 사용할 수 없어")))
   );
   check("R9g. raw provider text not shown", !(await main.innerText()).includes("gpt-other"));
-  check("R9g. mismatched input kept as unrecorded", await appears(main.locator("li.bg-indigo-50", { hasText: "모델 불일치 질문" }).getByText("미기록 입력")));
+  const mm = main.locator("li.bg-indigo-50", { hasText: "모델 불일치 질문" });
+  check("R9g. mismatched turn items badged as not a normal response", await appears(mm.getByText("정상 응답 아님")));
+  check("R9g. mismatched tool call badged", await appears(main.locator("li", { hasText: "research_document_save" }).filter({ hasText: "정상 응답 아님" })));
+  check("R9g. no assistant answer shown for mismatched turn", (await main.getByText("모의 응답:").count()) === answersBefore);
+  // 차단은 계정 runner 단위로 지속: 다음 입력은 선접수 거절, 입력 유지, 새 대화 안내 없음
+  await main.getByLabel("메시지").fill("차단 뒤 질문");
+  await main.getByRole("button", { name: "보내기" }).click();
+  check("R9g. follow-up refused while runner blocked", await appears(main.getByText("메시지를 보내지 못했습니다")));
+  check("R9g. follow-up input kept", (await main.getByLabel("메시지").inputValue()) === "차단 뒤 질문");
+  check("R9g. no 'start a new conversation' workaround suggested", !(await main.innerText()).includes("새 대화를 시작"));
+  await page.reload();
+  check("R9g. status explains operator confirmation", await appears(main.getByText("운영자가 확인한 뒤 다시 사용할 수 있습니다")));
+  // 이전 정상 이력은 그대로(일괄 실패 처리하지 않음)
+  check("R9g. earlier normal answers kept", (await main.getByText("모의 응답:").count()) === answersBefore);
   await setMock("codex=fixture");
   await page.reload();
   await main.getByLabel("메시지").waitFor();

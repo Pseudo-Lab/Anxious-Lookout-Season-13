@@ -201,11 +201,13 @@ export interface MessageItem {
   // Codex 원본에 아직/끝내 기록되지 않은 사용자 입력(플랫폼이 보존). 모델이 본 이력이 아니다.
   source?: "platform";
   status?: "pending" | "not_recorded";
+  // 고정 모델 확인 실패(응답 모델 불일치·우회)로 중단된 실행의 항목. 정상 응답이 아니다.
+  modelMismatch?: boolean;
 }
 
 export type SessionItem =
   | MessageItem
-  | { id: string; type: "tool_call"; name: string; input: unknown; output: unknown; status: string };
+  | { id: string; type: "tool_call"; name: string; input: unknown; output: unknown; status: string; modelMismatch?: boolean };
 
 export interface SessionDetail extends SessionSummary {
   items: SessionItem[];

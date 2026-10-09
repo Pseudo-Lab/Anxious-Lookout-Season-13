@@ -63,6 +63,11 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: Extract<Sessio
         </span>
         <span className="text-xs text-stone-500">{item.status}</span>
       </button>
+      {item.modelMismatch && (
+        <div className="px-4 pb-2">
+          <ModelMismatchNote />
+        </div>
+      )}
       {open && (
         <div className="space-y-3 px-4 pb-4">
           <div className="space-y-1">
@@ -88,6 +93,16 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: Extract<Sessio
 
 const PLATFORM_STATUS_LABELS = { pending: "전달 확인 중", not_recorded: "미기록 입력" } as const;
 
+// 고정 모델 확인 실패로 중단된 실행의 항목 표시(다른 모델명·정책 사유는 표시하지 않는다).
+function ModelMismatchNote() {
+  return (
+    <p className="mt-1 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
+      <span className="font-semibold">정상 응답 아님</span> — 고정 모델을 확인하지 못해 중단된 실행의 기록입니다. 이 실행의 결과는
+      사용하지 마세요.
+    </p>
+  );
+}
+
 function Message({ sessionId, item }: { sessionId: string; item: Extract<SessionItem, { type: "message" }> }) {
   const [raw, setRaw] = useState(false);
   const mine = item.role === "user";
@@ -106,6 +121,7 @@ function Message({ sessionId, item }: { sessionId: string; item: Extract<Session
         )}
       </p>
       {mine ? <p className="whitespace-pre-wrap text-sm text-stone-800">{item.text}</p> : <SafeMarkdown content={item.text} />}
+      {item.modelMismatch && <ModelMismatchNote />}
       {platform && (
         <p className="mt-1 text-xs text-amber-800">
           {item.status === "pending"

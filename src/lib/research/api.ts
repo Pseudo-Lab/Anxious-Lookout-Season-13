@@ -387,10 +387,13 @@ function parseSessionItem(v: unknown): SessionItem | null {
       item.source = "platform";
       item.status = v.status;
     }
+    if (v.modelMismatch === true) item.modelMismatch = true;
     return item;
   }
   if (v.type === "tool_call" && isStr(v.name) && isStr(v.status)) {
-    return { id: v.id, type: "tool_call", name: v.name, input: v.input, output: v.output, status: v.status };
+    const tool: SessionItem = { id: v.id, type: "tool_call", name: v.name, input: v.input, output: v.output, status: v.status };
+    if (v.modelMismatch === true) tool.modelMismatch = true;
+    return tool;
   }
   return null;
 }

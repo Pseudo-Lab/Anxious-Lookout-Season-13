@@ -250,30 +250,27 @@ async function dropFirstSend(p) {
   check("O8. continue created exactly one more document", (await fixtureDocs()) === before + 2);
 }
 
-// O10. #7 모델 우회/불일치(model/rerouted): 고정 모델 성공으로 표시하지 않고 codex_model_unavailable, provider 원문 비노출, 후속 명시 입력 가능
+// O10. #7 모델 우회/불일치(model/rerouted): codex_model_unavailable, 해당 turn의 assistant 결과는 projection에서 제외되고
+//      남는 user/tool 항목은 modelMismatch 배지, 도구 쓰기 없음, provider 원문 비노출, 계정 runner 차단은 지속(후속 입력 선접수 거절, 입력 유지)
 {
   const before = await fixtureDocs();
   await page.goto(s1);
   await main.getByLabel("메시지").waitFor();
+  const answersBefore = await main.getByText("Offline fixture answer").count();
   await send(main, "/fixture/rerouted");
   check("O10. rerouted -> fixed-model failure shown", await appears(main.getByText("고정된 모델을 사용할 수 없어")));
+  await settled(main);
   const t = await main.innerText();
   check("O10. wrong model / provider reason not shown", !t.includes("fixture-wrong-model") && !t.includes("highRiskCyberActivity"));
-  check("O10. rerouted input kept in conversation", (await userMsgs(main, "/fixture/rerouted").count()) === 1);
-  await settled(main);
+  check("O10. rerouted turn items badged not-normal", await appears(main.getByText("정상 응답 아님")));
+  check("O10. rerouted assistant result excluded", (await main.getByText("Offline fixture answer").count()) === answersBefore, `${answersBefore} -> ${await main.getByText("Offline fixture answer").count()}`);
   const docsAfterReroute = await fixtureDocs();
   check("O10. rerouted turn added no tool write", docsAfterReroute === before, `${before} -> ${docsAfterReroute}`);
-  // 우회 뒤 새 명시 입력의 서버 정책(허용/거절)은 back 확인 중: UI는 어느 쪽이든 입력 보존·자동 재전송 없음만 단언한다.
   await send(main, "우회 뒤 질문");
-  const answered = await appears(main.getByText("Offline fixture answer").nth(8), 20000);
-  const refused = !answered && (await appears(main.getByText("메시지를 보내지 못했습니다"), 1000));
-  console.log(`INFO O10 follow-up after reroute: ${answered ? "answered" : refused ? "refused before admission" : "other"}`);
-  check(
-    "O10. follow-up outcome explicit (answered, or refused with input kept and no auto resend)",
-    answered || (refused && (await main.getByLabel("메시지").inputValue()) === "우회 뒤 질문" && (await main.getByRole("button", { name: "다시 보내기" }).count()) === 0)
-  );
-  if (refused) await main.getByLabel("메시지").fill("");
-  await settled(main);
+  check("O10. account runner stays blocked: follow-up refused", await appears(main.getByText("메시지를 보내지 못했습니다")));
+  check("O10. follow-up input kept, no auto resend", (await main.getByLabel("메시지").inputValue()) === "우회 뒤 질문" && (await main.getByRole("button", { name: "다시 보내기" }).count()) === 0);
+  check("O10. no new-conversation workaround suggested", !(await main.innerText()).includes("새 대화를 시작"));
+  await main.getByLabel("메시지").fill("");
 }
 
 // O9. 계정 격리: B는 A 세션·도구 문서 404, B 목록에 A 세션 없음
