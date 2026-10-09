@@ -22,6 +22,10 @@ class FixtureRunner:
     def __init__(self, app, owner, root):
         self.app, self.owner, self.root = app, owner, root
         self.dispatches, self.last = 0, None
+        app.state.codex_verification = "fixture"
+
+    def health(self):
+        return {"model": "gpt-6.1-sol", "available": True, "reason": None, "verification": "fixture"}
 
     def submit(self, identity, body):
         self.dispatches += 1
@@ -138,6 +142,7 @@ def test_tool_token_binds_owner_session_turn_live_login_and_current_authority(cl
 
 
 class RejectedFixtureRunner:
+    health = FixtureRunner.health
     def submit(self, identity, body):
         request = httpx.Request("POST", "http://fixture.invalid/turn")
         raise httpx.HTTPStatusError("not accepted", request=request, response=httpx.Response(409, request=request))
@@ -147,6 +152,7 @@ class RejectedFixtureRunner:
 
 
 class UnrecordedFixtureRunner:
+    health = FixtureRunner.health
     def submit(self, identity, body):
         self.request = body["requestId"]
 
@@ -157,6 +163,7 @@ class UnrecordedFixtureRunner:
 def test_definite_rejection_revokes_tool_grant_and_allows_next_explicit_input(client, admin):
     owner, auth = identity(client, admin)
     client.app.state.research_runners[owner] = RejectedFixtureRunner()
+    client.app.state.codex_verification = "fixture"
     row = create_session(client, auth)
     root = "/api/research/sessions/" + row["id"]
     sent = client.post(root + "/messages", json={"text": "first rejection", "expectedVersion": 1}, headers=headers(auth))
@@ -175,6 +182,7 @@ def test_definite_rejection_revokes_tool_grant_and_allows_next_explicit_input(cl
 def test_unrecorded_failures_survive_followup_refresh_and_api_reconnect(client, admin):
     owner, auth = identity(client, admin)
     client.app.state.research_runners[owner] = UnrecordedFixtureRunner()
+    client.app.state.codex_verification = "fixture"
     row = create_session(client, auth)
     root = "/api/research/sessions/" + row["id"]
     version = 1
@@ -200,6 +208,7 @@ def test_ambiguous_dispatch_failure_does_not_auto_retry_or_release_active_turn(c
     owner, auth = identity(client, admin)
     runner = Ambiguous()
     client.app.state.research_runners[owner] = runner
+    client.app.state.codex_verification = "fixture"
     row = create_session(client, auth)
     root = "/api/research/sessions/" + row["id"]
     body, key = {"text": "maybe accepted", "expectedVersion": 1}, str(uuid.uuid4())

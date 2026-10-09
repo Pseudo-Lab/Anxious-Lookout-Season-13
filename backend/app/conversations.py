@@ -17,6 +17,7 @@ from .models import Account, LoginSession
 from .research import Expected, Input, Store, fail, page_query, encode_cursor, parse_id, stamp
 from .research_models import Conversation
 from .research_tools import definitions, dispatch
+from .codex_policy import MODEL, REASONS, ERRORS
 
 
 class NewConversation(Input):
@@ -45,12 +46,15 @@ class Runner:
             reply = client.request(method, self.url + path, json=body, headers={"Authorization": "Bearer " + self.token})
             reply.raise_for_status()
             result = reply.json()
-            if result.get("ownerId") != str(self.owner):
+            if not isinstance(result, dict) or result.get("ownerId") != str(self.owner):
                 raise ValueError("Runner ownership mismatch")
             return result
 
     def read(self, identity):
         return self.call("GET", "/sessions/" + str(identity))
+
+    def health(self):
+        return self.call("GET", "/health")
 
     def submit(self, identity, body):
         return self.call("POST", "/sessions/" + str(identity) + "/turn", body)
@@ -137,6 +141,37 @@ def register_conversations(app, authorized, sessions, settings, response, write)
     prefix = settings.base_path + "/api/research"
     app.state.research_runners = runners_from_file()
     app.state.codex_verification = "unverified"
+    personal = os.getenv("CODEX_PERSONAL_ACCOUNT_ID", "")
+    app.state.codex_personal_owner = uuid.UUID(personal) if personal else None
+    app.state.codex_personal_enabled = os.getenv("CODEX_PERSONAL_ENABLE") == "true" and os.getenv("APP_ENV") == "personal-test" and urlsplit(settings.origin).hostname in {"localhost", "127.0.0.1", "::1"}
+
+    def connection_status(owner):
+        result = {"available": False, "reason": "not_configured", "verification": "unverified", "model": MODEL}
+        runner = app.state.research_runners.get(owner)
+        fixture = app.state.codex_verification == "fixture"
+        if not fixture and app.state.codex_personal_owner:
+            if owner != app.state.codex_personal_owner:
+                return {**result, "reason": "not_enabled_for_account"}
+            if not app.state.codex_personal_enabled:
+                return {**result, "reason": "policy_refused"}
+        if not runner:
+            return result
+        if not fixture and not app.state.codex_personal_owner:
+            return {**result, "reason": "policy_refused"}
+        try:
+            health = runner.health()
+            if health.get("model") != MODEL:
+                return {**result, "reason": "model_unavailable"}
+            reason = health.get("reason")
+            verified = health.get("verification")
+            if (reason is not None and (not isinstance(reason, str) or reason not in REASONS)) or not isinstance(verified, str) or verified not in {"fixture", "unverified", "real"} or type(health.get("available")) is not bool:
+                raise ValueError()
+            if verified == "fixture" and not fixture:
+                raise ValueError()
+            available = health["available"] and reason is None
+            return {**result, "available": available, "reason": None if available else reason or "unavailable", "verification": verified}
+        except (httpx.HTTPError, ValueError, KeyError):
+            return {**result, "reason": "unavailable"}
 
     def require_schema(store):
         if store.db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() not in {"0003_sessions", "0004_publication"}:
@@ -144,8 +179,9 @@ def register_conversations(app, authorized, sessions, settings, response, write)
 
     def runner_for(owner):
         runner = app.state.research_runners.get(owner)
-        if not runner:
-            fail("codex_unavailable", "Your Codex connection is not configured", 503)
+        status = connection_status(owner)
+        if not status["available"]:
+            fail(ERRORS.get(status["reason"], "codex_unavailable"), "Codex cannot accept this request", 503)
         return runner
 
     def refresh(store, row):
@@ -172,7 +208,8 @@ def register_conversations(app, authorized, sessions, settings, response, write)
         row.native_record = {**record, "unrecordedInputs": row.native_record.get("unrecordedInputs", [])}
         if result["state"] != row.state:
             row.state = result["state"]
-            row.error_code = "codex_failed" if row.state == "failed" else None
+            safe_errors = {*ERRORS.values(), "codex_failed", "codex_rejected", "codex_unavailable"}
+            row.error_code = result.get("errorCode") if row.state == "failed" and result.get("errorCode") in safe_errors else "codex_failed" if row.state == "failed" else None
             row.version += 1
             row.updated_at = datetime.now(timezone.utc)
             row.tool_token_hash = None
@@ -205,6 +242,17 @@ def register_conversations(app, authorized, sessions, settings, response, write)
                         row.version += 1
                         row.updated_at = datetime.now(timezone.utc)
                         row.tool_token_hash, row.tool_expires_at = None, None
+                    elif isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 503:
+                        try:
+                            code = exc.response.json().get("error")
+                        except ValueError:
+                            code = None
+                        if code in ERRORS.values():
+                            row.state, row.error_code = "failed", code
+                            row.version += 1
+                            row.tool_token_hash, row.tool_expires_at = None, None
+                        else:
+                            row.error_code = "codex_unavailable"
                     else:
                         # Ambiguous network/5xx failure must never be auto-replayed.
                         row.error_code = "codex_unavailable"
@@ -212,9 +260,7 @@ def register_conversations(app, authorized, sessions, settings, response, write)
     @app.get(prefix + "/codex/status")
     def status(request: Request):
         with authorized(request) as store:
-            configured = store.owner in app.state.research_runners
-            return response({"available": configured, "reason": None if configured else "not_configured",
-                             "verification": app.state.codex_verification})
+            return response(connection_status(store.owner))
 
     @app.get(prefix + "/sessions")
     def listing(request: Request, limit: int = 30, cursor: str | None = None):

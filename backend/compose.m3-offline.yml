@@ -23,7 +23,7 @@ services:
       OFFLINE_RUNNER_FIXTURE: "true"
       RUNNER_ACCOUNT_ID: ${OFFLINE_ACCOUNT_A}
       RUNNER_TOKEN_FILE: /run/secrets/runner-token
-      CODEX_MODEL: fixture-no-provider
+      CODEX_MODEL: gpt-6.1-sol
       CODEX_BIN: /usr/local/bin/codex-fixture
       RESEARCH_TOOL_CALLBACK_URL: http://api:8080/api/internal/research/tools
     volumes: ["${OFFLINE_FIXTURE_DIR}/private/runner-a.token:/run/secrets/runner-token:ro", "offline-a-state:/state"]
@@ -40,7 +40,7 @@ services:
       OFFLINE_RUNNER_FIXTURE: "true"
       RUNNER_ACCOUNT_ID: ${OFFLINE_ACCOUNT_B}
       RUNNER_TOKEN_FILE: /run/secrets/runner-token
-      CODEX_MODEL: fixture-no-provider
+      CODEX_MODEL: gpt-6.1-sol
       CODEX_BIN: /usr/local/bin/codex-fixture
       RESEARCH_TOOL_CALLBACK_URL: http://api:8080/api/internal/research/tools
     volumes: ["${OFFLINE_FIXTURE_DIR}/private/runner-b.token:/run/secrets/runner-token:ro", "offline-b-state:/state"]

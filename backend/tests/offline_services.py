@@ -4,7 +4,7 @@ import os
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-MODEL_INPUTS = ("OPENAI_API_KEY", "OPENAI_API_KEY_FILE", "CODEX_API_KEY_FILE", "CODEX_ACCESS_TOKEN", "ACCESS_TOKEN")
+MODEL_INPUTS = ("OPENAI_API_KEY", "OPENAI_API_KEY_FILE", "CODEX_API_KEY_FILE", "CODEX_ACCESS_TOKEN", "ACCESS_TOKEN", "CODEX_PERSONAL_CONTROL_DIR")
 
 
 def require_offline():
@@ -24,7 +24,7 @@ def create_api():
 
 def create_runner():
     require_offline()
-    if os.environ.get("CODEX_BIN") != "/usr/local/bin/codex-fixture" or os.environ.get("CODEX_MODEL") != "fixture-no-provider":
+    if os.environ.get("CODEX_BIN") != "/usr/local/bin/codex-fixture" or os.environ.get("CODEX_MODEL") != "gpt-6.1-sol" or os.environ.get("CODEX_AUTH_MODE", "none") != "none":
         raise RuntimeError("Offline runner requires the test-only protocol executable")
     from runner.app import create_app
     app = create_app()

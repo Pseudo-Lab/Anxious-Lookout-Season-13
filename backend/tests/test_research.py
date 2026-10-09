@@ -161,7 +161,7 @@ def test_pagination_validation_and_inert_content(client, admin):
     doc = create(client, auth, "documents")
     result = client.post("/api/research/documents/" + doc["id"] + "/publications", json={}, headers=headers(auth))
     assert result.json()["error"]["code"] == "validation_error"
-    assert client.get("/api/research/codex/status").json() == {"available": False, "reason": "not_configured", "verification": "unverified"}
+    assert client.get("/api/research/codex/status").json() == {"available": False, "reason": "not_configured", "verification": "unverified", "model": "gpt-6.1-sol"}
 
 
 def test_concurrent_version_updates_and_same_key_creates(client, admin):

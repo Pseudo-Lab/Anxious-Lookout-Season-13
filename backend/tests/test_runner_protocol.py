@@ -32,7 +32,7 @@ def test_offline_native_protocol_tool_roundtrip_and_process_restart(tmp_path, mo
         return httpx.Response(200, json={"id": str(uuid.uuid4()), "content": "Complete fixture output"})
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: original(transport=httpx.MockTransport(tool_callback), **kwargs))
     root = tmp_path / "account-one"
-    native = Native(root, "fixture-no-provider", "/usr/local/bin/codex-fixture", "https://fixture.invalid/tools")
+    native = Native(root, "gpt-6.1-sol", "/usr/local/bin/codex-fixture", "https://fixture.invalid/tools")
     session, request = str(uuid.uuid4()), uuid.uuid4()
     body = Turn(requestId=request, text="Save fixture", tools=definitions(), toolToken="t" * 40)
     try:
@@ -44,7 +44,7 @@ def test_offline_native_protocol_tool_roundtrip_and_process_restart(tmp_path, mo
         assert len(requests) == 1  # Persistent dispatch reservation deduplicates.
     finally:
         native.close()
-    restarted = Native(root, "fixture-no-provider", "/usr/local/bin/codex-fixture", "https://fixture.invalid/tools")
+    restarted = Native(root, "gpt-6.1-sol", "/usr/local/bin/codex-fixture", "https://fixture.invalid/tools")
     try:
         assert restarted.read(session)["record"] == first["record"]
         restarted.accept(session, body)
@@ -59,14 +59,14 @@ def test_offline_native_protocol_tool_roundtrip_and_process_restart(tmp_path, mo
         restarted.close()
     restored_root = tmp_path / "restored-owner"
     shutil.copytree(root, restored_root)  # Quiesced full-state backup to a fresh fixture home.
-    restored = Native(restored_root, "fixture-no-provider", "/usr/local/bin/codex-fixture", "https://fixture.invalid/tools")
+    restored = Native(restored_root, "gpt-6.1-sol", "/usr/local/bin/codex-fixture", "https://fixture.invalid/tools")
     try:
         assert restored.read(session)["record"] == continued["record"]
         restored.accept(session, body)  # An older request ID must remain deduplicated after restore.
         assert len(requests) == 2
     finally:
         restored.close()
-    isolated = Native(tmp_path / "account-two", "fixture-no-provider", "/usr/local/bin/codex-fixture", "https://fixture.invalid/tools")
+    isolated = Native(tmp_path / "account-two", "gpt-6.1-sol", "/usr/local/bin/codex-fixture", "https://fixture.invalid/tools")
     try:
         assert isolated.read(session) is None
         assert not (tmp_path / "account-two" / "codex" / "fixture-native-record.json").exists()
@@ -125,6 +125,7 @@ def test_native_turn_binding_waits_for_start_response_and_rejects_stale_calls(mo
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: original(transport=httpx.MockTransport(callback), **kwargs))
     native = Native.__new__(Native)
     native.messages, native.completed, native.next_id = queue.Queue(), {}, 7
+    native.auth, native.blocked_reason = None, None
     native.callback_url, native.send = "https://fixture.invalid/tools", sent.append
     turn = {"thread": "same-thread", "turnId": None, "pendingTools": [], "session": str(uuid.uuid4()),
             "request": str(uuid.uuid4()), "token": "private-current-token"}
@@ -152,7 +153,7 @@ def test_history_rpc_does_not_reject_admission_and_keeps_true_busy_dedup(tmp_pat
         calls.append(json.loads(request.content))
         return httpx.Response(200, json={"id": str(uuid.uuid4()), "saved": True})
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: original_client(transport=httpx.MockTransport(callback), **kwargs))
-    native = Native(tmp_path / "owner", "fixture-no-provider", "/usr/local/bin/codex-fixture", "https://fixture.invalid/tools")
+    native = Native(tmp_path / "owner", "gpt-6.1-sol", "/usr/local/bin/codex-fixture", "https://fixture.invalid/tools")
     reading, release = threading.Event(), threading.Event()
     reader_result, reader_errors = [], []
     session = str(uuid.uuid4())

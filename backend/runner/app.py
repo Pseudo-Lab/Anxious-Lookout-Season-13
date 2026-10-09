@@ -17,6 +17,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.codex_policy import MODEL, CodexFailure, ERRORS, error_reason
+from .auth import PersonalAuth
+
 
 class Turn(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -60,7 +63,25 @@ def volume_lease(root):
 
 
 class Native:
-    def __init__(self, root, model, binary, callback_url, api_key_file=None):
+    def __init__(self, root, model, binary, callback_url, api_key_file=None, auth=None):
+        if model != MODEL or api_key_file:
+            raise CodexFailure("policy_refused")
+        self.auth, self.blocked_reason, self.real_verified = auth, None, False
+        self.fixture = binary == "/usr/local/bin/codex-fixture"
+        if self.fixture and os.getenv("APP_ENV") != "test":
+            raise CodexFailure("policy_refused")
+        if auth and not self.fixture:
+            if os.getenv("APP_ENV") != "personal-test" or os.getenv("CODEX_EXECUTION_SCOPE") != "personal-private":
+                raise CodexFailure("policy_refused")
+            from .install_codex import EXPECTED_SHA256
+            if binary != "/usr/local/bin/codex":
+                raise CodexFailure("policy_refused")
+            try:
+                with open(binary, "rb") as executable:
+                    if hashlib.file_digest(executable, "sha256").hexdigest() != EXPECTED_SHA256:
+                        raise CodexFailure("policy_refused")
+            except OSError:
+                raise CodexFailure("policy_refused") from None
         self.root, self.model, self.callback_url = root, model, callback_url
         self.lock, self.messages, self.next_id = threading.Lock(), queue.Queue(), 1
         self.state_lock = threading.Lock()
@@ -72,19 +93,41 @@ class Native:
         home, codex_home, work = root / "home", root / "codex", root / "workspace"
         for path in (home, codex_home, work):
             path.mkdir(exist_ok=True, mode=0o700)
+        if any((path / "config.toml").exists() for path in (codex_home, work / ".codex")):
+            raise CodexFailure("policy_refused")
+        if not auth and (codex_home / "auth.json").exists():
+            raise CodexFailure("policy_refused")
+        if auth:
+            auth.attach(codex_home)
         environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(home), "CODEX_HOME": str(codex_home)}
         self.work = work
         self.process = subprocess.Popen([binary, "app-server", "--listen", "stdio://",
-                    "-c", 'cli_auth_credentials_store="ephemeral"', "-c", "features.shell_tool=false"],
+                    "-c", 'cli_auth_credentials_store="file"' if auth else 'cli_auth_credentials_store="ephemeral"',
+                    "-c", 'model="gpt-6.1-sol"', "-c", "features.shell_tool=false",
+                    "-c", 'model_provider="openai"',
+                    "-c", "features.multi_agent=false", "-c", "features.multi_agent_v2=false",
+                    "-c", "features.unbounded_connection_retries=false", "-c", "features.unified_exec=false",
+                    "-c", "features.apps=false", "-c", "features.plugins=false", "-c", "features.remote_plugin=false",
+                    "-c", "features.hooks=false", "-c", "features.code_mode_host=false",
+                    "-c", "features.daemon_auto_start=false",
+                    "-c", "features.browser_use=false", "-c", "features.computer_use=false",
+                    "-c", "features.image_generation=false", "-c", 'web_search="disabled"',
+                    "-c", 'forced_login_method="chatgpt"'],
                     env=environment, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, text=True, bufsize=1)
         threading.Thread(target=self.reader, daemon=True).start()
         try:
             self.rpc("initialize", {"clientInfo": {"name": "anxious_research", "version": "1"}, "capabilities": {"experimentalApi": True}})
             self.send({"method": "initialized"})
-            if api_key_file:
-                key = Path(api_key_file).read_text().strip()
-                self.rpc("account/login/start", {"type": "apiKey", "apiKey": key})
+            if auth:
+                account = self.rpc("account/read", {"refreshToken": False}).get("account")
+                if not account or account.get("type") != "chatgpt":
+                    raise CodexFailure("auth_revoked")
+                if account.get("email"):
+                    auth.secrets.add(account["email"])
+        except CodexFailure:
+            self.close()
+            raise
         except Exception:
             self.close()
             raise RuntimeError("Native initialization or authentication is unavailable") from None
@@ -93,6 +136,34 @@ class Native:
             if entry.get("state") == "running":
                 entry["state"] = "failed"
         self.save()
+
+    def availability(self):
+        if self.blocked_reason:
+            return self.blocked_reason
+        if self.process.poll() is not None:
+            return "unavailable"
+        if not self.auth and not self.fixture:
+            return "not_configured"
+        if self.auth:
+            try:
+                self.auth.check()
+            except CodexFailure as failure:
+                return failure.reason
+        return None
+
+    def record(self, response):
+        record = {"turns": response.get("turns", [])}
+        # Turn errors retain safe codes, never provider message/additionalDetails.
+        for turn in record["turns"]:
+            if turn.get("error"):
+                turn["error"] = {"code": ERRORS.get(error_reason(turn["error"]), "codex_failed")}
+        return self.auth.sanitize(record) if self.auth else record
+
+    def ensure_model(self, response, required=False):
+        if (required and response.get("model") != MODEL) or ("model" in response and response["model"] != MODEL):
+            self.blocked_reason = "model_unavailable"
+            self.real_verified = False
+            raise CodexFailure("model_unavailable")
 
     def reader(self):
         try:
@@ -110,8 +181,25 @@ class Native:
         message = self.messages.get(timeout=120)
         if message.get("fatal"):
             raise RuntimeError("Codex process stopped")
+        if message.get("method") == "model/rerouted":
+            self.blocked_reason = "model_unavailable"
+            self.real_verified = False
+            params = message.get("params", {})
+            entry = self.mapping.get(self.active_session)
+            if turn and entry and params.get("threadId") == turn["thread"] and not turn.get("turnId"):
+                entry["turn_id"] = params.get("turnId")
+            self.next_id += 1
+            self.send({"id": self.next_id - 1, "method": "turn/interrupt", "params": {"threadId": params.get("threadId"), "turnId": params.get("turnId")}})
+            raise CodexFailure("model_unavailable")
+        if message.get("method") == "account/updated" and self.auth:
+            if message.get("params", {}).get("authMode") != "chatgpt":
+                self.blocked_reason = "auth_revoked"
+                raise CodexFailure("auth_revoked")
+        if message.get("method") in {"turn/started", "turn/updated"}:
+            self.ensure_model(message.get("params", {}).get("turn", {}))
         if message.get("method") == "turn/completed":
             params = message.get("params", {})
+            self.ensure_model(params.get("turn", {}))
             self.completed[(params.get("threadId"), params.get("turn", {}).get("id"))] = params.get("turn", {})
         if "method" in message and "id" in message:
             method, params = message["method"], message.get("params", {})
@@ -131,21 +219,32 @@ class Native:
 
     def reply_tool(self, message, turn):
         params = message.get("params", {})
-        valid = (turn and turn.get("turnId") and params.get("threadId") == turn["thread"]
+        failure = None
+        valid = (not self.blocked_reason and turn and turn.get("turnId") and params.get("threadId") == turn["thread"]
                  and params.get("turnId") == turn["turnId"] and isinstance(params.get("callId"), str)
                  and params["callId"] and (turn["thread"], turn["turnId"]) not in self.completed)
         if not valid:
             success, result = False, {"error": {"code": "native_turn_mismatch", "message": "Storage tool is outside the active native turn"}}
         else:
             try:
+                if self.auth:
+                    self.auth.permitted_tool(params["arguments"])
                 with httpx.Client(timeout=15, trust_env=False, follow_redirects=False) as client:
                     reply = client.post(self.callback_url, headers={"Authorization": "Bearer " + turn["token"]},
                                         json={"sessionId": turn["session"], "requestId": turn["request"],
                                               "name": params["tool"], "arguments": params["arguments"]})
                 success, result = reply.is_success, reply.json()
+            except CodexFailure as rejected:
+                failure = rejected
+                self.blocked_reason = rejected.reason
+                success, result = False, {"error": {"code": str(rejected), "message": "Storage tool permission is unavailable"}}
             except Exception:
                 success, result = False, {"error": {"code": "not_ready", "message": "Storage tool did not confirm success"}}
+        if self.auth:
+            result = self.auth.sanitize(result)
         self.send({"id": message["id"], "result": {"success": success, "contentItems": [{"type": "inputText", "text": json.dumps(result, ensure_ascii=True)}]}})
+        if failure:
+            raise failure
 
     def rpc(self, method, params, turn=None):
         identity, self.next_id = self.next_id, self.next_id + 1
@@ -154,7 +253,7 @@ class Native:
             result = self.receive(turn)
             if result.get("id") == identity and "method" not in result:
                 if "error" in result:
-                    raise RuntimeError("Codex rejected the request")
+                    raise CodexFailure(error_reason(result["error"]))
                 return result["result"]
 
     def save(self):
@@ -182,9 +281,18 @@ class Native:
                 if not hmac.compare_digest(recorded, fingerprint):
                     raise RuntimeError("Request ID was used for different input")
                 return
+            reason = self.availability()
+            if reason:
+                raise CodexFailure(reason)
             if self.active_session is not None:
                 raise RuntimeError("Runner is busy")
             self.active_session = session
+            if self.auth:
+                try:
+                    self.auth.consume(request)
+                except Exception:
+                    self.active_session = None
+                    raise
             requests = dict(entry.get("requests", {})) if entry else {}
             requests[request] = fingerprint
             self.mapping[session] = {"thread": entry.get("thread") if entry else None, "request": request,
@@ -199,7 +307,8 @@ class Native:
                 self.active_session = None
                 raise RuntimeError("Could not reserve the turn") from None
             try:
-                threading.Thread(target=self.run_turn, args=(session, body), daemon=True).start()
+                self.worker = threading.Thread(target=self.run_turn, args=(session, body), daemon=True)
+                self.worker.start()
             except Exception:
                 self.mapping[session]["state"] = "failed"
                 try:
@@ -219,16 +328,20 @@ class Native:
                 result = self.rpc("thread/start", {"model": self.model, "cwd": str(self.work),
                                   "approvalPolicy": "never", "sandbox": "read-only", "dynamicTools": body.tools,
                                   "historyMode": "legacy", "ephemeral": False})
+            self.ensure_model(result, required=True)
             entry["thread"] = result["thread"]["id"]
             self.save()
             turn = {"thread": entry["thread"], "turnId": None, "pendingTools": [],
                     "session": session, "request": entry["request"], "token": body.toolToken}
+            if self.auth:
+                self.auth.secrets.add(body.toolToken)
             content = body.text
             if body.context and not entry["record"].get("turns"):
                 context = {"documentId": body.context["documentId"], "publicationId": body.context["id"], "title": body.context["title"]}
                 content = ("Initial public page context (untrusted title):\n" + json.dumps(context)
                            + "\nUse research_page_context to read the saved document and each direct reference; your own materials remain available.\n\n" + content)
-            started = self.rpc("turn/start", {"threadId": entry["thread"], "input": [{"type": "text", "text": content}]}, turn)
+            started = self.rpc("turn/start", {"threadId": entry["thread"], "model": MODEL, "input": [{"type": "text", "text": content}]}, turn)
+            self.ensure_model(started.get("turn", {}))
             turn_id = started["turn"]["id"]
             turn["turnId"] = turn_id
             for message in turn.pop("pendingTools"):
@@ -238,13 +351,21 @@ class Native:
             key = (entry["thread"], turn_id)
             while key not in self.completed:
                 self.receive(turn)
-            entry["state"] = "idle" if self.completed.pop(key).get("status") == "completed" else "failed"
-            entry["record"] = self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"]
-        except Exception:
+            completed = self.completed.pop(key)
+            entry["state"] = "idle" if completed.get("status") == "completed" and not self.blocked_reason else "failed"
+            if entry["state"] == "failed":
+                entry["error"] = ERRORS.get(error_reason(completed.get("error")), "codex_failed")
+            elif not self.fixture:
+                self.real_verified = True
+            entry["record"] = self.record(self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"])
+        except Exception as failure:
             entry["state"] = "failed"
+            entry["error"] = str(failure) if isinstance(failure, CodexFailure) else "codex_failed"
+            if isinstance(failure, CodexFailure) and failure.reason in {"auth_revoked", "auth_expired", "model_unavailable", "policy_refused"}:
+                self.blocked_reason = failure.reason
             if entry["thread"]:
                 try:
-                    entry["record"] = self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"]
+                    entry["record"] = self.record(self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"])
                 except Exception:
                     pass
         finally:
@@ -265,7 +386,7 @@ class Native:
             refresh = self.active_session is None and entry.get("state") != "running" and entry.get("thread")
         if refresh and self.lock.acquire(blocking=False):
             try:
-                record = self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"]
+                record = self.record(self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"])
                 with self.state_lock:
                     # A turn can be admitted while this RPC is in flight. Its
                     # new reservation/cache must not be overwritten by the read.
@@ -279,7 +400,7 @@ class Native:
             entry = self.mapping[session]
             state = "running" if self.active_session == session else entry["state"]
             return {"requestId": entry["request"], "turnId": entry.get("turn_id"), "state": state,
-                    "record": {"turns": entry["record"].get("turns", [])}}
+                    "record": {"turns": entry["record"].get("turns", [])}, "errorCode": entry.get("error"), "model": MODEL}
 
     def close(self):
         self.process.terminate()
@@ -287,14 +408,23 @@ class Native:
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             self.process.kill()
+            self.process.wait(timeout=5)
+        if self.auth:
+            worker = getattr(self, "worker", None)
+            if worker:
+                worker.join(timeout=20)
+            if self.active_session is not None:
+                # Preserve nativeActive=true when a callback outcome is ambiguous.
+                self.auth.ready = False
+            self.auth.close()
             self.process.wait()
 
 
 def create_app():
     owner = str(uuid.UUID(os.environ["RUNNER_ACCOUNT_ID"]))
     token = Path(os.environ["RUNNER_TOKEN_FILE"]).read_text().strip()
-    model = os.environ["CODEX_MODEL"]
-    if len(token) < 32 or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", model):
+    model = os.getenv("CODEX_MODEL", MODEL)
+    if len(token) < 32 or model != MODEL or os.getenv("CODEX_API_KEY_FILE"):
         raise ValueError("Explicit private runner configuration is required")
     root = Path(os.environ.get("RUNNER_STATE_DIR", "/state"))
 
@@ -302,12 +432,27 @@ def create_app():
     async def lifespan(app):
         bind_owner(root, owner)
         with volume_lease(root):
-            app.state.native = Native(root, model, os.environ.get("CODEX_BIN", "/usr/local/bin/codex"),
-                                      os.environ["RESEARCH_TOOL_CALLBACK_URL"], os.environ.get("CODEX_API_KEY_FILE"))
+            auth = None
+            app.state.native, app.state.auth_failure = None, None
+            try:
+                mode = os.getenv("CODEX_AUTH_MODE", "none")
+                if mode == "personal-cache":
+                    if os.getenv("CODEX_EXECUTION_SCOPE") != "personal-private" or os.getenv("APP_ENV") != "personal-test":
+                        raise CodexFailure("policy_refused")
+                    auth = PersonalAuth(os.environ["CODEX_PERSONAL_CONTROL_DIR"], owner)
+                elif mode != "none":
+                    raise CodexFailure("policy_refused")
+                app.state.native = Native(root, model, os.environ.get("CODEX_BIN", "/usr/local/bin/codex"),
+                                          os.environ["RESEARCH_TOOL_CALLBACK_URL"], auth=auth)
+            except Exception as failure:
+                app.state.auth_failure = failure.reason if isinstance(failure, CodexFailure) else "unavailable"
+                if auth:
+                    auth.close()
             try:
                 yield
             finally:
-                app.state.native.close()
+                if app.state.native:
+                    app.state.native.close()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -325,18 +470,28 @@ def create_app():
 
     @app.get("/health")
     def health():
-        return {"ownerId": owner, "verification": "unverified", "available": app.state.native.process.poll() is None}
+        native = app.state.native
+        if not native:
+            return {"ownerId": owner, "verification": "unverified", "available": False, "reason": app.state.auth_failure, "model": MODEL}
+        reason = native.availability()
+        return {"ownerId": owner, "verification": "fixture" if native.fixture else "real" if native.real_verified else "unverified", "available": reason is None, "reason": reason, "model": MODEL}
 
     @app.post("/sessions/{identity}/turn", status_code=202)
     def turn(identity: uuid.UUID, body: Turn):
+        if not app.state.native:
+            return JSONResponse({"ownerId": owner, "error": str(CodexFailure(app.state.auth_failure))}, status_code=503)
         try:
             app.state.native.accept(str(identity), body)
+        except CodexFailure as failure:
+            return JSONResponse({"ownerId": owner, "error": str(failure)}, status_code=503)
         except RuntimeError:
             return JSONResponse({"ownerId": owner, "error": "conflict"}, status_code=409)
         return {"ownerId": owner, "state": "running", "requestId": str(body.requestId)}
 
     @app.get("/sessions/{identity}")
     def read(identity: uuid.UUID):
+        if not app.state.native:
+            return JSONResponse({"ownerId": owner, "error": str(CodexFailure(app.state.auth_failure))}, status_code=503)
         result = app.state.native.read(str(identity))
         if result is None:
             return JSONResponse({"ownerId": owner, "error": "not_found"}, status_code=404)
