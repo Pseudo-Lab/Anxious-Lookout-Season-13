@@ -26,6 +26,12 @@ def check(config, enabled=False):
     ports = services["gateway"].get("ports", [])
     if len(ports) != 1 or ports[0].get("host_ip") != "127.0.0.1" or env["AUTH_ORIGIN"] != "http://127.0.0.1:" + str(ports[0]["published"]):
         raise ValueError()
+    gateway_args = services["gateway"].get("command", [])
+    for character in ("slash", "backslash", "nullcharacter", "semicolon", "percent", "questionmark", "hash"):
+        key = "--entrypoints.web.http.encodedcharacters.allowencoded" + character + "="
+        values = [arg.lower()[len(key):] for arg in gateway_args if arg.lower().startswith(key)]
+        if values != ["false"]:
+            raise ValueError()  # Missing/relaxed/duplicate flags could re-open pre-routing decode ambiguity.
     for name, service in services.items():
         if service.get("build") or service.get("container_name") or service.get("privileged") or service.get("network_mode"):
             raise ValueError()

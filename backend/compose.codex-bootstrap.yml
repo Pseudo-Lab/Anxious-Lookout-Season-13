@@ -102,7 +102,17 @@ services:
     mem_limit: ${PERSONAL_WEB_MEMORY:?Set the reviewed frontend memory limit}
   gateway:
     image: rancher/mirrored-library-traefik:3.7.8@sha256:4299bbed850421258fc5448c2e0e6ad350981d4d335a68de11b92448aedbefe5
-    command: [--entrypoints.web.address=:8080, --providers.file.filename=/etc/traefik/routes.yml, --api.dashboard=false]
+    command:
+      - --entrypoints.web.address=:8080
+      - --entrypoints.web.http.encodedcharacters.allowencodedslash=false
+      - --entrypoints.web.http.encodedcharacters.allowencodedbackslash=false
+      - --entrypoints.web.http.encodedcharacters.allowencodednullcharacter=false
+      - --entrypoints.web.http.encodedcharacters.allowencodedsemicolon=false
+      - --entrypoints.web.http.encodedcharacters.allowencodedpercent=false
+      - --entrypoints.web.http.encodedcharacters.allowencodedquestionmark=false
+      - --entrypoints.web.http.encodedcharacters.allowencodedhash=false
+      - --providers.file.filename=/etc/traefik/routes.yml
+      - --api.dashboard=false
     volumes:
       - ./config/codex-personal-routes.yml:/etc/traefik/routes.yml:ro
     ports: ["127.0.0.1:${PERSONAL_GATEWAY_PORT}:8080"]

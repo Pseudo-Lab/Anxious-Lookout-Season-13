@@ -169,7 +169,7 @@ def test_operator_structure_checker_accepts_renderer_output(mode):
     validator()(rendered(mode), enabled=mode == "enabled")
 
 
-@pytest.mark.parametrize("damage", ["network_alias", "public_ingress", "runner_db", "operator_image", "owner", "model", "shared_control", "parent_control", "api_provider_net", "unbounded_resources"])
+@pytest.mark.parametrize("damage", ["network_alias", "public_ingress", "runner_db", "operator_image", "owner", "model", "shared_control", "parent_control", "api_provider_net", "unbounded_resources", "encoded_missing", "encoded_relaxed", "encoded_duplicate"])
 def test_operator_checker_rejects_unsafe_configuration_before_any_start(damage):
     config = rendered("enabled")
     if damage == "network_alias":
@@ -191,6 +191,15 @@ def test_operator_checker_rejects_unsafe_configuration_before_any_start(damage):
         config["services"]["api"]["networks"]["provider-egress"] = {}
     elif damage == "unbounded_resources":
         config["services"]["personal-runner"]["mem_limit"] = -1
+    elif damage.startswith("encoded_"):
+        command = config["services"]["gateway"]["command"]
+        flag = "--entrypoints.web.http.encodedcharacters.allowencodedslash=false"
+        if damage == "encoded_missing":
+            command.remove(flag)
+        elif damage == "encoded_relaxed":
+            command[command.index(flag)] = flag.replace("=false", "=true")
+        else:
+            command.append(flag.replace("=false", "=true"))
     with pytest.raises(ValueError):
         validator()(config, enabled=True)
 
