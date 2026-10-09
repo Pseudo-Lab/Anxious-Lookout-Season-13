@@ -1,0 +1,10 @@
+{
+  "origin": "https://trial.example.invalid",
+  "apiImage": "example.invalid/trial-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "webImage": "example.invalid/trial-web@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "webBasePath": "/codex-trial",
+  "tlsSecret": "trial-tls-generation-one",
+  "clientId": "synthetic-client-not-usable",
+  "clientCidrs": ["93.184.216.34/32"],
+  "trustedProxyCidrs": ["10.42.0.0/16"]
+}

@@ -1,10 +1,26 @@
 """Public safe status codes; model choice is never a browser input."""
+import os
+from urllib.parse import urlsplit
+
 MODEL = "gpt-6.1-sol"
 REASONS = {"not_configured", "not_enabled_for_account", "auth_expired", "auth_revoked",
            "model_unavailable", "policy_refused", "budget_exhausted", "unavailable"}
 ERRORS = {"auth_expired": "codex_auth_expired", "auth_revoked": "codex_auth_revoked",
           "model_unavailable": "codex_model_unavailable", "policy_refused": "codex_policy_refused",
           "budget_exhausted": "codex_budget_exhausted", "not_enabled_for_account": "codex_not_enabled_for_account"}
+
+
+def personal_origin_enabled(settings):
+    """Deployment admission only; flags never prove grant/support/access ownership."""
+    if os.getenv("CODEX_PERSONAL_ENABLE") != "true" or os.getenv("APP_ENV") != "personal-test":
+        return False
+    parsed = urlsplit(settings.origin)
+    if parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    return (parsed.scheme == "https" and settings.secure_cookie
+            and settings.base_path == "/codex-trial" and bool(settings.trusted_proxy_cidrs)
+            and os.getenv("CODEX_EXECUTION_SCOPE") == "personal-private"
+            and os.getenv("CODEX_PERSONAL_REMOTE_ORIGIN") == settings.origin)
 
 
 class CodexFailure(RuntimeError):

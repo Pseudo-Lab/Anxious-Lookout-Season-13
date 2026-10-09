@@ -1,5 +1,11 @@
 # Personal runtime configuration — review required before actual operation
 
+This document covers the loopback Compose candidate. The later
+[existing K3s HTTPS `/codex-trial` candidate](../infra/codex-trial/README.md)
+provides new trial DB/state, route-local access/encoding, explicit remote opt-in,
+staged review and policy-preserving rollback. Use that target's separate artifacts;
+neither Compose proof nor its old images authorize the K3s deployment.
+
 Issue7 uses the existing server ChatGPT account, native0.160.1 managed file cache and exactly `gpt-6.1-sol`. This package supplies configuration artifacts; it does not establish personal-use support, actual source authority, external refresh ownership, network policy or model entitlement. PM operates reviewed artifacts with private inputs. No actual source or service/provider start was performed in author validation.
 
 ## Two file sets; one private project/database/origin

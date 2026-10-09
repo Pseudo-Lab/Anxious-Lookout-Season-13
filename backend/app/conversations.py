@@ -17,7 +17,7 @@ from .models import Account, LoginSession
 from .research import Expected, Input, Store, ResearchError, fail, page_query, encode_cursor, parse_id, stamp
 from .research_models import Conversation
 from .research_tools import definitions, dispatch
-from .codex_policy import MODEL, REASONS, ERRORS
+from .codex_policy import MODEL, REASONS, ERRORS, personal_origin_enabled
 
 
 class NewConversation(Input):
@@ -146,7 +146,7 @@ def register_conversations(app, authorized, sessions, settings, response, write)
     app.state.codex_verification = "unverified"
     personal = os.getenv("CODEX_PERSONAL_ACCOUNT_ID", "")
     app.state.codex_personal_owner = uuid.UUID(personal) if personal else None
-    app.state.codex_personal_enabled = os.getenv("CODEX_PERSONAL_ENABLE") == "true" and os.getenv("APP_ENV") == "personal-test" and urlsplit(settings.origin).hostname in {"localhost", "127.0.0.1", "::1"}
+    app.state.codex_personal_enabled = personal_origin_enabled(settings)
 
     def connection_status(owner):
         result = {"available": False, "reason": "not_configured", "verification": "unverified", "model": MODEL}
