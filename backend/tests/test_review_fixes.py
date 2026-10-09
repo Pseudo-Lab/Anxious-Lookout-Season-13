@@ -51,14 +51,14 @@ def test_rotation_before_projection_and_retired_literals_across_partial_final_re
         native.close()
 
 
-@pytest.mark.parametrize("corruption", ["version", "legacy", "record", "journal", "baseline"])
+@pytest.mark.parametrize("corruption", ["version", "legacy", "legacy_v3", "legacy_empty", "record", "journal", "baseline", "verified"])
 def test_legacy_and_corrupted_safe_projection_are_not_trusted(tmp_path, monkeypatch, corruption):
     control, root, owner = grant_fixture(tmp_path)
     native = native_fixture(control, root, owner, monkeypatch, [])
     session = str(uuid.uuid4())
     native.accept(session, message())
     wait_idle(native, session)
-    if corruption == "baseline":
+    if corruption in {"baseline", "verified"}:
         native.accept(session, message("/fixture/early-started-mismatch"))
         assert wait_idle(native, session)["state"] == "failed"
     native.close()
@@ -72,12 +72,19 @@ def test_legacy_and_corrupted_safe_projection_are_not_trusted(tmp_path, monkeypa
             payload[session].pop("projectionVersion")
         elif corruption == "legacy":
             payload[session]["projectionVersion"] = 2  # Pre-C4 projections may already contain unmarked failed assistants.
+        elif corruption == "legacy_v3":
+            payload[session]["projectionVersion"] = 3  # Pre-round3 caches can already contain a late, unmarked result.
+        elif corruption == "legacy_empty":
+            payload[session]["projectionVersion"] = 3
+            payload[session]["record"] = {"turns": []}  # An unprojected old reservation must not bypass version refusal.
         elif corruption == "baseline":
             payload[session]["record"]["modelMismatchBaseline"].append(payload[session]["record"]["turns"][-1]["id"])
+        elif corruption == "verified":
+            payload[session]["record"]["modelVerifiedTurns"].append(payload[session]["record"]["turns"][-1]["id"])
         else:
             payload[session]["record"]["turns"][0]["items"][-1]["text"] = "untrusted tampered cache"
         write_private(root / "broker.json", payload)
-    if corruption == "baseline":
+    if corruption in {"baseline", "verified", "legacy_empty"}:
         with pytest.raises(CodexFailure):
             release_model_block(control, root)
     with pytest.raises(CodexFailure):
@@ -139,6 +146,7 @@ def test_unclean_close_keeps_tombstone_and_never_promotes_runtime_cache(tmp_path
             if trace.exists() and any(item["method"] == "turn/start" for item in json.loads(trace.read_text())):
                 break
             time.sleep(0.01)
+        assert trace.exists() and any(item["method"] == "turn/start" for item in json.loads(trace.read_text())), "Fixture did not reach the active turn barrier"
         assert native.active_session is not None
     elif phase == "timeout":
         session = str(uuid.uuid4())
@@ -282,5 +290,106 @@ def test_early_model_failure_quarantines_new_turns_through_read_and_restart(tmp_
         assert not result["record"]["turns"][-1].get("modelMismatch")
         assert any(item["type"] == "agentMessage" for item in result["record"]["turns"][-1]["items"])
         assert len(calls) == 2  # Original good turn + explicitly released followup only.
+    finally:
+        native.close()
+
+
+@pytest.mark.parametrize("event", ["started", "updated", "completed"])
+@pytest.mark.parametrize("arrival", ["before_accept", "after_completion"])
+def test_late_unknown_result_is_quarantined_even_without_read_before_new_turn(tmp_path, monkeypatch, event, arrival):
+    control, root, owner = grant_fixture(tmp_path)
+    calls = []
+    native = native_fixture(control, root, owner, monkeypatch, calls)
+    session = str(uuid.uuid4())
+    try:
+        native.accept(session, message())
+        previous = wait_idle(native, session)["record"]["turns"][0]
+        native.accept(session, message(f"/fixture/early-{event}-missing-mismatch"))
+        failed = wait_idle(native, session)
+        assert failed["state"] == "failed" and len(calls) == 1
+        failed_id = failed["record"]["turns"][-1]["id"]
+    finally:
+        native.close()
+    release_model_block(control, root)
+    original = root / "codex/fixture-native-record.json"
+    def inject_late():
+        source = json.loads(original.read_text())
+        next(iter(source.values()))["turns"].append({"id": "late-unknown-before-release-result", "items": [
+            {"id": "late-answer", "type": "agentMessage", "text": "Unsafe late past result"}
+        ]})
+        original.write_text(json.dumps(source))
+    if arrival == "before_accept":
+        inject_late()
+    native = native_fixture(control, root, owner, monkeypatch, calls)
+    try:
+        # No history GET after restart and before this explicit new admission.
+        native.accept(session, message("New explicitly authorized normal input"))
+        result = wait_idle(native, session)
+        assert result["state"] == "idle" and len(calls) == 2
+        current_id = result["turnId"]
+        current = next(turn for turn in result["record"]["turns"] if turn["id"] == current_id)
+        assert not current.get("modelMismatch") and any(item["type"] == "agentMessage" for item in current["items"])
+    finally:
+        native.close()
+    if arrival == "after_completion":
+        inject_late()
+    native = native_fixture(control, root, owner, monkeypatch, calls)
+    try:
+        # Policy survives another restart with state=idle/error=None.
+        for _ in range(2):
+            result = native.read(session)
+            assert result["state"] == "idle" and result["errorCode"] is None
+            assert result["record"]["turns"][0] == previous
+            assert next(turn for turn in result["record"]["turns"] if turn["id"] == current_id) == current
+            for identity in (failed_id, "late-unknown-before-release-result"):
+                old = next(turn for turn in result["record"]["turns"] if turn["id"] == identity)
+                assert old["modelMismatch"] is True
+                assert not any(item["type"] == "agentMessage" for item in old["items"])
+            assert set(result["record"]) == {"turns"}  # Private policy never reaches API callers.
+        assert len(calls) == 2
+        assert len(read_private(control / "ledger.json")["requests"]) == 3
+    finally:
+        native.close()
+
+
+def test_failed_history_query_cannot_lose_quarantine_before_release_and_new_input(tmp_path, monkeypatch):
+    control, root, owner = grant_fixture(tmp_path)
+    calls = []
+    native = native_fixture(control, root, owner, monkeypatch, calls)
+    session = str(uuid.uuid4())
+    try:
+        native.accept(session, message())
+        previous = wait_idle(native, session)["record"]["turns"][0]
+        rpc = native.rpc
+        def unavailable_history(method, params, turn=None):
+            if method == "thread/read" and threading.current_thread() is native.worker:
+                raise RuntimeError("Synthetic history RPC outage")
+            return rpc(method, params, turn)
+        monkeypatch.setattr(native, "rpc", unavailable_history)
+        native.accept(session, message("/fixture/early-started-missing-mismatch"))
+        native.worker.join(5)
+        assert not native.worker.is_alive() and native.active_session is None
+        assert native.mapping[session]["error"] == "codex_model_unavailable"
+        assert len(calls) == 1
+        # No history read occurs before closing and releasing the failed run.
+    finally:
+        native.close()
+    release_model_block(control, root)
+    original = root / "codex/fixture-native-record.json"
+    source = json.loads(original.read_text())
+    next(iter(source.values()))["turns"].append({"id": "unseen-old-turn", "items": [
+        {"id": "unseen-old-answer", "type": "agentMessage", "text": "Unsafe unknown original"}
+    ]})
+    original.write_text(json.dumps(source))
+    native = native_fixture(control, root, owner, monkeypatch, calls)
+    try:
+        native.accept(session, message())
+        result = wait_idle(native, session)
+        assert result["state"] == "idle" and len(calls) == 2
+        assert result["record"]["turns"][0] == previous
+        unknown = next(turn for turn in result["record"]["turns"] if turn["id"] == "unseen-old-turn")
+        assert unknown["modelMismatch"] is True and not unknown["items"]
+        current = next(turn for turn in result["record"]["turns"] if turn["id"] == result["turnId"])
+        assert not current.get("modelMismatch") and any(item["type"] == "agentMessage" for item in current["items"])
     finally:
         native.close()

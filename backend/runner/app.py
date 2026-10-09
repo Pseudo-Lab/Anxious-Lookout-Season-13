@@ -92,7 +92,7 @@ class Native:
         self.active_session = None
         self.mapping_file = root / "broker.json"
         self.mapping = json.loads(self.mapping_file.read_text()) if self.mapping_file.exists() else {}
-        if auth and any(entry.get("record", {}).get("turns") and entry.get("projectionVersion") != self.PROJECTION_VERSION for entry in self.mapping.values()):
+        if auth and any(entry.get("projectionVersion") != self.PROJECTION_VERSION for entry in self.mapping.values()):
             raise CodexFailure("policy_refused")  # Legacy unsafe projections need private reconciliation, never automatic trust.
         self.closing, self.closed = False, False
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -172,39 +172,61 @@ class Native:
             if entry.get("projectionVersion") != self.PROJECTION_VERSION or not isinstance(actual, str) or not re.fullmatch(r"[0-9a-f]{64}", actual) or not hmac.compare_digest(expected, actual):
                 raise CodexFailure("policy_refused")
 
-    def store_record(self, session, entry, response):
+    def store_record(self, session, entry, response, verified_turn_id=None):
         # Polling verifies under this same lock. Publish record and MAC as one
         # state change, including when a worker projects its completed turn.
         with self.state_lock:
-            self._store_record(session, entry, response)
+            self._store_record(session, entry, response, verified_turn_id)
 
-    def _store_record(self, session, entry, response):
+    def _store_record(self, session, entry, response, verified_turn_id):
         record = self.record(response)
         mismatches = entry.setdefault("modelMismatchTurns", [])
         for previous in entry.get("record", {}).get("turns", []):
             if previous.get("modelMismatch") is True and previous.get("id") not in mismatches:
                 mismatches.append(previous["id"])
-        if entry.get("error") == "codex_model_unavailable":
+        previous_record = entry.get("record", {})
+        baseline = previous_record.get("modelMismatchBaseline")
+        if baseline is None and entry.get("error") == "codex_model_unavailable":
             # A model event can abort turn/start before its reply supplies an
             # identity. Freeze the previously projected turns once; quarantine
             # every new original turn, including ones appearing on later reads
             # or after restart. An early/stale event never authorizes a tool or
             # selects an old good turn for exclusion.
-            baseline = entry.get("record", {}).get("modelMismatchBaseline", [
-                previous.get("id") for previous in entry.get("record", {}).get("turns", [])
-            ])
+            baseline = [previous.get("id") for previous in previous_record.get("turns", [])]
+        if baseline is not None:
+            # Quarantine outlives the request's error and operator release.
+            # Only a completed, correlated new turn can join the signed allow
+            # list; a history read must never bless an unidentified old result.
+            verified = list(previous_record.get("modelVerifiedTurns", []))
+            if verified_turn_id and verified_turn_id not in mismatches and verified_turn_id not in verified:
+                verified.append(verified_turn_id)
             record["modelMismatchBaseline"] = baseline  # Private metadata is covered by the projection MAC.
+            record["modelVerifiedTurns"] = verified
             for current in record["turns"]:
-                if current.get("id") not in baseline and current.get("id") not in mismatches:
+                if current.get("id") not in baseline and current.get("id") not in verified and current.get("id") not in mismatches:
                     mismatches.append(current.get("id"))
         for turn in record["turns"]:
             if turn.get("id") in mismatches:
                 turn["modelMismatch"] = True
                 turn["items"] = [{**item, "modelMismatch": True} for item in turn.get("items", []) if item.get("type") != "agentMessage"]
+        self.publish_record(session, entry, record)
+
+    def publish_record(self, session, entry, record):
         entry["record"] = record
         entry["projectionVersion"] = self.PROJECTION_VERSION
         if self.auth:
             entry["projectionMac"] = self.auth.projection_mac(session, entry.get("thread"), record)
+
+    def quarantine_history(self, session, entry):
+        # Capture the already safe boundary before any fallible history RPC.
+        # A later operator release cannot erase it if that RPC never succeeds.
+        with self.state_lock:
+            record = deepcopy(entry.get("record", {"turns": []}))
+            if self.auth:
+                record = self.auth.sanitize(record)
+            record.setdefault("modelMismatchBaseline", [turn.get("id") for turn in record.get("turns", [])])
+            record.setdefault("modelVerifiedTurns", [])
+            self.publish_record(session, entry, record)
 
     def record(self, response):
         if self.auth:
@@ -420,12 +442,15 @@ class Native:
                 entry["error"] = ERRORS.get(error_reason(completed.get("error")), "codex_failed")
             elif not self.fixture:
                 self.real_verified = True
-            self.store_record(session, entry, self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"])
+            self.store_record(session, entry, self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"],
+                              verified_turn_id=turn_id if entry["state"] == "idle" else None)
         except Exception as failure:
             entry["state"] = "failed"
             entry["error"] = str(failure) if isinstance(failure, CodexFailure) else "codex_failed"
             if isinstance(failure, CodexFailure) and failure.reason in {"auth_revoked", "auth_expired", "model_unavailable", "policy_refused"}:
                 self.blocked_reason = failure.reason
+                if failure.reason == "model_unavailable":
+                    self.quarantine_history(session, entry)
             if entry["thread"]:
                 try:
                     self.store_record(session, entry, self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"])

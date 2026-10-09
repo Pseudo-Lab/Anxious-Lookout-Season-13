@@ -271,10 +271,12 @@ def release_model_block(control, native_root):
         journal = ProjectionJournal(read_private(directory / "projection.json"), auth.owner, grant["trialId"])
         if (root / "broker.json").exists():
             for session, entry in read_private(root / "broker.json").items():
+                if entry.get("projectionVersion") != PROJECTION_VERSION:
+                    raise CodexFailure("policy_refused")
                 if entry.get("record", {}).get("turns") or "modelMismatchBaseline" in entry.get("record", {}):
                     expected = journal.projection_mac(session, entry.get("thread"), entry["record"])
                     actual = entry.get("projectionMac")
-                    if entry.get("projectionVersion") != PROJECTION_VERSION or not isinstance(actual, str) or not hmac.compare_digest(expected, actual):
+                    if not isinstance(actual, str) or not hmac.compare_digest(expected, actual):
                         raise CodexFailure("policy_refused")
         state["modelBlocked"] = False
         write_private(directory / "ledger.json", state)

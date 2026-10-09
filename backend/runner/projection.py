@@ -11,7 +11,7 @@ import secrets
 from app.codex_policy import CodexFailure
 
 BASE, MASK = 257, (1 << 64) - 1
-PROJECTION_VERSION = 3
+PROJECTION_VERSION = 4
 
 
 def rolling(value):
@@ -116,4 +116,4 @@ class ProjectionJournal:
 
     def projection_mac(self, session, thread, record):
         body = json.dumps([self.owner, self.trial, session, thread, record], sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-        return hmac.new(self.key, b"projection-v3\0" + body, hashlib.sha256).hexdigest()
+        return hmac.new(self.key, b"projection-v4\0" + body, hashlib.sha256).hexdigest()

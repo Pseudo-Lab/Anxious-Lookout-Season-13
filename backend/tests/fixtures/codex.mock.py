@@ -19,8 +19,14 @@ def emit(body):
     print(json.dumps(body), flush=True)
 
 
+def publish(destination, value):
+    temporary = destination.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value))
+    temporary.replace(destination)
+
+
 def save():
-    path.write_text(json.dumps(records))
+    publish(path, records)
 
 
 for line in sys.stdin:
@@ -28,7 +34,7 @@ for line in sys.stdin:
     method, identity, params = body.get("method"), body.get("id"), body.get("params", {})
     if method in {"thread/start", "thread/resume", "turn/start"}:
         observed.append({"method": method, "model": params.get("model")})
-        trace.write_text(json.dumps(observed))
+        publish(trace, observed)
     if method in {"initialize", "account/login/start"}:
         emit({"id": identity, "result": {}})
     elif method == "initialized":
