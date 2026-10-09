@@ -173,8 +173,11 @@ export interface ArchiveResult {
 
 export interface CodexStatus {
   available: boolean;
-  reason: null | "not_configured" | "unavailable";
+  // 서버가 정한 사유 코드. 새 코드가 추가될 수 있으므로 모르는 값은 일반 "사용할 수 없음"으로 표시한다.
+  reason: string | null;
   verification: "unverified" | "fixture" | "real";
+  // 서버가 강제하는 모델(표시 전용). 연결·모델 표시만으로 실제 응답 성공을 뜻하지 않는다.
+  model?: string;
 }
 
 export type SessionState = "idle" | "running" | "failed";

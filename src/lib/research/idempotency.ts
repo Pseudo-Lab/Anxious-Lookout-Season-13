@@ -20,7 +20,11 @@ export function isUncertain(failure: FetchFailure): boolean {
     failure.kind === "network" ||
     failure.kind === "timeout" ||
     failure.kind === "invalid" ||
-    (failure.kind === "http" && failure.status >= 500 && failure.code !== "policy_pending" && failure.code !== "codex_unavailable")
+    // 5xx라도 정책 대기·Codex 선접수 실패(codex_*)는 서버가 요청을 예약하기 전에 거절한 확정 응답이다.
+    (failure.kind === "http" &&
+      failure.status >= 500 &&
+      failure.code !== "policy_pending" &&
+      !(failure.code ?? "").startsWith("codex_"))
   );
 }
 

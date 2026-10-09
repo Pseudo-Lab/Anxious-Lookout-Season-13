@@ -2,6 +2,10 @@
 // 계약의 소유권(타인 ID 404), Origin/CSRF, Idempotency-Key 재생, expectedVersion 충돌, 정책 대기 응답을 흉내 낸다.
 import crypto from "node:crypto";
 
+export const FIXED_MODEL = "gpt-6.1-sol";
+// 선접수 단계에서 거절되는 사유(POST 503 codex_<reason>)
+const GATED_REASONS = ["not_enabled_for_account", "auth_expired", "auth_revoked", "model_unavailable", "policy_refused", "budget_exhausted"];
+
 export const researchMode = {
   // "approved": 승인 계정 허용 / "pending": 모든 개인 API 503 policy_pending
   access: "approved",
@@ -279,6 +283,25 @@ function handleMutation(owner, method, path, b, user) {
       return ok(200, { id: s.id, archived: true, version: s.version });
     }
     if (method === "POST" && m[2]) {
+      if (GATED_REASONS.includes(researchMode.codex)) return fail(503, `codex_${researchMode.codex}`, "Codex is not available");
+      if (researchMode.codex === "mismatch") {
+        // 접수 후 응답 모델 불일치/우회 → 고정 모델 성공으로 기록하지 않고 명시 실패
+        const item = { id: uuid(), type: "message", role: "user", text: b.text, source: "platform", status: "pending" };
+        item.raw = { type: "platformInput", source: "platform", text: b.text, status: "pending" };
+        s.items.push(item);
+        s.state = "running";
+        s.version++;
+        s.updatedAt = now();
+        setTimeout(() => {
+          item.status = "not_recorded";
+          item.raw.status = "not_recorded";
+          s.state = "failed";
+          s.error = { code: "codex_failed", message: "Provider returned model gpt-other" };
+          s.version++;
+          s.updatedAt = now();
+        }, 1500);
+        return ok(202, sessionSummary(s));
+      }
       if (researchMode.codex === "reject") {
         const item = { id: uuid(), type: "message", role: "user", text: b.text, source: "platform", status: "pending" };
         item.raw = { type: "platformInput", source: "platform", text: b.text, status: "pending" };
@@ -398,6 +421,13 @@ function handleRead(owner, path, url) {
     return v ? ok(200, previewOf(doc, v)) : fail(404, "not_found", "Not found");
   }
   if (path === "/research/codex/status") {
+    if (GATED_REASONS.includes(researchMode.codex)) {
+      // #7 계약: 계정별 선접수 불가 사유 + 서버 고정 모델(인증 정보·계정 식별자 없음)
+      return ok(200, { available: false, reason: researchMode.codex, verification: "unverified", model: FIXED_MODEL });
+    }
+    if (researchMode.codex === "mismatch") {
+      return ok(200, { available: true, reason: null, verification: "fixture", model: FIXED_MODEL });
+    }
     return ok(200, researchMode.codex === "fixture" ? { available: true, reason: null, verification: "fixture" } : { available: false, reason: "not_configured", verification: "unverified" });
   }
   if (path === "/research/sessions") {

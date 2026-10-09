@@ -285,8 +285,10 @@ function SessionView({ id }: { id: string }) {
       {s.state === "failed" && (
         <Notice tone="error">
           마지막 요청이 실패했습니다.{" "}
+          {/* 서버 오류 문구를 그대로 옮기지 않는다(외부 provider 원문·식별자 노출 방지). 아는 코드만 안내하고 나머지는 코드만 표시. */}
           {s.error &&
-            (researchErrorMessage({ kind: "http", status: 0, code: s.error.code }) ?? `${s.error.message} (${s.error.code})`)}{" "}
+            (researchErrorMessage({ kind: "http", status: 0, code: s.error.code }) ??
+              `Codex 요청을 처리하지 못했습니다 (${s.error.code}). 다른 모델로 자동 전환하거나 자동으로 다시 실행하지 않습니다.`)}{" "}
           이전 기록은 보존되어 있으며 새 메시지로 이어서 질문할 수 있습니다. 실패한 요청은 자동으로 다시 실행되지 않습니다.
         </Notice>
       )}

@@ -349,9 +349,12 @@ function parseAdminAccount(v: unknown): AdminAccount | null {
 
 function parseCodexStatus(v: unknown): CodexStatus | null {
   if (!isObj(v) || typeof v.available !== "boolean") return null;
-  if (v.reason !== null && v.reason !== "not_configured" && v.reason !== "unavailable") return null;
+  if (v.reason !== null && !isStr(v.reason)) return null;
   if (v.verification !== "unverified" && v.verification !== "fixture" && v.verification !== "real") return null;
-  return { available: v.available, reason: v.reason, verification: v.verification };
+  if (v.model !== undefined && v.model !== null && !isStr(v.model)) return null;
+  const out: CodexStatus = { available: v.available, reason: v.reason, verification: v.verification };
+  if (isStr(v.model) && v.model !== "") out.model = v.model;
+  return out;
 }
 
 function parseSessionSummary(v: unknown): SessionSummary | null {
@@ -597,6 +600,20 @@ export function researchErrorMessage(failure: FetchFailure): string | null {
       return "Codex에 연결할 수 없어 대화를 진행할 수 없습니다. 이전 기록은 보존됩니다.";
     case "codex_rejected":
       return "Codex가 이 요청을 받지 않았습니다. 입력은 대화에 보존되어 있으며 새 메시지로 다시 보낼 수 있습니다.";
+    case "codex_not_enabled_for_account":
+      return "이 계정에는 아직 Codex가 열려 있지 않습니다. 입력과 이전 대화는 그대로 있습니다.";
+    case "codex_auth_expired":
+      return "서버의 Codex 인증이 만료되어 요청을 보내지 못했습니다. 운영자가 다시 인증한 뒤 이어서 질문할 수 있습니다. 입력과 이전 대화는 그대로 있습니다.";
+    case "codex_auth_revoked":
+      return "서버의 Codex 인증이 회수되어 요청을 보내지 못했습니다. 입력과 이전 대화는 그대로 있습니다.";
+    case "codex_model_unavailable":
+      return "고정된 모델을 사용할 수 없어 요청을 처리하지 못했습니다. 다른 모델로 자동 전환하지 않습니다. 입력과 이전 대화는 그대로 있습니다.";
+    case "codex_policy_refused":
+      return "정책에 따라 이 요청이 거부되었습니다. 입력과 이전 대화는 그대로 있습니다.";
+    case "codex_budget_exhausted":
+      return "Codex 사용 한도에 도달해 요청을 보내지 못했습니다. 입력과 이전 대화는 그대로 있습니다.";
+    case "codex_failed":
+      return "Codex 요청이 실패했습니다. 자동으로 다시 실행하거나 다른 모델로 바꾸지 않습니다. 이전 대화는 그대로 있습니다.";
     case "not_ready":
       return "서비스가 준비되지 않았습니다. 잠시 후 다시 시도해 주세요.";
     default:

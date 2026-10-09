@@ -412,7 +412,15 @@ const publishButton = () => main.getByRole("button", { name: /글과 참고 자�
 
 // R9. 세션: Codex 미연결 안내 → 전송 실패 시 입력 보존 → 모의 연결 후 이어하기·도구 이력·원본
 await page.goto(U("/research/?tab=sessions"));
-check("R9. codex unavailable banner", await appears(main.getByText("Codex에 연결되어 있지 않아")));
+check("R9. codex unavailable banner", await appears(main.getByText("새 대화를 진행할 수 없지만")));
+// R9a. 계약에 아직 없는 사유 코드와 서버 고정 모델: 형식 오류로 막지 않고 일반 안내 + 모델 표시(실제 응답 성공으로 표시하지 않음)
+await setMock("codex=auth_expired");
+await page.reload();
+check("R9a. auth_expired reason explained", await appears(main.getByText("서버의 Codex 인증이 만료되었습니다")));
+check("R9a. fixed model shown, no auto switch", await appears(main.getByText("모델: gpt-6.1-sol (서버에서 고정)")) && (await appears(main.getByText("다른 모델로 자동 전환하지 않습니다"))));
+check("R9a. no login/API-key input offered", (await main.getByLabel(/API|키|ChatGPT/).count()) === 0);
+await setMock("codex=unavailable");
+await page.reload();
 await main.getByLabel("새 대화 제목").fill("세션 1");
 await main.getByRole("button", { name: "새 대화" }).click();
 await page.waitForURL(/\/research\/session\/\?id=/);
@@ -450,6 +458,40 @@ check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: 
   await main.getByRole("button", { name: "보내기" }).click();
   check("R9b. new explicit message after failure works", await appears(main.getByText("모의 응답: 거절 후 새 질문"), 15000));
   check("R9b. rejected input still preserved after new turn", (await main.locator("li.bg-indigo-50", { hasText: "거절 질문" }).count()) === 1);
+}
+
+// R9g. #7 선접수 실패(503 codex_*)는 확정 거절: 안내 + 입력 유지 + 같은 key 재전송 대상 아님 / 접수 후 모델 불일치는 명시 실패
+{
+  for (const [mode, text] of [
+    ["auth_expired", "서버의 Codex 인증이 만료되어"],
+    ["not_enabled_for_account", "이 계정에는 아직 Codex가 열려 있지 않습니다"],
+    ["model_unavailable", "고정된 모델을 사용할 수 없어"],
+    ["budget_exhausted", "사용 한도에 도달해"],
+  ]) {
+    await setMock(`codex=${mode}`);
+    await page.reload();
+    await main.getByLabel("메시지").waitFor();
+    await main.getByLabel("메시지").fill(`${mode} 질문`);
+    await main.getByRole("button", { name: "보내기" }).click();
+    check(`R9g. ${mode}: specific guidance`, await appears(main.getByText(text)));
+    check(`R9g. ${mode}: input preserved`, (await main.getByLabel("메시지").inputValue()) === `${mode} 질문`);
+    check(
+      `R9g. ${mode}: definitive (no same-key resend, nothing stored)`,
+      (await main.getByRole("button", { name: "다시 보내기" }).count()) === 0 && !(await page.evaluate(() => JSON.stringify({ ...sessionStorage }))).includes(`${mode} 질문`)
+    );
+  }
+  await setMock("codex=mismatch");
+  await page.reload();
+  await main.getByLabel("메시지").waitFor();
+  await main.getByLabel("메시지").fill("모델 불일치 질문");
+  await main.getByRole("button", { name: "보내기" }).click();
+  check("R9g. model mismatch -> explicit failure, no auto switch", await appears(main.getByText("다른 모델로 바꾸지 않습니다")));
+  check("R9g. raw provider text not shown", !(await main.innerText()).includes("gpt-other"));
+  check("R9g. mismatched input kept as unrecorded", await appears(main.locator("li.bg-indigo-50", { hasText: "모델 불일치 질문" }).getByText("미기록 입력")));
+  await setMock("codex=fixture");
+  await page.reload();
+  await main.getByLabel("메시지").waitFor();
+  await main.getByLabel("메시지").fill("");
 }
 
 // R12. 메시지 응답 유실 → polling으로 서버 version 변경 → 같은 내용 재전송: 모델 turn 중복 없음
