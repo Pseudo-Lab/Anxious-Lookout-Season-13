@@ -30,11 +30,23 @@ class OwnedEvents:
         if epoch != self.epoch or not self.live:
             return None
         method, params = message.get('method'), message.get('params', {})
-        if not isinstance(params, dict) or not isinstance(params.get('turn', {}), dict):
+        if not isinstance(params, dict):
             return None
         if params.get('threadId') != self.turn['thread']:
             return None  # Before reroute/model/error/storage/tool processing.
-        identity = params.get('turnId') or params.get('turn', {}).get('id')
+        if method in {'turn/started', 'turn/updated', 'turn/completed'}:
+            # Native.receive reads nested turn.id. Never prefer an extra flat ID.
+            if 'turnId' in params or not isinstance(params.get('turn'), dict):
+                return None
+            identity = params['turn'].get('id')
+        elif method in {'item/tool/call', 'model/rerouted'}:
+            if 'turn' in params:
+                return None
+            identity = params.get('turnId')
+        else:
+            return None
+        if not isinstance(identity, str) or not identity:
+            return None
         if self.turn['turnId'] is None:
             if method == 'item/tool/call' and len(self.pending) < 32:
                 self.pending.append(deepcopy(message))

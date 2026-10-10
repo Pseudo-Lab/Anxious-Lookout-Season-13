@@ -65,9 +65,28 @@ for method in ('model/rerouted', 'turn/completed', 'turn/updated'):
     deliver({'method': method, 'params': {'threadId': 'original-thread', 'turnId': 'original-turn',
                                         'turn': {'id': 'original-turn', 'model': 'wrong'}}})
 assert len(calls) == len(replies) == 1 and not effects and gate.live
+invalid = [
+    {'turnId': 'web-turn', 'turn': {'id': 'previous-turn', 'model': 'wrong'}},
+    {'turnId': 'web-turn'}, {'turn': None}, {'turn': 'web-turn'},
+    {'turn': {}}, {'turn': {'id': ''}}, {'turn': {'id': 7}},
+    {'turn': {'id': True}}, {'turn': {'id': ['web-turn']}},
+    {'turn': {'id': 'previous-turn', 'model': 'wrong'}},
+    {'turnId': 'web-turn', 'turn': {'id': 'web-turn'}},
+]
+for method in ('turn/started', 'turn/updated', 'turn/completed'):
+    for params in invalid:
+        deliver({'method': method, 'params': {'threadId': 'web-thread', **params}})
+for method in ('item/tool/call', 'model/rerouted'):
+    for params in ({'turnId': 'web-turn', 'turn': {'id': 'previous-turn'}},
+                   {'turnId': ''}, {'turnId': 7}, {'turnId': True}, {}):
+        deliver({'id': 19, 'method': method, 'params': {'threadId': 'web-thread', **params}})
+assert len(calls) == len(replies) == 1 and not effects and gate.live and not native.completed
+deliver({'method': 'turn/started', 'params': {'threadId': 'web-thread', 'turn': {'id': 'web-turn'}}})
+deliver({'method': 'turn/updated', 'params': {'threadId': 'web-thread', 'turn': {'id': 'web-turn'}}})
+assert effects == ['turn/started', 'turn/updated']
 deliver({'method': 'turn/completed', 'params': {'threadId': 'web-thread', 'turn': {'id': 'web-turn'}}})
 deliver(tool(call='late', rpc=11))
-assert len(calls) == len(replies) == 1 and effects == ['turn/completed']
+assert len(calls) == len(replies) == 1 and effects == ['turn/started', 'turn/updated', 'turn/completed']
 assert native.completed[('web-thread', 'web-turn')]['id'] == 'web-turn'
 gate.disconnect()
 deliver(tool(call='disconnected', rpc=12))
@@ -89,4 +108,5 @@ assert replies[-1]['result']['success'] is False and new.accept(3, message) is N
 assert len(calls) == 2 and len(replies) == 3
 print(json.dumps(dict(synthetic=True, callbacks=2, exactSessionAuthority=True,
                      foreignEffects=0, staleCallbacks=0, duplicateCallbacks=0,
+                     conflictingIdentityAccepted=False, previousTurnModelBlock=False,
                      unknownOutcomeReplay=False, productionGatewayImplemented=False)))

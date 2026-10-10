@@ -1,5 +1,6 @@
 """Pinned native tool roundtrip via fixture-only shared ingress, Docker network-none."""
 import base64
+import argparse
 import ipaddress
 import json
 import os
@@ -20,10 +21,16 @@ from runner.app import Native
 from owned_event_fixture import OwnedEvents
 from stock_wire import Client
 
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--legacy-history', action='store_true')
+parser.add_argument('--legacy-tools', action='store_true')
+parser.add_argument('--minimal-startup', action='store_true')
+options = parser.parse_args()
+
 root = Path('/tmp/shared-tools'); root.mkdir(mode=0o700)
 for name in ('home', 'codex', 'original', 'web'): (root / name).mkdir(mode=0o700)
 models = json.loads(Path('/fixture-models.json').read_text())
-audit = {'responsePosts': 0, 'toolOutputs': 0, 'wrongModel': False, 'refreshPosts': 0,
+audit = {'responsePosts': 0, 'toolOutputs': 0, 'wrongModel': False, 'nonResponsesPosts': 0,
          'missingRegisteredTools': 0}
 requests, callbacks, captures, failures = [], [], [], []
 mutex = threading.Lock()
@@ -46,7 +53,7 @@ class Mock(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', '0'))))
         if 'responses' not in self.path:
-            audit['refreshPosts'] += 1
+            audit['nonResponsesPosts'] += 1  # Other mock POSTs are not proof of auth refresh.
             self.send_response(400); self.end_headers(); return
         with mutex:
             audit['responsePosts'] += 1
@@ -124,7 +131,10 @@ settings = ['cli_auth_credentials_store="ephemeral"', 'features.daemon_auto_star
             'model_providers.fixture_openai.base_url=' + json.dumps(origin + '/backend-api/codex'),
             'model_providers.fixture_openai.supports_websockets=false',
             'model_providers.fixture_openai.request_max_retries=0', 'model_providers.fixture_openai.stream_max_retries=0']
-for setting in settings: args += ['-c', setting]
+for setting in settings:
+    if options.minimal_startup and setting.startswith('features.') and not setting.startswith('features.daemon_auto_start='):
+        continue
+    args += ['-c', setting]
 p = subprocess.Popen(args, env={'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': str(root/'home'),
                      'CODEX_HOME': str(root/'codex'), 'CODEX_CA_CERTIFICATE': str(cert_path), 'LANG': 'C.UTF-8'},
                      cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -139,7 +149,9 @@ def callback(request):
 httpx.Client = lambda **kwargs: original_httpx(transport=httpx.MockTransport(callback), **kwargs)
 clients, gates, natives, results = [], [], [], {}
 report = {'hostAuthRead': False, 'realProviderContact': False, 'syntheticExternalTokenOnly': True,
-          'productionGatewayImplemented': False, 'authenticatedAuthorityProven': False}
+          'productionGatewayImplemented': False, 'authenticatedAuthorityProven': False,
+          'legacyHistory': options.legacy_history, 'legacyTools': options.legacy_tools,
+          'minimalStartup': options.minimal_startup}
 try:
     deadline = time.monotonic() + 10
     while not Path(path).exists() and time.monotonic() < deadline:
@@ -153,10 +165,16 @@ try:
     assert clients[0].rpc('account/read', {'refreshToken': False}) is not None
     for index, client in enumerate(clients):
         label = ('original', 'web')[index]; tool = label + '_fixture_tool'
-        response = client.rpc('thread/start', {'model': 'gpt-6.1-sol', 'cwd': str(root/label),
-                    'approvalPolicy': 'never', 'sandbox': 'read-only', 'dynamicTools': [{'type': 'function',
-                    'name': tool, 'description': 'Synthetic save', 'inputSchema': {'type': 'object',
-                    'properties': {'content': {'type': 'string'}}, 'required': ['content'], 'additionalProperties': False}}]})
+        registration = {'type': 'function', 'name': tool, 'description': 'Synthetic save',
+                        'inputSchema': {'type': 'object', 'properties': {'content': {'type': 'string'}},
+                                        'required': ['content'], 'additionalProperties': False}}
+        if options.legacy_tools:
+            registration.pop('type')
+        request = {'model': 'gpt-6.1-sol', 'cwd': str(root/label), 'approvalPolicy': 'never',
+                   'sandbox': 'read-only', 'dynamicTools': [registration]}
+        if options.legacy_history:
+            request.update(historyMode='legacy', ephemeral=False)
+        response = client.rpc('thread/start', request)
         assert response
         gate = OwnedEvents(response['thread']['id'], label+'-session', label+'-request', label+'-token', 1, [tool])
         gates.append(gate)
@@ -221,5 +239,5 @@ finally:
     report.update(audit, failures=failures, nativeExitCode=p.returncode,
                   authJsonPersisted=(root/'codex'/'auth.json').exists())
     print(json.dumps(report))
-assert report.get('actualStockToolCalls') == 2 and not audit['wrongModel'] and not audit['refreshPosts']
+assert report.get('actualStockToolCalls') == 2 and not audit['wrongModel'] and not audit['nonResponsesPosts']
 assert p.returncode == 0 and not report['authJsonPersisted']

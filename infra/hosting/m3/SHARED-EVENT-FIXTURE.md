@@ -58,7 +58,53 @@ exact-tag source validates/passes dynamic tools into StartThreadOptions and incl
 registration tests, but it does not explain this packaged runtime observation.
 Exact source path: `app-server/src/request_processors/thread_processor.rs`,
 thread_start_task; `app-server/tests/suite/v2/dynamic_tools.rs`; core tools/spec_plan.rs.
-No runtime feature expansion, alternate model, native build or fork was attempted.
+At the initial checkpoint no runtime feature expansion, alternate model, native
+build or fork was attempted. The later blank-fixture comparison below removes
+optional overrides; it does not change production configuration.
+
+### Follow-up diagnosis and EVENT-R1
+
+`sudo bash infra/hosting/m3/check_stock_registration.sh` is a minimal, zero-turn,
+no-login registration contract probe. It independently verifies the executable hash
+fbbaec80443919f86dd63648a0b62759cf6f1d0e09310602fde96885e0bceb3e.
+Canonical function type/name/description/inputSchema matches the pinned experimental
+schema; legacy type-omitted format is supported by its source normalizer. Both are
+accepted; bad type is rejected with -32600. Opaque invalid schema content is accepted,
+which is a parser observation, not a claim of complete JSON Schema validation.
+Persisted tool rows are zero in the no-turn named-thread probe, not proof of a lost
+registration across successful native inference.
+
+Actual stock variants use the same model/image/provider fixture; optional arguments:
+
+```sh
+sudo bash infra/hosting/m3/check_shared_events.sh /path/to/pinned/models.json --legacy-history
+sudo bash infra/hosting/m3/check_shared_events.sh /path/to/pinned/models.json --legacy-history --legacy-tools
+sudo bash infra/hosting/m3/check_shared_events.sh /path/to/pinned/models.json --legacy-history --minimal-startup
+```
+
+`--legacy-history` aligns historyMode=legacy/ephemeral=false with current runner.
+`--legacy-tools` removes canonical type as the source compatibility test does.
+`--minimal-startup` removes optional feature overrides only within the blank fixture;
+Docker network-none/read-only and per-thread read-only/never approval remain. All
+three still omit the registered tools and fail acceptance with tool calls=0/failed
+turns=2/exit1, native cleanup0. Minimal startup additionally caused eight non-Responses
+mock POSTs; their purpose was not established. The former audit key refreshPosts
+counted every non-Responses POST and is now correctly named nonResponsesPosts.
+This does not prove managed credential renewal. Other tested variants had zero.
+No production flags, model/version, real account or original runtime were changed.
+
+Therefore the bounded comparisons exclude these simple format/history/feature-
+override explanations. They do not identify the exact packaged-runtime root cause
+or exclude every valid stock configuration. Request acceptance alone still cannot
+prove registration reaches the model. No working minimum correction is established.
+
+EVENT-R1 exposed competing flat turnId and nested turn.id: gate acceptance previously
+used the former, Native.receive the latter. The fixture now reads nested turn.id for
+turn/started/updated/completed, flat turnId for tool/reroute, and rejects competing
+shapes, missing/empty/non-string identities before buffering, closing or downstream
+effects. Regression tests include wrong-model previous completion, malformed types
+and normal own events; reviewer conflicting.py also passes unchanged after the fix.
+This remains a synthetic parser defect/fix, not observed stock malformed traffic.
 
 The previous stock-client reviewer minor is fixed: foreign thread event observation
 is now asserted in `stock_client_probe.py`, in addition to foreign read/private-name
