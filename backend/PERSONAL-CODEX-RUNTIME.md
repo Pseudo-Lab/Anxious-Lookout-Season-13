@@ -1,5 +1,11 @@
 # Personal runtime configuration — review required before actual operation
 
+Current login-UID protocol and readonly selected-source diagnosis are in
+[USER-UID-CONNECTION.md](USER-UID-CONNECTION.md). Enable requires privately verified
+PERSONAL_RUNNER_STATE_ID, matching runners.json stateId and explicit fresh-root
+initialization before process startup. Bootstrap needs none of these. Current
+structure coverage is35cases/20rejections; dated results below remain historical.
+
 This document covers the loopback Compose candidate. The later
 [existing K3s HTTPS `/codex-trial` candidate](../infra/codex-trial/README.md)
 provides new trial DB/state, route-local access/encoding, explicit remote opt-in,

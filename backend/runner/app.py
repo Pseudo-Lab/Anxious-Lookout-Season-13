@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.codex_policy import MODEL, CodexFailure, ERRORS, error_reason
 from .auth import PersonalAuth, read_private, write_private
 from .projection import PROJECTION_VERSION
+from .binding import canonical_uuid, require_binding
 
 
 class Turn(BaseModel):
@@ -30,6 +31,7 @@ class Turn(BaseModel):
     tools: list[dict]
     toolToken: str = Field(min_length=32, max_length=100)
     context: dict | None = None
+    expectedThreadId: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 def bind_owner(root, owner):
@@ -66,10 +68,12 @@ def volume_lease(root):
 
 class Native:
     PROJECTION_VERSION = PROJECTION_VERSION
-    def __init__(self, root, model, binary, callback_url, api_key_file=None, auth=None):
+    def __init__(self, root, model, binary, callback_url, api_key_file=None, auth=None, binding_check=None):
         if model != MODEL or api_key_file:
             raise CodexFailure("policy_refused")
         self.auth, self.blocked_reason, self.real_verified = auth, None, False
+        self.binding_check = binding_check
+        self.check_binding()
         self.fixture = binary == "/usr/local/bin/codex-fixture"
         if self.fixture and os.getenv("APP_ENV") != "test":
             raise CodexFailure("policy_refused")
@@ -152,6 +156,10 @@ class Native:
         self.save()
 
     def availability(self):
+        try:
+            self.check_binding()
+        except CodexFailure as failure:
+            return failure.reason
         if self.blocked_reason:
             return self.blocked_reason
         if self.process.poll() is not None:
@@ -164,6 +172,15 @@ class Native:
             except CodexFailure as failure:
                 return failure.reason
         return None
+
+    def check_binding(self):
+        check = getattr(self, "binding_check", None)
+        if check:
+            try:
+                check()
+            except CodexFailure:
+                self.blocked_reason = "policy_refused"
+                raise
 
     def verify_projection(self, session, entry):
         if self.auth and (entry.get("record", {}).get("turns") or "modelMismatchBaseline" in entry.get("record", {})):
@@ -315,6 +332,7 @@ class Native:
             success, result = False, {"error": {"code": "native_turn_mismatch", "message": "Storage tool is outside the active native turn"}}
         else:
             try:
+                self.check_binding()
                 if self.auth:
                     self.auth.permitted_tool(params["arguments"])
                 with httpx.Client(timeout=15, trust_env=False, follow_redirects=False) as client:
@@ -345,15 +363,21 @@ class Native:
                 return result["result"]
 
     def save(self):
+        self.check_binding()
         write_private(self.mapping_file, self.mapping)
 
     def accept(self, session, body):
         request = str(body.requestId)
-        fingerprint = hashlib.sha256(json.dumps({"text": body.text, "tools": body.tools, "context": body.context}, sort_keys=True).encode()).hexdigest()
+        fingerprint_body = {"text": body.text, "tools": body.tools, "context": body.context}
+        if body.expectedThreadId is not None:
+            fingerprint_body["expectedThreadId"] = body.expectedThreadId
+        fingerprint = hashlib.sha256(json.dumps(fingerprint_body, sort_keys=True).encode()).hexdigest()
         # Admission depends on a reserved turn, not a history RPC holding the
         # protocol mutex. The worker waits for that RPC without resubmission.
         with self.state_lock:
             entry = self.mapping.get(session)
+            if body.expectedThreadId is not None and (entry is None or entry.get("thread") != body.expectedThreadId):
+                raise CodexFailure("policy_refused")  # Never replace an established conversation with thread/start.
             recorded = entry.get("requests", {}).get(request) if entry else None
             if recorded:
                 if not hmac.compare_digest(recorded, fingerprint):
@@ -402,9 +426,12 @@ class Native:
         self.lock.acquire()  # Serialize native RPCs after any in-flight history read.
         entry = self.mapping[session]
         try:
+            self.check_binding()
             if entry["thread"]:
                 result = self.rpc("thread/resume", {"threadId": entry["thread"], "model": self.model,
                                   "cwd": str(self.work), "approvalPolicy": "never", "sandbox": "read-only"})
+                if result.get("thread", {}).get("id") != entry["thread"]:
+                    raise CodexFailure("policy_refused")
             else:
                 result = self.rpc("thread/start", {"model": self.model, "cwd": str(self.work),
                                   "approvalPolicy": "never", "sandbox": "read-only", "dynamicTools": body.tools,
@@ -467,6 +494,7 @@ class Native:
                 self.lock.release()
 
     def read(self, session):
+        self.check_binding()
         with self.state_lock:
             entry = self.mapping.get(session)
             if entry is None:
@@ -488,7 +516,7 @@ class Native:
         with self.state_lock:
             entry = self.mapping[session]
             state = "running" if self.active_session == session else entry["state"]
-            return {"requestId": entry["request"], "turnId": entry.get("turn_id"), "state": state,
+            return {"requestId": entry["request"], "threadId": entry.get("thread"), "turnId": entry.get("turn_id"), "state": state,
                     "record": {"turns": entry["record"].get("turns", [])}, "errorCode": entry.get("error"), "model": MODEL}
 
     def close(self):
@@ -498,6 +526,11 @@ class Native:
         active_at_start = self.active_session is not None
         alive_at_start = self.process.poll() is None
         forced = False
+        binding_ok = True
+        try:
+            self.check_binding()
+        except CodexFailure:
+            binding_ok = False
         try:
             if alive_at_start:
                 try:
@@ -519,7 +552,7 @@ class Native:
                 worker.join(timeout=20)
         finally:
             if self.auth:
-                clean = alive_at_start and not forced and not active_at_start and self.active_session is None and self.process.poll() == 0
+                clean = binding_ok and alive_at_start and not forced and not active_at_start and self.active_session is None and self.process.poll() == 0
                 self.auth.close(clean=clean)
             for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
                 if stream:
@@ -532,6 +565,14 @@ class Native:
 
 def create_app():
     owner = str(uuid.UUID(os.environ["RUNNER_ACCOUNT_ID"]))
+    state_id = os.getenv("RUNNER_STATE_ID")
+    if state_id is not None:
+        canonical_uuid(state_id)
+    elif os.getenv("APP_ENV") != "test":
+        raise ValueError("Explicit durable runner state identity is required")
+    pod_uid = os.getenv("RUNNER_POD_UID")
+    if pod_uid is not None:
+        canonical_uuid(pod_uid)  # Auxiliary instance metadata, never an auth identity.
     token = Path(os.environ["RUNNER_TOKEN_FILE"]).read_text().strip()
     model = os.getenv("CODEX_MODEL", MODEL)
     if len(token) < 32 or model != MODEL or os.getenv("CODEX_API_KEY_FILE"):
@@ -540,6 +581,8 @@ def create_app():
 
     @asynccontextmanager
     async def lifespan(app):
+        if state_id:
+            require_binding(root, owner, state_id)  # Refuse wrong/fresh volume before auth/native startup.
         bind_owner(root, owner)
         with volume_lease(root):
             auth = None
@@ -553,7 +596,8 @@ def create_app():
                 elif mode != "none":
                     raise CodexFailure("policy_refused")
                 app.state.native = Native(root, model, os.environ.get("CODEX_BIN", "/usr/local/bin/codex"),
-                                          os.environ["RESEARCH_TOOL_CALLBACK_URL"], auth=auth)
+                                          os.environ["RESEARCH_TOOL_CALLBACK_URL"], auth=auth,
+                                          binding_check=(lambda: require_binding(root, owner, state_id)) if state_id else None)
             except Exception as failure:
                 app.state.auth_failure = failure.reason if isinstance(failure, CodexFailure) else "unavailable"
                 if auth:
@@ -570,6 +614,15 @@ def create_app():
     async def authenticate(request: Request, call_next):
         if not hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + token):
             return JSONResponse({"error": "unauthenticated"}, status_code=401)
+        if state_id and not hmac.compare_digest(request.headers.get("x-runner-state-id", ""), state_id):
+            return JSONResponse({"ownerId": owner, "error": "codex_policy_refused"}, status_code=503)
+        if state_id:
+            try:
+                require_binding(root, owner, state_id)
+            except CodexFailure:
+                if app.state.native:
+                    app.state.native.blocked_reason = "policy_refused"
+                return JSONResponse({"ownerId": owner, "error": "codex_policy_refused"}, status_code=503)
         result = await call_next(request)
         result.headers["Cache-Control"] = "no-store"
         return result
@@ -582,9 +635,9 @@ def create_app():
     def health():
         native = app.state.native
         if not native:
-            return {"ownerId": owner, "verification": "unverified", "available": False, "reason": app.state.auth_failure, "model": MODEL}
+            return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, "verification": "unverified", "available": False, "reason": app.state.auth_failure, "model": MODEL}
         reason = native.availability()
-        return {"ownerId": owner, "verification": "fixture" if native.fixture else "real" if native.real_verified else "unverified", "available": reason is None, "reason": reason, "model": MODEL}
+        return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, "verification": "fixture" if native.fixture else "real" if native.real_verified else "unverified", "available": reason is None, "reason": reason, "model": MODEL}
 
     @app.post("/sessions/{identity}/turn", status_code=202)
     def turn(identity: uuid.UUID, body: Turn):
@@ -596,7 +649,7 @@ def create_app():
             return JSONResponse({"ownerId": owner, "error": str(failure)}, status_code=503)
         except RuntimeError:
             return JSONResponse({"ownerId": owner, "error": "conflict"}, status_code=409)
-        return {"ownerId": owner, "state": "running", "requestId": str(body.requestId)}
+        return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, "state": "running", "requestId": str(body.requestId)}
 
     @app.get("/sessions/{identity}")
     def read(identity: uuid.UUID):
@@ -605,6 +658,6 @@ def create_app():
         result = app.state.native.read(str(identity))
         if result is None:
             return JSONResponse({"ownerId": owner, "error": "not_found"}, status_code=404)
-        return {"ownerId": owner, **result}
+        return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, **result}
 
     return app

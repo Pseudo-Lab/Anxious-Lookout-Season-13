@@ -38,16 +38,21 @@ class ToolRequest(Input):
 
 class Runner:
     """Trusted mapping selected using the service account, never a client URL."""
-    def __init__(self, url, token, owner):
-        self.url, self.token, self.owner = url, token, owner
+    def __init__(self, url, token, owner, state_id=None):
+        self.url, self.token, self.owner, self.state_id = url, token, owner, state_id
 
     def call(self, method, path, body=None):
         with httpx.Client(timeout=5, trust_env=False, follow_redirects=False) as client:
-            reply = client.request(method, self.url + path, json=body, headers={"Authorization": "Bearer " + self.token})
+            headers = {"Authorization": "Bearer " + self.token}
+            if self.state_id:
+                headers["X-Runner-State-Id"] = self.state_id
+            reply = client.request(method, self.url + path, json=body, headers=headers)
             reply.raise_for_status()
             result = reply.json()
             if not isinstance(result, dict) or result.get("ownerId") != str(self.owner):
                 raise ValueError("Runner ownership mismatch")
+            if self.state_id and result.get("stateId") != self.state_id:
+                raise ValueError("Runner state binding mismatch")
             return result
 
     def read(self, identity):
@@ -67,9 +72,18 @@ def runners_from_file():
     entries = json.loads(Path(filename).read_text())
     if not isinstance(entries, dict):
         raise ValueError("Invalid runner configuration")
-    result, destinations = {}, set()
+    result, destinations, states = {}, set(), set()
     for identity, entry in entries.items():
         owner = uuid.UUID(identity)
+        if not isinstance(entry, dict) or entry.keys() - {"url", "tokenFile", "stateId"}:
+            raise ValueError("Invalid runner configuration")
+        state_id = entry.get("stateId")
+        if state_id is None and os.getenv("APP_ENV") != "test":
+            raise ValueError("A verified durable state binding is required")
+        if state_id is not None:
+            if not isinstance(state_id, str) or str(uuid.UUID(state_id)) != state_id or state_id in states:
+                raise ValueError("Each account requires a canonical isolated state identity")
+            states.add(state_id)
         url = entry["url"].rstrip("/")
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password or url in destinations:
@@ -78,7 +92,7 @@ def runners_from_file():
         if len(token) < 32 or any(r.token == token for r in result.values()):
             raise ValueError("Each runner requires a separate secret")
         destinations.add(url)
-        result[owner] = Runner(url, token, owner)
+        result[owner] = Runner(url, token, owner, state_id)
     return result
 
 
@@ -197,6 +211,12 @@ def register_conversations(app, authorized, sessions, settings, response, write)
             result = runner.read(row.id)
             if result.get("requestId") != str(row.request_id) or result.get("state") not in {"running", "idle", "failed"}:
                 raise ValueError()
+            thread_id = result.get("threadId")
+            if thread_id is not None and (not isinstance(thread_id, str) or not 1 <= len(thread_id) <= 200):
+                raise ValueError()
+            expected_thread = row.native_record.get("nativeThreadId")
+            if expected_thread is not None and thread_id != expected_thread:
+                raise ValueError()
         except (httpx.HTTPError, ValueError, KeyError):
             # A short outage must not pretend to cancel a still-running paid turn.
             if row.tool_expires_at and row.tool_expires_at <= datetime.now(timezone.utc):
@@ -209,6 +229,8 @@ def register_conversations(app, authorized, sessions, settings, response, write)
             fail("codex_unavailable", "Codex history is unavailable", 503)
         # Native snapshots cannot overwrite platform-retained failed inputs.
         row.native_record = {**record, "unrecordedInputs": row.native_record.get("unrecordedInputs", [])}
+        if thread_id is not None:
+            row.native_record["nativeThreadId"] = thread_id  # Server-only mapping, excluded from browser summaries/items.
         if result["state"] != row.state:
             row.state = result["state"]
             safe_errors = {*ERRORS.values(), "codex_failed", "codex_rejected", "codex_unavailable"}
@@ -234,6 +256,8 @@ def register_conversations(app, authorized, sessions, settings, response, write)
                     return
                 payload = {"requestId": str(request_id), "text": row.pending_text,
                            "tools": definitions(), "toolToken": token, "context": row.context}
+                if row.native_record.get("nativeThreadId") is not None:
+                    payload["expectedThreadId"] = row.native_record["nativeThreadId"]
             runner = runner_for(owner)
             submitting = True
             runner.submit(identity, payload)
@@ -341,6 +365,8 @@ def register_conversations(app, authorized, sessions, settings, response, write)
                 Store.expect(row, parsed.expectedVersion)
                 if row.state == "running":
                     fail("conflict", "A turn is already running", 409)
+                if row.native_record.get("turns") and not row.native_record.get("nativeThreadId") and app.state.codex_verification != "fixture":
+                    fail("codex_policy_refused", "Existing conversation binding requires reconciliation", 503)
                 runner_for(store.owner)
                 if row.pending_text:
                     prior = {"id": "unrecorded-" + str(row.request_id), "requestId": str(row.request_id),

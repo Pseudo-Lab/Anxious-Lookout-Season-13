@@ -18,6 +18,7 @@ services:
       CODEX_PERSONAL_CONTROL_DIR: /run/personal-control
       CODEX_MODEL: gpt-6.1-sol
       RUNNER_ACCOUNT_ID: ${PERSONAL_PLATFORM_ACCOUNT_ID}
+      RUNNER_STATE_ID: ${PERSONAL_RUNNER_STATE_ID:?Set the privately verified durable state UUID}
       RUNNER_TOKEN_FILE: /run/secrets/runner-token
       CODEX_BIN: /usr/local/bin/codex
       RESEARCH_TOOL_CALLBACK_URL: http://api:8080/api/internal/research/tools

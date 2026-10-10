@@ -70,6 +70,36 @@ def test_session_owner_unavailable_and_archive_preserves_cache(client, admin):
     assert client.get("/api/research/sessions").json()["items"] == []
 
 
+@pytest.mark.parametrize("field", ["uid", "ownerId", "stateId", "threadId", "expectedThreadId"])
+def test_browser_cannot_select_owner_storage_or_native_thread(client, admin, tmp_path, field):
+    owner, auth = identity(client, admin)
+    runner = FixtureRunner(client.app, owner, tmp_path)
+    client.app.state.research_runners[owner] = runner
+    row = create_session(client, auth)
+    root = "/api/research/sessions/" + row["id"]
+    result = client.post(root + "/messages", json={"text": "explicit input", "expectedVersion": 1,
+                        field: str(uuid.uuid4())}, headers=headers(auth))
+    assert result.status_code == 422 and runner.dispatches == 0
+    assert client.get(root).json()["version"] == 1
+
+
+def test_server_retains_native_thread_binding_without_exposing_or_accepting_it(client, admin, tmp_path):
+    owner, auth = identity(client, admin)
+    thread = "private-native-thread-sentinel"
+    class ThreadedFixture(FixtureRunner):
+        def read(self, identity):
+            return {**super().read(identity), "threadId": thread}
+    runner = ThreadedFixture(client.app, owner, tmp_path)
+    client.app.state.research_runners[owner] = runner
+    row = create_session(client, auth)
+    root = "/api/research/sessions/" + row["id"]
+    assert client.post(root + "/messages", json={"text": "first", "expectedVersion": 1}, headers=headers(auth)).status_code == 202
+    detail = client.get(root).json()
+    assert thread not in json.dumps(detail) and "nativeThreadId" not in detail
+    assert client.post(root + "/messages", json={"text": "same conversation", "expectedVersion": detail["version"]}, headers=headers(auth)).status_code == 202
+    assert runner.last["expectedThreadId"] == thread
+
+
 def test_fixture_tools_full_history_resume_reconnect_and_retry_without_dispatch(client, admin, tmp_path):
     owner, auth = identity(client, admin)
     runner = FixtureRunner(client.app, owner, tmp_path)

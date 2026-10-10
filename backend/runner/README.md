@@ -1,5 +1,11 @@
 # Private Codex runner prototype
 
+Current issue7 login UID/state/session package: [USER-UID-CONNECTION.md](../USER-UID-CONNECTION.md).
+Real mapping requires stateId/RUNNER_STATE_ID and an explicitly initialized fresh
+marker. Request state validation precedes native effects; Pod UID is auxiliary and
+same-conversation resume verifies its private thread. New API/runner images and
+exact operating review are required; existing deployed images are unchanged.
+
 This is an isolated per-service-account app-server broker. Source/fixture validation is separate from real provider authentication, paid turns and native resume acceptance. Deployment/resources/credential injection are not authorized by this development checkpoint.
 
 The optional Docker `runner` stage installs ARM64 Codex **0.160.1** with executable SHA256 `fbbaec80443919f86dd63648a0b62759cf6f1d0e09310602fde96885e0bceb3e`. A different artifact fails the build. Experimental protocol fields are version-dependent. The pinned executable's `generate-json-schema --experimental` was checked in Docker without an account/model request; `dynamicTools` needs initialize.experimentalApi and function descriptors need type=function. Upgrading the pin requires fresh schema and integration verification.

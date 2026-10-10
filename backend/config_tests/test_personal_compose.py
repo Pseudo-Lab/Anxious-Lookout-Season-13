@@ -131,7 +131,7 @@ def test_gateway_route_contract(path, expected):
 
 def test_required_private_input_rejections():
     rows = (RENDERS / "rejections.tsv").read_text().splitlines()
-    assert len(rows) == 18 and all(row.endswith("\trejected") for row in rows)
+    assert len(rows) == 20 and all(row.endswith("\trejected") for row in rows)
     assert any(row.startswith("PERSONAL_PLATFORM_ACCOUNT_ID\t") for row in rows)
     assert any(row.startswith("PERSONAL_PROVIDER_EGRESS_NETWORK\t") for row in rows)
 
@@ -169,7 +169,7 @@ def test_operator_structure_checker_accepts_renderer_output(mode):
     validator()(rendered(mode), enabled=mode == "enabled")
 
 
-@pytest.mark.parametrize("damage", ["network_alias", "public_ingress", "runner_db", "operator_image", "owner", "model", "shared_control", "parent_control", "api_provider_net", "unbounded_resources", "encoded_missing", "encoded_relaxed", "encoded_duplicate"])
+@pytest.mark.parametrize("damage", ["network_alias", "public_ingress", "runner_db", "operator_image", "owner", "state", "model", "shared_control", "parent_control", "api_provider_net", "unbounded_resources", "encoded_missing", "encoded_relaxed", "encoded_duplicate"])
 def test_operator_checker_rejects_unsafe_configuration_before_any_start(damage):
     config = rendered("enabled")
     if damage == "network_alias":
@@ -182,6 +182,8 @@ def test_operator_checker_rejects_unsafe_configuration_before_any_start(damage):
         config["services"]["migrate"]["image"] = "synthetic-stale-ops:unstarted"
     elif damage == "owner":
         config["services"]["api"]["environment"]["CODEX_PERSONAL_ACCOUNT_ID"] = "invalid-owner"
+    elif damage == "state":
+        config["services"]["personal-runner"]["environment"]["RUNNER_STATE_ID"] = "not-a-state-uuid"
     elif damage == "model":
         config["services"]["personal-runner"]["environment"]["CODEX_MODEL"] = "unexpected-model"
     elif damage in {"shared_control", "parent_control"}:

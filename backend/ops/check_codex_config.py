@@ -77,6 +77,9 @@ def check(config, enabled=False):
     owner = env["CODEX_PERSONAL_ACCOUNT_ID"]
     if str(uuid.UUID(owner)) != owner or native_env["RUNNER_ACCOUNT_ID"] != owner or env["CODEX_PERSONAL_ENABLE"] != "true":
         raise ValueError()
+    state_id = native_env.get("RUNNER_STATE_ID")
+    if not isinstance(state_id, str) or str(uuid.UUID(state_id)) != state_id:
+        raise ValueError()
     if not env.get("CODEX_RUNNERS_FILE") or native_env.get("CODEX_MODEL") != "gpt-6.1-sol" or native_env.get("CODEX_AUTH_MODE") != "personal-cache" or native_env.get("CODEX_EXECUTION_SCOPE") != "personal-private":
         raise ValueError()
     if set(native["networks"]) != {"api-runner", "provider-egress"} or not networks["api-runner"].get("internal") or not networks["provider-egress"].get("external"):

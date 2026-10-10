@@ -30,6 +30,7 @@ ENV
 cp "$CONFIG_INPUT_FILE" "$CONFIG_RESULT_DIR/enabled.env"
 cat >> "$CONFIG_RESULT_DIR/enabled.env" <<'ENV'
 PERSONAL_PLATFORM_ACCOUNT_ID=00000000-0000-4000-8000-000000000001
+PERSONAL_RUNNER_STATE_ID=00000000-0000-4000-8000-000000000002
 PERSONAL_RUNNER_IMAGE=synthetic-pinned-runner-runtime:unstarted
 PERSONAL_CONTROL_DIR=/tmp/issue7-config-synthetic/control
 PERSONAL_PROVIDER_EGRESS_NETWORK=synthetic-reviewed-provider-egress
@@ -57,7 +58,7 @@ for config_missing in PERSONAL_PROJECT_NAME PERSONAL_API_IMAGE PERSONAL_DB_PASSW
   fi
   printf '%s\trejected\n' "$config_missing" >> "$CONFIG_RESULT_DIR/rejections.tsv"
 done
-for config_missing in PERSONAL_PLATFORM_ACCOUNT_ID PERSONAL_RUNNER_IMAGE PERSONAL_CONTROL_DIR \
+for config_missing in PERSONAL_PLATFORM_ACCOUNT_ID PERSONAL_RUNNER_STATE_ID PERSONAL_RUNNER_IMAGE PERSONAL_CONTROL_DIR \
   PERSONAL_PROVIDER_EGRESS_NETWORK PERSONAL_RUNNER_CPUS PERSONAL_RUNNER_MEMORY; do
   sed "/^${config_missing}=/d" "$CONFIG_RESULT_DIR/enabled.env" > "$CONFIG_RESULT_DIR/missing.env"
   if render "$CONFIG_RESULT_DIR/missing.env" "$CONFIG_RESULT_DIR/missing.json" enabled 2> "$CONFIG_RESULT_DIR/rejection.log"; then
@@ -66,7 +67,7 @@ for config_missing in PERSONAL_PLATFORM_ACCOUNT_ID PERSONAL_RUNNER_IMAGE PERSONA
   fi
   printf '%s\trejected\n' "$config_missing" >> "$CONFIG_RESULT_DIR/rejections.tsv"
 done
-for config_empty in PERSONAL_PLATFORM_ACCOUNT_ID PERSONAL_RUNNER_IMAGE PERSONAL_CONTROL_DIR \
+for config_empty in PERSONAL_PLATFORM_ACCOUNT_ID PERSONAL_RUNNER_STATE_ID PERSONAL_RUNNER_IMAGE PERSONAL_CONTROL_DIR \
   PERSONAL_PROVIDER_EGRESS_NETWORK PERSONAL_RUNNER_CPUS PERSONAL_RUNNER_MEMORY; do
   sed "s/^${config_empty}=.*/${config_empty}=/" "$CONFIG_RESULT_DIR/enabled.env" > "$CONFIG_RESULT_DIR/missing.env"
   if render "$CONFIG_RESULT_DIR/missing.env" "$CONFIG_RESULT_DIR/missing.json" enabled 2> "$CONFIG_RESULT_DIR/rejection.log"; then
