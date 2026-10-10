@@ -32,6 +32,7 @@ parser.add_argument('--stdio', action='store_true')
 parser.add_argument('--code-mode-wire', action='store_true')
 parser.add_argument('--enable-code-mode-host', action='store_true')
 parser.add_argument('--permission-probe', action='store_true')
+parser.add_argument('--fail-after-tool', action='store_true')
 options = parser.parse_args()
 
 root = Path('/tmp/shared-tools'); root.mkdir(mode=0o700)
@@ -40,6 +41,7 @@ models = json.loads(Path('/fixture-models.json').read_text())
 audit = {'responsePosts': 0, 'toolOutputs': 0, 'wrongModel': False, 'nonResponsesPosts': 0,
          'codeModeExecAdvertised': False, 'registeredToolInPrompt': False,
          'codeModeDisabledObserved': False, 'codeModeHostMissingObserved': False,
+         'postToolFailuresInjected': 0,
          'missingRegisteredTools': 0}
 requests, callbacks, captures, failures = [], [], [], []
 permission_results = {}
@@ -120,6 +122,12 @@ class Mock(BaseHTTPRequestHandler):
                 audit['codeModeHostMissingObserved'] |= 'failed to spawn code-mode host' in text and 'No such file' in text
                 if not any(v['call_id'] == call and 'saved' in str(v.get('output')) for v in outputs):
                     payload = b'{"error":{"message":"Fixture tool result unavailable","type":"invalid_request_error"}}'
+                    self.send_response(400); self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(payload))); self.end_headers(); self.wfile.write(payload)
+                    return
+                if options.fail_after_tool:
+                    audit['postToolFailuresInjected'] += 1
+                    payload = b'{"error":{"message":"Injected post-tool failure","type":"invalid_request_error"}}'
                     self.send_response(400); self.send_header('Content-Type', 'application/json')
                     self.send_header('Content-Length', str(len(payload))); self.end_headers(); self.wfile.write(payload)
                     return
@@ -214,6 +222,7 @@ report['companionBinarySha256'] = hashlib.sha256(companion_path.read_bytes()).he
 report['companionMode'] = oct(companion_path.stat().st_mode & 0o777) if companion_path.is_file() else None
 labels = ('web',) if options.stdio else ('original', 'web')
 expected = len(labels)
+callbacks_match = False
 try:
     deadline = time.monotonic() + 10
     while not options.stdio and not Path(path).exists() and time.monotonic() < deadline:
@@ -278,13 +287,6 @@ try:
     for worker in workers: worker.start()
     for worker in workers: worker.join(25)
     assert not any(w.is_alive() for w in workers)
-    if not failures:
-        assert len(callbacks) == len(captures) == audit['toolOutputs'] == expected
-        for label in labels:
-            selected = [v for v in callbacks if v[0] == 'Bearer ' + label + '-token']
-            assert len(selected) == 1 and selected[0][1]['sessionId'] == label+'-session'
-            assert selected[0][1]['requestId'] == label+'-request'
-            assert selected[0][1]['name'] == label+'_fixture_tool'
     # Replay actual captured server-request after completion/into foreign/old epoch.
     # These are deliberate synthetic replays, not native-generated late callbacks.
     for index, message in captures:
@@ -292,7 +294,11 @@ try:
         if len(gates) > 1:
             assert gates[1-index].accept(1, message) is None
         assert gates[index].accept(0, message) is None
-    report.update(actualStockToolCalls=len(captures), exactSessionCallbacks=not failures,
+    expected_callbacks = [('Bearer '+label+'-token', {'sessionId': label+'-session',
+                          'requestId': label+'-request', 'name': label+'_fixture_tool',
+                          'arguments': {'content': label+'_fixture_tool-synthetic'}}) for label in labels]
+    callbacks_match = len(callbacks) == expected and all(callbacks.count(value) == 1 for value in expected_callbacks)
+    report.update(actualStockToolCalls=len(captures), callbackCount=len(callbacks), exactSessionCallbacks=callbacks_match,
                   separateModelToolRegistrations=not audit['missingRegisteredTools'],
                   completedTurns=sum(v == 'completed' for v in results.values()),
                   failedTurns=sum(v == 'failed' for v in results.values()),
@@ -322,8 +328,16 @@ finally:
                   sessionMetadataCount=metadata_seen, persistedToolRows=rows,
                   registeredToolsInMetadata=all(label+'_fixture_tool' in metadata_names for label in labels))
     report['permissionProbeResults'] = permission_results
+    permission_keys = {'shellToolAvailable', 'foreignToolAvailable', 'requireAvailable', 'processAvailable', 'fetchAvailable'}
+    permissions_match = (not options.permission_probe or
+                         (set(permission_results) == {label+'_fixture_tool' for label in labels} and
+                          all(set(values) == permission_keys and all(flag is False for flag in values.values())
+                              for values in permission_results.values())))
+    report['acceptancePassed'] = bool(
+        not failures and len(captures) == expected and callbacks_match and
+        audit['toolOutputs'] == expected and len(results) == expected and
+        all(results.get(label) == 'completed' for label in labels) and
+        not audit['wrongModel'] and not audit['nonResponsesPosts'] and
+        p.returncode == 0 and not report['authJsonPersisted'] and permissions_match)
     print(json.dumps(report))
-assert report.get('actualStockToolCalls') == expected and not audit['wrongModel'] and not audit['nonResponsesPosts']
-assert p.returncode == 0 and not report['authJsonPersisted']
-if options.permission_probe:
-    assert len(permission_results) == expected and all(not flag for values in permission_results.values() for flag in values.values())
+assert report['acceptancePassed'], 'Stock acceptance failed: worker/completion/output/authority/permission gate'

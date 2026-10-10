@@ -120,6 +120,21 @@ threadId/turnId/callId/tool/namespace shape is observed. Each thread advertises 
 its own synthetic tool; callback headers/body carry its exact session/request token.
 Candidate SHA/mode are reported. Source API/runner and original images remain untouched.
 
+COMP-R1 corrected a false-success acceptance gate: captured tool count and permission
+observations alone could pass after a worker's subsequent model request failed. Final
+acceptance now unconditionally requires no worker failures, expected captures/callbacks/
+tool outputs/completed turns, exact session/request/tool/arguments correspondence,
+model/POST/cleanup/auth-cache constraints and complete permission observations.
+`acceptancePassed` matches the final assertion; callback authority may match even when
+the later turn fails, so it is reported separately rather than used as a success proxy.
+
+The candidate wrapper now runs a post-tool HTTP400 negative case for both stdio/Unix.
+The tool callback and permission result have already arrived, but model completion
+fails before output acceptance. Each native probe must exit1 with expected callbacks,
+injected failure, output/completed0 and failed turn count. A separate Docker validator
+checks that exact failure shape, rejecting unrelated startup/IO errors. Normal cases
+exit0 and the wrapper exits0 only when both positive and negative checks succeed.
+
 Actual code-mode permission probes on all three fixture threads show shell exec_command,
 foreign fixture tool, require, process and fetch unavailable. Docker continues to
 deny external networking and rootfs writes; only fresh /tmp is writable, and code
