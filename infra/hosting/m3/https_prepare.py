@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from prepare import API as BASE_API
+from prepare import API as BASE_API, deployment_spec_for_comparison
 
 NS = "m2-hosting"
 ROOT_API = "docker.io/library/anxious-s13-root-api-8fa7854@sha256:ddd324c1078ffee5c3deef2f3fc21543f94edb25bb9ac9828c68121266fdfde3"
@@ -162,7 +162,11 @@ def patch(snapshot, current, tls_name, role, rollback=False):
     original = snapshot["api" if role == "api" else "httpRoute"]
     identity(current, original["kind"], original["metadata"]["name"])
     require(current["metadata"]["uid"] == original["metadata"]["uid"])
-    require(current["spec"] == (values[role] if rollback else original["spec"]))
+    expected = values[role] if rollback else original["spec"]
+    if role == "api":
+        require(deployment_spec_for_comparison(current["spec"]) == deployment_spec_for_comparison(expected))
+    else:
+        require(current["spec"] == expected)
     target = original["spec"] if rollback else values[role]
     checks = [{"op": "test", "path": "/metadata/uid", "value": current["metadata"]["uid"]},
               {"op": "test", "path": "/metadata/resourceVersion", "value": current["metadata"]["resourceVersion"]},

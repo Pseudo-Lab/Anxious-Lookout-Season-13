@@ -80,6 +80,14 @@ boundaries explicitly from all new root routes.
 | http / existing IngressRoute hosting JSON patch | UID/RV/full-spec tests; temporary redirect only for GET/HEAD non-API/non-fixture/non-Android/non-ACME root. HTTP API and mutating requests have no root route |
 | rollback-api, rollback-http | Require same UID and exact expected P1 spec; restore original image/config reference/env and original HTTP spec |
 
+P1-R1: API spec comparison treats omitted EnvVar.value and a literal empty string
+as equivalent only when valueFrom is absent. Nonempty values/valueFrom/env order,
+all other spec fields and UID/RV remain exact. This comparison uses a copy;
+emitted JSON tests still contain the **actual unnormalized current spec**, and
+rollback restores the original image/config/env exactly. The adjacent original
+M3 prepare.py uses the same comparison for its preserved rollback path. No
+native flag, Job/checker/migration or runtime image changed for this fix.
+
 TLS input is the name of a new namespace-local `hosting-root-tls-<generation>`.
 It is a **planned resource name**, not proof a Secret exists or is valid. Secret
 creation itself is not emitted. The reviewed TLS snapshot procedure supplies the
@@ -105,6 +113,20 @@ cannot observe live drift. Captures/emitted ConfigMap contain private client/hos
 metadata and do not go into Git or shared message bodies.
 
 ## PM execution: independent metadata stage, then origin transition
+
+PM has already executed the reviewer-approved version-only stage with toolcee47ef.
+`artifacts/pm-issue7-root-p1/VERSION-ONLY-ACTUAL.md` in the communication workspace
+records namespace-local hosting-root-tls-v1, hosting-root-encoding-v1 and
+hosting-root-tls-probe-v1 and their private ownership evidence. Review independently
+confirmed GET/HEAD200/edff, source/target/serving leaf/key/trust agreement, scoped
+rejections and original baseline preservation. This is the version-only checkpoint;
+full P1 remains unapplied and its callback/impact/rollback review gates remain.
+**Do not create/adopt/replace these existing objects or repeat TLS supply.** Use
+their captured ownership/UID/spec plus fresh baseline/source-generation/trust/
+expiry checks; retain the current TLS reference for later full route. Confirm the
+probe's owned deletion before full-route creation. If generation/spec/ownership
+drifts or expiry intervenes, preserve/stop for exact generation review. The steps
+below describe the stage order; completed version-only steps are reuse checks.
 
 0. Verify approved tool SHA, image/local archive provenance, source equivalence,
    current baseline/backup recency, Secret/config/PG/PVC identities, one-replica
@@ -196,3 +218,12 @@ Method(GET)||Method(HEAD). Early redirect assertions incorrectly assumed one
 temporary status; observed302/307 both meet the GET/HEAD-only contract with exact
 Location/upstream0. Permanent redirects and HTTP API/POST delivery remain denied.
 Only final50+62+15/exit0 counts as passing. Earlier iterations are diagnostics.
+
+After reviewer P1-R1, Docker unit checks pass **68 cases** including Kubernetes
+empty-value omission, original env/image/config restoration, actual current-spec
+tests, resourceVersion concurrency and valueFrom/nonempty/null/order/duplicate/
+auth-ref/resource drift refusal for both P1 and original M3. Private frozen
+observed M3 GET omission and equivalent P1 omission fixture also pass offline
+rollback emission. Existing62+15 proxy cases are reused because route/image/
+middleware source did not change. No live apply/rollback/server dry-run or
+restored service/OAuth outcome is claimed by these source checks.

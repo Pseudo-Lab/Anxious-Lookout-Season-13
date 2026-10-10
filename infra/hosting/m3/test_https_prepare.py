@@ -4,6 +4,7 @@ import copy
 import pytest
 
 from https_prepare import BASE_API, CONFIG, DISABLED, ROOT_API, boundary, desired, patch, validate
+from test_prepare import apply, kube_env_omission
 
 HOST = "93.184.216.34"
 TLS = "hosting-root-tls-v1"
@@ -88,6 +89,44 @@ def test_uid_rv_full_spec_checked_forward_and_exact_rollback(snapshot, role):
     else:
         original = snapshot[key]["spec"]["template"]["spec"]["containers"][0]
         assert [v["value"] for v in undo[3:]] == [original[k] for k in ("image", "envFrom", "env")]
+
+
+def test_p1_rollback_after_get_omits_empty_env_restores_original_and_checks_rv(snapshot):
+    original = copy.deepcopy(snapshot["api"])
+    current = apply(original, patch(snapshot, original, TLS, "api"))
+    current = kube_env_omission(current)
+    current["metadata"]["resourceVersion"] = "observed-456"
+    env = {v["name"]: v for v in current["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["CODEX_PERSONAL_ACCOUNT_ID"] == {"name": "CODEX_PERSONAL_ACCOUNT_ID"}
+    assert env["CODEX_RUNNERS_FILE"] == {"name": "CODEX_RUNNERS_FILE"}
+    undo = patch(snapshot, current, TLS, "api", rollback=True)
+    assert undo[1]["value"] == "observed-456" and undo[2]["value"] == current["spec"]
+    assert apply(current, undo)["spec"] == original["spec"]
+    drifted = copy.deepcopy(current)
+    drifted["metadata"]["resourceVersion"] = "later-789"
+    with pytest.raises(AssertionError): apply(drifted, undo)
+    drifted = copy.deepcopy(current)
+    drifted["metadata"]["uid"] = "replacement"
+    with pytest.raises(ValueError): patch(snapshot, drifted, TLS, "api", True)
+
+
+@pytest.mark.parametrize("change", ["valueFrom", "nonempty", "false", "null", "auth-ref", "duplicate", "order", "resource"])
+def test_p1_rollback_omission_keeps_valuefrom_actual_values_and_spec_drift_refusal(snapshot, change):
+    current = copy.deepcopy(snapshot["api"])
+    current["spec"] = desired(snapshot, TLS)["api"]
+    current = kube_env_omission(current)
+    container = current["spec"]["template"]["spec"]["containers"][0]
+    env = next(v for v in container["env"] if v["name"] == "CODEX_RUNNERS_FILE")
+    if change == "valueFrom":
+        env.update(value="", valueFrom={"secretKeyRef": {"name": "other", "key": "x"}})
+    elif change == "nonempty": env["value"] = "/other-map"
+    elif change == "false": next(v for v in container["env"] if v["name"] == "CODEX_PERSONAL_ROOT_ENABLE")["value"] = "true"
+    elif change == "null": env["value"] = None
+    elif change == "auth-ref": container["env"][0]["value"] = "/other-secret"
+    elif change == "duplicate": container["env"].append(copy.deepcopy(env))
+    elif change == "order": container["env"].reverse()
+    else: container["resources"]["requests"]["memory"] = "128Mi"
+    with pytest.raises(ValueError): patch(snapshot, current, TLS, "api", True)
 
 
 @pytest.mark.parametrize("role", ["api", "http"])

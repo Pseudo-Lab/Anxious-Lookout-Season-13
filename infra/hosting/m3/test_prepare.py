@@ -35,6 +35,48 @@ def test_forward_and_rollback_preserve_existing_spec_and_auth_refs():
     assert restored["spec"]==old["spec"]
 
 
+def kube_env_omission(value):
+    """Observed GET shape: empty literal values disappear, env names remain."""
+    value = deepcopy(value)
+    for env in value["spec"]["template"]["spec"]["containers"][0]["env"]:
+        if env.get("value") == "":
+            env.pop("value")
+    return value
+
+
+def test_m3_rollback_after_kubernetes_empty_env_omission_restores_original():
+    old = baseline()
+    old["spec"]["template"]["spec"]["containers"][0]["env"].append({"name": "UNRELATED_EMPTY", "value": ""})
+    current = kube_env_omission(apply(old, patch(old, old)))
+    current["metadata"]["resourceVersion"] = "observed-20"
+    env = {v["name"]: v for v in current["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["CODEX_RUNNERS_FILE"] == {"name": "CODEX_RUNNERS_FILE"}
+    assert env["CODEX_PERSONAL_ACCOUNT_ID"] == {"name": "CODEX_PERSONAL_ACCOUNT_ID"}
+    operations = patch(old, current, True)
+    assert operations[1]["value"] == "observed-20"
+    assert apply(current, operations)["spec"] == old["spec"]
+    # Forward comparison also accepts only the server's empty-literal omission.
+    assert patch(old, kube_env_omission(old))
+
+
+@pytest.mark.parametrize("change", ["valueFrom", "nonempty", "false", "null", "auth-ref", "duplicate", "order", "volume"])
+def test_m3_rollback_omission_does_not_hide_real_spec_changes(change):
+    old = baseline()
+    current = kube_env_omission(apply(old, patch(old, old)))
+    container = current["spec"]["template"]["spec"]["containers"][0]
+    env = next(v for v in container["env"] if v["name"] == "CODEX_RUNNERS_FILE")
+    if change == "valueFrom":
+        env.update(value="", valueFrom={"secretKeyRef": {"name": "other", "key": "x"}})
+    elif change == "nonempty": env["value"] = "/other-map"
+    elif change == "false": next(v for v in container["env"] if v["name"] == "CODEX_PERSONAL_ENABLE")["value"] = "true"
+    elif change == "null": env["value"] = None
+    elif change == "auth-ref": container["env"][0]["value"] = "/other-secret"
+    elif change == "duplicate": container["env"].append(deepcopy(env))
+    elif change == "order": container["env"].reverse()
+    else: current["spec"]["template"]["spec"]["volumes"][0]["secret"]["secretName"] = "other"
+    with pytest.raises(ValueError): patch(old, current, True)
+
+
 @pytest.mark.parametrize("field",["uid","strategy","image","auth-ref","enabled","map"])
 def test_changed_baseline_refuses(field):
     old=baseline();now=deepcopy(old)

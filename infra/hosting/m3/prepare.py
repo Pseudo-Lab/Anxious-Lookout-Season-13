@@ -15,6 +15,20 @@ def require(value):
         raise ValueError("Existing rollout baseline mismatch")
 
 
+def deployment_spec_for_comparison(spec):
+    """Kubernetes omits empty EnvVar.value; normalize only that literal field.
+
+    Keep valueFrom, order, all nonempty values and every other spec field exact.
+    Return a copy: actual UID/RV/spec tests and original rollback remain untouched.
+    """
+    result = json.loads(json.dumps(spec))
+    for container in result["template"]["spec"]["containers"]:
+        for item in container.get("env", []):
+            if item.get("value") == "" and "valueFrom" not in item:
+                del item["value"]
+    return result
+
+
 def jobs():
     code = Path(__file__).with_name("verify_database.py").read_text()
     cm = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": CM, "namespace": "m2-hosting",
@@ -65,7 +79,7 @@ def patch(original, current, rollback=False):
     # Everything outside image and the explicit disable env must match the approved baseline.
     expected = json.loads(json.dumps(original["spec"]))
     expected["template"]["spec"]["containers"][0].update(image=now["image"], env=wanted if rollback else env)
-    require(current["spec"] == expected)
+    require(deployment_spec_for_comparison(current["spec"]) == deployment_spec_for_comparison(expected))
     return [{"op":"test","path":"/metadata/uid","value":current["metadata"]["uid"]},
             {"op":"test","path":"/metadata/resourceVersion","value":current["metadata"]["resourceVersion"]},
             {"op":"replace","path":"/spec/template/spec/containers/0/image","value":OLD_API if rollback else API},

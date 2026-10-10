@@ -170,3 +170,11 @@ is private `/tmp/issue7-m3-check-round5/`; no original DB was backed up/migrated
 the author. Synthetic admin input was corrected to satisfy the nonempty-password
 preflight. PG readiness now requires final PID1=postgres plus pg_isready, avoiding
 the temporary init server shutdown race. No failing earlier run is claimed passed.
+# Kubernetes empty env comparison (P1-R1)
+
+`prepare.py` and the root HTTPS emitter compare omitted `EnvVar.value` and literal
+`value:""` as equivalent only without `valueFrom`. This is a copy used for spec
+comparison; original rollback env, UID/resourceVersion and other spec fields stay
+exact. Normal GET omission after a disabled rollout no longer refuses rollback.
+Current source tests include observed omission fixtures and real drift rejection.
+This does not authorize replaying completed migrations or operational rollback.
