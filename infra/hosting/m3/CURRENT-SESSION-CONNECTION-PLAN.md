@@ -15,7 +15,8 @@ companion과 tool wire 문제는 해결됐지만 **현재 embedded 작업 세션
 별도0.162.1 daemon은 이 세션의 인증 소유자로 확인되지 않았습니다. PATH launcher
 0.162.0도 선택한 실행 파일과 다릅니다. 이들을 재사용하거나 교체 대상으로 자동 선택하지
 않습니다. metadata의 기본 HOME/config/file 존재는 실제 사용 중인 credential store와
-현재 grant/모든 writer를 확정하지 않습니다. 다음 운영 직전에는 좁은 범위로 다시 확인해야 합니다.
+현재 grant/모든 writer를 확정하지 않습니다. 완료된 관찰은 재사용하며 다음 운영의 대상
+일관성 확인을 제외하고 같은 launcher/default 확인을 반복하지 않습니다.
 
 pinned source의 AuthManager cache/refresh lock은 manager 단위입니다. 바깥 flock을
 잡거나 같은 auth.json을 다른 Pod에 복사해도 현재 세션의 refresh가 그 lock에 참여하지
@@ -28,6 +29,78 @@ GitHub login의 exact-one eligible platform UID lookup, stage1/backup/PV 검증,
 stock stdio/Unix transport·정상 tool 왕복, raw peer foreign thread/event 노출,
 companion source 및 고정 모델/max3/중복/권한 mock 회귀. Lookup/backup/companion 원인
 시험을 반복하지 않습니다. 실제 provider entitlement/원래 source 적용성은 아직 별도입니다.
+
+## P0/P1 실제 결과 반영: 지금 확인 가능한 경계
+
+PM의 `messages/review/2026-10-10-pm-issue7-session-p1-actual.md`와
+`messages/back/2026-10-10-pm-issue7-session-p1-result.md`를 재사용합니다.
+P1 수정 절차는 source `200f26299febf5d898375666178d41e8dce2b794`이며,
+선택 PM process에 same-UID bounded pipe 방식으로 실행해 exit0, 전후 identity/exe/filter
+일치 및 transport/filter/outer logs empty를 PM이 보고했습니다. 실제 결과의 독립 review는
+요청된 상태이며 절차 승인과 실제 결과 승인을 혼동하지 않습니다. Raw process bytes는
+host/daemon/container 메모리를 경유했습니다. Credential 파일/auth RPC는 접근하지 않았습니다.
+
+| 확보한 사실 | 가능한 해석 | 확정하지 못하는 것 |
+| --- | --- | --- |
+| P0 선택 process identity 안정, candidate/reference 미입력 | 이번 process 관찰을 기존 supervisor 선택에 연결 | candidate owner, native thread reference, auth source |
+| P1 HOME=true, CODEX_HOME=false | 필터가 관찰한 초기 환경의 두 key presence | 실제 해석된 HOME/path, 현재 memory auth/store, config loader override |
+| P1 OPENAI_API_KEY 및 workload 세 key=false | 이 allowlist의 초기 환경 marker 미관찰 | 모든 환경 인증 배제, 현재 auth mode, 이전 login/runtime 변경 |
+| P1 profile/remote/no-daemon token=false | 지원하는 lexical 문법에서 token 미관찰 | full CLI 문법/실제 target 선택; embedded topology는 기존 별도 metadata 근거 |
+| P1 store override count0/null, otherConfigOverride=true | 인식된 store key override 없음; 다른 override 존재 | 다른 override의 key/value/영향, 모든 config layer와 live auth 정책 |
+| 기존 정확한 config의 store unset/default provider | 이미 확인한 한 설정 파일의 값/부재 | 선택 manager가 적용한 effective config, resolved backend, grant/계정 |
+
+P1의 API_KEY 요약은 **OPENAI_API_KEY 한 key**입니다. CODEX_API_KEY/CODEX_ACCESS_TOKEN 등
+모든 환경 경로를 관찰한 것은 아닙니다. 이 설명은 pinned source 범위 대조이며 추가
+환경 collector를 실행/확장하라는 제안이 아닙니다. 초기 환경에 특정 marker가 없다는
+사실로 현재 API-key/external/managed auth를 긍정하거나 배제하지 않습니다.
+
+Source 근거는 rust-v0.160.1 commit
+`d27764b82f7118f674371e6d6e76271d9d606edb`의 다음 지점입니다.
+
+- `codex-rs/login/src/auth/manager.rs:1507`: in-memory ephemeral auth를 configured persistent
+  store보다 먼저 확인합니다. `:2039`에는 cache가 외부 파일 변경을 explicit reload 전까지
+  관찰하지 않는다는 설명이 있습니다. File/config/stat만으로 live cache를 재구성할 수 없습니다.
+- 같은 파일 `:2362`의 `auth_cached()`는 manager 내부 clone 함수입니다. 외부 운영 metadata
+  endpoint가 아닙니다. `:2393`의 `auth()`는 reload/proactive refresh를 수행할 수 있어 단순
+  무효과 관찰로 호출하지 않습니다. `:2789`의 `shared_from_config()`는 새 manager 구성입니다.
+- `codex-rs/login/src/auth/storage.rs:431`의 auto는 keyring 결과에 따라 file fallback을
+  선택합니다. Store enum만으로 실제 backend를 확정할 수 없습니다.
+- `codex-rs/app-server/src/lib.rs:544,580`은 startup config/auth manager 구성 지점이고,
+  `codex-rs/tui/src/lib.rs:563` 이후는 remote/daemon 접속 또는 embedded startup 분기입니다.
+  Source의 분기 존재는 살아 있는 선택 instance의 현재 분기/상태를 관찰한 결과가 아닙니다.
+
+현재 허용된 외부 metadata 입구는 선택 embedded live manager에 대해 입증되지 않았습니다.
+따라서 **현재 범위에서** cached auth의 실제 주체/resolved store/private source association/
+refresh 상태를 직접 확인할 방법은 없습니다. 이를 제품 전체의 불가능성이나 해당 auth가
+memory-only라는 증명으로 바꾸지 않습니다. 다른 daemon/new login-status process, config/read
+RPC, cache 내용 읽기는 이 공백을 자동으로 해결하는 허용 대체가 아닙니다.
+
+### 추가 known config 읽기 판단
+
+현재 남은 질문을 바꾸기 위해 다시 읽어야 할 known config field는 없습니다. 이미 읽은
+정확한 한 config의 store/provider/profile 결과를 재사용합니다. Store unset 재확인은 active
+association을 만들지 않고, file/auto/ephemeral 값을 새로 발견해도 future launch 후보를
+바꿀 뿐 현재 manager의 source를 입증하지 않습니다. OtherConfigOverride=true는 그 파일의
+값을 재독해 해소할 수 없으며 effective layer/loader 차이를 계속 unknown으로 둡니다.
+이미 가진 신뢰된 비밀 아닌 operator field report가 있다면 provenance를 연결할 수 있지만,
+이 한계를 재확인하는 argv/config/HOME collector나 fixture를 새로 만들지 않습니다.
+
+### 정상 lifecycle에서만 새로 확립할 사항
+
+이 계획의 **추천 topology**는 새 persistent authority를 시작하고 원래 client를 그 authority로
+정상 재연결하는 변경이므로 현재 embedded 세션을 그대로 둔 채 완료했다고 할 수 없습니다.
+지원 hot-handoff/resume 입구는 아직 입증되지 않았습니다. 이것은 모든 무변경 연결 방식이
+불가능하다는 결론이 아니라 이번 추천 구조의 운영 조건입니다.
+
+정상 lifecycle 단계에서는 명시적으로 선택한 source/config에서 새 authority를 구성하고
+그 instance의 지원되는 접속으로 주체·store 관계를 확인할 후보 경로가 생깁니다. 하지만
+**정상 종료/재시작만으로 기존 grant의 안전한 이전, 모든 writer 종료, 원래 thread resume가
+보장되지는 않습니다.** 사용 가능한 원래 source와 지원 resume/reference/recovery가 먼저
+구체화돼야 하며, 그 전에는 전환 실행안을 완료된 것으로 제시하지 않습니다. Lifecycle 후
+새 instance를 확인해도 이전 embedded manager의 과거 memory association을 소급 증명하지
+않습니다. 실제 정상 resume/refresh continuity/provider 권한/웹 turn 성공은 별도 운영 결과가
+필요합니다. 현재는 sourceSupply=false, transition=false, authRpcExecuted=false,
+activeStoreBinding=not_established, allWriters=unknown, actualResume=not_tested입니다.
 
 ## 1. 현재 세션 무변경으로 가능한 범위
 
@@ -54,7 +127,7 @@ companion source 및 고정 모델/max3/중복/권한 mock 회귀. Lookup/backup
 | 구성 | 책임/경계 | 현재 상태 |
 | --- | --- | --- |
 | 선택한 source host의 persistent authority | 같은 native0.160.1/companion, 확인된 원래 credential store의 유일한 정상 refresh writer; client 종료와 별도 수명 | 미구축/실제 source 미확정 |
-| 원래 작업 TUI | 작업 종료/정상 resume 시 explicit remote 접속; worktree/role 지침/원래 thread 보존 | 현재 embedded, hot 전환 불가 |
+| 원래 작업 TUI | 작업 종료/정상 resume 시 explicit remote 접속; worktree/role 지침/원래 thread 보존 | 현재 embedded, 지원 hot 전환 미입증 |
 | 신뢰된 host coordinator/bridge | 원래 auth 변경과 웹 admission 직렬화, selected-account 조건, 보호된 stock socket; 웹에 raw endpoint 노출 금지 | 미구현 |
 | UID별 웹 adapter | 기존 HTTP/UID-state/session-request 계약, private owned-thread mapping/ledger/projection, 허용 RPC/event/tool 응답만 전달 | 기존 isolated adapter 재사용 부분 있음; remote mode 미구현 |
 | 기존 API/웹 | 서버가 선택한 platform UID mapping 및 기존 role/session/toolToken 권한 | 기존 계약 유지 |
@@ -117,8 +190,10 @@ client 재연결은 별도 검토된 PM 운영 단계입니다. 실패하면 웹
 ## 4. 최소 구현과 운영 순서, 이미지/복구
 
 1. **계획 선택과 준비:** PM/review가 source topology와 연결 전 gate를 검토합니다.
-   필요한 read-only preflight를 정확한 source/대상에 한정해 모든 writer/store/client
-   resume 조건을 확인합니다. Existing owner lookup 결과는 private handoff로 재사용합니다.
+   완료된 P0/P1/config/owner lookup을 재사용합니다. Current live association은 현 관찰 입구로
+   확정할 수 없어 unknown으로 남깁니다. 정확한 source/지원 resume reference/운영 writer
+   inventory와 recovery 조건이 기존 신뢰된 근거로 구체화되기 전에는 전환 단계로 진행하지
+   않습니다. Read-only preflight만으로 모든 gate를 닫을 수 있다고 가정하지 않습니다.
 2. **최소 소스:** 기존 adapter interface/ledger/binding/projection을 사용하는 remote mode,
    보호된 host bridge/coordinator, 원래 client remote 설정과 thread별 제한을 구현합니다.
    Remote mode는 PersonalAuth.attach/cache copy/Native child spawn을 사용하지 않습니다.
@@ -135,7 +210,8 @@ client 재연결은 별도 검토된 PM 운영 단계입니다. 실패하면 웹
    이때 source 공급/접근 및 provider 접촉도 승인된 절차에 한정합니다. 새 reader/writer를
    먼저 병렬 시작하거나 원래 세션 종료를 강제하지 않습니다.
 5. **웹 연결 운영:** 원래 작업 복구를 먼저 확인한 뒤 선택 UID 하나의 새 adapter/bridge
-   및 private mapping을 단계적으로 적용하고 read-only auth 확인을 거칩니다. 실제 turn
+   및 private mapping을 단계적으로 적용하고 별도 검토된 auth/account 확인을 거칩니다.
+   Auth 조회도 bootstrap/refresh 가능성을 검토하며 순수 metadata 관찰로 취급하지 않습니다. 실제 turn
    admission은 ownership/source 조건이 안정된 뒤에만 엽니다. 기존 총3/두 성공 turn·실패/
    unknown 소비/no autoresend 제한을 보존합니다.
 6. **검증/복구:** 연결 뒤 gate를 PM 실행·review 독립 확인으로 닫습니다. 이상 시 먼저
