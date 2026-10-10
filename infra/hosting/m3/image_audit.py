@@ -1,4 +1,4 @@
-"""Offline exact API-b19/root-web-edff provenance. No caller policy overrides."""
+"""Offline exact b19 API, 8fa root API and edff web provenance; sealed policies."""
 import hashlib
 import json
 import re
@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 POLICY = {
+    "root-api": ("8fa785480e73b88903d3263ebe51159961f30d2e", "sha256:ddd324c1078ffee5c3deef2f3fc21543f94edb25bb9ac9828c68121266fdfde3", "docker.io/library/anxious-s13-root-api-8fa7854"),
     "api": ("b19fafe8187fd37b7c11fcfadde40893c8ab3a9c", "sha256:41403b6a5ab16bee5cfb936879761f8a31420085236794de347eb410944defca", "docker.io/library/anxious-s13-personal-api"),
     "root-web": ("edff9cefe26b58d51619238bb12538a94249a9e9", "sha256:02b39712fd75b482b7e966008eb76ee2bf97304dbc0752af0e304c1e429afa0e", "docker.io/library/anxious-s13-personal-web"),
 }
