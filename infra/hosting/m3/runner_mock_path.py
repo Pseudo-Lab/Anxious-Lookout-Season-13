@@ -143,7 +143,7 @@ def run_runner(root, origin, ca, settings, options, audit, permission_results):
         report['nativeExitCode'] = native.process.returncode
         report['nativeClosed'] = native.closed
         report['cacheRemoved'] = not (state_root/'codex'/'auth.json').exists()
-        assert native.closed and report['cacheRemoved']
+        assert native.process.returncode == 0 and native.closed and report['cacheRemoved']
         return report
     finally:
         subprocess.Popen, httpx.Client, Native.rpc = original_popen, original_client, original_rpc
