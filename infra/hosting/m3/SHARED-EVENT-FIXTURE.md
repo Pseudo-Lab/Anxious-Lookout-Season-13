@@ -183,9 +183,16 @@ event projection, durable concurrency or production exactly-once guarantees.
 
 The minimum package/config correction is now validated in the candidate fixture:
 same pinned companion plus required code-mode host flag and correct mock wire.
-Production still needs a scoped change to the runner installer/package and Native
-configuration with these pins and permission checks. It has not been made or deployed.
-The existing native-only installer and host-disabled config remain on original runner6fc.
+After independent companion/COMP-R1 approval, runner source now installs the pinned
+companion and enables the host for real native; both executable pins/permissions are
+checked before auth/native startup. Test CLI retains its prior host-disabled path.
+`check_runner_companion.sh` exercises actual Native/runner HTTP admission and research
+tools with a synthetic grant/cache, fixed-model trace, denied bearer/state/model input,
+deduplication, same-thread follow-up and max3 failure consumption. New bundle guard plus
+existing protocol/auth/binding tests pass38 in Docker with a disposable PostgreSQL.
+No production image import/deploy/source supply occurred. Original runner6fc and API70
+nativeoff remain unchanged; their native-only package/config still require a reviewed
+operational rollout if that path is selected.
 
 The correction must preserve the existing permitted tool set and denial of shell,
 other builtin capabilities and other-owner callbacks. A successful evaluator startup
