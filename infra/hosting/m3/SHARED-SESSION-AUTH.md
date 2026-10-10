@@ -1,5 +1,11 @@
 # #7 selected current-session auth: applicability and minimum change
 
+Follow-up: SHARED-AUTH-OPTIONS.md compares a concrete stock remote/normal-lifecycle
+topology with a bounded access-only/refuse experiment. The earlier authority
+integration direction is investigation, not approval to patch original runtime.
+New native counterexamples show callback refusal alone permits general retries and
+expired local login is accepted; application expiry/retry gates are required.
+
 2026-10-10 investigation/proposal; runtime70/live nativeoff and runner imported-only
 remain unchanged. The user explicitly selected the **current PM/back working-session
 Codex authentication**. Independent-profile selection is superseded, not requested
