@@ -1,10 +1,12 @@
 """Pinned native tool roundtrip via fixture-only shared ingress, Docker network-none."""
 import base64
 import argparse
+import hashlib
 import ipaddress
 import json
 import os
 import ssl
+import sqlite3
 import subprocess
 import threading
 import time
@@ -20,19 +22,27 @@ from cryptography.x509.oid import NameOID
 from runner.app import Native
 from owned_event_fixture import OwnedEvents
 from stock_wire import Client
+from stock_stdio import StdioClient
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--legacy-history', action='store_true')
 parser.add_argument('--legacy-tools', action='store_true')
 parser.add_argument('--minimal-startup', action='store_true')
+parser.add_argument('--stdio', action='store_true')
+parser.add_argument('--code-mode-wire', action='store_true')
+parser.add_argument('--enable-code-mode-host', action='store_true')
+parser.add_argument('--permission-probe', action='store_true')
 options = parser.parse_args()
 
 root = Path('/tmp/shared-tools'); root.mkdir(mode=0o700)
 for name in ('home', 'codex', 'original', 'web'): (root / name).mkdir(mode=0o700)
 models = json.loads(Path('/fixture-models.json').read_text())
 audit = {'responsePosts': 0, 'toolOutputs': 0, 'wrongModel': False, 'nonResponsesPosts': 0,
+         'codeModeExecAdvertised': False, 'registeredToolInPrompt': False,
+         'codeModeDisabledObserved': False, 'codeModeHostMissingObserved': False,
          'missingRegisteredTools': 0}
 requests, callbacks, captures, failures = [], [], [], []
+permission_results = {}
 mutex = threading.Lock()
 
 
@@ -58,19 +68,31 @@ class Mock(BaseHTTPRequestHandler):
         with mutex:
             audit['responsePosts'] += 1
             audit['wrongModel'] |= body.get('model') != 'gpt-6.1-sol'
-            outputs = [v for v in body.get('input', []) if v.get('type') == 'function_call_output']
+            output_type = 'custom_tool_call_output' if options.code_mode_wire else 'function_call_output'
+            outputs = [v for v in body.get('input', []) if v.get('type') == output_type]
             def tool_names(values):
                 return [name for value in values for name in
                         ([value.get('name')] + tool_names(value.get('tools', [])))]
+            def tool_specs(values):
+                return [spec for value in values for spec in [value, *tool_specs(value.get('tools', []))]]
             names = tool_names(body.get('tools', []))
+            advertised = tool_specs(body.get('tools', []))
             for item in body.get('input', []):
                 if item.get('type') == 'additional_tools':
                     names += tool_names(item.get('tools', []))
+                    advertised += tool_specs(item.get('tools', []))
+            # Inspect advertised exec descriptions only, not user/model history
+            # containing deliberate foreign-name negative probes.
+            prompt = '\n'.join(spec.get('description', '') for spec in advertised if spec.get('name') == 'exec')
+            prompt_names = [name for name in ('original_fixture_tool', 'web_fixture_tool') if name in prompt]
+            audit['registeredToolInPrompt'] |= bool(prompt_names)
+            audit['codeModeExecAdvertised'] |= 'exec' in names
             print(json.dumps({'registeredFixtureTools': [v for v in names if v in
                              ('original_fixture_tool', 'web_fixture_tool')],
                               'responseToolCount': len(body.get('tools', [])),
-                              'inputToolNamesCount': len(names)}), flush=True)
-            name = next((v for v in names if v in ('original_fixture_tool', 'web_fixture_tool')), None)
+                              'inputToolNamesCount': len(names), 'registeredToolPromptNames': prompt_names}), flush=True)
+            name = (next(iter(prompt_names), None) if options.code_mode_wire and 'exec' in names else
+                    next((v for v in names if v in ('original_fixture_tool', 'web_fixture_tool')), None))
             if not name:
                 audit['missingRegisteredTools'] += 1
                 payload = b'{"error":{"message":"Fixture registered tool absent","type":"invalid_request_error"}}'
@@ -80,15 +102,44 @@ class Mock(BaseHTTPRequestHandler):
                 return
             other = 'web_fixture_tool' if name == 'original_fixture_tool' else 'original_fixture_tool'
             assert other not in names, 'Foreign tool registration leaked'
+            if options.code_mode_wire: assert other not in prompt_names
             call = name + '-call'
             if outputs:
-                assert any(v['call_id'] == call and 'saved' in str(v.get('output')) for v in outputs)
+                if options.code_mode_wire:
+                    print(json.dumps({'syntheticCodeModeOutputs': [str(v.get('output'))[:1200] for v in outputs]}), flush=True)
+                text = ' '.join(str(v.get('output')) for v in outputs)
+                if options.permission_probe:
+                    for output in outputs:
+                        for item in output.get('output', []) if isinstance(output.get('output'), list) else []:
+                            if item.get('type') == 'input_text':
+                                try: value = json.loads(item.get('text', ''))
+                                except ValueError: continue
+                                if isinstance(value, dict) and 'shellToolAvailable' in value:
+                                    permission_results[name] = value
+                audit['codeModeDisabledObserved'] |= 'code-mode host is disabled' in text
+                audit['codeModeHostMissingObserved'] |= 'failed to spawn code-mode host' in text and 'No such file' in text
+                if not any(v['call_id'] == call and 'saved' in str(v.get('output')) for v in outputs):
+                    payload = b'{"error":{"message":"Fixture tool result unavailable","type":"invalid_request_error"}}'
+                    self.send_response(400); self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(payload))); self.end_headers(); self.wfile.write(payload)
+                    return
                 audit['toolOutputs'] += 1
                 item = {'type': 'message', 'id': name + '-message', 'role': 'assistant',
                         'status': 'completed', 'content': [{'type': 'output_text', 'text': 'Synthetic saved', 'annotations': []}]}
             else:
-                item = {'type': 'function_call', 'id': name + '-item', 'call_id': call,
-                        'name': name, 'arguments': json.dumps({'content': name + '-synthetic'})}
+                if options.code_mode_wire:
+                    code = 'text(await tools.'+name+'('+json.dumps({'content': name+'-synthetic'})+'));'
+                    if options.permission_probe:
+                        code = ('text(JSON.stringify({shellToolAvailable:typeof tools.exec_command === "function",'
+                                'foreignToolAvailable:typeof tools.'+other+' === "function",'
+                                'requireAvailable:typeof require !== "undefined",'
+                                'processAvailable:typeof process !== "undefined",'
+                                'fetchAvailable:typeof fetch !== "undefined"}));'+code)
+                    item = {'type': 'custom_tool_call', 'id': name+'-item', 'call_id': call,
+                            'name': 'exec', 'input': code}
+                else:
+                    item = {'type': 'function_call', 'id': name + '-item', 'call_id': call,
+                            'name': name, 'arguments': json.dumps({'content': name + '-synthetic'})}
             requests.append((name, bool(outputs)))
         values = [{'type': 'response.created', 'response': {'id': name + '-response'}},
                   {'type': 'response.output_item.done', 'item': item},
@@ -116,7 +167,7 @@ server.socket = context.wrap_socket(server.socket, server_side=True)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 origin = 'https://127.0.0.1:' + str(server.server_port)
 path = str(root / 'control.sock')
-args = ['/usr/local/bin/codex', 'app-server', '--listen', 'unix://' + path]
+args = ['/usr/local/bin/codex', 'app-server', '--listen', 'stdio://' if options.stdio else 'unix://' + path]
 settings = ['cli_auth_credentials_store="ephemeral"', 'features.daemon_auto_start=false',
             'features.code_mode_host=false', 'features.shell_tool=false', 'features.unified_exec=false',
             'features.multi_agent=false', 'features.multi_agent_v2=false', 'features.apps=false',
@@ -135,9 +186,13 @@ for setting in settings:
     if options.minimal_startup and setting.startswith('features.') and not setting.startswith('features.daemon_auto_start='):
         continue
     args += ['-c', setting]
+if options.enable_code_mode_host:
+    args += ['-c', 'features.code_mode_host=true']
 p = subprocess.Popen(args, env={'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': str(root/'home'),
                      'CODEX_HOME': str(root/'codex'), 'CODEX_CA_CERTIFICATE': str(cert_path), 'LANG': 'C.UTF-8'},
-                     cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                     cwd=root, stdin=subprocess.PIPE if options.stdio else None,
+                     stdout=subprocess.PIPE if options.stdio else subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, text=True, bufsize=1)
 original_httpx = httpx.Client
 
 
@@ -151,12 +206,19 @@ clients, gates, natives, results = [], [], [], {}
 report = {'hostAuthRead': False, 'realProviderContact': False, 'syntheticExternalTokenOnly': True,
           'productionGatewayImplemented': False, 'authenticatedAuthorityProven': False,
           'legacyHistory': options.legacy_history, 'legacyTools': options.legacy_tools,
-          'minimalStartup': options.minimal_startup}
+          'minimalStartup': options.minimal_startup, 'transport': 'stdio' if options.stdio else 'unix'}
+report['codeModeWire'] = options.code_mode_wire
+report['codeModeHostEnabled'] = options.enable_code_mode_host
+companion_path = Path('/usr/local/bin/codex-code-mode-host')
+report['companionBinarySha256'] = hashlib.sha256(companion_path.read_bytes()).hexdigest() if companion_path.is_file() else None
+report['companionMode'] = oct(companion_path.stat().st_mode & 0o777) if companion_path.is_file() else None
+labels = ('web',) if options.stdio else ('original', 'web')
+expected = len(labels)
 try:
     deadline = time.monotonic() + 10
-    while not Path(path).exists() and time.monotonic() < deadline:
+    while not options.stdio and not Path(path).exists() and time.monotonic() < deadline:
         assert p.poll() is None; time.sleep(.05)
-    clients = [Client(label, path) for label in ('original', 'web')]
+    clients = [StdioClient('web', p)] if options.stdio else [Client(label, path) for label in labels]
     def segment(value): return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip('=')
     token = segment({'alg': 'none'}) + '.' + segment({'email': 'synthetic@example.invalid', 'exp': int(time.time())+3600,
              'https://api.openai.com/auth': {'chatgpt_account_id': 'synthetic-account', 'chatgpt_plan_type': 'plus'}}) + '.synthetic'
@@ -164,7 +226,7 @@ try:
                             'chatgptAccountId': 'synthetic-account', 'chatgptPlanType': 'plus'}) is not None
     assert clients[0].rpc('account/read', {'refreshToken': False}) is not None
     for index, client in enumerate(clients):
-        label = ('original', 'web')[index]; tool = label + '_fixture_tool'
+        label = labels[index]; tool = label + '_fixture_tool'
         registration = {'type': 'function', 'name': tool, 'description': 'Synthetic save',
                         'inputSchema': {'type': 'object', 'properties': {'content': {'type': 'string'}},
                                         'required': ['content'], 'additionalProperties': False}}
@@ -186,9 +248,13 @@ try:
 
     def run(index):
         client, gate, native = clients[index], gates[index], natives[index]
-        label = ('original', 'web')[index]
+        label = labels[index]
         def handle(value):
             accepted = gate.accept(1, value)
+            if 'method' in value and 'id' in value:
+                print(json.dumps({'fixtureServerRequestMethod': value['method'],
+                                  'paramKeys': sorted(value.get('params', {})),
+                                  'acceptedByGate': bool(accepted)}), flush=True)
             if accepted and accepted['method'] == 'item/tool/call':
                 with mutex: captures.append((index, accepted))
                 native.reply_tool(accepted, gate.turn)
@@ -208,13 +274,13 @@ try:
             assert results.get(label) == 'completed', label + ' did not complete'
         except Exception as error:
             failures.append({'client': label, 'type': type(error).__name__, 'detail': str(error)})
-    workers = [threading.Thread(target=run, args=(i,), daemon=True) for i in range(2)]
+    workers = [threading.Thread(target=run, args=(i,), daemon=True) for i in range(expected)]
     for worker in workers: worker.start()
     for worker in workers: worker.join(25)
     assert not any(w.is_alive() for w in workers)
     if not failures:
-        assert len(callbacks) == len(captures) == audit['toolOutputs'] == 2
-        for label in ('original', 'web'):
+        assert len(callbacks) == len(captures) == audit['toolOutputs'] == expected
+        for label in labels:
             selected = [v for v in callbacks if v[0] == 'Bearer ' + label + '-token']
             assert len(selected) == 1 and selected[0][1]['sessionId'] == label+'-session'
             assert selected[0][1]['requestId'] == label+'-request'
@@ -223,7 +289,8 @@ try:
     # These are deliberate synthetic replays, not native-generated late callbacks.
     for index, message in captures:
         assert gates[index].accept(1, message) is None
-        assert gates[1-index].accept(1, message) is None
+        if len(gates) > 1:
+            assert gates[1-index].accept(1, message) is None
         assert gates[index].accept(0, message) is None
     report.update(actualStockToolCalls=len(captures), exactSessionCallbacks=not failures,
                   separateModelToolRegistrations=not audit['missingRegisteredTools'],
@@ -236,8 +303,27 @@ finally:
     try: p.wait(timeout=50)
     except subprocess.TimeoutExpired: p.kill(); p.wait(timeout=2)
     server.shutdown()
+    metadata_names = set()
+    metadata_seen = 0
+    for file in (root/'codex'/'sessions').rglob('*.jsonl'):
+        for line in file.read_text().splitlines():
+            value = json.loads(line)
+            if value.get('type') == 'session_meta':
+                metadata_seen += 1
+                for spec in value.get('payload', {}).get('dynamic_tools', []):
+                    metadata_names.add(spec.get('name'))
+    rows = 0
+    for db in (root/'codex').glob('state_*.sqlite'):
+        with sqlite3.connect('file:'+str(db)+'?mode=ro', uri=True) as connection:
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_dynamic_tools'").fetchone():
+                rows += connection.execute('SELECT COUNT(*) FROM thread_dynamic_tools').fetchone()[0]
     report.update(audit, failures=failures, nativeExitCode=p.returncode,
-                  authJsonPersisted=(root/'codex'/'auth.json').exists())
+                  authJsonPersisted=(root/'codex'/'auth.json').exists(),
+                  sessionMetadataCount=metadata_seen, persistedToolRows=rows,
+                  registeredToolsInMetadata=all(label+'_fixture_tool' in metadata_names for label in labels))
+    report['permissionProbeResults'] = permission_results
     print(json.dumps(report))
-assert report.get('actualStockToolCalls') == 2 and not audit['wrongModel'] and not audit['nonResponsesPosts']
+assert report.get('actualStockToolCalls') == expected and not audit['wrongModel'] and not audit['nonResponsesPosts']
 assert p.returncode == 0 and not report['authJsonPersisted']
+if options.permission_probe:
+    assert len(permission_results) == expected and all(not flag for values in permission_results.values() for flag in values.values())
