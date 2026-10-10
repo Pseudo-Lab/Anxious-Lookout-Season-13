@@ -1,5 +1,11 @@
 # #7 remaining work: narrow readonly owner/source preflight
 
+Update: the user selected current working-session Codex authentication; the
+independent-profile option below is historical and superseded. Platform A lookup
+has now completed privately. Follow SHARED-SESSION-AUTH.md for actual-runtime
+applicability and the needed owner-side integration; do not ask for another profile
+or repeat A. B remains format-only and is not shared-refresh proof.
+
 Proposal for independent procedure review, then PM execution. Source/runtime70 and
 infra packageb678 remain unchanged; current live API70/nativeoff is independently
 verified. Stage1 import/rollout/PV proof is reused. This procedure does not authorize
