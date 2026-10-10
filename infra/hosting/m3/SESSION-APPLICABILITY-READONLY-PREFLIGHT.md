@@ -110,6 +110,16 @@ redirect하세요. 새 PREFLIGHT_PRIVATE_DIR 내부 파일로 outer redirect하�
 
 ## 출력과 판정: 공유는 요약만
 
+**PM의 필수 수동 UID 판정:** 위 block의 exit0는 metadata 수집/일관성 검사 완료이며
+소유 일치의 성공 판정이 아닙니다. `process-identity.txt`의 Uid 행에서 선택 process의
+effective UID(두 번째 UID 값)를 확인하고, source candidate가 제공됐다면 해당
+`known-files.before.stat` 기록의 owner UID(세 번째 `|` 필드)와 private 비교합니다.
+Process의 filesystem UID가 effective UID와 다르면 그 차이도 기록하고 소유 관계를
+자동 승인하지 않습니다. Candidate owner가 선택 process와 불일치하면
+`candidateOwnerMatches=false`, 해당 적용성 관찰은 **중단/unknown**으로 판정합니다.
+권한 확대나 다른 file/process 선택으로 대체하지 않습니다. Candidate가 없으면 이 항목은
+unknown입니다. UID가 같아도 active store/grant나 resume 성공은 여전히 미확정입니다.
+
 | 관찰 | 말할 수 있는 것 | 확정하지 못하는 것 |
 | --- | --- | --- |
 | PID/start/exe/cwd consistency | 선택 process가 안정적으로 관찰됐고 identity가 같다면 기존 version/path 근거 연결 가능 | 실제 effective config, active auth/cache/account, 모든 descendant/writer |
@@ -124,6 +134,7 @@ redirect하세요. 새 PREFLIGHT_PRIVATE_DIR 내부 파일로 outer redirect하�
 `resumeSupport=version_surface_only|unresolved`, `actualResume=not_tested`,
 `writerInventory=selected_process_only_not_exhaustive`, `authRpcExecuted=false`,
 `secretContentRead=false`, `sourceSupplyOrTransition=false`.
+`candidateOwnerMatches=true|false|unknown`은 위 수동 비교 이후에만 보고합니다.
 
 신뢰된 기존 **비밀이 아닌** 기록이 실제 store/resume 관계를 제공할 때만 그 근거를
 인용하세요. Private reference/type/date를 연결하며 stat 성공으로 결과를 만들어내지
