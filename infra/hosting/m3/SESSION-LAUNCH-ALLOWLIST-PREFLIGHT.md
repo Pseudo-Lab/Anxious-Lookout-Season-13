@@ -22,7 +22,7 @@ P0 optional file 수집/owner lookup을 반복하지 않습니다.
 ## 정확한 입력과 출력
 
 필터는 `backend/ops/process_launch_fields.py`이며 SHA256은
-`52a57466bde8f95b4868e73ae964654d7db7bb1af280769a9597b17615e7daed`입니다.
+`866b2e5829109ca3a036b485e86638c3f7013b7e342254dda5ca4cc17693d1eb`입니다.
 고정 두 입력을 각각 최대 131072 bytes까지 읽고 NUL termination/크기를 검사합니다.
 큰 입력, 사라진 process, 접근 실패, empty cmdline, 빠진 config 인자는 실패입니다.
 
@@ -59,6 +59,20 @@ live AuthManager 상태를 반영한다고 가정하지 않습니다. 여러 buf
 
 ## PM 실행 block: 입력 범위 검토 후에만
 
+P1-R1 독립 검증에서 이전 exact proc bind mount는 OCI/runc propagation permission
+오류(exit126)로 실패했습니다. 아래 수정안은 **proc mount 없이** same-UID host `head`가
+각 파일을 최대 131073 bytes만 읽어 base64 한 줄씩 pipe로 전달합니다. Container는 stdin의
+정확한 두 frame을 길이 제한/strict base64/NUL 검사 후 처리하고 여분 입력을 거절합니다.
+131073번째 byte가 있으면 oversize로 거절하며 성공한 truncation으로 처리하지 않습니다.
+Base64는 framing이며 비밀 보호가 아닙니다. Raw/encoded buffer는 파일·argv·env·로그에
+저장하지 않습니다. Shell trace/session stdin recording이 활성화된 환경에서는 실행하지
+않습니다. Docker에는 filter source 하나만 bind하고 입력은 `-i` pipe이며 TTY는 없습니다.
+Transport frame의 base64 decode는 수행합니다. 출력 `secretValuesDecoded=false`는 secret
+field 값을 text/credential 구조로 해석하지 않는다는 의미이며 raw secret bytes가 메모리에
+없다는 주장이 아닙니다.
+Docker daemon 메모리 전달도 추가 입력 경계에 포함하며, daemon의 기존 stdin 비저장 운영
+조건을 확인하지 못하면 실행하지 않습니다. 실패 시 파일 전달 방식으로 대체하지 않습니다.
+
 PM은 자신이 이미 선택한 host namespace process에 대해 same-UID로 실행합니다.
 Sandbox PID namespace에서 대상이 안 보이면 PM의 이미 승인된 host 운영 위치를
 사용합니다. 다른 PID 탐색/대체, target 권한 변경, sudo process read, ptrace,
@@ -81,7 +95,7 @@ umask 077
 [[ $LAUNCH_PRIVATE_DIR =~ ^/tmp/issue7-session-launch-[A-Za-z0-9_-]+$ && ! -e $LAUNCH_PRIVATE_DIR ]]
 [[ $LAUNCH_FILTER == /* && ! -L $LAUNCH_FILTER && -f $LAUNCH_FILTER ]]
 [[ $(realpath -e -- "$LAUNCH_FILTER") == "$LAUNCH_FILTER" ]]
-[[ $(sha256sum -- "$LAUNCH_FILTER" | awk '{print $1}') == 52a57466bde8f95b4868e73ae964654d7db7bb1af280769a9597b17615e7daed ]]
+[[ $(sha256sum -- "$LAUNCH_FILTER" | awk '{print $1}') == 866b2e5829109ca3a036b485e86638c3f7013b7e342254dda5ca4cc17693d1eb ]]
 mkdir -m 0700 -- "$LAUNCH_PRIVATE_DIR"
 
 LAUNCH_STAT=$(cat "/proc/$LAUNCH_PID/stat")
@@ -94,14 +108,18 @@ LAUNCH_GID=$(awk '/^Gid:/ {print $3}' "$LAUNCH_PRIVATE_DIR/identity.before")
 awk '/^(Uid|Gid):/ {if ($2 != $3 || $3 != $4 || $4 != $5) exit 1}' "$LAUNCH_PRIVATE_DIR/identity.before"
 stat -Lc '%d|%i|%u|%g|%f|%s|%y|%z' -- "/proc/$LAUNCH_PID/exe" > "$LAUNCH_PRIVATE_DIR/exe.before"
 
-LAUNCH_DOCKER run --rm --pull=never --network none --read-only --tmpfs /tmp \
+{
+  head -c 131073 -- "/proc/$LAUNCH_PID/cmdline" | base64 --wrap=0
+  printf '\n'
+  head -c 131073 -- "/proc/$LAUNCH_PID/environ" | base64 --wrap=0
+  printf '\n'
+} 2> "$LAUNCH_PRIVATE_DIR/transport.stderr" | \
+LAUNCH_DOCKER run --rm -i --pull=never --network none --read-only --tmpfs /tmp \
   --cap-drop ALL --security-opt no-new-privileges:true \
   --user "$LAUNCH_UID:$LAUNCH_GID" --entrypoint python \
   --mount "type=bind,src=$LAUNCH_FILTER,dst=/filter.py,readonly" \
-  --mount "type=bind,src=/proc/$LAUNCH_PID/cmdline,dst=/inputs/cmdline,readonly" \
-  --mount "type=bind,src=/proc/$LAUNCH_PID/environ,dst=/inputs/environ,readonly" \
   sha256:5a2a95d93810bcfc035bb883d1096376d9f2cf6f48fc99f88f1f8c308c308566 \
-  -B /filter.py > "$LAUNCH_PRIVATE_DIR/fields.unaccepted.json" \
+  -B /filter.py --stdin-base64 > "$LAUNCH_PRIVATE_DIR/fields.unaccepted.json" \
   2> "$LAUNCH_PRIVATE_DIR/filter.stderr"
 
 LAUNCH_STAT=$(cat "/proc/$LAUNCH_PID/stat")
@@ -111,18 +129,18 @@ awk '/^(Uid|Gid):/ {print}' "/proc/$LAUNCH_PID/status" > "$LAUNCH_PRIVATE_DIR/id
 stat -Lc '%d|%i|%u|%g|%f|%s|%y|%z' -- "/proc/$LAUNCH_PID/exe" > "$LAUNCH_PRIVATE_DIR/exe.after"
 cmp -s "$LAUNCH_PRIVATE_DIR/identity.before" "$LAUNCH_PRIVATE_DIR/identity.after"
 cmp -s "$LAUNCH_PRIVATE_DIR/exe.before" "$LAUNCH_PRIVATE_DIR/exe.after"
-[[ $(sha256sum -- "$LAUNCH_FILTER" | awk '{print $1}') == 52a57466bde8f95b4868e73ae964654d7db7bb1af280769a9597b17615e7daed ]]
+[[ $(sha256sum -- "$LAUNCH_FILTER" | awk '{print $1}') == 866b2e5829109ca3a036b485e86638c3f7013b7e342254dda5ca4cc17693d1eb ]]
 mv -- "$LAUNCH_PRIVATE_DIR/fields.unaccepted.json" "$LAUNCH_PRIVATE_DIR/fields.json"
 unset LAUNCH_STAT LAUNCH_FIELDS LAUNCH_UID LAUNCH_GID
 ```
 
 Identity/access/timeout/size failure는 관찰 중단입니다. 중간 unaccepted 출력을 성과로
 공유하지 않고 unknown을 보고합니다. 다른 process/image/path/credential로 대체하지 않습니다.
-UID/GID filesystem 차이도 이번에는 중단합니다. Docker/proc mount 제약으로 거절돼도 다른
+UID/GID filesystem 차이도 이번에는 중단합니다. Docker/pipe 접근 제약으로 거절돼도 다른
 권한이나 daemon으로 우회하지 않습니다. Private errors에는 path가 나올 수 있어 공유하지
 않습니다. 이 block의 exit0는 제한 입력 취득 성공이며 active binding 승인이 아닙니다.
 
-## pinned sourceの意味と残る不足
+## pinned source의 의미와 남은 부족 항목
 
 대상 source는 rust-v0.160.1 / commit
 `d27764b82f7118f674371e6d6e76271d9d606edb`입니다.
@@ -153,3 +171,16 @@ config/auth 읽기를 동반해 대체 방법으로 사용하지 않습니다. `
 Writer inventory는 selected_process_only_not_exhaustive, candidateOwnerMatches는 unknown,
 actualResume는 not_tested를 유지하며 전체 client/refresh continuity/binding 완료로
 판정하지 않습니다.
+
+## P1-R1 수정 검증
+
+기존 API image에서 stdin frame의 정상 입력과 missing/invalid base64/extra frame/
+newline 누락/NUL 누락/decoded oversize/encoded oversize 거절을 Docker로 확인했습니다.
+수정된 위 shell block을 그대로 추출해 새 disposable Docker process의 host PID/start와
+same UID/GID를 입력해 timeout15s로 실행했고 exit0입니다. Known store enum/profile token/
+workload presence를 관찰했고 start/exe/UID 전후 검사도 통과했습니다. 결과와 private
+stderr에 합성 secret sentinel이 없었습니다. 합성 process는 종료·삭제했습니다.
+Private 합성 증거는 `/tmp/issue7-launch-e2e-r1-mSmxce/`와
+`/tmp/issue7-session-launch-back-r1-1791665659/`입니다.
+이는 pipe 방식의 해당 Docker 환경 재현이며 원본 process의 접근 가능성/성공,
+raw 입력 승인, active-store association 또는 auth 성공을 증명하지 않습니다.

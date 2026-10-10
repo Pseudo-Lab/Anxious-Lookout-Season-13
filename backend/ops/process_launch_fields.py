@@ -3,6 +3,8 @@
 Proc buffers may contain secret bytes. No unknown/env value is decoded, printed or
 persisted; operators must separately approve these exact bounded metadata inputs.
 """
+import base64
+import binascii
 import json
 import sys
 from pathlib import Path
@@ -13,12 +15,29 @@ ENV_KEYS = ('HOME', 'CODEX_HOME', 'OPENAI_API_KEY', 'OPENAI_FEDERATION_RULE_ID',
             'OPENAI_IDENTITY_TOKEN_FILE', 'OPENAI_WORKLOAD_IDENTITY_CONTEXT')
 
 
-def read_buffer(path):
-    with path.open('rb') as source:
-        value = source.read(LIMIT+1)
+def split_buffer(value):
     if len(value) > LIMIT or (value and not value.endswith(b'\0')):
         raise ValueError('Invalid bounded process buffer')
     return value.split(b'\0')[:-1] if value else []
+
+
+def read_buffer(path):
+    with path.open('rb') as source:
+        return split_buffer(source.read(LIMIT+1))
+
+
+def read_stdin(stream):
+    # Exactly two base64 lines. Encoding frames NUL buffers; it is not secrecy.
+    encoded_limit = 4*((LIMIT+1+2)//3)
+    buffers = []
+    for _ in range(2):
+        line = stream.readline(encoded_limit+2)
+        if not line.endswith(b'\n') or len(line) > encoded_limit+1:
+            raise ValueError('Invalid bounded input frame')
+        buffers.append(split_buffer(base64.b64decode(line[:-1], validate=True)))
+    if stream.read(1):
+        raise ValueError('Unexpected input frame')
+    return buffers
 
 
 def fields(argv, environment):
@@ -70,8 +89,14 @@ def fields(argv, environment):
 
 def main():
     try:
-        result = fields(read_buffer(Path('/inputs/cmdline')), read_buffer(Path('/inputs/environ')))
-    except (OSError, ValueError):
+        if sys.argv[1:] == ['--stdin-base64']:
+            argv, environment = read_stdin(sys.stdin.buffer)
+        elif not sys.argv[1:]:
+            argv, environment = read_buffer(Path('/inputs/cmdline')), read_buffer(Path('/inputs/environ'))
+        else:
+            raise ValueError('Unsupported input mode')
+        result = fields(argv, environment)
+    except (OSError, ValueError, binascii.Error):
         print('Selected process fields unavailable; raw values are not printed', file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True))
