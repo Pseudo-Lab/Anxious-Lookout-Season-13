@@ -33,7 +33,13 @@ parser.add_argument('--code-mode-wire', action='store_true')
 parser.add_argument('--enable-code-mode-host', action='store_true')
 parser.add_argument('--permission-probe', action='store_true')
 parser.add_argument('--fail-after-tool', action='store_true')
+parser.add_argument('--runner-path', action='store_true')
 options = parser.parse_args()
+fixture_tool_names = ('research_list',) if options.runner_path else ('original_fixture_tool', 'web_fixture_tool')
+
+
+def fixture_arguments(name):
+    return {'type': 'document', 'limit': 1} if options.runner_path else {'content': name+'-synthetic'}
 
 root = Path('/tmp/shared-tools'); root.mkdir(mode=0o700)
 for name in ('home', 'codex', 'original', 'web'): (root / name).mkdir(mode=0o700)
@@ -86,15 +92,15 @@ class Mock(BaseHTTPRequestHandler):
             # Inspect advertised exec descriptions only, not user/model history
             # containing deliberate foreign-name negative probes.
             prompt = '\n'.join(spec.get('description', '') for spec in advertised if spec.get('name') == 'exec')
-            prompt_names = [name for name in ('original_fixture_tool', 'web_fixture_tool') if name in prompt]
+            prompt_names = [name for name in fixture_tool_names if name in prompt]
             audit['registeredToolInPrompt'] |= bool(prompt_names)
             audit['codeModeExecAdvertised'] |= 'exec' in names
             print(json.dumps({'registeredFixtureTools': [v for v in names if v in
-                             ('original_fixture_tool', 'web_fixture_tool')],
+                             fixture_tool_names],
                               'responseToolCount': len(body.get('tools', [])),
                               'inputToolNamesCount': len(names), 'registeredToolPromptNames': prompt_names}), flush=True)
             name = (next(iter(prompt_names), None) if options.code_mode_wire and 'exec' in names else
-                    next((v for v in names if v in ('original_fixture_tool', 'web_fixture_tool')), None))
+                    next((v for v in names if v in fixture_tool_names), None))
             if not name:
                 audit['missingRegisteredTools'] += 1
                 payload = b'{"error":{"message":"Fixture registered tool absent","type":"invalid_request_error"}}'
@@ -102,10 +108,18 @@ class Mock(BaseHTTPRequestHandler):
                 self.send_header('Content-Length', str(len(payload))); self.end_headers()
                 self.wfile.write(payload)
                 return
-            other = 'web_fixture_tool' if name == 'original_fixture_tool' else 'original_fixture_tool'
+            other = ('foreign_owner_tool' if options.runner_path else
+                     'web_fixture_tool' if name == 'original_fixture_tool' else 'original_fixture_tool')
             assert other not in names, 'Foreign tool registration leaked'
             if options.code_mode_wire: assert other not in prompt_names
             call = name + '-call'
+            if options.runner_path:
+                # Resume includes prior tool outputs; only this explicit user turn
+                # can trigger the current callback and completion.
+                users = [v for v in body.get('input', []) if v.get('role') == 'user']
+                assert users and isinstance(users[-1].get('id'), str)
+                call += '-'+users[-1]['id']
+                outputs = [v for v in outputs if v.get('call_id') == call]
             if outputs:
                 if options.code_mode_wire:
                     print(json.dumps({'syntheticCodeModeOutputs': [str(v.get('output'))[:1200] for v in outputs]}), flush=True)
@@ -136,7 +150,7 @@ class Mock(BaseHTTPRequestHandler):
                         'status': 'completed', 'content': [{'type': 'output_text', 'text': 'Synthetic saved', 'annotations': []}]}
             else:
                 if options.code_mode_wire:
-                    code = 'text(await tools.'+name+'('+json.dumps({'content': name+'-synthetic'})+'));'
+                    code = 'text(await tools.'+name+'('+json.dumps(fixture_arguments(name))+'));'
                     if options.permission_probe:
                         code = ('text(JSON.stringify({shellToolAvailable:typeof tools.exec_command === "function",'
                                 'foreignToolAvailable:typeof tools.'+other+' === "function",'
@@ -147,7 +161,7 @@ class Mock(BaseHTTPRequestHandler):
                             'name': 'exec', 'input': code}
                 else:
                     item = {'type': 'function_call', 'id': name + '-item', 'call_id': call,
-                            'name': name, 'arguments': json.dumps({'content': name + '-synthetic'})}
+                            'name': name, 'arguments': json.dumps(fixture_arguments(name))}
             requests.append((name, bool(outputs)))
         values = [{'type': 'response.created', 'response': {'id': name + '-response'}},
                   {'type': 'response.output_item.done', 'item': item},
@@ -196,6 +210,15 @@ for setting in settings:
     args += ['-c', setting]
 if options.enable_code_mode_host:
     args += ['-c', 'features.code_mode_host=true']
+if options.runner_path:
+    from runner_mock_path import run_runner
+    try:
+        runner_report = run_runner(root, origin, cert_path, settings, options, audit, permission_results)
+        print(json.dumps(runner_report))
+        assert runner_report['acceptancePassed']
+    finally:
+        server.shutdown()
+    raise SystemExit(0)
 p = subprocess.Popen(args, env={'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': str(root/'home'),
                      'CODEX_HOME': str(root/'codex'), 'CODEX_CA_CERTIFICATE': str(cert_path), 'LANG': 'C.UTF-8'},
                      cwd=root, stdin=subprocess.PIPE if options.stdio else None,

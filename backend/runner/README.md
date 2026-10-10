@@ -8,6 +8,22 @@ exact operating review are required; existing deployed images are unchanged.
 
 This is an isolated per-service-account app-server broker. Source/fixture validation is separate from real provider authentication, paid turns and native resume acceptance. Deployment/resources/credential injection are not authorized by this development checkpoint.
 
+The ARM64 runner packages native0.160.1 plus the same-release code-mode host. Native
+and companion hashes and executable permission are checked before auth attachment or
+process startup; missing/modified/unexecutable bundles refuse. The pinned model uses
+code_mode_only, so real native enables its required host while retaining the existing
+shell/unified-exec/apps/plugins/browser/image/web and approval restrictions. Test CLI
+fixtures keep their previous host-disabled path. Installer pins the official companion
+archive and ELF64 AArch64 binary; no model/version fallback is introduced.
+
+`infra/hosting/m3/check_runner_companion.sh <runner-test image ID> <pinned models.json>`
+exercises actual Native construction and runner HTTP admission with a synthetic private
+grant/cache and network-none loopback mock. It verifies research tool callbacks, exact
+session/request authority, separate session threads and same-thread follow-up, wrong
+bearer/state/model refusal, deduplication, failed-turn consumption and max3 refusal.
+This is not original-source authority, live entitlement/shared lifecycle or deployment
+approval. Production images are built separately and handed to PM only after review.
+
 The optional Docker `runner` stage installs ARM64 Codex **0.160.1** with executable SHA256 `fbbaec80443919f86dd63648a0b62759cf6f1d0e09310602fde96885e0bceb3e`. A different artifact fails the build. Experimental protocol fields are version-dependent. The pinned executable's `generate-json-schema --experimental` was checked in Docker without an account/model request; `dynamicTools` needs initialize.experimentalApi and function descriptors need type=function. Upgrading the pin requires fresh schema and integration verification.
 
 Protocol references: [official App Server](https://learn.chatgpt.com/docs/app-server) and [official authentication](https://learn.chatgpt.com/docs/auth). The broker initializes stdio, creates/resumes a thread and reads its persisted turns. Dynamic tool requests return complete JSON results. Original Codex home and broker dispatch reservations survive in `/state`; DB stores owner metadata and a conversation cache, not a separate execution-event database. A failed/interrupted turn is explicit and never automatically replayed.

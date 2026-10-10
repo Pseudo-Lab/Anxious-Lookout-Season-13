@@ -81,13 +81,15 @@ class Native:
         if auth and not self.fixture:
             if os.getenv("APP_ENV") != "personal-test" or os.getenv("CODEX_EXECUTION_SCOPE") != "personal-private":
                 raise CodexFailure("policy_refused")
-            from .install_codex import EXPECTED_SHA256
+        if not self.fixture:
+            from .install_codex import EXPECTED_SHA256, HOST_SHA256
             if binary != "/usr/local/bin/codex":
                 raise CodexFailure("policy_refused")
             try:
-                with open(binary, "rb") as executable:
-                    if hashlib.file_digest(executable, "sha256").hexdigest() != EXPECTED_SHA256:
-                        raise CodexFailure("policy_refused")
+                for path, digest in ((binary, EXPECTED_SHA256), ("/usr/local/bin/codex-code-mode-host", HOST_SHA256)):
+                    with open(path, "rb") as executable:
+                        if hashlib.file_digest(executable, "sha256").hexdigest() != digest or not os.access(path, os.X_OK):
+                            raise CodexFailure("policy_refused")
             except OSError:
                 raise CodexFailure("policy_refused") from None
         self.root, self.model, self.callback_url = root, model, callback_url
@@ -127,7 +129,7 @@ class Native:
                     "-c", "features.multi_agent=false", "-c", "features.multi_agent_v2=false",
                     "-c", "features.unbounded_connection_retries=false", "-c", "features.unified_exec=false",
                     "-c", "features.apps=false", "-c", "features.plugins=false", "-c", "features.remote_plugin=false",
-                    "-c", "features.hooks=false", "-c", "features.code_mode_host=false",
+                    "-c", "features.hooks=false", "-c", "features.code_mode_host=true" if not self.fixture else "features.code_mode_host=false",
                     "-c", "features.daemon_auto_start=false",
                     "-c", "features.browser_use=false", "-c", "features.computer_use=false",
                     "-c", "features.image_generation=false", "-c", 'web_search="disabled"',

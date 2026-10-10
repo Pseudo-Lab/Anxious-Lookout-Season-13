@@ -35,3 +35,8 @@ RUN python /app/runner/install_codex.py \
     && chown 10001:10001 /state
 USER 10001:10001
 CMD ["uvicorn", "runner.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log", "--no-proxy-headers"]
+
+# Isolated tests of the actual pinned bundle plus existing offline protocol cases.
+FROM test AS runner-test
+COPY --from=runner --chmod=755 /usr/local/bin/codex /usr/local/bin/codex
+COPY --from=runner --chmod=755 /usr/local/bin/codex-code-mode-host /usr/local/bin/codex-code-mode-host
