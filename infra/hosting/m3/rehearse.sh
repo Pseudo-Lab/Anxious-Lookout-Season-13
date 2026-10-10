@@ -55,7 +55,7 @@ for image in "$M3_OLD" "$M3_IMAGE"; do
     -e "DATABASE_URL=postgresql+psycopg://anxious_api:$M3_PASSWORD@127.0.0.1/restore_m3" \
     -e APP_ENV=production -e OAUTH_MODE=disabled -e AUTH_ORIGIN=http://127.0.0.1:8080 -e ALLOW_INSECURE_LOOPBACK=true \
     -e CODEX_PERSONAL_ENABLE=false -e CODEX_RUNNERS_FILE= \
-    --entrypoint python "$image" -c 'from fastapi.testclient import TestClient; from app.main import create_app; app=create_app(); assert not getattr(app.state,"codex_personal_enabled",False); 
+    --entrypoint python "$image" -c 'from fastapi.testclient import TestClient; from app.main import create_app; app=create_app(); assert not getattr(app.state,"codex_personal_enabled",False);
 with TestClient(app) as c:
  assert c.get("/healthz").status_code==200 and c.get("/readyz").status_code==200 and c.get("/api/auth/me").status_code==401
 print("PASS actual image/auth readiness on upgraded isolated DB; native disabled")' \
