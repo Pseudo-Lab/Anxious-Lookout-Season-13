@@ -36,9 +36,12 @@ PM의 `messages/review/2026-10-10-pm-issue7-session-p1-actual.md`와
 `messages/back/2026-10-10-pm-issue7-session-p1-result.md`를 재사용합니다.
 P1 수정 절차는 source `200f26299febf5d898375666178d41e8dce2b794`이며,
 선택 PM process에 same-UID bounded pipe 방식으로 실행해 exit0, 전후 identity/exe/filter
-일치 및 transport/filter/outer logs empty를 PM이 보고했습니다. 실제 결과의 독립 review는
-요청된 상태이며 절차 승인과 실제 결과 승인을 혼동하지 않습니다. Raw process bytes는
-host/daemon/container 메모리를 경유했습니다. Credential 파일/auth RPC는 접근하지 않았습니다.
+일치 및 transport/filter/outer logs empty를 PM이 보고했습니다. 독립 review는
+`old/pm/2026-10-10-review-issue7-session-p1-verified.md`에서 저장 증거/현재 단일 process
+identity/출력 shape와 해석을 대조했습니다. 원본 raw 입력 재열람이나 live binding 검증은
+아니며, 원 실행 exit0/timeout 및 모든 외부 recording 부재를 독립 추적한 결과도 아닙니다.
+Raw process bytes는 host/daemon/container 메모리를 경유했습니다. Credential 파일/auth RPC는
+접근하지 않았습니다.
 
 | 확보한 사실 | 가능한 해석 | 확정하지 못하는 것 |
 | --- | --- | --- |
