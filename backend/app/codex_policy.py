@@ -17,8 +17,10 @@ def personal_origin_enabled(settings):
     parsed = urlsplit(settings.origin)
     if parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
         return True
+    permitted_path = settings.base_path == "/codex-trial" or (
+        settings.base_path == "" and os.getenv("CODEX_PERSONAL_ROOT_ENABLE") == "true")
     return (parsed.scheme == "https" and settings.secure_cookie
-            and settings.base_path == "/codex-trial" and bool(settings.trusted_proxy_cidrs)
+            and permitted_path and bool(settings.trusted_proxy_cidrs)
             and os.getenv("CODEX_EXECUTION_SCOPE") == "personal-private"
             and os.getenv("CODEX_PERSONAL_REMOTE_ORIGIN") == settings.origin)
 
