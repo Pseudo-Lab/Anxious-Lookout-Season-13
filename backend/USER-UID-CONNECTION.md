@@ -38,6 +38,11 @@ start another thread. Observed runtime failure blocks the instance and prevents
 an asserted clean cache handoff. Marker copies are not cryptographic Pod attestation;
 trusted images, actual PVC/CNI and operator ownership remain necessary.
 
+UID-R1: Native and HTTP middleware both latch binding_failed for the instance.
+Restoring marker bytes does not clear it: read/dispatch remain refused and close
+cannot call auth.close(clean=True). The retained nativeActive barrier rejects a
+new instance until separately reviewed reconciliation; no automatic flag reset.
+
 API retains nativeThreadId in its existing private JSON cache and sends
 expectedThreadId on follow-ups. Public summary/items do not expose this field.
 Missing/wrong established session/thread refuses before ledger consumption;
@@ -160,9 +165,11 @@ No DB/schema downgrade, original-cache rewrite or automatic new thread.
 
 `sudo bash backend/tests/check-user-uid.sh`: current readonly source in cached Docker
 test image, isolated network-none PostgreSQL, fixture adapter subprocesses only.
-**65 passed**: A-health/B-submit zero accept/tools/broker/ledger changes, same-thread
+**67 passed**: A-health/B-submit zero accept/tools/broker/ledger changes, same-thread
 restart, startup/runtime marker refusal, private bookmark/forgery, resume-response
 thread mismatch, metadata value suppression and existing owner/model/max3 cases.
+Native and HTTP marker-failure→restore→close→restart barriers are included. The
+reviewer's original UID-R1 counterexample also passes separately, unchanged.
 No vendor native binary/provider/actual Pod/auth proof. Owned PG removed by EXIT.
 Existing TestClient HTTPX deprecation warning is nonblocking; dependencies unchanged.
 

@@ -73,6 +73,7 @@ class Native:
             raise CodexFailure("policy_refused")
         self.auth, self.blocked_reason, self.real_verified = auth, None, False
         self.binding_check = binding_check
+        self.binding_failed = False
         self.check_binding()
         self.fixture = binary == "/usr/local/bin/codex-fixture"
         if self.fixture and os.getenv("APP_ENV") != "test":
@@ -174,12 +175,15 @@ class Native:
         return None
 
     def check_binding(self):
+        if getattr(self, "binding_failed", False):
+            raise CodexFailure("policy_refused")
         check = getattr(self, "binding_check", None)
         if check:
             try:
                 check()
             except CodexFailure:
                 self.blocked_reason = "policy_refused"
+                self.binding_failed = True
                 raise
 
     def verify_projection(self, session, entry):
@@ -526,7 +530,7 @@ class Native:
         active_at_start = self.active_session is not None
         alive_at_start = self.process.poll() is None
         forced = False
-        binding_ok = True
+        binding_ok = not getattr(self, "binding_failed", False)
         try:
             self.check_binding()
         except CodexFailure:
@@ -622,6 +626,7 @@ def create_app():
             except CodexFailure:
                 if app.state.native:
                     app.state.native.blocked_reason = "policy_refused"
+                    app.state.native.binding_failed = True
                 return JSONResponse({"ownerId": owner, "error": "codex_policy_refused"}, status_code=503)
         result = await call_next(request)
         result.headers["Cache-Control"] = "no-store"
