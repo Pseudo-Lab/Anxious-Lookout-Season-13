@@ -64,6 +64,11 @@ observation. No silent Recreate/scale-down or unreviewed maintenance window.
    postgres m2 service, matching API password, frozen auth0001, existing nonsuper
    API role and no research schema in readonly transactions. Missing/changed
    source state/credential/role fails before migration; no creation/reset repair.
+   Nonempty URL queries are unsupported and refused before engine/connection,
+   including host/user/password/dbname/hostaddr/service/options/SSL query settings.
+   After connect, current_database=hosting and current_user/session_user must both
+   be postgres for admin or anxious_api for API. Do not edit existing Secrets or
+   bypass this check to make unsupported input pass; reconcile exact inputs.
 5. Only after backup+actual rehearsal+before/policy/owner evidence, create
    Job/hosting-m3-migrate-v1 once. It runs the existing baked CLI
    `python -m app.migrate --revision 0004_publication`; no code/0001-renderer

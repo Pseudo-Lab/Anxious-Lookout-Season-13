@@ -4,14 +4,16 @@ set -euo pipefail
 umask 077
 CHECK_DIR=$(cd "$(dirname "$0")" && pwd)
 CHECK_OUT=${1:?New /tmp/issue7-m3-check-* private directory}
+CHECK_MODE=${2:-all}
+[[ $CHECK_MODE == all || $CHECK_MODE == --only-db-guard ]]
 [[ $CHECK_OUT =~ ^/tmp/issue7-m3-check-[A-Za-z0-9_-]+$ && ! -e $CHECK_OUT ]]
 mkdir -m 0700 "$CHECK_OUT"
 CHECK_PG="issue7-m3-source-$(cat /proc/sys/kernel/random/uuid)"
 trap 'docker rm -f "$CHECK_PG" >/dev/null 2>&1 || true' EXIT
 docker run --rm --network none --read-only --tmpfs /tmp \
-  --env PYTHONPATH=/checks --env PYTHONDONTWRITEBYTECODE=1 \
+  --env PYTHONPATH=/checks:/app --env PYTHONDONTWRITEBYTECODE=1 \
   --mount "type=bind,src=$CHECK_DIR,dst=/checks,readonly" --entrypoint bash anxious-hosting-api-issue7-c4-r4-test \
-  -c 'bash -n /checks/rehearse.sh && pytest -q -p no:cacheprovider /checks/test_prepare.py' > "$CHECK_OUT/unit.txt"
+  -c 'bash -n /checks/rehearse.sh && pytest -q -p no:cacheprovider /checks/test_prepare.py /checks/test_db_guard.py' > "$CHECK_OUT/unit.txt"
 docker run -d --pull=never --name "$CHECK_PG" --network none --read-only --user 999:999 \
   --cap-drop ALL --security-opt no-new-privileges:true \
   --tmpfs /var/lib/postgresql:uid=999,gid=999,size=256m --tmpfs /var/run/postgresql:uid=999,gid=999 --tmpfs /tmp \
@@ -38,9 +40,11 @@ with engine.begin() as c:
 engine.dispose()
 print('Synthetic populated M2 source ready')
 PY
-docker exec "$CHECK_PG" pg_dump -U postgres -d hosting --no-owner --no-privileges -Fc > "$CHECK_OUT/source.dump"
-sha256sum "$CHECK_OUT/source.dump" > "$CHECK_OUT/source.dump.sha256"
-bash "$CHECK_DIR/rehearse.sh" "$CHECK_OUT/source.dump" "$CHECK_OUT/rehearsal.json" > "$CHECK_OUT/rehearsal.txt"
+if [[ $CHECK_MODE == all ]]; then
+  docker exec "$CHECK_PG" pg_dump -U postgres -d hosting --no-owner --no-privileges -Fc > "$CHECK_OUT/source.dump"
+  sha256sum "$CHECK_OUT/source.dump" > "$CHECK_OUT/source.dump.sha256"
+  bash "$CHECK_DIR/rehearse.sh" "$CHECK_OUT/source.dump" "$CHECK_OUT/rehearsal.json" > "$CHECK_OUT/rehearsal.txt"
+fi
 # Verify actual mounted before/after checker on an entirely offline synthetic
 # source DB. Bind a nonsecret hosts file instead of accessing cluster DNS.
 printf '127.0.0.1 localhost postgres\n' > "$CHECK_OUT/hosts"
@@ -60,4 +64,8 @@ for stage in before after; do
     --entrypoint python sha256:41403b6a5ab16bee5cfb936879761f8a31420085236794de347eb410944defca \
     /checks/verify_database.py "$stage" > "$CHECK_OUT/checker-$stage.json"
 done
-printf 'PASS unit boundaries plus actual M2/M3 image isolated dump/0004 compatibility; synthetic data only.\n'
+if [[ $CHECK_MODE == all ]]; then
+  printf 'PASS unit boundaries plus actual M2/M3 image isolated dump/0004 compatibility; synthetic data only.\n'
+else
+  printf 'PASS DB guard unit boundaries and actual before/after readonly identity checks; no restore repeated.\n'
+fi

@@ -16,6 +16,9 @@ def check(stage):
     admin, api = make_url(secret("ADMIN_DATABASE_URL")), make_url(secret("DATABASE_URL"))
     aliases = {"postgres", "postgres.m2-hosting.svc", "postgres.m2-hosting.svc.cluster.local"}
     if (admin.drivername != "postgresql+psycopg" or api.drivername != "postgresql+psycopg"
+            # SQLAlchemy query keys override authority connection fields. No URL
+            # query (including service/options/hostaddr or SSL options) is supported.
+            or admin.query or api.query
             or admin.host not in aliases or api.host not in aliases
             or admin.database != "hosting" or api.database != "hosting"
             or admin.username != "postgres" or api.username != "anxious_api"
@@ -28,7 +31,9 @@ def check(stage):
             with engine.connect() as conn:
                 conn.exec_driver_sql("SET TRANSACTION READ ONLY")
                 conn.exec_driver_sql("SET LOCAL statement_timeout = 10000")
-                if conn.execute(text("SELECT current_database()")).scalar_one() != "hosting":
+                identity = conn.execute(text("SELECT current_database(), current_user, session_user")).one()
+                expected_user = "postgres" if role == "admin" else "anxious_api"
+                if tuple(identity) != ("hosting", expected_user, expected_user):
                     raise ValueError()
                 validate_v1(conn)
                 if conn.execute(text("SELECT version_num FROM auth.alembic_version")).scalar_one() != "0001_auth":
