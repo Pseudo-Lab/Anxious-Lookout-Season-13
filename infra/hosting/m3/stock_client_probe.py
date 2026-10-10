@@ -119,6 +119,7 @@ finally:
     report['ownedFixtureServerExitCode']=p.returncode
     print(json.dumps(report))
 assert report['rawPeerForeignThreadReadAllowed'] and report['rawPeerPrivateNameExposed']
+assert report['webObservedForeignThreadEvents']
 assert report['originalWorksAfterWebDisconnect'] and report['webSameThreadReconnect']
 assert report['serverAndWebSurviveOriginalDisconnect'] and report['serverAliveAfterBothDisconnect']
 assert report['ownedFixtureServerExitCode']==0
