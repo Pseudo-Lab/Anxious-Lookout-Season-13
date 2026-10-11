@@ -178,3 +178,12 @@ comparison; original rollback env, UID/resourceVersion and other spec fields sta
 exact. Normal GET omission after a disabled rollout no longer refuses rollback.
 Current source tests include observed omission fixtures and real drift rejection.
 This does not authorize replaying completed migrations or operational rollback.
+
+## Selected-node DNS proxy recovery preparation
+
+[ACCESS-NODE-PROXY-RECOVERY.md](ACCESS-NODE-PROXY-RECOVERY.md) separates a
+read-only preflight, an explicitly mutating load-only kernel helper probe,
+and a separately approved one-node NodeConfig/agent recreation trial with
+default rollback. It includes exact UID/RV deletion guards, original Runner
+DNS policy/Service gates, two bounded agent replacements and host API recovery.
+The package does not authorize live execution or a persistent mode change.

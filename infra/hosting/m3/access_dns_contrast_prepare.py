@@ -9,7 +9,8 @@ import access_runner_dns_control_prepare as control
 import access_web_prepare as web
 
 POLICY = 'access-runner-dns-contrast-v1'
-JOBS = {'l4': 'access-runner-dns-l4-v1', 'l7': 'access-runner-dns-l7-v1'}
+JOBS = {'l4': 'access-runner-dns-l4-v1', 'l7': 'access-runner-dns-l7-v1',
+        'node': 'access-runner-dns-node-v1'}
 RULE_PATH = '/spec/egress/1/toPorts/0/rules'
 
 

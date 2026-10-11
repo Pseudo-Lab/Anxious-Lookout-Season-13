@@ -10,7 +10,7 @@ contrast_command=$3
 contrast_prefix=$4
 case "$contrast_kubectl" in /*/kubectl) ;; *) exit 1 ;; esac
 case "$contrast_prefix" in /*) ;; *) exit 1 ;; esac
-if [[ ! "$contrast_pod" =~ ^access-runner-dns-(l4|l7)-v1-[a-z0-9-]+$ ]]; then exit 1; fi
+if [[ ! "$contrast_pod" =~ ^access-runner-dns-(l4|l7|node)-v1-[a-z0-9-]+$ ]]; then exit 1; fi
 contrast_directory=$(dirname "$contrast_prefix")
 if [ "$(stat -c %a "$contrast_directory")" != 700 ] || [ "$(stat -c %u "$contrast_directory")" != "$(id -u)" ]; then exit 1; fi
 if [ ! -f "$contrast_command" ] || [ -L "$contrast_command" ] || [ "$(stat -c %u "$contrast_command")" != "$(id -u)" ] || [ "$(stat -c %a "$contrast_command")" != 600 ]; then exit 1; fi

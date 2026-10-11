@@ -27,7 +27,7 @@ def holder_command(nonce):
 
 
 def emit(snapshot, inputs, images, baseline, services, phase, nonce):
-    if phase not in JOBS:
+    if phase not in ('l4', 'l7'):
         raise ValueError()
     original = direct.emit(snapshot, inputs, images)
     if control.canonical(original) != control.canonical(baseline):
