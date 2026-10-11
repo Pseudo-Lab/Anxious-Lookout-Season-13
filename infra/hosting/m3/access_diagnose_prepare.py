@@ -15,17 +15,18 @@ def emit(snapshot, inputs, image, kind, window=None, dns_inputs=None):
     if image != DIAGNOSTIC_IMAGE:
         raise ValueError()
     directory = Path(__file__).parent
-    if kind not in {'state', 'network', 'dns', 'dns-ndots1', 'dns-observed', 'resolver-map'}:
+    if kind not in {'state', 'network', 'dns', 'dns-ndots1', 'dns-observed', 'resolver-map', 'dns-path-contrast'}:
         raise ValueError()
-    if kind != 'resolver-map' and dns_inputs is not None:
+    if kind not in ('resolver-map', 'dns-path-contrast') and dns_inputs is not None:
         raise ValueError()
-    if kind == 'resolver-map' and window is not None:
+    if kind in ('resolver-map', 'dns-path-contrast') and window is not None:
         raise ValueError()
     name = 'access-'+kind+'-diagnose-v1'
-    script = directory/('access_resolver_map.py' if kind == 'resolver-map' else 'access_state_diagnose.py' if kind == 'state' else
+    script = directory/('access_dns_path_contrast.py' if kind == 'dns-path-contrast' else
+                        'access_resolver_map.py' if kind == 'resolver-map' else 'access_state_diagnose.py' if kind == 'state' else
                         'access_dns_diagnose.py' if kind.startswith('dns') else 'access_network_diagnose.py')
     volumes, mounts, env = [], [], []
-    if kind in ('state', 'resolver-map'):
+    if kind in ('state', 'resolver-map', 'dns-path-contrast'):
         # Existing stopped runner only; fresh current GET supplied in snapshot.
         runner = snapshot['runner']
         if (runner['metadata']['namespace'] != 'codex-trial' or runner['metadata']['name'] != 'access-web-runner-v1'
@@ -61,6 +62,18 @@ def emit(snapshot, inputs, image, kind, window=None, dns_inputs=None):
         from access_resolver_map import expected_context
         context = expected_context(dns_inputs['service'], dns_inputs['pod'], node)
         container['command'][3] = 'EXPECTED_DNS_CONTEXT = '+json.dumps(context)+'\n'+script.read_text()
+    if kind == 'dns-path-contrast':
+        from access_resolver_map import expected_context
+        from access_dns_path_contrast import path_context
+        context = path_context(dns_inputs, node, expected_context)
+        bodies = []
+        for shared in ('access_dns_diagnose.py', 'access_resolver_map.py'):
+            pieces = (directory/shared).read_text().split("\nif __name__ == '__main__':")
+            if len(pieces) != 2:
+                raise ValueError()
+            bodies.append(pieces[0])  # Trusted definitions; never run old diagnostic main.
+        container['command'][3] = ('EXPECTED_DNS_CONTEXT = '+json.dumps(context)+'\n'+'\n'.join(bodies)
+            +'\n'+script.read_text()+"\nif __name__ == '__main__':\n    main(EXPECTED_DNS_CONTEXT, read_resolver, query, summary)\n")
     if kind == 'dns-ndots1':
         job['spec']['template']['spec']['dnsConfig'] = {'options': [{'name': 'ndots', 'value': '1'}]}
     if kind != 'state':
@@ -74,7 +87,7 @@ def emit(snapshot, inputs, image, kind, window=None, dns_inputs=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('kind', choices=('state', 'network', 'dns', 'dns-ndots1', 'dns-observed', 'resolver-map'))
+    parser.add_argument('kind', choices=('state', 'network', 'dns', 'dns-ndots1', 'dns-observed', 'resolver-map', 'dns-path-contrast'))
     parser.add_argument('--snapshot', required=True); parser.add_argument('--inputs', required=True)
     parser.add_argument('--window-inputs')
     parser.add_argument('--dns-inputs')
