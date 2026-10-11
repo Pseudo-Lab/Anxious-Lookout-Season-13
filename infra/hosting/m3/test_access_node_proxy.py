@@ -44,9 +44,10 @@ def bundle(runner_snapshot):
     ds = meta('DaemonSet', 'cilium', 'kube-system')
     mounts = [{'name': 'config', 'mountPath': '/tmp/cilium/config-map'}]
     ds['spec'] = {'template': {'spec': {'hostNetwork': True, 'volumes': [{'name': 'config', 'emptyDir': {}}],
-          'containers': [{'name': 'cilium-agent', 'command': ['cilium-agent'], 'image': 'cilium:v1.20.2',
+          'containers': [{'name': 'cilium-agent', 'command': ['cilium-agent'], 'image': prep.CILIUM_IMAGE,
                           'args': ['--config-dir=/tmp/cilium/config-map'], 'volumeMounts': mounts}],
-          'initContainers': [{'name': 'config', 'command': ['cilium-dbg', 'build-config'], 'image': 'cilium:v1.20.2',
+          'initContainers': [{'name': 'config', 'command': ['cilium-dbg', 'build-config'], 'image': prep.CILIUM_IMAGE,
+                              'env': [{'name': 'K8S_NODE_NAME', 'valueFrom': {'fieldRef': {'apiVersion': 'v1', 'fieldPath': 'spec.nodeName'}}}],
                               'args': ['--source=config-map:kube-system/cilium-config,cilium-node-config:kube-system',
                                        '--dest=/tmp/cilium/config-map'], 'volumeMounts': mounts}]}}}
     pod = meta('Pod', 'cilium-original', 'kube-system')
@@ -88,6 +89,9 @@ def capability(receipt):
     calls = []
     result = probe.run(receipt['binding'], 'machine', 'boot', '6.6-test', calls.append)
     assert len(calls) == 4
+    result['lifecycle'] = {'mode': 'probe', 'imageId': probe.PROBE_TOOL_IMAGE, 'ownerNonce': NONCE,
+        'containerName': 'access-node-proxy-'+NONCE, 'containerId': 'b'*64, 'childExit': 0,
+        'probeCompleted': True, 'containerAbsentVerified': True, 'p2Eligible': True}
     return result
 
 
@@ -162,6 +166,22 @@ def test_preflight_fails_before_mutation(bundle, change):
     elif change == 'api_unobserved': bundle['snapshot']['api']['status']['observedGeneration'] = 0
     else: bundle['endpoints']['api']['policy']['realized']['policy-revision'] = 2
     with pytest.raises((ValueError, KeyError)): prep.preflight(bundle)
+
+
+@pytest.mark.parametrize('change', ['missing', 'duplicate', 'literal', 'wrong_field', 'wrong_version', 'extra_value'])
+def test_config_init_requires_exact_once_node_fieldref(bundle, change):
+    init = bundle['daemonset']['spec']['template']['spec']['initContainers'][0]
+    env = init['env']
+    if change == 'missing': init['env'] = []
+    elif change == 'duplicate': env.append(copy.deepcopy(env[0]))
+    elif change == 'literal': env[0] = {'name': 'K8S_NODE_NAME', 'value': bundle['expectedNode']['name']}
+    elif change == 'wrong_field': env[0]['valueFrom']['fieldRef']['fieldPath'] = 'metadata.name'
+    elif change == 'wrong_version': env[0]['valueFrom']['fieldRef']['apiVersion'] = 'v2'
+    else: env[0]['value'] = ''
+    bundle['agents']['items'][0]['spec']['initContainers'] = copy.deepcopy(bundle['daemonset']['spec']['template']['spec']['initContainers'])
+    with pytest.raises(ValueError): prep.startup(bundle['daemonset'])
+    with pytest.raises(ValueError): prep.select_initial(bundle)
+    with pytest.raises(ValueError): prep.preflight(bundle)
 
 
 @pytest.mark.parametrize('change', ['node_uid', 'boot', 'capability_unknown', 'attach', 'hash', 'load_count'])

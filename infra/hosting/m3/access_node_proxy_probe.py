@@ -13,6 +13,8 @@ from pathlib import Path
 import struct
 import sys
 
+PROBE_TOOL_IMAGE = 'sha256:e1cd49c5e8d36fae0689e727c06459529bbc67e823e08385602ea534c6397450'
+
 
 class LoadAttr(ctypes.Structure):
     _fields_ = [('prog_type', ctypes.c_uint32), ('insn_cnt', ctypes.c_uint32),

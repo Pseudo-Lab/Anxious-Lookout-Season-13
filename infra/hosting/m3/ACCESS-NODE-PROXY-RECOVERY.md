@@ -55,7 +55,9 @@ current workload metadata inventory. Do not restart unrelated workloads to
 make a failed gate pass.
 
 Both Ready windows are120s from the corresponding conditional delete. P1
-is bounded to15s; a P2 operator session has a600s hard budget. Individual
+Docker attached execution is bounded to15s+1s kill; the owned-container wrapper reserves
+up to100s including creation, inspection and exact cleanup. A P2 operator
+session has a600s hard budget. Individual
 Kubernetes/exec commands use8s request timeout and12s wall timeout+1s kill.
 Reserve at least240s for rollback: if insufficient time remains, skip DNS and
 rollback immediately. On uncertain create/delete/exec outcome, reconcile
@@ -82,8 +84,11 @@ a host tooling image, not a new cluster deployment or production image.
 Private bundles are assembled from the following saved raw files, using
 Docker/jq rather than hand-altering metadata. All lists must be complete raw
 API lists with nonempty resourceVersion and no continuation token. Preserve
-full original DS/Pod containers: admission differences are unsupported and
-must be reported, never normalize the DS from a Pod to bypass comparison.
+full original DS/Pod containers. Typed NodeList/PodList/CiliumNodeConfigList
+can omit nested TypeMeta; the guard interprets types in copies and rejects
+conflicting explicit types. It permits only the exact standard serviceaccount
+admission mount/projection described below. Other differences are unsupported,
+never normalize the DS from a Pod to bypass comparison.
 
 | Action | Bundle inputs / output |
 | --- | --- |
@@ -157,17 +162,57 @@ full raw witness privately. Do not substitute init config files for effective
 daemon values. [config-get source](https://github.com/cilium/cilium/blob/v1.20.2/cilium-dbg/cmd/config_get.go)
 reads running daemon configuration, normalizing field names.
 
-This initial package deliberately supports only a narrow startup profile:
-config init command `cilium-dbg build-config`, explicit source order
-`config-map:kube-system/cilium-config,cilium-node-config:kube-system`, dest
-`/tmp/cilium/config-map`; shared emptyDir; agent command `cilium-agent` and
-only `--config-dir=/tmp/cilium/config-map`. Only literal kube-system namespace
-and spec.nodeName fieldRef env are accepted. Unknown CLI/env/shell, allow/deny
-filters or later annotation sources stop **before mutations**, and require a
-source-backed package revision. This is not a claim about uncollected current
-startup support. [build-config](https://github.com/cilium/cilium/blob/v1.20.2/cilium-dbg/cmd/build-config.go)
-and [resolver](https://github.com/cilium/cilium/blob/v1.20.2/pkg/option/resolver/resolver.go)
-define source order, override filtering and selector handling. CRD v2 must be
+The revised profile requires the official pinned Cilium image on both config
+init and agent:
+`quay.io/cilium/cilium:v1.20.2@sha256:2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01`.
+Config init is `cilium-dbg build-config`; agent is `cilium-agent` with only
+`--config-dir=/tmp/cilium/config-map`. Init must contain **exactly one**
+K8S_NODE_NAME spec.nodeName fieldRef with apiVersionv1, no literal value.
+Missing/duplicate/literal/wrong fieldRefs refuse `select` and `preflight`.
+
+Two source-backed argument forms are accepted. The original explicit source
+order/dest args use the shared emptyDir at `/tmp/cilium/config-map`. The actual
+stored P0 form has absent/empty args and mounts that emptyDir at `/tmp` in
+both init and agent. The latter requires exactly one CILIUM_K8S_NAMESPACE
+metadata.namespace fieldRef in config init, resolved to kube-system by the
+fixed DS/Pod namespace. [build-config defaults](https://github.com/cilium/cilium/blob/v1.20.2/cilium-dbg/cmd/build-config.go)
+set NodeName from K8S_NODE_NAME, Dest=/tmp/cilium/config-map and ordered sources
+config-map:cilium-config then cilium-node-config:$CILIUM_K8S_NAMESPACE, with
+empty allow/deny lists. [resolver](https://github.com/cilium/cilium/blob/v1.20.2/pkg/option/resolver/resolver.go)
+resolves the ConfigMap namespace from that same env and merges later sources
+over earlier keys, applying filters. [Hive env binding](https://github.com/cilium/cilium/blob/v1.20.2/vendor/github.com/cilium/hive/hive.go)
+uses CILIUM_SOURCE/DEST/NODE_NAME/ALLOW_CONFIG_KEYS/DENY_CONFIG_KEYS; these
+overrides and all envFrom are refused. The [release Dockerfile](https://github.com/cilium/cilium/blob/v1.20.2/images/cilium/Dockerfile)
+sets HUBBLE_SERVER/INITSYSTEM, with a [scratch runtime final stage](https://github.com/cilium/cilium/blob/v1.20.2/images/runtime/Dockerfile);
+neither defines those startup overrides. No image entrypoint shell is used.
+
+The default form also allows only the observed exact auxiliary envs:
+KUBERNETES_SERVICE_HOST=127.0.0.1/PORT=6443; agent-only
+CILIUM_CLUSTERMESH_CONFIG=/var/lib/cilium/clustermesh/, GOMEMLIMIT from
+limits.memory divisor1, KUBE_CLIENT_BACKOFF_BASE=1/DURATION=120. Node and
+namespace refs remain exact and env names unique. Unknown CLI/env/filter/
+shell, different image, or a shadowing config-directory mount is unsupported.
+No live DS edit adds arguments or changes evidence.
+
+Actual raw Pod containers differ from the DS only by the appended readonly
+kube-api-access-* mount at /var/run/secrets/kubernetes.io/serviceaccount.
+The comparison validates cilium SA, exactly one generated projection with
+defaultMode420, token path token/expiration3607/no alternate audience,
+kube-root-ca.crt ConfigMap mapping and namespace downwardAPI; original
+non-token volumes and every other container field must still match. Only
+comparison copies omit that one mount; raw objects stay unchanged. This is
+the standard [serviceaccount admission implementation](https://github.com/kubernetes/kubernetes/blob/v1.34.1/plugin/pkg/admission/serviceaccount/admission.go),
+not proof of this cluster's Kubernetes version. No token/Secret contents are
+read. Any other admission delta refuses. The current cilium-config must also
+keep clean-cilium-state/clean-cilium-bpf-state absent/false/empty. Agent
+recreation re-executes existing mount/sysctl/CNI init containers; include
+those Node effects in PM availability/recovery review.
+
+The stored `/tmp/issue7-node-proxy-p0.bHOGJS/select.bundle.json` passes offline
+select under this revision with raw bundle hash unchanged. This resolves a
+source interpretation gap; it is not fresh/full P0 readiness. Agent version/
+effective flags/status/endpoint and independent recovery-access evidence were
+not collected after the original refusal and remain required. CRD v2 must be
 served/Established, namespaced, with string defaults and object selector.
 Current effective flag must befalse; an alreadytrue installation is not this
 trial. IPv4/installiptablestrue and endpointRoutesfalse must match baseline.
@@ -220,28 +265,62 @@ the selected Node's independently reached Docker host. Bind Node machine ID
 (hash only), bootID and kernel to the readonly host files before the first
 load. No host Python and no new privileged cluster Pod:
 
+Copy only the reviewed binding metadata to a fresh operator-owned0700 P1
+directory as binding.json0600. Invoke the entire wrapper as that owner:
+
 ```bash
-timeout --signal=TERM --kill-after=1s 15s docker run --rm --init --pull=never \
-  --log-driver=none --network none --read-only --user 0:0 --cap-drop ALL \
-  --cap-add BPF --cap-add NET_ADMIN --security-opt no-new-privileges \
-  --security-opt seccomp=unconfined --entrypoint python \
-  --mount type=bind,src=/etc/machine-id,dst=/target-machine-id,readonly \
-  --mount type=bind,src=/proc/sys/kernel/random/boot_id,dst=/target-boot-id,readonly \
-  --mount type=bind,src=/REVIEWED_SOURCE/infra/hosting/m3,dst=/checks,readonly \
-  --mount type=bind,src=/private/p0,dst=/evidence,readonly \
-  sha256:e1cd49c5e8d36fae0689e727c06459529bbc67e823e08385602ea534c6397450 \
-  -B /checks/access_node_proxy_probe.py --binding /evidence/binding.json --approved-load-only
+bash run_node_proxy_probe.sh /trusted/absolute/docker /REVIEWED_SOURCE/infra/hosting/m3 /private/p1 probe
 ```
+
+The wrapper claims the directory once, creates a random fresh name/owner
+label, uses Docker cidfile, restartno, init/networknone/read-only/lognone,
+the fixed tooling image, BPF+NET_ADMIN only and relaxed seccomp. Existing
+machine/boot/source/binding paths are readonly mounts. Creation10s+1s kill
+is separate from `start --attach`15s+1s kill. Full ID/name/owner label/image
+must match before start. It never relies on `--rm` or client exit to infer
+process termination. [Docker create](https://docs.docker.com/reference/cli/docker/container/create/)
+does not start the container, and [kill](https://docs.docker.com/reference/cli/docker/container/kill/)
+targets the owned full ID during cleanup.
+
+On completion, timeout, transport failure or handled TERM/INT/HUP, an EXIT
+trap reconciles identity, sends exact-ID SIGKILL if Running, confirms stopped,
+removes that same exited ID without force/prune, and requires successful
+empty daemon list responses for full ID, exact name and owner label. Every
+inspect/kill/remove/list has5s+1s kill bounds; allow100s for the complete
+wrapper and cleanup. All argv/outcomes, identity, stdout/stderr and final
+probe.lifecycle.json remain private. Never wrap the entire cleanup-capable
+wrapper in the old15s timeout. A rejected ownership proof cannot kill/remove
+that object. Unacknowledged create with no recovered ID is unknown/handoff,
+even if current lists are empty (creation may still be in flight).
+
+Missing final receipt, daemon failure, stillRunning, failed absence checks,
+or an unhandled wrapper SIGKILL/host failure is unknown and prohibits P2.
+The wrapper cannot guarantee termination when the daemon/host fails. PM must
+handoff the saved name/nonce/CID/current outcomes through independent host
+operator access; no broad cleanup or automatic retry. A normal completed
+probe also undergoes exact cleanup/absence verification. Successful JSON
+from a still-running/unknown container never grants NodeConfig creation.
+
+For regression only, `selfcheck` mode runs a fixed TERM-ignoring shell/sleep
+under UID10001/capdropALL/default seccomp with no BPF/machine/boot/source
+mounts and a1s attach timeout. It uses the same identity/kill/remove/absence
+path and always sets p2Eligiblefalse. It cannot be a capability receipt.
 
 Declare both capabilities and relaxed seccomp in the P1 privilege decision.
 Effective capabilities must be exactly BPF+NET_ADMIN. Old kernels/architectures,
 permission errors, verifier disagreement, timeout or mismatch are **unknown**;
 stop before NodeConfig/reload, do not retry or add SYS_ADMIN/privileged fallback.
-No raw verifier log is printed. Process exit releases all unpinned load FDs,
-including on failure. Docker backend tests only mock this syscall.
+No raw verifier log is printed. Confirmed container termination releases its
+unpinned load FDs, including on failure. Docker backend tests only mock the
+BPF syscall and use a capability-free real container substitute for timeout.
 
 P1 success requires four loads closed with the exact generated program hashes
-and selected Node/boot/kernel binding. Refresh P0 identity/settings/conflicts
+and selected Node/boot/kernel binding, **plus** probe.lifecycle.json modeprobe,
+exact owned ID/name/nonce/tool image, childExit0/probeCompletedtrue,
+containerAbsentVerifiedtrue/p2Eligibletrue. Assemble capability from the
+guarded probe.stdout with its lifecycle object in Docker/jq; bare old helper
+JSON, selfcheck or an unknown cleanup receipt is refused by `emit`.
+Refresh P0 identity/settings/conflicts
 within60s immediately before creation; repeat source comparisons, compare
 binding with P1. A changed Node UID/boot invalidates the probe. A passed probe
 does not grant P2 or guarantee networking availability.

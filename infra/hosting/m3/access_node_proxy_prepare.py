@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import re
 
 import access_runner_dns_prepare as direct
 import access_dns_contrast_exec as launch
@@ -12,11 +13,14 @@ from access_dns_contrast_prepare import JOBS
 from access_dns_contrast_scope import endpoint_one, rows
 from access_endpoint_pin import pin, verify
 from access_runner_dns_control_prepare import canonical, JOB_NAME_LABELS, JOB_UID_LABELS
-from access_node_proxy_probe import instructions
+from access_node_proxy_probe import instructions, PROBE_TOOL_IMAGE
 
 CONFIG = 'access-dns-bpf-tproxy-trial-v1'
 FLAG = 'enable-bpf-tproxy'
 KEYS = (FLAG, 'enable-ipv4', 'enable-ipv6', 'install-iptables-rules', 'enable-endpoint-routes')
+CILIUM_IMAGE = 'quay.io/cilium/cilium:v1.20.2@sha256:2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01'
+NODE_ENV = {'name': 'K8S_NODE_NAME', 'valueFrom': {'fieldRef': {'apiVersion': 'v1', 'fieldPath': 'spec.nodeName'}}}
+NAMESPACE_ENV = {'name': 'CILIUM_K8S_NAMESPACE', 'valueFrom': {'fieldRef': {'apiVersion': 'v1', 'fieldPath': 'metadata.namespace'}}}
 
 
 def digest(value):
@@ -52,7 +56,21 @@ def items(value):
     if (not value['metadata'].get('resourceVersion') or value['metadata'].get('continue', '')
             or value['metadata'].get('remainingItemCount', 0) or not isinstance(value['items'], list)):
         raise ValueError()
-    return value['items']
+    typed = {'NodeList': ('Node', 'v1'), 'PodList': ('Pod', 'v1'),
+             'CiliumNodeConfigList': ('CiliumNodeConfig', 'cilium.io/v2')}.get(value.get('kind'))
+    if not typed:
+        return value['items']
+    kind, version = typed
+    if value.get('apiVersion') != version:
+        raise ValueError()
+    result = []
+    for item in value['items']:
+        # Typed API list already declares item types. Interpret omitted nested
+        # TypeMeta in copies only; never accept conflicting explicit TypeMeta.
+        if item.get('kind', kind) != kind or item.get('apiVersion', version) != version:
+            raise ValueError()
+        result.append(copy.deepcopy(item) | {'kind': kind, 'apiVersion': version})
+    return result
 
 
 def selector_matches(selector, labels):
@@ -119,13 +137,53 @@ def selected_agent(pods, node, daemonset):
     owners = pod['metadata'].get('ownerReferences', [])
     if (len(owners) != 1 or owners[0].get('kind') != 'DaemonSet' or owners[0].get('name') != ds['name']
             or owners[0].get('uid') != ds['uid'] or owners[0].get('controller') is not True
-            or pod['spec']['containers'] != daemonset['spec']['template']['spec']['containers']
-            or pod['spec'].get('initContainers', []) != daemonset['spec']['template']['spec'].get('initContainers', [])
             or pod['spec'].get('hostNetwork') is not True):
         raise ValueError()
-    # Unknown admission defaults are unsupported, never copy a Pod into the DS
-    # witness to bypass this source comparison.
+    compare_containers(pod, daemonset)
     return pod
+
+
+def compare_containers(pod, daemonset):
+    expected = daemonset['spec']['template']['spec']
+    actual = pod['spec']
+    if actual.get('serviceAccountName', 'default') != expected.get('serviceAccountName', 'default'):
+        raise ValueError()
+    token_volumes = [v for v in actual.get('volumes', []) if v['name'].startswith('kube-api-access-')]
+    token_name = None
+    if token_volumes:
+        if (len(token_volumes) != 1 or expected.get('serviceAccountName') != 'cilium'
+                or actual.get('serviceAccountName') != 'cilium'
+                or expected.get('automountServiceAccountToken', True) is not True
+                or actual.get('automountServiceAccountToken', True) is not True
+                or any(v['name'].startswith('kube-api-access-') for v in expected.get('volumes', []))):
+            raise ValueError()
+        token_name = token_volumes[0]['name']
+        if not re.fullmatch('kube-api-access-[a-z0-9]{5}', token_name):
+            raise ValueError()
+        projected = {'name': token_name, 'projected': {'defaultMode': 420, 'sources': [
+            {'serviceAccountToken': {'expirationSeconds': 3607, 'path': 'token'}},
+            {'configMap': {'name': 'kube-root-ca.crt', 'items': [{'key': 'ca.crt', 'path': 'ca.crt'}]}},
+            {'downwardAPI': {'items': [{'path': 'namespace', 'fieldRef': {'apiVersion': 'v1', 'fieldPath': 'metadata.namespace'}}]}}]}}
+        if token_volumes[0] != projected:
+            raise ValueError()
+    if [v for v in actual.get('volumes', []) if v['name'] != token_name] != expected.get('volumes', []):
+        raise ValueError()
+    # Compare copies only; raw DS/Pod stay unchanged. The only permitted delta
+    # is the exact standard admission mount backed by the checked projection.
+    for key in ('containers', 'initContainers'):
+        wanted = expected.get(key, [])
+        got = copy.deepcopy(actual.get(key, []))
+        if len(wanted) != len(got):
+            raise ValueError()
+        for original, current in zip(wanted, got):
+            if token_name:
+                mount = {'name': token_name, 'readOnly': True, 'mountPath': '/var/run/secrets/kubernetes.io/serviceaccount'}
+                if current.get('volumeMounts') != original.get('volumeMounts', [])+[mount]:
+                    raise ValueError()
+                current['volumeMounts'] = copy.deepcopy(original.get('volumeMounts', []))
+                if 'volumeMounts' not in original: current.pop('volumeMounts')
+            if current != original:
+                raise ValueError()
 
 
 def startup(ds):
@@ -137,27 +195,57 @@ def startup(ds):
     i, a = init[0], agent[0]
     if i.get('command') != ['cilium-dbg', 'build-config'] or a.get('command') != ['cilium-agent']:
         raise ValueError()
+    if i.get('image') != CILIUM_IMAGE or a.get('image') != CILIUM_IMAGE:
+        raise ValueError()
     # One intentionally narrow startup profile; unknown flags/env/shell stop.
     allowed = ('--source=config-map:kube-system/cilium-config,cilium-node-config:kube-system',
                '--dest=/tmp/cilium/config-map')
     args = i.get('args', [])
-    if sorted(args) != sorted(allowed):
+    node_env = [e for e in i.get('env', []) if e.get('name') == 'K8S_NODE_NAME']
+    if node_env != [NODE_ENV]:
+        raise ValueError()
+    defaults_profile = args == []
+    if defaults_profile:
+        # Fixed image/source: default dest+source order, empty override filters.
+        if (i['image'] != CILIUM_IMAGE or a['image'] != CILIUM_IMAGE
+                or [e for e in i.get('env', []) if e.get('name') == 'CILIUM_K8S_NAMESPACE'] != [NAMESPACE_ENV]):
+            raise ValueError()
+    elif sorted(args) != sorted(allowed):
         raise ValueError()
     for c in (i, a):
         if c.get('envFrom'):
             raise ValueError()
-        for env in c.get('env', []):
+        envs = c.get('env', [])
+        if len({e['name'] for e in envs}) != len(envs):
+            raise ValueError()
+        auxiliary = {'KUBERNETES_SERVICE_HOST': {'name': 'KUBERNETES_SERVICE_HOST', 'value': '127.0.0.1'},
+                     'KUBERNETES_SERVICE_PORT': {'name': 'KUBERNETES_SERVICE_PORT', 'value': '6443'}}
+        if c is a:
+            auxiliary.update({
+                'CILIUM_CLUSTERMESH_CONFIG': {'name': 'CILIUM_CLUSTERMESH_CONFIG', 'value': '/var/lib/cilium/clustermesh/'},
+                'GOMEMLIMIT': {'name': 'GOMEMLIMIT', 'valueFrom': {'resourceFieldRef': {'resource': 'limits.memory', 'divisor': '1'}}},
+                'KUBE_CLIENT_BACKOFF_BASE': {'name': 'KUBE_CLIENT_BACKOFF_BASE', 'value': '1'},
+                'KUBE_CLIENT_BACKOFF_DURATION': {'name': 'KUBE_CLIENT_BACKOFF_DURATION', 'value': '120'}})
+        for env in envs:
             name = env['name']
+            if name in auxiliary:
+                if not defaults_profile or env != auxiliary[name]: raise ValueError()
+                continue
             if name not in ('K8S_NODE_NAME', 'CILIUM_K8S_NAMESPACE'):
                 raise ValueError()
-            if name == 'CILIUM_K8S_NAMESPACE' and env.get('value') != 'kube-system':
+            if name == 'CILIUM_K8S_NAMESPACE' and env not in (NAMESPACE_ENV, {'name': name, 'value': 'kube-system'}):
                 raise ValueError()
-            if name == 'K8S_NODE_NAME' and env.get('valueFrom') != {'fieldRef': {'apiVersion': 'v1', 'fieldPath': 'spec.nodeName'}}:
+            if name == 'K8S_NODE_NAME' and env != NODE_ENV:
                 raise ValueError()
     if a.get('args') != ['--config-dir=/tmp/cilium/config-map']:
         raise ValueError()
-    mounts = [[m for m in c.get('volumeMounts', []) if m.get('mountPath') == '/tmp/cilium/config-map'] for c in (i, a)]
+    mount_path = '/tmp' if defaults_profile else '/tmp/cilium/config-map'
+    mounts = [[m for m in c.get('volumeMounts', []) if m.get('mountPath') == mount_path] for c in (i, a)]
     if any(len(m) != 1 for m in mounts) or mounts[0][0]['name'] != mounts[1][0]['name']:
+        raise ValueError()
+    if any(set(m[0]) != {'name', 'mountPath'} for m in mounts):
+        raise ValueError()
+    if any(m['mountPath'].startswith(mount_path+'/') for c in (i, a) for m in c.get('volumeMounts', [])):
         raise ValueError()
     volume = [v for v in spec['volumes'] if v['name'] == mounts[0][0]['name']]
     if len(volume) != 1 or set(volume[0]) != {'name', 'emptyDir'}:
@@ -254,6 +342,8 @@ def preflight(b):
     ident(cm, 'ConfigMap', 'kube-system')
     if cm['metadata']['name'] != 'cilium-config':
         raise ValueError()
+    if any(cm.get('data', {}).get(k, 'false') not in ('false', '') for k in ('clean-cilium-state', 'clean-cilium-bpf-state')):
+        raise ValueError()
     if b['version'] != '1.20.2' or b['independentApiServer'] not in ('https://127.0.0.1:6443', 'https://[::1]:6443'):
         raise ValueError()
     if b['independentApiGetPassed'] is not True:
@@ -278,7 +368,7 @@ def preflight(b):
                         'machineSha256': hashlib.sha256(info['machineID'].encode()).hexdigest()},
             'daemonsetUid': ds['metadata']['uid'], 'daemonsetSpecHash': digest(ds['spec']),
             'initialAgent': ident(pod, 'Pod', 'kube-system'), 'agentImageId': image_id, 'settings': b['settings'],
-            'configMapHash': digest(b['configMap']), 'nodeConfigsHash': digest(b['nodeConfigs']['items']),
+            'configMapHash': digest(b['configMap']), 'nodeConfigsHash': digest(items(b['nodeConfigs'])),
             'policiesHash': digest(policy_witness(b['policies'])), 'baselineHash': digest(b['baseline']),
             'endpointWitnesses': endpoints,
             'applicationWitness': application,
@@ -286,6 +376,16 @@ def preflight(b):
 
 
 def emit(receipt, capability):
+    lifecycle = capability.get('lifecycle', {})
+    nonce = lifecycle.get('ownerNonce', '')
+    if (lifecycle.get('mode') != 'probe' or lifecycle.get('imageId') != PROBE_TOOL_IMAGE
+            or not isinstance(nonce, str) or not re.fullmatch('[a-f0-9]{32}', nonce)
+            or lifecycle.get('containerName') != 'access-node-proxy-'+nonce
+            or not isinstance(lifecycle.get('containerId'), str)
+            or not re.fullmatch('[a-f0-9]{64}', lifecycle['containerId'])
+            or type(lifecycle.get('childExit')) is not int or lifecycle['childExit'] != 0
+            or any(lifecycle.get(k) is not True for k in ('probeCompleted', 'containerAbsentVerified', 'p2Eligible'))):
+        raise ValueError()
     expected_hashes = [hashlib.sha256(instructions(f, p)).hexdigest() for f in (4, 6) for p in ('tcp', 'udp')]
     if (any(capability.get(k) != v for k, v in receipt['binding'].items())
             or capability.get('programType') != 'SCHED_CLS' or capability.get('programHashes') != expected_hashes
