@@ -52,3 +52,15 @@ def test_ndots_contrast_changes_only_diagnostic_dns_config(package):
     assert value == {'options': [{'name': 'ndots', 'value': '1'}]}
     assert contrast == normal
     assert normal['spec']['template']['spec']['volumes'] == []
+
+
+def test_observed_dns_has_bounded_window_without_changing_network_or_destinations(package):
+    snapshot, inputs, _ = package
+    normal = emit(snapshot, inputs, DIAGNOSTIC_IMAGE, 'dns')
+    observed = emit(snapshot, inputs, DIAGNOSTIC_IMAGE, 'dns-observed')
+    assert observed['spec']['activeDeadlineSeconds'] == 60
+    pod = observed['spec']['template']['spec']
+    assert pod['volumes'] == [] and pod['containers'][0]['env'] == []
+    assert 'dnsConfig' not in pod and pod['automountServiceAccountToken'] is False
+    assert pod['containers'][0]['command'][3] == 'import time\ntime.sleep(8)\n'+normal['spec']['template']['spec']['containers'][0]['command'][3]+'\ntime.sleep(20)\n'
+    assert observed['spec']['template']['metadata']['labels'] == normal['spec']['template']['metadata']['labels']

@@ -15,7 +15,7 @@ def emit(snapshot, inputs, image, kind, window=None):
     if image != DIAGNOSTIC_IMAGE:
         raise ValueError()
     directory = Path(__file__).parent
-    if kind not in {'state', 'network', 'dns', 'dns-ndots1'}:
+    if kind not in {'state', 'network', 'dns', 'dns-ndots1', 'dns-observed'}:
         raise ValueError()
     name = 'access-'+kind+'-diagnose-v1'
     script = directory/('access_state_diagnose.py' if kind == 'state' else
@@ -48,6 +48,10 @@ def emit(snapshot, inputs, image, kind, window=None):
                         'securityContext': {'runAsNonRoot': True, 'runAsUser': 10001, 'runAsGroup': 10001,
                                             'seccompProfile': {'type': 'RuntimeDefault'}},
                         'containers': [container], 'volumes': volumes}}}}
+    if kind == 'dns-observed':
+        # Bounded window for exact endpoint/proxy metadata, not a background monitor.
+        container['command'][3] = 'import time\ntime.sleep(8)\n'+script.read_text()+'\ntime.sleep(20)\n'
+        job['spec']['activeDeadlineSeconds'] = 60
     if kind == 'dns-ndots1':
         job['spec']['template']['spec']['dnsConfig'] = {'options': [{'name': 'ndots', 'value': '1'}]}
     if kind != 'state':
@@ -61,7 +65,7 @@ def emit(snapshot, inputs, image, kind, window=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('kind', choices=('state', 'network', 'dns', 'dns-ndots1'))
+    parser.add_argument('kind', choices=('state', 'network', 'dns', 'dns-ndots1', 'dns-observed'))
     parser.add_argument('--snapshot', required=True); parser.add_argument('--inputs', required=True)
     parser.add_argument('--window-inputs')
     args = parser.parse_args()
