@@ -1,4 +1,4 @@
-"""Bounded stdin-only drop sanitizer; no raw stream persistence or live calls."""
+"""Bounded stdin-only DNS event sanitizer; no raw stream persistence or live calls."""
 import argparse
 import datetime as dt
 import hashlib
@@ -66,15 +66,59 @@ def selected_drop(value, pin):
             'file': integer(value['File'], maximum=255), 'line': integer(value['Line'], maximum=65535)}
 
 
-def capture(stream, mode, pin=None):
+def selected_dns(value, pin, identity):
+    if (value.get('type') != 'logRecord' or value.get('l7Proto') != 'dns'
+            or value.get('observationPoint') != 'Egress' or value.get('http') is not None
+            or value.get('l7') is not None or value.get('flowType') not in ('Request', 'Response')
+            or value.get('verdict') not in ('Forwarded', 'Denied', 'Error', 'Redirected')):
+        raise ValueError()
+    src, dst = integer(value['srcEpID'], maximum=65535), integer(value['dstEpID'], maximum=65535)
+    if (src == pin['endpointId']) == (dst == pin['endpointId']):
+        raise ValueError()
+    side = 'src' if src == pin['endpointId'] else 'dst'
+    if integer(value[side+'Identity'], 1, 2**32-1) != identity:
+        raise ValueError()
+    labels = value[side+'EpLabels']
+    if not isinstance(labels, list) or not {'k8s:app=access-web-runner',
+            'k8s:io.kubernetes.pod.namespace=codex-trial'}.issubset(labels):
+        raise ValueError()
+    dns = value['dns']
+    if dns.get('ObservationSource') != 'proxy':
+        raise ValueError()
+    query = dns['Query']
+    names = {'chatgpt.com': 'provider', 'api.m2-hosting.svc.cluster.local': 'callback'}
+    if query.endswith('.'):
+        query = query[:-1]
+    if query not in names:
+        raise ValueError()
+    questions = dns['QTypes']
+    if not isinstance(questions, list) or not 1 <= len(questions) <= 2 or any(type(q) is not int or q not in (1, 28) for q in questions):
+        raise ValueError()
+    rcode = integer(dns.get('RCode', 0), maximum=4095)  # v1.20.2 omits the integer zero.
+    answers = dns.get('IPs', [])
+    if not isinstance(answers, list) or len(answers) > 64:
+        raise ValueError()
+    for address in answers:
+        if not isinstance(address, str):
+            raise ValueError()
+        ipaddress.ip_address(address)
+    return {'receivedAt': utc(), 'target': names[query], 'flowType': value['flowType'],
+            'verdict': value['verdict'], 'qTypes': questions,
+            'rcode': rcode if value['flowType'] == 'Response' else None,
+            'hasAnswers': bool(answers) if value['flowType'] == 'Response' else None}
+
+
+def capture(stream, mode, pin=None, identity=None):
     begin = time.monotonic()
     receipt = {'mode': mode, 'startedAt': utc(), 'complete': False, 'events': []}
-    if mode not in ('probe', 'observe'):
+    if mode not in ('probe', 'observe', 'observe-dns'):
         raise ValueError()
-    if mode == 'observe':
+    if mode != 'probe':
         integer(pin['endpointId'], 1, 65535)
         ipaddress.ip_address(pin['podIp'])
         receipt['pinTag'] = tag(pin)
+    if mode == 'observe-dns':
+        receipt['securityIdentity'] = integer(identity, 1, 2**32-1)
     size = count = 0
     try:
         while True:
@@ -109,9 +153,9 @@ def capture(stream, mode, pin=None):
                 else:
                     raise ValueError()
             else:
-                if mode != 'observe' or 'child' not in receipt or 'timeoutExit' in receipt:
+                if mode == 'probe' or 'child' not in receipt or 'timeoutExit' in receipt:
                     raise ValueError()
-                receipt['events'].append(selected_drop(value, pin))
+                receipt['events'].append(selected_dns(value, pin, identity) if mode == 'observe-dns' else selected_drop(value, pin))
         if 'child' not in receipt or 'timeoutExit' not in receipt or time.monotonic()-begin > 12:
             raise ValueError()
         receipt['complete'] = True
@@ -134,6 +178,14 @@ def finalize(receipt, proof, pin=None, pod=None, cep=None, agent=None, endpoint=
         raise ValueError()
     verify(pin, pod, cep, agent, endpoint)
     events = receipt['events']
+    if receipt['mode'] == 'observe-dns':
+        if receipt['securityIdentity'] != integer(cep['status']['identity']['id'], 1, 2**32-1):
+            raise ValueError()
+        return {'captureComplete': True, 'dnsRequests': sum(v['flowType'] == 'Request' for v in events),
+                'dnsResponses': sum(v['flowType'] == 'Response' for v in events),
+                'dnsProxyDenied': sum(v['verdict'] == 'Denied' for v in events),
+                'dnsProxyErrors': sum(v['verdict'] == 'Error' for v in events), 'dnsCause': 'unknown',
+                'noEventConclusion': 'unknown'}
     return {'captureComplete': True, 'matchingDnsDrops': len(events),
             'policyDeniedDrops': sum(v['reasonCategory'] in ('policy_denied', 'explicit_deny') for v in events),
             'dnsCause': 'unknown', 'noDropConclusion': 'unknown'}
@@ -146,7 +198,7 @@ def write_private(path, value):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mode', choices=('probe', 'observe')); parser.add_argument('--receipt', required=True)
+    parser.add_argument('--mode', choices=('probe', 'observe', 'observe-dns')); parser.add_argument('--receipt', required=True)
     parser.add_argument('--proof'); parser.add_argument('--pin'); parser.add_argument('--pod')
     parser.add_argument('--cep'); parser.add_argument('--agent'); parser.add_argument('--endpoint')
     parser.add_argument('--transport-exit-code', type=int)
@@ -164,7 +216,13 @@ if __name__ == '__main__':
                 raise TimeoutError()
             signal.signal(signal.SIGALRM, expired)
             signal.alarm(12)
-            receipt = capture(sys.stdin.buffer, args.mode, read(args.pin) if args.pin else None)
+            identity = None
+            if args.mode == 'observe-dns':
+                ep = read(args.endpoint)
+                if not isinstance(ep, list) or len(ep) != 1:
+                    raise ValueError()
+                identity = ep[0]['status']['identity']['id']
+            receipt = capture(sys.stdin.buffer, args.mode, read(args.pin) if args.pin else None, identity)
             signal.alarm(0)
             write_private(args.receipt, receipt)
             result = {'sanitizedReceiptWritten': True, 'captureComplete': receipt['complete']}

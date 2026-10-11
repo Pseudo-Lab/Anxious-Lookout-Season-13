@@ -4,7 +4,7 @@ set -f
 ulimit -c 0
 dn6_mode=${1-}
 case "$dn6_mode" in
-  probe|observe) ;;
+  probe|observe|observe-dns) ;;
   check)
     shift
     [ "$#" -eq 4 ] || exit 2
@@ -34,7 +34,7 @@ case "$dn6_mode" in
 esac
 dn6_id=${2-0}
 case "$dn6_id" in ''|*[!0-9]*) exit 2;; esac
-if [ "$dn6_mode" = observe ]; then
+if [ "$dn6_mode" != probe ]; then
   [ "$dn6_id" -ge 1 ] && [ "$dn6_id" -le 65535 ] || exit 2
 else
   [ "$dn6_id" = 0 ] || exit 2
@@ -61,6 +61,9 @@ if [ "$dn6_mode" = probe ]; then
   dn6_probe_child=$!
   wait
 else
+  if [ "$dn6_mode" = observe-dns ]; then
+    exec cilium-dbg monitor --type l7 --related-to "$dn6_id" --json --numeric
+  fi
   exec cilium-dbg monitor --type drop --related-to "$dn6_id" --json --numeric
 fi
 '
