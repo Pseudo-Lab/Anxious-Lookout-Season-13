@@ -121,12 +121,17 @@ def proxy_route(raw):
     for key in ('protocol', 'scope', 'prefsrc', 'type'):
         if key in row and not isinstance(row[key], str):
             raise ValueError()
+    # iproute2 print_route omits the default RTN_UNICAST type without details.
+    # Only these simple route types are supported; unknown types are not mismatches.
+    route_type = row.get('type', 'unicast')
+    if route_type not in ('local', 'unicast'):
+        raise ValueError()
     if 'prefsrc' in row: ipaddress.IPv4Address(row['prefsrc'])
     if 'metric' in row and (type(row['metric']) is not int or not 0 <= row['metric'] <= 2**32-1):
         raise ValueError()
     if 'flags' in row and (not isinstance(row['flags'], list) or row['flags']):
         raise ValueError()
-    matched = (row.get('type') == 'local' and row['dst'] in ('default', '0.0.0.0/0')
+    matched = (route_type == 'local' and row['dst'] in ('default', '0.0.0.0/0')
                and table in (2004, '2004') and row['dev'] == 'lo')
     return {'status': 'supported_match' if matched else 'mismatch', 'markedFibLookupUsesLocalDefault': matched,
             'usesProxyTable': table in (2004, '2004'), 'usesLoopbackDevice': row['dev'] == 'lo',

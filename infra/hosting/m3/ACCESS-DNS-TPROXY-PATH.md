@@ -55,6 +55,9 @@ Cilium 조회를 추가하지 않고 기존 DN11A의1.20.2 및 DN10 anchor 연�
   결과가 모두 일치해도unknown입니다. Port/주소/mark/rule/comment 원문은 receipt에 남기지 않습니다.
 - FIB JSON은 단일 simple route의 알려진 key/type만 허용합니다. Local/default/table2004/lo가
   모두 맞아야 supported_match입니다. Numeric 또는 decimal-string table2004를 지원합니다.
+  지원 route type은 local/unicast뿐입니다. 위 iproute2 print_route source는 details 없는 기본
+  RTN_UNICAST type을 생략하므로 type key 부재는 unicast로 처리하고 지원된 mismatch로 구분합니다.
+  명시적 빈/미지원 type 문자열 및 잘못된 type은 전체unknown입니다. 명시적 local만 match 후보입니다.
   Missing table/multiple routes/duplicate key/cache/encap/multipath/알 수 없는 selector/type는
   unknown입니다. 기본 table 이름 추정/다른 출력 방식 fallback은 하지 않습니다.
 

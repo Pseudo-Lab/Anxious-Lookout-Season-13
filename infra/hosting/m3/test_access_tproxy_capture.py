@@ -94,6 +94,24 @@ def test_single_fib_result_can_match_without_priority_or_packet_claims():
     assert receipt('proxy-route', raw=(json.dumps([row])+'\n').encode())['observation']['status'] == 'mismatch'
 
 
+@pytest.mark.parametrize('explicit_type', [True, False])
+def test_supported_unicast_route_is_mismatch_including_default_type_omission(explicit_type):
+    row = json.loads(route())[0]
+    if explicit_type: row['type'] = 'unicast'
+    else: del row['type']
+    value = receipt('proxy-route', raw=(json.dumps([row])+'\n').encode())
+    assert value['complete'] and value['observation']['status'] == 'mismatch'
+    assert value['observation']['markedFibLookupUsesLocalDefault'] is False
+
+
+@pytest.mark.parametrize('route_type', ['unsupported-route-type', '', 'PRIVATE_TYPE_SENTINEL', None, 1, False])
+def test_unsupported_route_types_are_unknown_not_supported_mismatch(route_type):
+    row = json.loads(route())[0]; row['type'] = route_type
+    value = receipt('proxy-route', raw=(json.dumps([row])+'\n').encode())
+    assert value['complete'] is False and value['observation'] == {'status': 'unknown'}
+    assert 'PRIVATE' not in json.dumps(value)
+
+
 @pytest.mark.parametrize('variant', ['missing_table', 'duplicate', 'multiple', 'partial', 'cache', 'bool_table', 'sentinel_device'])
 def test_unsupported_fib_schema_is_unknown(variant):
     row = json.loads(route())[0]
