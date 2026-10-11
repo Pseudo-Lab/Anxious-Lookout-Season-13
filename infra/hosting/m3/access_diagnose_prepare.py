@@ -15,10 +15,11 @@ def emit(snapshot, inputs, image, kind, window=None):
     if image != DIAGNOSTIC_IMAGE:
         raise ValueError()
     directory = Path(__file__).parent
-    if kind not in {'state', 'network'}:
+    if kind not in {'state', 'network', 'dns', 'dns-ndots1'}:
         raise ValueError()
     name = 'access-'+kind+'-diagnose-v1'
-    script = directory/('access_state_diagnose.py' if kind == 'state' else 'access_network_diagnose.py')
+    script = directory/('access_state_diagnose.py' if kind == 'state' else
+                        'access_dns_diagnose.py' if kind.startswith('dns') else 'access_network_diagnose.py')
     volumes, mounts, env = [], [], []
     if kind == 'state':
         # Existing stopped runner only; fresh current GET supplied in snapshot.
@@ -47,7 +48,9 @@ def emit(snapshot, inputs, image, kind, window=None):
                         'securityContext': {'runAsNonRoot': True, 'runAsUser': 10001, 'runAsGroup': 10001,
                                             'seccompProfile': {'type': 'RuntimeDefault'}},
                         'containers': [container], 'volumes': volumes}}}}
-    if kind == 'network':
+    if kind == 'dns-ndots1':
+        job['spec']['template']['spec']['dnsConfig'] = {'options': [{'name': 'ndots', 'value': '1'}]}
+    if kind != 'state':
         return job  # Selects already deployed runner network policy, mounts no PVC/Secrets.
     deny = {'apiVersion': 'cilium.io/v2', 'kind': 'CiliumNetworkPolicy',
             'metadata': {'namespace': 'codex-trial', 'name': 'access-state-diagnose-deny-v1'},
@@ -58,7 +61,7 @@ def emit(snapshot, inputs, image, kind, window=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('kind', choices=('state', 'network'))
+    parser.add_argument('kind', choices=('state', 'network', 'dns', 'dns-ndots1'))
     parser.add_argument('--snapshot', required=True); parser.add_argument('--inputs', required=True)
     parser.add_argument('--window-inputs')
     args = parser.parse_args()
