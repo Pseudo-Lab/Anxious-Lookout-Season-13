@@ -1,9 +1,12 @@
 # 진단 전용 DNS L4→L7 비교 — 완성 source/운영 절차 재검토 대상
 
-PM은 준비 범위(새 진단 CNP 하나/최대 두 Pod/8 helpers)를 확정했지만 **아직 생성/patch/exec 승인은
-없습니다**. Production boundary/P1/CCNP/Deployment를 바꾸지 않습니다. 기존 실제 control의 네
+b57ad8d의 제한 운영 승인을 받은 첫 실행은 L4 실현 후 host transport 권한 오류로 중단·정리됐으며
+review도 이를 독립 검증했습니다. **새 실행 승인은 별도**입니다. Production boundary/P1/CCNP/Deployment를 바꾸지 않습니다. 기존 실제 control의 네
 reply와 원래 app의 네 timeout은 출발점이며, 이 패키지는 default-deny와 DNS L7을 분리합니다.
 API P1은 두 요소를 함께 바꾼 사례입니다. DNS L7 제거를 production 처방으로 확대하지 않습니다.
+
+L4 DNS 판정은 없고 기존 claim은 소비됐으며 L7는 미진행입니다. 다음 호출 권한과 명시적 fresh run
+범위는 [운영 UID 보완](ACCESS-RUNNER-DNS-CONTRAST-OPERATOR.md)을 재검토한 뒤 적용합니다.
 
 ## 고정 산출물
 
@@ -87,6 +90,9 @@ Remote는 UID10001 소유 **해당 diagnostic의 runtime /dev/shm**에 nonce별 
 
 `run_dns_contrast_exec.sh`는 PM-only wrapper입니다. 다음의 program은 Docker emitter `program` 산출물이며
 host에서 실행하거나 shell eval하지 않습니다. private0700/소유UID/파일0600/source hash를 확인합니다.
+Wrapper 전체의 operator UID와 kubectl 관리자 권한, input/output 소유 UID가 같아야 합니다. 기존 target이
+root-owned k3s 설정을 사용하는 경우 **wrapper 전체를 sudo로 호출**하고 root-owned private inputs/output을
+사용합니다. 다른 kubectl 명령에서 sudo를 썼다는 사실이 wrapper 내부에 권한을 전달하지 않습니다.
 
 ```text
 bash run_dns_contrast_exec.sh <trusted-absolute-kubectl>
