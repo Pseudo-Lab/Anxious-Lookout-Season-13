@@ -23,8 +23,11 @@ PVC/Secret/env는 없습니다. Original runner는0/Pod0, API mapping disabled�
 Pod가 같은 Service selector에 포함될 수 있어 진단 중 API enable 금지, exact Job/Pod UID로
 삭제 및 Pod0 확인은 기존 절차와 같습니다.
 
-Code는 `/etc/resolv.conf`의 첫 **현재 configured resolver**만 사용합니다. IP/검색suffix를
-출력하지 않고 resolver 수/search 수/ndots만 출력합니다. Source credential/토큰/원래 세션/
+직접 UDP/TCP probe는 `/etc/resolv.conf`의 첫 **현재 configured resolver**만 사용합니다.
+Libc 비교는 OS 설정에 따라 다른 configured resolver/search suffix/A·AAAA를 사용할 수 있습니다.
+직접 만든 두 absolute A 질문과 OS name resolution 비교를 구분하며 새 public resolver나
+policy 허용을 추가하지 않습니다. IP/검색suffix를 출력하지 않고 resolver 수/search 수/ndots만
+출력합니다. Source credential/토큰/원래 세션/
 native/HTTP/auth/provider model에는 접근하지 않습니다.
 
 두 existing name의 absolute A DNS 질문을 UDP와 TCP53로 각각 보냅니다. 질문을 추가 suffix로
@@ -35,8 +38,11 @@ size를 검사하고 status/rcode/answer 존재만 내보냅니다. IP/packet/re
 
 ## DN2: diagnostic Pod만 ndots1 대조
 
-DN1에서 direct absolute reply 또는 absolute libc 성공, 상대 lookup 실패로 search 관련 후보가
-좁혀졌을 때만 `dns-ndots1` 단발 Job을 review 범위로 실행합니다. Same code/image/selector/
+DN1의 해당 대상에서 **absoluteLibc=resolved AND relativeLibc=failed 또는 timeout**이
+확인됐을 때만 `dns-ndots1` 단발 Job을 review 범위로 실행합니다. Direct status=reply/
+rcode0/answersPresent만으로 DN2에 진입하지 않습니다. Direct probe는 answer section을
+해석하지 않으므로 주소 해석 성공을 보증하지 않으며 REFUSED/SERVFAIL/무응답도 성공이 아닙니다.
+Same code/image/selector/
 permissions/no state 조건이며 **diagnostic Pod의 dnsConfig ndots1 한 필드만** 다릅니다.
 원래 runner Deployment, DNS policy, 허용 destinations, cluster proxy 설정은 바꾸지 않습니다.
 기존 만료창과 Original credential source를 다시 읽지 않습니다.
