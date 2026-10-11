@@ -29,6 +29,8 @@ def diagnose():
         with engine.connect() as connection:
             with connection.begin():
                 connection.execute(text('SET TRANSACTION READ ONLY'))
+                connection.execute(text("SET LOCAL statement_timeout = '3s'"))
+                connection.execute(text("SET LOCAL lock_timeout = '1s'"))
                 report['dbConnection'] = 'connected'
                 version = connection.execute(text('SELECT version FROM auth.schema_version WHERE singleton=true')).scalar_one()
                 revision = connection.execute(text('SELECT version_num FROM auth.alembic_version')).scalar_one()
@@ -47,4 +49,9 @@ def diagnose():
 
 
 if __name__ == '__main__':
+    import signal
+    # Only the disposable stdin-exec helper, not the API's serving process.
+    # Default signal action also terminates a blocked native driver/socket wait.
+    signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    signal.alarm(20)
     print(json.dumps(diagnose()))

@@ -83,3 +83,23 @@ def test_api_diagnosis_never_prints_dsn_and_uses_no_other_secret(monkeypatch):
     assert calls == ['DATABASE_URL'] and result['dbNetwork']['dns'] == 'failed'
     assert 'PRIVATE_DSN_VALUE' not in json.dumps(result) and 'private.invalid' not in json.dumps(result)
     assert result['dataModified'] is False and result['sourceCredentialRead'] is False
+
+
+def test_api_readonly_queries_use_transaction_local_time_limits(monkeypatch):
+    from unittest.mock import MagicMock
+    import access_api_diagnose as api
+    engine = MagicMock()
+    connection = engine.connect.return_value.__enter__.return_value
+    def execute(statement):
+        value = MagicMock()
+        value.scalar_one.return_value = api.AUTH_REVISION if 'version_num' in str(statement) else 1
+        return value
+    connection.execute.side_effect = execute
+    monkeypatch.setattr(api, 'secret', lambda _: 'postgresql+psycopg://u:PRIVATE_DSN@db.invalid/database')
+    monkeypatch.setattr(api, 'probe', lambda *_: {'dns': 'resolved', 'tcp': 'connected', 'tls': 'not_tested'})
+    monkeypatch.setattr(api, 'database', lambda _: (engine, None))
+    result = api.diagnose()
+    sql = [str(call.args[0]) for call in connection.execute.call_args_list]
+    assert sql[:3] == ['SET TRANSACTION READ ONLY', "SET LOCAL statement_timeout = '3s'", "SET LOCAL lock_timeout = '1s'"]
+    assert result['schemaContract'] == 'matches' and result['accountTableAccessible']
+    engine.dispose.assert_called_once()

@@ -63,6 +63,12 @@ emit합니다. 기존 API70의 Ready Pod UID/RS/Deployment/image를 전후 고�
 사용합니다. GitHub secret/session key/원본 Codex source/cache는 읽지 않습니다. DB DNS3s,
 resolved 첫 address TCP3s, 연결 후 SET TRANSACTION READ ONLY와 auth schema/version/계정 table
 LIMIT0만 실행합니다. DSN/hostname/password/exception text/row/계정 ID는 출력하지 않습니다.
+Read-only transaction에는 statement_timeout3s/lock_timeout1s를 SET LOCAL로 적용합니다.
+별도 stdin-exec Python helper 자체는 SIGALRM20s 기본 종료로 driver/socket 정지도 제한하며
+API serving PID를 종료하지 않습니다. PM은 exec 전체에도 외부 timeout25s를 적용합니다.
+지연/timeout/signal 종료 때 같은 exec를 반복하지 않습니다. 해당 disposable helper의 종료와
+DB 연결/transaction 잔여 상태를 비밀 없는 기존 운영 metadata로 확인하고, 불명확하면 결과
+미확정으로 인계합니다. API 전체/다른 process를 kill하거나 role·DB 기본 timeout을 바꾸지 않습니다.
 출력은 dns/tcp/connection/schemaContract/accountTableAccessible boolean/enum입니다.
 정상 readiness의 기존 pool과 달리 새 연결 진단이며, 성공도 실패 당시 새 Pod를 소급 증명하지
 않습니다. 연결/DNS 실패는 policy/current route 근거와 대조하며 migration/credential 수정을
