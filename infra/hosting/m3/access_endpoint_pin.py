@@ -13,7 +13,7 @@ def pin(pod, cep, agent):
     namespace, name, uid = meta['namespace'], meta['name'], meta['uid']
     node = pod['spec']['nodeName']
     if namespace == 'codex-trial':
-        if not name.startswith('access-dns-observed-diagnose-v1-') or meta['labels'].get('app') != 'access-web-runner':
+        if not name.startswith(('access-dns-observed-diagnose-v1-', 'access-dns-proxy-listener-diagnose-v1-')) or meta['labels'].get('app') != 'access-web-runner':
             raise ValueError()
     elif namespace == 'kube-system':
         if meta['labels'].get('k8s-app') != 'kube-dns':

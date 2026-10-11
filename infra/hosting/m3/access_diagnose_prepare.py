@@ -15,18 +15,18 @@ def emit(snapshot, inputs, image, kind, window=None, dns_inputs=None):
     if image != DIAGNOSTIC_IMAGE:
         raise ValueError()
     directory = Path(__file__).parent
-    if kind not in {'state', 'network', 'dns', 'dns-ndots1', 'dns-observed', 'resolver-map', 'dns-path-contrast'}:
+    if kind not in {'state', 'network', 'dns', 'dns-ndots1', 'dns-observed', 'resolver-map', 'dns-path-contrast', 'dns-proxy-listener'}:
         raise ValueError()
     if kind not in ('resolver-map', 'dns-path-contrast') and dns_inputs is not None:
         raise ValueError()
-    if kind in ('resolver-map', 'dns-path-contrast') and window is not None:
+    if kind in ('resolver-map', 'dns-path-contrast', 'dns-proxy-listener') and window is not None:
         raise ValueError()
     name = 'access-'+kind+'-diagnose-v1'
     script = directory/('access_dns_path_contrast.py' if kind == 'dns-path-contrast' else
                         'access_resolver_map.py' if kind == 'resolver-map' else 'access_state_diagnose.py' if kind == 'state' else
                         'access_dns_diagnose.py' if kind.startswith('dns') else 'access_network_diagnose.py')
     volumes, mounts, env = [], [], []
-    if kind in ('state', 'resolver-map', 'dns-path-contrast'):
+    if kind in ('state', 'resolver-map', 'dns-path-contrast', 'dns-proxy-listener'):
         # Existing stopped runner only; fresh current GET supplied in snapshot.
         runner = snapshot['runner']
         if (runner['metadata']['namespace'] != 'codex-trial' or runner['metadata']['name'] != 'access-web-runner-v1'
@@ -58,6 +58,10 @@ def emit(snapshot, inputs, image, kind, window=None, dns_inputs=None):
         # Bounded window for exact endpoint/proxy metadata, not a background monitor.
         container['command'][3] = 'import time\ntime.sleep(8)\n'+script.read_text()+'\ntime.sleep(20)\n'
         job['spec']['activeDeadlineSeconds'] = 60
+    if kind == 'dns-proxy-listener':
+        container['command'][3] = ('import json,time\nprint(json.dumps({"holding":True,"networkRequested":False}),flush=True)\n'
+                                  'time.sleep(40)\nprint(json.dumps({"holderCompleted":True,"networkRequested":False}),flush=True)\n')
+        job['spec']['activeDeadlineSeconds'] = 50
     if kind == 'resolver-map':
         from access_resolver_map import expected_context
         context = expected_context(dns_inputs['service'], dns_inputs['pod'], node)
@@ -87,7 +91,7 @@ def emit(snapshot, inputs, image, kind, window=None, dns_inputs=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('kind', choices=('state', 'network', 'dns', 'dns-ndots1', 'dns-observed', 'resolver-map', 'dns-path-contrast'))
+    parser.add_argument('kind', choices=('state', 'network', 'dns', 'dns-ndots1', 'dns-observed', 'resolver-map', 'dns-path-contrast', 'dns-proxy-listener'))
     parser.add_argument('--snapshot', required=True); parser.add_argument('--inputs', required=True)
     parser.add_argument('--window-inputs')
     parser.add_argument('--dns-inputs')
