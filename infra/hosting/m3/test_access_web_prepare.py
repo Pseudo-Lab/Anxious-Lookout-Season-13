@@ -35,6 +35,10 @@ def test_access_runner_expiry_keeps_service_ready_and_exact_nonrefresh_egress(pa
     policy = web.emit(snapshot, inputs, 'policy')['items'][0]
     assert policy['spec']['egress'][-1]['toFQDNs'] == [{'matchName': 'chatgpt.com'}]
     assert 'auth.openai.com' not in str(policy) and 'api.openai.com' not in str(policy)
+    bridge = web.emit(snapshot, inputs, 'policy')['items'][1]['spec']
+    assert bridge['enableDefaultDeny'] == {'ingress': False, 'egress': False}
+    assert len(bridge['egress']) == 1 and bridge['egress'][0]['toPorts'] == [{'ports': [{'port': '8080', 'protocol': 'TCP'}]}]
+    assert 'dns' not in str(bridge) and '53' not in str(bridge)
 
 
 def test_access_init_fresh_subdirectories_and_same_retained_claims(package):

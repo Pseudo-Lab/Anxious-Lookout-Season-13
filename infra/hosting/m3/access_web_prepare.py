@@ -58,6 +58,11 @@ def emit(snapshot, inputs, part):
     if part == 'policy':
         value['items'][0]['metadata']['name'] = 'access-web-boundary-v1'
         value['items'][1]['metadata']['name'] = 'hosting-access-web-link-v1'
+        # This is an additive callback link, not the hosting API's complete policy.
+        # Do not flip the existing API into deny mode or proxy/restrict its DB/OAuth DNS.
+        bridge = value['items'][1]['spec']
+        bridge['enableDefaultDeny'] = {'ingress': False, 'egress': False}
+        bridge['egress'] = bridge['egress'][:1]  # runner8080 only; baseline owns API DNS/DB/GitHub
     return value
 
 
