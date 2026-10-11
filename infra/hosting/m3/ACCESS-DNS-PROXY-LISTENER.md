@@ -23,6 +23,8 @@ return/DNS 정상 증명이 아니며 absence를 과거 DN9 timeout의 원인으
   egress53 DNS statistics 두 항목의 **단일 공통 allocated port**를 검사합니다. Port/revision이
   비지원/누락/분리/범위 밖이면 unknown이며 다른 port를 추정하지 않습니다. Scope0600는
   O_EXCL/NOFOLLOW이고 raw port/IDs는 stdout에 없습니다.
+  설치1.20.2의 desired revision JSON 경로는 **status.policy.spec.policy-revision**입니다.
+  실제 DN5B 저장 JSON과 offline parser를 대조했으며 policy.desired fallback은 사용하지 않습니다.
 - **추가 infrastructure metadata read scope:** 같은 선택 agent/container에서 `/proc/1/comm`,
   `/proc/1/fd` symlink metadata와 `/proc/net/tcp`, udp, tcp6, udp6를 읽습니다. Agent hostNetwork=true,
   hostPID=false/shareProcessNamespace=false 및 comm=cilium-agent일 때만 동작합니다.
@@ -55,6 +57,13 @@ return/DNS 정상 증명이 아니며 absence를 과거 DN9 timeout의 원인으
    agent FD 최대4096개, table별 최대4096 rows이며 한도/누락/형식 실패면 partial 결과 없이unknown/
    exit1입니다. UDP connect-to-peer/TCP established rows는 listener로 집계하지 않습니다.
    Symlink targets는 inode 비교용 metadata일 뿐 source 내용 접근이 아닙니다.
+   Header 전체와 모든 row를 port filtering **전에** 검사합니다. IPv4/IPv6 주소·port·state·
+   queue·timer·숫자·pointer 및 TCP17-field/UDP13-field tail을 검증하며 TCP TIME_WAIT/open-request의
+   inode0인12-field 형태만 별도 허용합니다. 빈/잘린/미지원 row, 중복 header, newline 없는 마지막
+   줄도 전체unknown입니다. Timer hex는8~16자리, pointer는8/16자리만 지원합니다.
+   형태 기준은 [Linux TCP proc formatter](https://github.com/torvalds/linux/blob/v6.1/net/ipv4/tcp_ipv4.c)
+   와 [UDP proc formatter](https://github.com/torvalds/linux/blob/v6.1/net/ipv4/udp.c)이며 설치 환경의
+   다른 형태를 추정하여 정상 zero로 처리하지 않습니다.
 5. Metadata 직후 stderr에서 발행한 **정확한4 숫자**를 기존 access_drop_remote.sh check mode에
    전달해 private proof를 얻습니다. Source를 복사/설치하지 않고 sh stdin으로 전달합니다.
    PID/startTicks/group에 결합된 childGone=true/groupGone=true/exit0 뒤만 결과를 채택합니다.

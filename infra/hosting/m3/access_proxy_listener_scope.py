@@ -7,6 +7,20 @@ from pathlib import Path
 from access_endpoint_pin import verify
 
 
+def policy_scope(policy):
+    # Installed1.20.2 serializes desired policy as spec, not a desired property.
+    revisions = [policy['spec']['policy-revision'], policy['realized']['policy-revision'], policy['proxy-policy-revision']]
+    if any(type(v) is not int for v in revisions) or len(set(revisions)) != 1:
+        raise ValueError()
+    stats = [v for v in policy['proxy-statistics'] if v.get('protocol') == 'dns' and v.get('location') == 'egress' and v.get('port') == 53]
+    if len(stats) != 2:
+        raise ValueError()
+    ports = [v['allocated-proxy-port'] for v in stats]
+    if any(type(v) is not int or not 1 <= v <= 65535 for v in ports) or len(set(ports)) != 1:
+        raise ValueError()
+    return {'allocatedPort': ports[0], 'policyRevision': revisions[0]}
+
+
 def scope(saved, pod, cep, agent, response):
     verify(saved, pod, cep, agent, response)
     if agent['spec'].get('hostNetwork') is not True or agent['spec'].get('shareProcessNamespace', False) is not False:
@@ -16,17 +30,7 @@ def scope(saved, pod, cep, agent, response):
     if not pod['metadata']['name'].startswith('access-dns-proxy-listener-diagnose-v1-'):
         raise ValueError()
     value = response[0] if isinstance(response, list) and len(response) == 1 else response
-    policy = value['status']['policy']
-    revisions = [policy['desired']['policy-revision'], policy['realized']['policy-revision'], policy['proxy-policy-revision']]
-    if any(type(v) is not int for v in revisions) or len(set(revisions)) != 1:
-        raise ValueError()
-    stats = [v for v in policy['proxy-statistics'] if v.get('protocol') == 'dns' and v.get('location') == 'egress' and v.get('port') == 53]
-    if len(stats) != 2:
-        raise ValueError()
-    ports = [v['allocated-proxy-port'] for v in stats]
-    if any(type(v) is not int or not 1 <= v <= 65535 for v in ports) or len(set(ports)) != 1:
-        raise ValueError()
-    return {'targetPin': saved, 'allocatedPort': ports[0], 'policyRevision': revisions[0]}
+    return dict(targetPin=saved, **policy_scope(value['status']['policy']))
 
 
 def finalize(saved, pod, cep, agent, response, result, transport_exit, child, proof):
