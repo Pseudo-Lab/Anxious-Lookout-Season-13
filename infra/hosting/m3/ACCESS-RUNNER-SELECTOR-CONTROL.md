@@ -1,0 +1,85 @@
+# #7 Runner app selector 한 변수 비교
+
+이 패키지는 별도 control Job 준비용입니다. **완성 패키지의 독립 검토 및 PM 운영 범위 확정 전에는
+생성/질의하지 않습니다.** 기존 Deployment/Service/정책 객체는 수정하지 않지만 control Pod가
+named Runner boundary 선택에서 벗어나므로 effective isolation/L7 적용은 달라질 수 있습니다.
+DN12는 계속 PAUSED이며 node-wide 관측을 추가하지 않습니다.
+
+비교 기준은 review가 검증한 `/tmp/issue7-runner-direct-20261011/render.json`과 해당 실제 Runner2948
+결과입니다. source73cde8e, 문서2a3af39의 네 absolute UDP/TCP helper가 모두 timeout이었습니다.
+이번 단일 control은 과거 결과와 시점 차이가 있으며 동시 paired 실험이 아닙니다.
+
+## 고정 variant와 차이 검증
+
+`access_runner_dns_control_prepare.py`는 현재 direct renderer를 호출하고 **fresh metadata로 만든
+direct render 전체가 보관 source render와 일치해야** 진행합니다. JSON key 순서는 무관하지만
+값/타입은 동일해야 합니다. live Job의 UID/defaulted 필드를 baseline으로 사용하지 않습니다.
+그 뒤 딱 두 경로를 변경합니다:
+
+- `metadata.name`: `access-runner-image-dns-v1` → `access-runner-selector-dns-v1`
+- `spec.template.metadata.labels.app`: `access-web-runner` → `access-runner-dns-control`
+
+다른 labels, namespace, retained node, DNS 설정, command bytes, security, 이미지 및 Job 제한은
+같습니다. source915/Runner2948/imagePullPolicy Never, UID10001/RO/no env·envFrom·mount·PVC·Secret·token,
+serviceAccount trial, 단일 container, backoff0/deadline30을 유지합니다. 기존 프로그램 그대로
+두 이름/UDP·TCP 네 helper attempts/socket operation timeout2초/전체10초, libcQueries0입니다.
+HTTP/TLS/Native/auth/상태 초기화는 실행하지 않습니다. attempts는 packet 수가 아닙니다.
+
+Language toolchain은 Docker에서만 실행합니다. 고정 검증 image와 private readonly 파일 mount를 사용합니다:
+
+```text
+python -B /checks/access_runner_dns_control_prepare.py
+  --snapshot /metadata/snapshot.json --inputs /metadata/inputs.json --images /metadata/images.json
+  --baseline /metadata/direct-render.json --services /metadata/services.json
+```
+
+`services.json`은 **fresh/unfiltered** `kubectl get services -n codex-trial -o json` 전체 결과입니다.
+renderer는 유효한 namespace/name/UID/selector/list RV를 요구하고 control의 모든 labels로 selector를
+대조합니다. 어떤 기존 Service라도 control을 선택하면 중단합니다. app 조건 이외 selector도 검사합니다.
+selector가 없는 Service는 Pod를 선택하지 않습니다. 이 파일의 완전성/수집 시점과 기존 Runner label의
+Service membership 비교는 PM이 기록합니다. 목록의 형식만으로 freshness/누락 없음이 증명되지는 않습니다.
+
+## PM 운영 절차 — 아직 실행 승인 아님
+
+1. private0700 evidence directory 및 기존 bounded kubectl 방식(core0/TERM10+KILL2/출력256KiB)을
+   사용합니다. API70 UID/spec/Ready1/updated1, runner replicas0/runner selector Pod0, mapping disabled,
+   window1 expired/requests0 및 기존 storage metadata를 확인합니다. 원본 auth/state/PVC 내용은 읽거나
+   공급하지 않습니다. fresh snapshot/inputs/images 및 보관 direct-render bytes/source/provenance를 보존합니다.
+2. 현재 named Runner boundary/P1/CCNP의 UID/RV/spec, known DNS Service/EndpointSlice metadata 및
+   기존 runner node/DNS/template를 직전 actual 기준과 대조합니다. named boundary의 app selector 및
+   default-deny true/true와 namespace-based CCNP 적용 조건이 같아야 합니다. **어떤 drift나 미지원도 중단**합니다.
+   다른 label-based 정책/identity 선택까지 동일하다고 주장하지 않습니다. 새 policy relaxation/namespace/
+   node/image 변경을 섞지 않습니다. 기존 global CCNP는 같은 namespace에 계속 적용될 수 있습니다.
+3. 모든 Service의 실제 selector에 baseline/control 전체 labels를 각각 대조하고 control membership0을
+   보존합니다. `codex-trial/access-runner-selector-dns-v1` Job 부재, control selector
+   `app=access-runner-dns-control` Pod0 및 runner selector Pod0를 **각각** 확인합니다. 같은 이름/label의
+   잔여물이 있으면 재사용하거나 자동 삭제하지 않고 중단합니다. 컨트롤러 등 다른 metadata에서
+   동일 control 이름/label 사용이 발견돼도 중단합니다.
+4. 위 renderer를 Docker로 실행합니다. baseline/control의 기계적 diff가 위 두 경로만인지 저장합니다.
+   server dry-run을 보존하고 실제 spec을 비교합니다. 자동 UID/controller labels/ownerReferences 및
+   Kubernetes defaulting은 lifecycle 차이로 별도 기록하고 arbitrary template 변경을 허용하지 않습니다.
+   Pod 생성 시 추가된 Job controller labels는 원래 다른 labels 보존 검사를 대체하지 않습니다.
+5. review 승인 후 PM이 **Job 한 번만 생성**하고 반환된 exact Job UID를 저장합니다. 해당 UID를 owner로
+   가진 단일 Pod의 UID/imageID/command/labels/node/DNS/security/無 env·volume·token을 확인합니다.
+   OCI index2948→arm64 manifest b902→config2b017 및 CRI repoDigest/config id 연결로 provenance를
+   검증합니다. 새 build/import/pull은 하지 않습니다. 실패/Pod replacement/restart/다중 Pod는 unknown이며
+   재시도하지 않습니다. 고정 deadline 안에서 bounded safe JSON만 수집합니다. raw errors/packet/주소를 공개하지 않습니다.
+6. 생성 이후 **모든 outcome에서** 저장된 exact Job UID precondition/Foreground 기존 deletion 절차를
+   사용합니다. 같은 이름의 다른 UID는 삭제하지 않습니다. selector만으로 삭제하지 않습니다.
+   exact Job UID 소유 Pod0(저장 owner UID 및 controller-uid selector로 확인), Job 부재,
+   **control selector Pod0**, **runner selector Pod0**를 각각 기록합니다. cleanup 실패/UID mismatch는
+   미완료로 인계하며 성공으로 판정하지 않습니다. 객체를 못 생성한 경우 이전 잔여물을 지우지 않습니다.
+7. API/runner UID/spec/Ready/replicas/mapping, Service selector, known DNS metadata 및 정책/P1/CCNP
+   UID/RV/spec을 후검증합니다. 변화가 있으면 별도 중단/조사 대상으로 인계합니다. baseline 복구를 위해
+   임의 정책/Deployment를 수정하지 않습니다. 원본 storage 불변이나 모든 요청 무영향을 추정하지 않습니다.
+
+## 결과 해석과 종료
+
+Control reply는 app-selected policy/Cilium identity/L7/Service 선택 차이의 영향을 의심할 근거이며
+특정 CNP 단독 원인 증명은 아닙니다. REFUSED/SERVFAIL/malformed는 정상 DNS 해석이 아닙니다.
+Control도 timeout이면 named boundary 단독 가설의 근거는 약해지지만 그 영향 부재가 증명되지는
+않습니다. global/other policy/common DNS 경로, 시간 차이와 복합 원인은 여전히 열려 있습니다.
+
+Backend는 source/오프라인 회귀만 담당하며 실제 Job/query/cluster metadata 수집은 PM 담당입니다.
+생산 정책 변경, DN12 재개, 재공급/새 창/API enable, Native/auth/turn 및 최종 PR/public posting은
+자동 진행하지 않습니다. 결과/정리 증거는 별도 독립 검증을 받습니다.
