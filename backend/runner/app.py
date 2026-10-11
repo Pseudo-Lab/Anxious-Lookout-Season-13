@@ -22,6 +22,7 @@ from app.codex_policy import MODEL, CodexFailure, ERRORS, error_reason
 from .auth import PersonalAuth, read_private, write_private
 from .projection import PROJECTION_VERSION
 from .binding import canonical_uuid, require_binding
+from .access import AccessAuth, SupplySocket
 
 
 class Turn(BaseModel):
@@ -68,10 +69,12 @@ def volume_lease(root):
 
 class Native:
     PROJECTION_VERSION = PROJECTION_VERSION
+    external = False
     def __init__(self, root, model, binary, callback_url, api_key_file=None, auth=None, binding_check=None):
         if model != MODEL or api_key_file:
             raise CodexFailure("policy_refused")
         self.auth, self.blocked_reason, self.real_verified = auth, None, False
+        self.external = bool(getattr(auth, 'external', False))
         self.binding_check = binding_check
         self.binding_failed = False
         self.check_binding()
@@ -122,8 +125,8 @@ class Native:
             self.blocked_reason = "model_unavailable"
         environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(home), "CODEX_HOME": str(codex_home)}
         self.work = work
-        self.process = subprocess.Popen([binary, "app-server", "--listen", "stdio://",
-                    "-c", 'cli_auth_credentials_store="file"' if auth else 'cli_auth_credentials_store="ephemeral"',
+        command = [binary, "app-server", "--listen", "stdio://",
+                    "-c", 'cli_auth_credentials_store="file"' if auth and not self.external else 'cli_auth_credentials_store="ephemeral"',
                     "-c", 'model="gpt-6.1-sol"', "-c", "features.shell_tool=false",
                     "-c", 'model_provider="openai"',
                     "-c", "features.multi_agent=false", "-c", "features.multi_agent_v2=false",
@@ -133,13 +136,30 @@ class Native:
                     "-c", "features.daemon_auto_start=false",
                     "-c", "features.browser_use=false", "-c", "features.computer_use=false",
                     "-c", "features.image_generation=false", "-c", 'web_search="disabled"',
-                    "-c", 'forced_login_method="chatgpt"'],
+                    "-c", 'forced_login_method="chatgpt"']
+        if self.external:
+            # Same authenticated Codex endpoint, named provider solely to disable retries.
+            # The pinned built-in provider cannot be overridden. No API key route.
+            for setting in ('model_provider="access_only_openai"',
+                            'model_providers.access_only_openai.name="OpenAI access-only test"',
+                            'model_providers.access_only_openai.base_url="https://chatgpt.com/backend-api/codex"',
+                            'model_providers.access_only_openai.wire_api="responses"',
+                            'model_providers.access_only_openai.requires_openai_auth=true',
+                            'model_providers.access_only_openai.supports_websockets=false',
+                            'model_providers.access_only_openai.request_max_retries=0',
+                            'model_providers.access_only_openai.stream_max_retries=0',
+                            'analytics.enabled=false', 'otel.exporter="none"',
+                            'otel.trace_exporter="none"', 'otel.metrics_exporter="none"'):
+                command += ['-c', setting]
+        self.process = subprocess.Popen(command,
                     env=environment, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, text=True, bufsize=1)
         threading.Thread(target=self.reader, daemon=True).start()
         try:
             self.rpc("initialize", {"clientInfo": {"name": "anxious_research", "version": "1"}, "capabilities": {"experimentalApi": True}})
             self.send({"method": "initialized"})
+            if self.external:
+                self.login_access()
             if auth:
                 account = self.rpc("account/read", {"refreshToken": False}).get("account")
                 if not account or account.get("type") != "chatgpt":
@@ -157,6 +177,32 @@ class Native:
             if entry.get("state") == "running":
                 entry["state"] = "failed"
         self.save()
+
+    def login_access(self):
+        self.auth.check(budget=False)
+        result = self.rpc('account/login/start', {'type': 'chatgptAuthTokens', **self.auth.snapshot})
+        if result.get('type') != 'chatgptAuthTokens':
+            raise CodexFailure('auth_revoked')
+
+    def resupply(self, envelope):
+        # Operator-only. Never resume/replay a failed request while replacing auth.
+        with self.state_lock:
+            self.check_binding()
+            if self.active_session is not None or not self.lock.acquire(blocking=False):
+                raise CodexFailure('unavailable')
+            try:
+                if self.process.poll() is not None or self.closing:
+                    raise CodexFailure('unavailable')
+                self.auth.install(envelope)
+                self.blocked_reason = None
+                self.login_access()
+                self.real_verified = False
+            except CodexFailure as failure:
+                self.blocked_reason = failure.reason
+                self.auth.block(failure.reason)
+                raise
+            finally:
+                self.lock.release()
 
     def availability(self):
         try:
@@ -290,7 +336,19 @@ class Native:
         self.process.stdin.flush()
 
     def receive(self, turn=None):
-        message = self.messages.get(timeout=120)
+        timeout = 120
+        if self.external:
+            self.auth.check(budget=False)
+            import time
+            timeout = max(.01, min(timeout, self.auth.state()['deadline']-time.time()))
+        try:
+            message = self.messages.get(timeout=timeout)
+        except queue.Empty:
+            if self.external:
+                self.auth.check(budget=False)
+            raise CodexFailure('unavailable') from None
+        if self.external:
+            self.auth.check(budget=False)
         if message.get("fatal"):
             raise RuntimeError("Codex process stopped")
         if message.get("method") == "model/rerouted":
@@ -303,7 +361,7 @@ class Native:
             self.send({"id": self.next_id - 1, "method": "turn/interrupt", "params": {"threadId": params.get("threadId"), "turnId": params.get("turnId")}})
             raise CodexFailure("model_unavailable")
         if message.get("method") == "account/updated" and self.auth:
-            if message.get("params", {}).get("authMode") != "chatgpt":
+            if message.get("params", {}).get("authMode") not in ({'chatgptAuthTokens'} if self.external else {'chatgpt'}):
                 self.blocked_reason = "auth_revoked"
                 raise CodexFailure("auth_revoked")
         if message.get("method") in {"turn/started", "turn/updated"}:
@@ -314,6 +372,11 @@ class Native:
             self.completed[(params.get("threadId"), params.get("turn", {}).get("id"))] = params.get("turn", {})
         if "method" in message and "id" in message:
             method, params = message["method"], message.get("params", {})
+            if method == 'account/chatgptAuthTokens/refresh' and self.external:
+                self.send({'id': message['id'], 'error': {'code': -32001, 'message': 'Operator access resupply required'}})
+                self.auth.block('auth_revoked')
+                self.blocked_reason = 'auth_revoked'
+                raise CodexFailure('auth_revoked')
             if method == "item/tool/call" and turn:
                 if not turn.get("turnId") and params.get("threadId") == turn["thread"]:
                     pending = turn.setdefault("pendingTools", [])
@@ -359,6 +422,8 @@ class Native:
             raise failure
 
     def rpc(self, method, params, turn=None):
+        if self.external:
+            self.auth.check(budget=False)
         identity, self.next_id = self.next_id, self.next_id + 1
         self.send({"id": identity, "method": method, "params": params})
         while True:
@@ -473,6 +538,9 @@ class Native:
             entry["state"] = "idle" if completed.get("status") == "completed" and not self.blocked_reason else "failed"
             if entry["state"] == "failed":
                 entry["error"] = ERRORS.get(error_reason(completed.get("error")), "codex_failed")
+                if self.external and error_reason(completed.get('error')) in {'auth_revoked', 'auth_expired', 'provider_rate_limited'}:
+                    self.blocked_reason = error_reason(completed.get('error'))
+                    self.auth.block(self.blocked_reason)
             elif not self.fixture:
                 self.real_verified = True
             self.store_record(session, entry, self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"],
@@ -480,11 +548,21 @@ class Native:
         except Exception as failure:
             entry["state"] = "failed"
             entry["error"] = str(failure) if isinstance(failure, CodexFailure) else "codex_failed"
+            if self.external and isinstance(failure, CodexFailure) and failure.reason in {'auth_revoked', 'auth_expired'}:
+                self.auth.block(failure.reason)
+                # Stop only this owned turn; never dispatch a retry after auth refusal.
+                if entry.get('thread') and entry.get('turn_id'):
+                    try:
+                        self.next_id += 1
+                        self.send({'id': self.next_id-1, 'method': 'turn/interrupt',
+                                   'params': {'threadId': entry['thread'], 'turnId': entry['turn_id']}})
+                    except Exception:
+                        pass
             if isinstance(failure, CodexFailure) and failure.reason in {"auth_revoked", "auth_expired", "model_unavailable", "policy_refused"}:
                 self.blocked_reason = failure.reason
                 if failure.reason == "model_unavailable":
                     self.quarantine_history(session, entry)
-            if entry["thread"]:
+            if entry["thread"] and not (self.external and self.blocked_reason in {'auth_revoked', 'auth_expired'}):
                 try:
                     self.store_record(session, entry, self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"])
                 except Exception:
@@ -506,7 +584,8 @@ class Native:
             if entry is None:
                 return None
             self.verify_projection(session, entry)
-            refresh = self.active_session is None and entry.get("state") != "running" and entry.get("thread")
+            refresh = (self.active_session is None and entry.get("state") != "running" and entry.get("thread")
+                       and not (self.external and self.availability() is not None))
         if refresh and self.lock.acquire(blocking=False):
             try:
                 raw = self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"]
@@ -592,18 +671,48 @@ def create_app():
         bind_owner(root, owner)
         with volume_lease(root):
             auth = None
+            supply = None
             app.state.native, app.state.auth_failure = None, None
+            app.state.stopping = False
             try:
                 mode = os.getenv("CODEX_AUTH_MODE", "none")
                 if mode == "personal-cache":
                     if os.getenv("CODEX_EXECUTION_SCOPE") != "personal-private" or os.getenv("APP_ENV") != "personal-test":
                         raise CodexFailure("policy_refused")
                     auth = PersonalAuth(os.environ["CODEX_PERSONAL_CONTROL_DIR"], owner)
+                elif mode == 'access-only':
+                    if os.getenv('CODEX_EXECUTION_SCOPE') != 'personal-private' or os.getenv('APP_ENV') != 'personal-test' or not state_id:
+                        raise CodexFailure('policy_refused')
+                    auth = AccessAuth(os.environ['CODEX_ACCESS_CONTROL_DIR'], owner, state_id)
                 elif mode != "none":
                     raise CodexFailure("policy_refused")
-                app.state.native = Native(root, model, os.environ.get("CODEX_BIN", "/usr/local/bin/codex"),
-                                          os.environ["RESEARCH_TOOL_CALLBACK_URL"], auth=auth,
-                                          binding_check=(lambda: require_binding(root, owner, state_id)) if state_id else None)
+                def start_native():
+                    return Native(root, model, os.environ.get('CODEX_BIN', '/usr/local/bin/codex'),
+                                  os.environ['RESEARCH_TOOL_CALLBACK_URL'], auth=auth,
+                                  binding_check=(lambda: require_binding(root, owner, state_id)) if state_id else None)
+                if mode == 'access-only':
+                    app.state.auth_failure = 'not_configured'
+                    def apply(envelope):
+                        if app.state.stopping:
+                            raise CodexFailure('unavailable')
+                        require_binding(root, owner, state_id)
+                        try:
+                            if app.state.native:
+                                app.state.native.resupply(envelope)
+                            else:
+                                auth.install(envelope)
+                                candidate = start_native()
+                                if app.state.stopping:
+                                    candidate.close()
+                                    raise CodexFailure('unavailable')
+                                app.state.native = candidate
+                            app.state.auth_failure = None
+                        except Exception as failure:
+                            app.state.auth_failure = failure.reason if isinstance(failure, CodexFailure) else 'unavailable'
+                            raise
+                    supply = SupplySocket(auth.control, apply)
+                else:
+                    app.state.native = start_native()
             except Exception as failure:
                 app.state.auth_failure = failure.reason if isinstance(failure, CodexFailure) else "unavailable"
                 if auth:
@@ -611,8 +720,13 @@ def create_app():
             try:
                 yield
             finally:
+                app.state.stopping = True
+                if supply:
+                    supply.close()
                 if app.state.native:
                     app.state.native.close()
+                elif auth:
+                    auth.close()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -644,7 +758,8 @@ def create_app():
         if not native:
             return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, "verification": "unverified", "available": False, "reason": app.state.auth_failure, "model": MODEL}
         reason = native.availability()
-        return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, "verification": "fixture" if native.fixture else "real" if native.real_verified else "unverified", "available": reason is None, "reason": reason, "model": MODEL}
+        return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, "verification": "fixture" if native.fixture else "real" if native.real_verified else "unverified", "available": reason is None, "reason": reason, "model": MODEL,
+                **(native.auth.status() if getattr(native, 'external', False) else {})}
 
     @app.post("/sessions/{identity}/turn", status_code=202)
     def turn(identity: uuid.UUID, body: Turn):

@@ -4,10 +4,10 @@ from urllib.parse import urlsplit
 
 MODEL = "gpt-6.1-sol"
 REASONS = {"not_configured", "not_enabled_for_account", "auth_expired", "auth_revoked",
-           "model_unavailable", "policy_refused", "budget_exhausted", "unavailable"}
+           "model_unavailable", "policy_refused", "budget_exhausted", "provider_rate_limited", "unavailable"}
 ERRORS = {"auth_expired": "codex_auth_expired", "auth_revoked": "codex_auth_revoked",
           "model_unavailable": "codex_model_unavailable", "policy_refused": "codex_policy_refused",
-          "budget_exhausted": "codex_budget_exhausted", "not_enabled_for_account": "codex_not_enabled_for_account"}
+          "budget_exhausted": "codex_budget_exhausted", "provider_rate_limited": "codex_rate_limited", "not_enabled_for_account": "codex_not_enabled_for_account"}
 
 
 def personal_origin_enabled(settings):
@@ -40,6 +40,10 @@ def error_reason(error):
     code = data.get("code")
     message = error.get("message", "")
     message = message.lower() if isinstance(message, str) else ""
+    if (info in ('usageLimitExceeded', 'rateLimitExceeded') if isinstance(info, str) else False) or code in {'rate_limit_exceeded', 'too_many_requests'}:
+        return 'provider_rate_limited'
+    if isinstance(info, dict) and any(isinstance(v, dict) and v.get('httpStatusCode') == 429 for v in info.values()):
+        return 'provider_rate_limited'
     if code in {"model_not_found", "model_unavailable", "unsupported_model"} or ("model" in message and any(term in message for term in ("not available", "not found", "does not exist", "do not have access", "not supported"))):
         return "model_unavailable"
     if info == "unauthorized":

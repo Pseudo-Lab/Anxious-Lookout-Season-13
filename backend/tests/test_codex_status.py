@@ -50,7 +50,8 @@ def test_private_status_is_owner_scoped_and_never_exposes_auth_metadata(client, 
 
 
 @pytest.mark.parametrize("reason,code", [("auth_expired", "codex_auth_expired"), ("auth_revoked", "codex_auth_revoked"),
-    ("model_unavailable", "codex_model_unavailable"), ("policy_refused", "codex_policy_refused"), ("budget_exhausted", "codex_budget_exhausted")])
+    ("model_unavailable", "codex_model_unavailable"), ("policy_refused", "codex_policy_refused"), ("budget_exhausted", "codex_budget_exhausted"),
+    ("provider_rate_limited", "codex_rate_limited")])
 def test_preflight_failures_do_not_reserve_key_and_polling_failure_retains_input(client, admin, reason, code):
     owner, auth = identity(client, admin)
     runner = HealthRunner(reason)
@@ -96,3 +97,17 @@ def test_invalid_runner_status_is_unavailable_instead_of_server_error(client, ad
     enable(client, owner, runner)
     result = client.get("/api/research/codex/status")
     assert result.status_code == 200 and result.json()["reason"] == "unavailable"
+
+
+def test_access_expiry_and_window_status_are_safe_optional_owner_metadata(client, admin):
+    owner, _ = identity(client, admin)
+    runner = HealthRunner('auth_expired')
+    valid = runner.health()
+    runner.health = lambda: {**valid, 'accessExpiresAt': '2026-10-11T03:00:00+00:00', 'remainingAdmissions': 2}
+    enable(client, owner, runner)
+    status = client.get('/api/research/codex/status').json()
+    assert status['reason'] == 'auth_expired' and status['available'] is False
+    assert status['accessExpiresAt'] == '2026-10-11T03:00:00+00:00' and status['remainingAdmissions'] == 2
+    assert 'privateMetadata' not in status
+    runner.health = lambda: {**valid, 'accessExpiresAt': 'private-metadata-not-a-date'}
+    assert client.get('/api/research/codex/status').json()['reason'] == 'unavailable'

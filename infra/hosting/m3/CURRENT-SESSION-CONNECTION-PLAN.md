@@ -1,5 +1,10 @@
 # #7 현재 작업 인증을 유지하는 UID별 웹 연결 실행 경로
 
+2026-10-11 선행 웹 테스트는 [ACCESS-WEB-TEST.md](ACCESS-WEB-TEST.md)의 명시적으로 승인된
+access-only 구현/운영 경로를 따릅니다. 아래 persistent authority 계획의 all-writer/원래
+memory association/정상 lifecycle 전환 gate를 그 제한 테스트의 선행조건으로 적용하지 않습니다.
+이 문서의 장기 지속 연결 구상과 실제 access-only 웹 테스트 완료는 별개입니다.
+
 계획/의사결정 자료입니다. 실제 credential 접근·공급, 원래 세션 전환,
 새 authority/bridge 시작, image import/배포를 실행하는 지시가 아닙니다.
 

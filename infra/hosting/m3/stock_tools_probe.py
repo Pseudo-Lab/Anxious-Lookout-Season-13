@@ -34,7 +34,9 @@ parser.add_argument('--enable-code-mode-host', action='store_true')
 parser.add_argument('--permission-probe', action='store_true')
 parser.add_argument('--fail-after-tool', action='store_true')
 parser.add_argument('--runner-path', action='store_true')
+parser.add_argument('--access-only-path', action='store_true')
 options = parser.parse_args()
+options.runner_path = options.runner_path or options.access_only_path
 fixture_tool_names = ('research_list',) if options.runner_path else ('original_fixture_tool', 'web_fixture_tool')
 
 
@@ -120,6 +122,11 @@ class Mock(BaseHTTPRequestHandler):
                 assert users and isinstance(users[-1].get('id'), str)
                 call += '-'+users[-1]['id']
                 outputs = [v for v in outputs if v.get('call_id') == call]
+            if getattr(options, 'unauthorized_access', False):
+                payload = b'{"error":{"message":"Synthetic unauthorized","type":"invalid_request_error"}}'
+                self.send_response(401); self.send_header('Content-Length', str(len(payload)))
+                self.end_headers(); self.wfile.write(payload)
+                return
             if outputs:
                 if options.code_mode_wire:
                     print(json.dumps({'syntheticCodeModeOutputs': [str(v.get('output'))[:1200] for v in outputs]}), flush=True)

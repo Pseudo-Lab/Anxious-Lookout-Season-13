@@ -186,7 +186,19 @@ def register_conversations(app, authorized, sessions, settings, response, write)
             if verified == "fixture" and not fixture:
                 raise ValueError()
             available = health["available"] and reason is None
-            return {**result, "available": available, "reason": None if available else reason or "unavailable", "verification": verified}
+            extra = {}
+            if 'accessExpiresAt' in health:
+                expiry = health['accessExpiresAt']
+                if expiry is not None:
+                    if not isinstance(expiry, str) or len(expiry) > 40 or datetime.fromisoformat(expiry.replace('Z', '+00:00')).tzinfo is None:
+                        raise ValueError()
+                extra['accessExpiresAt'] = expiry
+            if 'remainingAdmissions' in health:
+                remaining = health['remainingAdmissions']
+                if remaining is not None and (type(remaining) is not int or not 0 <= remaining <= 3):
+                    raise ValueError()
+                extra['remainingAdmissions'] = remaining
+            return {**result, **extra, "available": available, "reason": None if available else reason or "unavailable", "verification": verified}
         except (httpx.HTTPError, ValueError, KeyError):
             return {**result, "reason": "unavailable"}
 

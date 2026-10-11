@@ -5,6 +5,8 @@ RUNNER_CHECK_DIR=$(cd "$(dirname "$0")" && pwd)
 RUNNER_CHECK_BACKEND=$(cd "$RUNNER_CHECK_DIR/../../../backend" && pwd)
 RUNNER_CHECK_IMAGE=${1:?Source-built runner-test immutable image ID}
 RUNNER_CHECK_MODELS=${2:?Pinned public model catalog}
+RUNNER_CHECK_PATH=${3:-managed}
+[[ $RUNNER_CHECK_PATH == managed || $RUNNER_CHECK_PATH == access || $RUNNER_CHECK_PATH == unit-only ]]
 [[ $RUNNER_CHECK_IMAGE =~ ^sha256:[a-f0-9]{64}$ ]]
 [[ -f $RUNNER_CHECK_MODELS && ! -L $RUNNER_CHECK_MODELS ]]
 [[ $(sha256sum "$RUNNER_CHECK_MODELS" | cut -d' ' -f1) == fd219bd9f061278275f528939f82f54d2eb97df4b25c23b022adbe48813d920b ]]
@@ -21,14 +23,18 @@ for ((i=0;i<40;i++)); do
   sleep .5
 done
 [[ $RUNNER_CHECK_READY == yes ]]
+if [[ $RUNNER_CHECK_PATH != unit-only ]]; then
+RUNNER_CHECK_PATH_ARGS=(--runner-path)
+[[ $RUNNER_CHECK_PATH != access ]] || RUNNER_CHECK_PATH_ARGS=(--access-only-path)
 docker run --rm --pull=never --network none --read-only --tmpfs /tmp \
   --cap-drop ALL --security-opt no-new-privileges:true --user 10001:10001 \
   --mount "type=bind,src=$RUNNER_CHECK_DIR,dst=/checks,readonly" \
   --mount "type=bind,src=$RUNNER_CHECK_BACKEND,dst=/source,readonly" \
   --mount "type=bind,src=$RUNNER_CHECK_MODELS,dst=/fixture-models.json,readonly" \
   --env PYTHONPATH=/source --entrypoint python "$RUNNER_CHECK_IMAGE" \
-  -B /checks/stock_tools_probe.py --runner-path --legacy-history --legacy-tools \
+  -B /checks/stock_tools_probe.py "${RUNNER_CHECK_PATH_ARGS[@]}" --legacy-history --legacy-tools \
   --code-mode-wire --enable-code-mode-host --permission-probe
+fi
 docker run --rm --pull=never --network "container:$RUNNER_CHECK_PG" --read-only --tmpfs /tmp \
   --cap-drop ALL --security-opt no-new-privileges:true --user 10001:10001 \
   --mount "type=bind,src=$RUNNER_CHECK_BACKEND,dst=/source,readonly" \
@@ -41,4 +47,5 @@ docker run --rm --pull=never --network "container:$RUNNER_CHECK_PG" --read-only 
   --env AUTH_TRANSACTION_KEY=MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA= \
   --entrypoint pytest "$RUNNER_CHECK_IMAGE" \
   -q -p no:cacheprovider /source/tests/test_runner_native_bundle.py \
-  /source/tests/test_runner_protocol.py /source/tests/test_runner_auth.py /source/tests/test_runner_binding.py
+  /source/tests/test_runner_protocol.py /source/tests/test_runner_auth.py /source/tests/test_runner_binding.py \
+  /source/tests/test_access_only.py /source/tests/test_codex_status.py
