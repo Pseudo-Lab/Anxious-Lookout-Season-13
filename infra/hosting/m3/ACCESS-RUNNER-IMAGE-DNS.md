@@ -25,7 +25,9 @@ python -B -c 진단 프로그램으로 override**합니다. Runner app/Native/au
 Codex native resolver/인증 동작 전체를 검증하는 것은 아닙니다.
 
 Configured resolver 첫 주소에 `chatgpt.com`, `api.m2-hosting.svc.cluster.local`의 absolute A를
-UDP/TCP 각각 한 helper attempt씩, **총4회/각2초/프로그램 전체10초**로 요청합니다. Libc metadata는
+UDP/TCP 각각 한 helper attempt씩, **총4회/socket operation timeout2초/프로그램 전체10초**로 요청합니다.
+TCP connect/send/각 recv의 대기가 누적될 수 있으므로 helper 한 회의 wall-clock 상한을2초로
+해석하지 않습니다. 전체10초 alarm이 프로그램의 누적 대기를 제한합니다. Libc metadata는
 읽지만 libc resolution/search suffix/A·AAAA expansion query는 실행하지 않습니다. Public resolver/
 다른 이름/다른 transport/fallback/retry/HTTP/TLS/Native/auth는 없습니다. helperAttempts는 실제
 packet 수가 아닙니다. Reply status/rcode/answer-count 존재는 주소 해석이나 인증 성공 증명이 아닙니다.
