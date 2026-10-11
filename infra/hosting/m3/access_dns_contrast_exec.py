@@ -90,7 +90,7 @@ def selected(job, pod, phase, nonce):
     return ref
 
 
-def command(job, pod, receipt, scope, phase, nonce, dns_program):
+def command(job, pod, receipt, scope, phase, nonce, dns_program, counter=None):
     selected(job, pod, phase, nonce)
     if (receipt.get('holding') is not True or receipt.get('networkRequested') is not False
             or receipt.get('podUid') != pod['metadata']['uid'] or receipt.get('podName') != pod['metadata']['name']
@@ -104,6 +104,18 @@ def command(job, pod, receipt, scope, phase, nonce, dns_program):
     expected['holderCommand'] = holder_command(nonce)
     expected.update(phase=phase, jobUid=job['metadata']['uid'], policyUid=scope['policyUid'],
                     policyRv=scope['policyRv'], policyRevision=scope['policyRevision'])
+    if counter is not None:
+        from access_dns_proxy_counter import clock, snapshot
+        bound = counter['bound']
+        captured = clock(counter['clock'], 'before', scope['pin']['endpointId'])
+        if (phase != 'l7' or any(control.canonical(bound.get(key)) != control.canonical(value) for key, value in scope.items())
+                or bound['jobUid'] != job['metadata']['uid'] or bound['nonce'] != nonce
+                or bound['containerId'] != pod['status']['containerStatuses'][0]['containerID']
+                or bound['holderStartTicks'] != receipt['startTicks'] or bound['startNs'] != receipt['startNs']):
+            raise ValueError()
+        snapshot(counter['endpoint'], bound)
+        expected.update(counterMode=True, counterTimeNamespace=captured['timeNamespace'],
+                        counterBeforeEndNs=captured['endUpperCs']*10_000_000)
     helper = Path(__file__).with_name('access_dns_diagnose.py').read_text().split("\nif __name__ == '__main__':")
     if len(helper) != 2 or dns_program != helper[0]+direct.RUNTIME_PROGRAM:
         raise ValueError()
@@ -127,9 +139,11 @@ except (Exception, DNS['RunnerDnsDeadline']):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('holder', 'command', 'program'))
+    parser.add_argument('action', choices=('holder', 'command', 'program', 'counter-program'))
     parser.add_argument('--phase', required=True, choices=tuple(JOBS)); parser.add_argument('--nonce', required=True)
     for key in ('snapshot', 'inputs', 'images', 'baseline', 'services', 'job', 'pod', 'receipt', 'scope'):
+        parser.add_argument('--'+key)
+    for key in ('counter-bound', 'counter-clock', 'counter-endpoint'):
         parser.add_argument('--'+key)
     args = parser.parse_args()
     try:
@@ -138,9 +152,10 @@ if __name__ == '__main__':
             result = emit(*(read(key) for key in ('snapshot', 'inputs', 'images', 'baseline', 'services')), args.phase, args.nonce)
         else:
             baseline = read('baseline')
+            counter = {'bound': read('counter_bound'), 'clock': read('counter_clock'), 'endpoint': read('counter_endpoint')} if args.action == 'counter-program' else None
             result = command(*(read(key) for key in ('job', 'pod', 'receipt', 'scope')), args.phase, args.nonce,
-                             baseline['spec']['template']['spec']['containers'][0]['command'][3])
-        if args.action == 'program':
+                             baseline['spec']['template']['spec']['containers'][0]['command'][3], counter)
+        if args.action in ('program', 'counter-program'):
             print(result[3], end='')
         else:
             print(json.dumps(result, indent=2))

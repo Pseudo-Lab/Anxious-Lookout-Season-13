@@ -24,9 +24,10 @@ def own_pid1():
     return ticks, ticks*1_000_000_000//hz, hashlib.sha256(command).hexdigest()
 
 
-def window(start_ns, now_ns, first=True):
+def window(start_ns, now_ns, first=True, counter=False):
+    first_limit, end_limit = (18, 28) if counter else (28, 38)
     if (type(start_ns) is not int or type(now_ns) is not int or now_ns < start_ns
-            or now_ns >= start_ns + (28 if first else 38)*1_000_000_000):
+            or now_ns >= start_ns + (first_limit if first else end_limit)*1_000_000_000):
         raise ValueError()
 
 
@@ -65,7 +66,15 @@ def verify_owner(expected):
 def run_once(expected, dns_namespace):
     # Own ephemeral runtime tmpfs marker only: no PVC, source state or IPC listener.
     start_ns = verify_owner(expected)
-    window(start_ns, time.clock_gettime_ns(time.CLOCK_BOOTTIME))
+    counter = expected.get('counterMode', False)
+    if type(counter) is not bool:
+        raise ValueError()
+    if counter:
+        if (str(Path('/proc/self/ns/time').readlink()) != expected['counterTimeNamespace']
+                or type(expected['counterBeforeEndNs']) is not int
+                or expected['counterBeforeEndNs'] > time.clock_gettime_ns(time.CLOCK_BOOTTIME)):
+            raise ValueError()
+    window(start_ns, time.clock_gettime_ns(time.CLOCK_BOOTTIME), counter=counter)
     nonce = expected['nonce']
     if len(nonce) != 32 or any(c not in '0123456789abcdef' for c in nonce):
         raise ValueError()
@@ -74,7 +83,8 @@ def run_once(expected, dns_namespace):
         claim.write('claimed\n')
     # A transport/ACK failure leaves this claim consumed; never replay the exec.
     start_ns = verify_owner(expected)
-    window(start_ns, time.clock_gettime_ns(time.CLOCK_BOOTTIME))
+    window(start_ns, time.clock_gettime_ns(time.CLOCK_BOOTTIME), counter=counter)
+    entered_ns = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
     deadline = dns_namespace['RunnerDnsDeadline']
     socket_module = dns_namespace['socket']
     original_socket = socket_module.socket
@@ -84,7 +94,7 @@ def run_once(expected, dns_namespace):
         nonlocal started
         try:
             verify_owner(expected)
-            window(start_ns, time.clock_gettime_ns(time.CLOCK_BOOTTIME), first=not started)
+            window(start_ns, time.clock_gettime_ns(time.CLOCK_BOOTTIME), first=not started, counter=counter)
         except Exception:
             raise deadline()
         if mark:
@@ -110,11 +120,16 @@ def run_once(expected, dns_namespace):
     signal.signal(signal.SIGALRM, expired)
     socket_module.socket = GuardedSocket
     try:
-        remaining = (start_ns+38_000_000_000-time.clock_gettime_ns(time.CLOCK_BOOTTIME))/1_000_000_000
-        window(start_ns, time.clock_gettime_ns(time.CLOCK_BOOTTIME))
+        remaining = (start_ns+(28 if counter else 38)*1_000_000_000-time.clock_gettime_ns(time.CLOCK_BOOTTIME))/1_000_000_000
+        window(start_ns, time.clock_gettime_ns(time.CLOCK_BOOTTIME), counter=counter)
         signal.setitimer(signal.ITIMER_REAL, min(10, remaining))
         result = dns_namespace['runner_image_dns'](lambda: Path('/etc/resolv.conf').read_text(), dns_namespace['query'])
-        window(start_ns, time.clock_gettime_ns(time.CLOCK_BOOTTIME), first=False)
+        finished_ns = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+        window(start_ns, finished_ns, first=False, counter=counter)
+        if counter:
+            result['counterBudget'] = {'timeNamespace': expected['counterTimeNamespace'], 'startNs': start_ns,
+                                       'enteredNs': entered_ns, 'finishedNs': finished_ns,
+                                       'afterCutoffNs': start_ns+38_000_000_000}
         return result
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
