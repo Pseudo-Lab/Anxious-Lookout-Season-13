@@ -16,9 +16,11 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
-def services_exclude_control(services, labels):
+def services_exclude_control(services, labels, job_name=CONTROL_JOB):
     # Supply a fresh raw /api/v1/namespaces/codex-trial/services response.
     metadata = services.get('metadata', {})
+    if job_name not in (CONTROL_JOB, 'access-runner-dns-l4-v1', 'access-runner-dns-l7-v1'):
+        raise ValueError()
     if (services.get('kind') not in ('List', 'ServiceList') or services.get('apiVersion') != 'v1'
             or not isinstance(metadata, dict) or not isinstance(metadata.get('resourceVersion'), str)
             or not metadata['resourceVersion'] or not isinstance(services.get('items'), list)
@@ -29,9 +31,9 @@ def services_exclude_control(services, labels):
     # accepts server-defaulted/actual labels, but UID-based Service selectors stay unsupported.
     effective_labels = copy.deepcopy(labels)
     for key in JOB_NAME_LABELS:
-        if key in effective_labels and effective_labels[key] != CONTROL_JOB:
+        if key in effective_labels and effective_labels[key] != job_name:
             raise ValueError()
-        effective_labels[key] = CONTROL_JOB
+        effective_labels[key] = job_name
     names = set()
     typed = services['kind'] == 'ServiceList'
     for service in services['items']:
