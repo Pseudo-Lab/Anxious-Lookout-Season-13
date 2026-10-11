@@ -423,9 +423,17 @@ await page.waitForURL(/\/research\/session\/\?id=/);
 const sessionUrl = page.url();
 check("L9. session created via real API", await appears(main.getByRole("heading", { name: "실물 세션" })));
 await main.getByLabel("메시지").fill("실물 질문");
-await main.getByRole("button", { name: "보내기" }).click();
-check("L9. send -> codex_unavailable shown", await appears(main.getByText("Codex에 연결할 수 없어")));
+// 실제 status가 접수 불가이면 화면은 보내기를 잠근다. 서버 선접수 거절 자체는 API로 직접 확인한다.
+check("L9. send locked by real status", (await appears(main.getByText("보내기가 잠겨 있습니다"))) && (await main.getByRole("button", { name: "보내기" }).isDisabled()));
 check("L9. input preserved", (await main.getByLabel("메시지").inputValue()) === "실물 질문");
+{
+  const sid = new URL(sessionUrl).searchParams.get("id");
+  const detail = await api.get(`/research/sessions/${sid}`);
+  const r = await api.send("POST", `/research/sessions/${sid}/messages`, { text: "실물 질문", expectedVersion: detail.body.version });
+  check("L9. server refuses before admission (503 codex_unavailable)", r.status === 503 && r.body?.error?.code === "codex_unavailable", `${r.status} ${r.body?.error?.code}`);
+  const after = await api.get(`/research/sessions/${sid}`);
+  check("L9. refused POST added nothing", after.body.items.length === detail.body.items.length && after.body.version === detail.body.version);
+}
 check("L9. no unconfirmed send kept for definitive 503", !(await page.evaluate(() => JSON.stringify({ ...sessionStorage }))).includes("실물 질문"));
 await page.reload();
 check("L9. session persists after reload", await appears(main.getByRole("heading", { name: "실물 세션" })));

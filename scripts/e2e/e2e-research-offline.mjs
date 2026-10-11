@@ -63,12 +63,34 @@ async function approvedAccount(name, page) {
   return after.user;
 }
 function apiClient(page) {
+  async function csrf() {
+    return (await (await page.request.get(U("/api/auth/me"))).json()).csrfToken;
+  }
   return {
     async get(path) {
       const r = await page.request.get(U(`/api${path}`));
       return { status: r.status(), body: await r.json().catch(() => null) };
     },
+    async send(method, path, data) {
+      const r = await page.request.fetch(U(`/api${path}`), {
+        method,
+        data,
+        headers: { Origin: ORIGIN, "X-CSRF-Token": await csrf(), "Idempotency-Key": crypto.randomUUID() },
+      });
+      return { status: r.status(), body: await r.json().catch(() => null) };
+    },
   };
+}
+// 차단된 계정 runner에 대한 후속 전송: 화면은 상태를 다시 읽어 보내기를 잠그고, 서버 선접수 거절은 API로 직접 판정한다.
+async function blockedFollowUp(p, client, sessionUrl, text) {
+  const m = p.locator("main");
+  await m.getByLabel("메시지").fill(text);
+  const locked = (await appears(m.getByText("보내기가 잠겨 있습니다"))) && (await m.getByRole("button", { name: "보내기" }).isDisabled());
+  const sid = new URL(sessionUrl).searchParams.get("id");
+  const detail = await client.get(`/research/sessions/${sid}`);
+  const post = await client.send("POST", `/research/sessions/${sid}/messages`, { text, expectedVersion: detail.body.version });
+  const after = await client.get(`/research/sessions/${sid}`);
+  return { locked, post, unchanged: after.body.items.length === detail.body.items.length && after.body.version === detail.body.version };
 }
 
 const A = await newPage();
@@ -267,13 +289,10 @@ async function dropFirstSend(p) {
   const docsAfterReroute = await fixtureDocs();
   check("O10. rerouted turn added no tool write", docsAfterReroute === before, `${before} -> ${docsAfterReroute}`);
   // 후속 POST 응답 자체로 판정한다(화면의 응답 개수로 추정하지 않는다).
-  const followPost = page.waitForResponse((r) => r.request().method() === "POST" && /\/messages$/.test(new URL(r.url()).pathname));
-  await send(main, "우회 뒤 질문");
-  const fp = await followPost;
-  const fpBody = await fp.json().catch(() => null);
-  check("O10. follow-up POST refused before admission (503 codex_model_unavailable)", fp.status() === 503 && fpBody?.error?.code === "codex_model_unavailable", `${fp.status()} ${fpBody?.error?.code}`);
-  check("O10. account runner stays blocked: refusal shown", await appears(main.getByText("메시지를 보내지 못했습니다")));
-  check("O10. follow-up not added to conversation", (await userMsgs(main, "우회 뒤 질문").count()) === 0);
+  const fu = await blockedFollowUp(page, api, s1, "우회 뒤 질문");
+  check("O10. account runner stays blocked: send locked by status", fu.locked);
+  check("O10. follow-up POST refused before admission (503 codex_model_unavailable)", fu.post.status === 503 && fu.post.body?.error?.code === "codex_model_unavailable", `${fu.post.status} ${fu.post.body?.error?.code}`);
+  check("O10. follow-up not added to conversation", fu.unchanged && (await userMsgs(main, "우회 뒤 질문").count()) === 0);
   check("O10. no new tool write after follow-up", (await fixtureDocs()) === before);
   check("O10. follow-up input kept, no auto resend", (await main.getByLabel("메시지").inputValue()) === "우회 뒤 질문" && (await main.getByRole("button", { name: "다시 보내기" }).count()) === 0);
   check("O10. no new-conversation workaround suggested", !(await main.innerText()).includes("새 대화를 시작"));
@@ -316,11 +335,10 @@ console.log(`INFO dropped message POST timings: ${JSON.stringify(postTimings)}`)
   check("O11. no assistant result for early-mismatch turn; prior answer kept", (await bm.getByText("Offline fixture answer").count()) === bAnswersBefore && bAnswersBefore >= 1);
   check("O11. no wrong model text shown", !(await bm.innerText()).includes("fixture-wrong-model"));
   check("O11. early-mismatch turn added no tool write", (await fixtureDocs(bApi)) === bDocsBefore);
-  const followPost = B.page.waitForResponse((r) => r.request().method() === "POST" && /\/messages$/.test(new URL(r.url()).pathname));
-  await send(bm, "B 차단 뒤 질문");
-  const fp = await followPost;
-  const fpBody = await fp.json().catch(() => null);
-  check("O11. B runner blocked after early mismatch (503 codex_model_unavailable)", fp.status() === 503 && fpBody?.error?.code === "codex_model_unavailable", `${fp.status()} ${fpBody?.error?.code}`);
+  const fu = await blockedFollowUp(B.page, bApi, B.page.url(), "B 차단 뒤 질문");
+  check("O11. B send locked by status after early mismatch", fu.locked);
+  check("O11. B runner blocked after early mismatch (503 codex_model_unavailable)", fu.post.status === 503 && fu.post.body?.error?.code === "codex_model_unavailable", `${fu.post.status} ${fu.post.body?.error?.code}`);
+  check("O11. refused follow-up added nothing", fu.unchanged);
   check("O11. follow-up input kept", (await bm.getByLabel("메시지").inputValue()) === "B 차단 뒤 질문");
 }
 

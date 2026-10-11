@@ -185,6 +185,15 @@ http
       // expire=1: 모든 로그인 session 만료(서버 측 폐기)
       if (url.searchParams.get("expire") === "1") sessions.clear();
       for (const k of ["access", "publish", "codex", "csrf"]) if (url.searchParams.has(k)) researchMode[k] = url.searchParams.get(k);
+      // 시험 창(back 2026-10-11 access-only 계약): window=<초> 뒤 접수 종료, remaining=<횟수>. 빈 값이면 해제.
+      if (url.searchParams.has("window")) {
+        const sec = url.searchParams.get("window");
+        researchMode.windowEnd = sec === "" ? null : Date.now() + Number(sec) * 1000;
+      }
+      if (url.searchParams.has("remaining")) {
+        const n = url.searchParams.get("remaining");
+        researchMode.remaining = n === "" ? null : Number(n);
+      }
       return json(res, 200, { ...mode, ...researchMode });
     }
     if (url.pathname === "/__mock/counts") return json(res, 200, researchCounts());

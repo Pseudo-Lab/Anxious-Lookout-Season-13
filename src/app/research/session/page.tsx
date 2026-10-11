@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useState, type FormEvent } from "react";
+import { Suspense, useEffect, useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { FetchFailure } from "@/lib/api/client";
@@ -18,7 +18,7 @@ import { useAuth } from "@/hooks/useAuth";
 import type { SessionDetail, SessionItem } from "@/lib/research/types";
 import { formatDateTime, toDisplayText } from "@/lib/research/format";
 import AuthGate from "@/components/research/AuthGate";
-import CodexStatusBanner from "@/components/research/CodexStatusBanner";
+import { CodexStatusView, codexBlocked, useCodexStatus } from "@/components/research/CodexStatusBanner";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
 import SafeMarkdown from "@/components/research/SafeMarkdown";
@@ -142,7 +142,20 @@ function Message({ sessionId, item }: { sessionId: string; item: Extract<Session
   );
 }
 
-function Composer({ session, accountId, onSent }: { session: SessionDetail; accountId: string; onSent: () => void }) {
+function Composer({
+  session,
+  accountId,
+  blocked,
+  onRecheck,
+  onSent,
+}: {
+  session: SessionDetail;
+  accountId: string;
+  // 서버가 지금 접수할 수 없다고 확인한 상태. 보내기만 잠그고 입력·이전 대화는 그대로 둔다.
+  blocked: boolean;
+  onRecheck: () => void;
+  onSent: (ok: boolean) => void;
+}) {
   const { csrfToken, refresh } = useAuth();
   // Composer는 세션을 불러온 뒤 브라우저에서만 그려지므로 sessionStorage를 바로 읽어도 된다.
   const [pending, setPending] = useState<PendingSend | null>(() => loadPendingSend(accountId, session.id));
@@ -159,7 +172,7 @@ function Composer({ session, accountId, onSent }: { session: SessionDetail; acco
   async function submit(e: FormEvent) {
     e.preventDefault();
     const body = text.trim();
-    if (!body || busy) return;
+    if (!body || busy || blocked) return;
     if (!csrfToken) {
       setFailure({ kind: "http", status: 401, code: "unauthenticated" });
       return;
@@ -192,7 +205,7 @@ function Composer({ session, accountId, onSent }: { session: SessionDetail; acco
       setFailure(res.failure);
       if (res.failure.kind === "http" && (res.failure.status === 401 || res.failure.code === "csrf_invalid")) void refresh();
     }
-    onSent();
+    onSent(res.ok);
   }
 
   const retrying = pending !== null && pending.text === text.trim();
@@ -209,6 +222,14 @@ function Composer({ session, accountId, onSent }: { session: SessionDetail; acco
         className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm disabled:bg-stone-50"
       />
       {failure && <ErrorNotice failure={failure} prefix="메시지를 보내지 못했습니다." />}
+      {blocked && (
+        <Notice tone="warn">
+          지금은 Codex가 요청을 받을 수 없어 보내기가 잠겨 있습니다(위 연결 상태 참고). 입력한 내용과 이전 대화는 그대로 있습니다.{" "}
+          <button type="button" onClick={onRecheck} className="font-medium underline hover:no-underline">
+            상태 다시 확인
+          </button>
+        </Notice>
+      )}
       {pending && (
         <Notice tone="warn">
           이전 전송의 결과를 확인하지 못했습니다. 위 대화 기록에 메시지가 이미 있는지 확인하세요.{" "}
@@ -219,7 +240,7 @@ function Composer({ session, accountId, onSent }: { session: SessionDetail; acco
       )}
       <button
         type="submit"
-        disabled={busy || running || text.trim() === ""}
+        disabled={busy || running || blocked || text.trim() === ""}
         className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
       >
         {busy ? "보내는 중..." : retrying ? "다시 보내기" : "보내기"}
@@ -235,6 +256,30 @@ function SessionView({ id }: { id: string }) {
   const { run, busy } = useMutation();
   const [archiveFailure, setArchiveFailure] = useState<FetchFailure | null>(null);
   const running = result?.ok === true && result.data.state === "running";
+  const codex = useCodexStatus();
+  const reloadCodex = codex.reload;
+
+  // turn이 끝날 때마다(성공·실패) 연결 상태를 다시 확인한다. 실행 중 인증 만료·사용 한도·모델 차단이
+  // 생겼으면 안내와 보내기 잠금에 바로 반영되고, 첫 실제 응답 뒤의 확인 상태도 갱신된다.
+  const loaded = result?.ok === true;
+  const settledVersion = result?.ok === true && result.data.state !== "running" ? result.data.version : null;
+  const seenSettled = useRef<{ version: number | null } | null>(null);
+  useEffect(() => {
+    if (!loaded) return;
+    const prev = seenSettled.current;
+    seenSettled.current = { version: settledVersion };
+    // 처음 불러온 대화의 상태는 useCodexStatus가 이미 조회 중이므로 다시 묻지 않는다.
+    if (prev !== null && settledVersion !== null && settledVersion !== prev.version) void reloadCodex();
+  }, [loaded, settledVersion, reloadCodex]);
+
+  // 서버가 알려 준 접수 종료 시각이 지나면 상태를 다시 확인한다. 잠금 판정은 브라우저 시계가 아니라 서버 응답으로 한다.
+  const expiresAt = codex.result?.ok === true && codex.result.data.available ? codex.result.data.accessExpiresAt : undefined;
+  useEffect(() => {
+    if (!expiresAt) return;
+    const delay = Math.min(Math.max(Date.parse(expiresAt) - Date.now(), 0) + 1000, 2_147_483_647);
+    const timer = setTimeout(() => void reloadCodex(), delay);
+    return () => clearTimeout(timer);
+  }, [expiresAt, reloadCodex]);
 
   // 진행 중인 turn은 상세를 다시 조회해 확인한다. 재접속해도 같은 방식으로 이어진다.
   useEffect(() => {
@@ -278,7 +323,10 @@ function SessionView({ id }: { id: string }) {
         {archiveFailure && <ErrorNotice failure={archiveFailure} prefix="보관하지 못했습니다." />}
       </header>
 
-      <CodexStatusBanner />
+      <CodexStatusView result={codex.result} />
+      {codex.refreshFailure && (
+        <ErrorNotice failure={codex.refreshFailure} prefix="Codex 상태를 다시 확인하지 못했습니다. 마지막으로 받은 상태를 표시합니다." />
+      )}
 
       {s.items.length === 0 ? (
         <p className="text-sm text-stone-500">아직 주고받은 메시지가 없습니다.</p>
@@ -309,7 +357,20 @@ function SessionView({ id }: { id: string }) {
         </Notice>
       )}
 
-      {user && <Composer key={user.accountId} session={s} accountId={user.accountId} onSent={() => void reload()} />}
+      {user && (
+        <Composer
+          key={user.accountId}
+          session={s}
+          accountId={user.accountId}
+          blocked={codexBlocked(codex.result)}
+          onRecheck={() => void reloadCodex()}
+          onSent={(ok) => {
+            void reload();
+            // 거절 사유(만료·한도·차단)가 생겼을 수 있으므로 상태도 다시 확인한다.
+            if (!ok) void reloadCodex();
+          }}
+        />
+      )}
     </div>
   );
 }

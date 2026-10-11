@@ -1,7 +1,10 @@
 "use client";
 
+import type { FetchResult } from "@/lib/api/client";
 import { getCodexStatus } from "@/lib/research/api";
 import { useLoad } from "@/lib/research/hooks";
+import type { CodexStatus } from "@/lib/research/types";
+import { formatDateTime } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
 
@@ -9,22 +12,40 @@ import Notice from "@/components/research/Notice";
 const UNAVAILABLE_REASONS: Record<string, string> = {
   not_configured: "서버에 Codex 연결이 설정되어 있지 않습니다.",
   not_enabled_for_account: "이 계정에는 아직 Codex가 열려 있지 않습니다. 지정된 시험 계정에서만 사용할 수 있습니다.",
-  auth_expired: "서버의 Codex 인증이 만료되었습니다. 운영자가 다시 인증해야 합니다.",
-  auth_revoked: "서버의 Codex 인증이 회수되었습니다. 운영자 조치가 필요합니다.",
+  auth_expired: "서버의 Codex 인증이 만료되어 재연결이 필요합니다. 운영자가 다시 연결하면 이 대화에서 이어서 질문할 수 있습니다.",
+  auth_revoked: "서버의 Codex 인증이 더 이상 유효하지 않습니다. 운영자가 다시 연결해야 합니다.",
   model_unavailable: "고정된 모델을 확인하지 못해 Codex 실행이 중단되었습니다. 운영자가 확인한 뒤 다시 사용할 수 있습니다.",
   policy_refused: "정책에 따라 Codex 사용이 거부되었습니다.",
   budget_exhausted: "Codex 사용 한도에 도달했습니다.",
+  provider_rate_limited: "Codex 제공자의 사용 한도에 걸려 지금은 사용할 수 없습니다.",
   unavailable: "Codex에 일시적으로 연결할 수 없습니다.",
 };
 
+/** Codex 연결 상태 조회. 같은 화면의 안내와 전송 잠금이 한 결과를 함께 쓴다. */
+export function useCodexStatus() {
+  return useLoad("codex-status", getCodexStatus);
+}
+
+/** 서버가 접수할 수 없다고 확인한 상태(available:false)인지. 조회 실패는 잠그지 않는다(서버가 선접수에서 다시 거른다). */
+export function codexBlocked(result: FetchResult<CodexStatus> | null): boolean {
+  return result?.ok === true && !result.data.available;
+}
+
 // Codex 연결 상태. 서버가 보고한 그대로 표시하고, 확인되지 않은 연결을 정상으로 보이게 하지 않는다.
 // 모델은 서버가 고정하므로 선택하지 않고 표시만 한다. 인증은 서버가 다루며 이 화면에서 로그인·키 입력을 받지 않는다.
-export default function CodexStatusBanner() {
-  const { result } = useLoad("codex-status", getCodexStatus);
+export function CodexStatusView({ result }: { result: FetchResult<CodexStatus> | null }) {
   if (!result) return null;
   if (!result.ok) return <ErrorNotice failure={result.failure} prefix="Codex 상태를 확인하지 못했습니다." />;
   const s = result.data;
-  const model = s.model ? <span className="block text-xs">모델: {s.model} (서버에서 고정)</span> : null;
+  const model = (
+    <>
+      {s.model && <span className="block text-xs">모델: {s.model} (서버에서 고정)</span>}
+      {s.available && s.accessExpiresAt && (
+        <span className="block text-xs">이용 가능 기한: {formatDateTime(s.accessExpiresAt)}까지</span>
+      )}
+      {s.remainingAdmissions !== undefined && <span className="block text-xs">남은 요청 횟수: {s.remainingAdmissions}</span>}
+    </>
+  );
   if (!s.available) {
     const why = (s.reason && UNAVAILABLE_REASONS[s.reason]) ?? "Codex를 사용할 수 없습니다.";
     return (
@@ -51,5 +72,15 @@ export default function CodexStatusBanner() {
       </Notice>
     );
   }
-  return model ? <Notice tone="info">{model}</Notice> : null;
+  return (
+    <Notice tone="info">
+      Codex에 연결되어 있습니다.
+      {model}
+    </Notice>
+  );
+}
+
+export default function CodexStatusBanner() {
+  const { result } = useCodexStatus();
+  return <CodexStatusView result={result} />;
 }

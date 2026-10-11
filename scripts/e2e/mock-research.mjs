@@ -15,6 +15,29 @@ export const researchMode = {
   codex: "unavailable",
   // "reject": 변경 요청을 403 csrf_invalid로 거절(키 확인 전 단계)
   csrf: "normal",
+  // 시험 창: 접수 종료 시각(ms)과 남은 접수 횟수. null이면 표시·제한하지 않는다.
+  windowEnd: null,
+  remaining: null,
+};
+
+// 시험 창 상태(fixture 연결에만 적용): 종료 시각이 지나면 auth_expired, 횟수가 0이면 budget_exhausted
+function windowReason() {
+  if (researchMode.windowEnd !== null && Date.now() >= researchMode.windowEnd) return "auth_expired";
+  if (researchMode.remaining !== null && researchMode.remaining <= 0) return "budget_exhausted";
+  return null;
+}
+function windowFields() {
+  const out = {};
+  if (researchMode.windowEnd !== null) out.accessExpiresAt = new Date(researchMode.windowEnd).toISOString();
+  if (researchMode.remaining !== null) out.remainingAdmissions = researchMode.remaining;
+  return out;
+}
+
+// 접수(202) 뒤 실행 중 인증 실패. back 계약: 만료 → codex_auth_expired, 외부 갱신 요구/401 → codex_auth_revoked.
+// 현재 turn의 userMessage가 Codex에 기록됐는지에 따라 입력은 Codex 기록 또는 플랫폼 미기록으로 남는다.
+const MIDTURN = {
+  midturn_expired: { code: "codex_auth_expired", then: "auth_expired", recorded: false },
+  midturn_revoked: { code: "codex_auth_revoked", then: "auth_revoked", recorded: true },
 };
 
 const items = new Map(); // id -> item
@@ -286,6 +309,30 @@ function handleMutation(owner, method, path, b, user) {
       if (GATED_REASONS.includes(researchMode.codex)) return fail(503, `codex_${researchMode.codex}`, "Codex is not available");
       // 계약에 없는 codex_* 503: 결과 불명으로 취급되어야 한다(서버는 아무것도 하지 않음)
       if (researchMode.codex === "unknown_code") return fail(503, "codex_upstream_timeout", "Upstream timeout");
+      if (researchMode.codex === "rate_limited") return fail(503, "codex_rate_limited", "Provider usage limit");
+      if (MIDTURN[researchMode.codex]) {
+        const mt = MIDTURN[researchMode.codex];
+        const item = mt.recorded
+          ? { id: uuid(), type: "message", role: "user", text: b.text, raw: { type: "userMessage", text: b.text } }
+          : { id: uuid(), type: "message", role: "user", text: b.text, source: "platform", status: "pending", raw: { type: "platformInput", source: "platform", text: b.text, status: "pending" } };
+        s.items.push(item);
+        s.error = null;
+        s.state = "running";
+        s.version++;
+        s.updatedAt = now();
+        setTimeout(() => {
+          if (!mt.recorded) {
+            item.status = "not_recorded";
+            item.raw.status = "not_recorded";
+          }
+          s.state = "failed";
+          s.error = { code: mt.code, message: "upstream 401 token_expired acct_secret" };
+          s.version++;
+          s.updatedAt = now();
+          researchMode.codex = mt.then;
+        }, 1500);
+        return ok(202, sessionSummary(s));
+      }
       if (researchMode.codex === "mismatch") {
         // 계약: 응답 모델 불일치/우회 → 해당 turn의 assistant 결과는 projection에서 제외, 남는 user/tool 항목에 modelMismatch,
         // polling codex_model_unavailable, 계정 runner는 운영자가 해제할 때까지 차단(durable)
@@ -331,6 +378,9 @@ function handleMutation(owner, method, path, b, user) {
         return ok(202, sessionSummary(s));
       }
       if (researchMode.codex !== "fixture") return fail(503, "codex_unavailable", "Codex unavailable");
+      const closed = windowReason();
+      if (closed) return fail(503, `codex_${closed}`, "Codex is not available");
+      if (researchMode.remaining !== null) researchMode.remaining--;
       s.error = null;
       s.items.push({ id: uuid(), type: "message", role: "user", text: b.text, raw: { kind: "user_message", text: b.text } });
       s.state = "running";
@@ -436,8 +486,16 @@ function handleRead(owner, path, url) {
       // #7 계약: 계정별 선접수 불가 사유 + 서버 고정 모델(인증 정보·계정 식별자 없음)
       return ok(200, { available: false, reason: researchMode.codex, verification: "unverified", model: FIXED_MODEL });
     }
-    if (researchMode.codex === "mismatch") {
+    // 접수 가능한 연결에서 일어나는 실패를 흉내 내는 모드: 상태는 접수 가능(fixture)
+    if (["mismatch", "unknown_code", "reject"].includes(researchMode.codex) || MIDTURN[researchMode.codex]) {
       return ok(200, { available: true, reason: null, verification: "fixture", model: FIXED_MODEL });
+    }
+    if (researchMode.codex === "rate_limited") {
+      return ok(200, { available: false, reason: "provider_rate_limited", verification: "unverified", model: FIXED_MODEL });
+    }
+    if (researchMode.codex === "fixture" && (researchMode.windowEnd !== null || researchMode.remaining !== null)) {
+      const closed = windowReason();
+      return ok(200, { available: !closed, reason: closed, verification: "fixture", model: FIXED_MODEL, ...windowFields() });
     }
     return ok(200, researchMode.codex === "fixture" ? { available: true, reason: null, verification: "fixture" } : { available: false, reason: "not_configured", verification: "unverified" });
   }

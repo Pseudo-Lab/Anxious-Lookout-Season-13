@@ -178,6 +178,10 @@ export interface CodexStatus {
   verification: "unverified" | "fixture" | "real";
   // 서버가 강제하는 모델(표시 전용). 연결·모델 표시만으로 실제 응답 성공을 뜻하지 않는다.
   model?: string;
+  // 이 계정의 Codex 접수가 끝나는 시각(서버가 접근 만료보다 이르게 잡은 시험 창 끝). 표시용이며 판정은 서버가 한다.
+  accessExpiresAt?: string;
+  // 현재 시험 창에서 남은 접수 횟수.
+  remainingAdmissions?: number;
 }
 
 export type SessionState = "idle" | "running" | "failed";

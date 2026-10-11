@@ -416,7 +416,7 @@ check("R9. codex unavailable banner", await appears(main.getByText("새 대화�
 // R9a. 계약에 아직 없는 사유 코드와 서버 고정 모델: 형식 오류로 막지 않고 일반 안내 + 모델 표시(실제 응답 성공으로 표시하지 않음)
 await setMock("codex=auth_expired");
 await page.reload();
-check("R9a. auth_expired reason explained", await appears(main.getByText("서버의 Codex 인증이 만료되었습니다")));
+check("R9a. auth_expired reason explained (operator reconnect)", await appears(main.getByText("서버의 Codex 인증이 만료되어 재연결이 필요합니다")));
 check("R9a. fixed model shown, no auto switch", await appears(main.getByText("모델: gpt-6.1-sol (서버에서 고정)")) && (await appears(main.getByText("다른 모델로 자동 전환하지 않습니다"))));
 check("R9a. no login/API-key input offered", (await main.getByLabel(/API|키|ChatGPT/).count()) === 0);
 await setMock("codex=unavailable");
@@ -425,14 +425,25 @@ await main.getByLabel("새 대화 제목").fill("세션 1");
 await main.getByRole("button", { name: "새 대화" }).click();
 await page.waitForURL(/\/research\/session\/\?id=/);
 const sessionUrl = page.url();
-await main.getByLabel("메시지").fill("질문 하나");
-await main.getByRole("button", { name: "보내기" }).click();
-check("R9. codex_unavailable message", await appears(main.getByText("Codex에 연결할 수 없어")));
-check("R9. message input preserved", (await main.getByLabel("메시지").inputValue()) === "질문 하나");
+// 서버가 접수 불가로 보고한 동안은 보내기를 잠그고 입력은 그대로 둔다. 운영자 재연결 뒤 '상태 다시 확인'으로 풀린다(새로고침 불필요).
+{
+  const posts = [];
+  await page.route("**/api/research/sessions/*/messages", async (route) => {
+    posts.push(route.request().method());
+    return route.continue();
+  });
+  await main.getByLabel("메시지").fill("질문 하나");
+  check("R9. send locked while codex unavailable", (await appears(main.getByText("보내기가 잠겨 있습니다"))) && (await main.getByRole("button", { name: "보내기" }).isDisabled()));
+  await main.locator("form").evaluate((f) => f.requestSubmit());
+  await page.waitForTimeout(300);
+  check("R9. locked composer sends nothing", posts.length === 0, String(posts.length));
+  check("R9. message input preserved while locked", (await main.getByLabel("메시지").inputValue()) === "질문 하나");
+  await page.unroute("**/api/research/sessions/*/messages");
+}
 await setMock("codex=fixture");
-await page.reload();
-check("R9. fixture banner (not real)", await appears(main.getByText("테스트용 모의 Codex")));
-await main.getByLabel("메시지").fill("질문 하나");
+await main.getByRole("button", { name: "상태 다시 확인" }).click();
+check("R9. recheck unlocks without reload", await appears(main.getByText("테스트용 모의 Codex")));
+check("R9. input still there after unlock", (await main.getByLabel("메시지").inputValue()) === "질문 하나");
 await main.getByRole("button", { name: "보내기" }).click();
 check("R9. running state shown", await appears(main.getByText("Codex가 응답하는 중입니다.")));
 await page.reload(); // 진행 중 재접속
@@ -462,24 +473,30 @@ check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: 
 
 // R9g. #7 선접수 실패(503 codex_*)는 확정 거절: 안내 + 입력 유지 + 같은 key 재전송 대상 아님 / 접수 후 모델 불일치는 명시 실패
 {
+  // 화면을 연 뒤에 접수 불가가 된 경우(열어 둔 화면에서 만료 등): 서버 선접수 거절 → 안내·입력 유지 → 상태 재확인으로 잠금
   for (const [mode, text] of [
     ["auth_expired", "서버의 Codex 인증이 만료되어"],
     ["not_enabled_for_account", "이 계정에는 아직 Codex가 열려 있지 않습니다"],
     ["model_unavailable", "고정된 모델을 사용할 수 없어"],
     ["budget_exhausted", "사용 한도에 도달해"],
+    ["rate_limited", "제공자의 사용 한도에 걸려"],
   ]) {
-    await setMock(`codex=${mode}`);
+    await setMock("codex=fixture");
     await page.reload();
     await main.getByLabel("메시지").waitFor();
+    await main.getByText("테스트용 모의 Codex").waitFor();
+    await setMock(`codex=${mode}`);
     await main.getByLabel("메시지").fill(`${mode} 질문`);
     await main.getByRole("button", { name: "보내기" }).click();
-    check(`R9g. ${mode}: specific guidance`, await appears(main.getByText(text)));
+    check(`R9g. ${mode}: specific guidance`, await appears(main.getByText(text).first()));
     check(`R9g. ${mode}: input preserved`, (await main.getByLabel("메시지").inputValue()) === `${mode} 질문`);
     check(
       `R9g. ${mode}: definitive (no same-key resend, nothing stored)`,
       (await main.getByRole("button", { name: "다시 보내기" }).count()) === 0 && !(await page.evaluate(() => JSON.stringify({ ...sessionStorage }))).includes(`${mode} 질문`)
     );
+    check(`R9g. ${mode}: status rechecked -> send locked`, await appears(main.getByText("보내기가 잠겨 있습니다")));
   }
+  check("R9g. rate limit reason shown in status", await appears(main.getByText("Codex 제공자의 사용 한도에 걸려 지금은 사용할 수 없습니다")));
   // 계약에 없는 codex_* 503은 결과 불명: 같은 key·본문 보관, "다시 보내기" 제공, 새로고침 뒤 입력 복구(리뷰 F7-1)
   {
     await setMock("codex=unknown_code");
@@ -519,10 +536,10 @@ check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: 
   check("R9g. mismatched turn items badged as not a normal response", await appears(mm.getByText("정상 응답 아님")));
   check("R9g. mismatched tool call badged", await appears(main.locator("li", { hasText: "research_document_save" }).filter({ hasText: "정상 응답 아님" })));
   check("R9g. no assistant answer shown for mismatched turn", (await main.getByText("모의 응답:").count()) === answersBefore);
-  // 차단은 계정 runner 단위로 지속: 다음 입력은 선접수 거절, 입력 유지, 새 대화 안내 없음
+  // 차단은 계정 runner 단위로 지속: turn 실패 뒤 상태를 다시 읽어 보내기 잠금, 입력 유지, 새 대화 안내 없음
+  // (서버 선접수 거절 자체는 위 model_unavailable 반복에서 확인)
   await main.getByLabel("메시지").fill("차단 뒤 질문");
-  await main.getByRole("button", { name: "보내기" }).click();
-  check("R9g. follow-up refused while runner blocked", await appears(main.getByText("메시지를 보내지 못했습니다")));
+  check("R9g. follow-up locked while runner blocked (status rechecked after failed turn)", (await appears(main.getByText("보내기가 잠겨 있습니다"))) && (await main.getByRole("button", { name: "보내기" }).isDisabled()));
   check("R9g. follow-up input kept", (await main.getByLabel("메시지").inputValue()) === "차단 뒤 질문");
   check("R9g. no 'start a new conversation' workaround suggested", !(await main.innerText()).includes("새 대화를 시작"));
   await page.reload();
@@ -532,6 +549,69 @@ check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: 
   await setMock("codex=fixture");
   await page.reload();
   await main.getByLabel("메시지").waitFor();
+  await main.getByLabel("메시지").fill("");
+}
+
+// R9h. 접수(202) 뒤 실행 중 인증 실패(back access-only 계약): 만료 → codex_auth_expired, 외부 갱신 요구 → codex_auth_revoked.
+//      provider 원문 비노출, 입력은 기록 여부대로 표시, 자동 재실행 없음, 상태 재확인으로 잠금, 운영자 재공급 뒤 같은 대화에서 이어짐
+{
+  for (const [mode, text, recorded] of [
+    ["midturn_expired", "서버의 Codex 인증이 만료되어", false],
+    ["midturn_revoked", "서버의 Codex 인증이 더 이상 유효하지 않아", true],
+  ]) {
+    await setMock("codex=fixture");
+    await page.reload();
+    await main.getByLabel("메시지").waitFor();
+    const before = await main.locator("ol > li").count();
+    const posts = [];
+    await page.route("**/api/research/sessions/*/messages", async (route) => {
+      posts.push(route.request().headers()["idempotency-key"]);
+      return route.continue();
+    });
+    await setMock(`codex=${mode}`);
+    await main.getByLabel("메시지").fill(`${mode} 질문`);
+    await main.getByRole("button", { name: "보내기" }).click();
+    check(`R9h. ${mode}: failed turn explained`, (await appears(main.getByText("마지막 요청이 실패했습니다"))) && (await appears(main.getByText(text).first())));
+    check(`R9h. ${mode}: provider text not shown`, !(await main.innerText()).includes("acct_secret") && !(await main.innerText()).includes("token_expired"));
+    const item = main.locator("li.bg-indigo-50", { hasText: `${mode} 질문` });
+    check(
+      `R9h. ${mode}: input shown as ${recorded ? "Codex record" : "unrecorded platform input"}`,
+      (await item.count()) === 1 && (await item.getByText("미기록 입력").count()) === (recorded ? 0 : 1)
+    );
+    check(`R9h. ${mode}: status rechecked -> send locked`, await appears(main.getByText("보내기가 잠겨 있습니다")));
+    await page.waitForTimeout(500);
+    check(`R9h. ${mode}: no automatic resend`, posts.length === 1, String(posts.length));
+    await page.unroute("**/api/research/sessions/*/messages");
+    // 운영자 재공급(같은 계정) 뒤: 상태 재확인 → 같은 대화에 새 메시지
+    await setMock("codex=fixture");
+    await main.getByRole("button", { name: "상태 다시 확인" }).click();
+    await main.getByText("테스트용 모의 Codex").waitFor();
+    await main.getByLabel("메시지").fill(`${mode} 재개 질문`);
+    await main.getByRole("button", { name: "보내기" }).click();
+    check(`R9h. ${mode}: same conversation continues after resupply`, await appears(main.getByText(`모의 응답: ${mode} 재개 질문`), 15000));
+    check(`R9h. ${mode}: earlier items kept`, (await main.locator("ol > li").count()) >= before + 3);
+    await main.getByLabel("메시지").and(main.locator(":enabled")).waitFor({ timeout: 15000 });
+  }
+}
+
+// R9w. 시험 창: 접수 종료 시각·남은 횟수 표시, 종료 시각이 지나면 화면을 그대로 둔 채 상태 재확인 → 잠금
+{
+  await setMock("codex=fixture&window=10&remaining=2");
+  await page.reload();
+  await main.getByLabel("메시지").waitFor();
+  check("R9w. access window end shown", await appears(main.getByText(/이용 가능 기한: .+까지/)));
+  check("R9w. remaining admissions shown", await appears(main.getByText("남은 요청 횟수: 2")));
+  await main.getByLabel("메시지").fill("창 안 질문");
+  await main.getByRole("button", { name: "보내기" }).click();
+  await main.getByText("모의 응답: 창 안 질문").waitFor({ timeout: 15000 });
+  check("R9w. remaining admissions refreshed after turn", await appears(main.getByText("남은 요청 횟수: 1")));
+  await main.getByLabel("메시지").fill("창 끝난 뒤 질문");
+  check("R9w. window end -> locked without reload", await appears(main.getByText("보내기가 잠겨 있습니다"), 15000));
+  check("R9w. expired reason shown", await appears(main.getByText("서버의 Codex 인증이 만료되어 재연결이 필요합니다")));
+  check("R9w. input kept after window end", (await main.getByLabel("메시지").inputValue()) === "창 끝난 뒤 질문");
+  await setMock("codex=fixture&window=&remaining=");
+  await main.getByRole("button", { name: "상태 다시 확인" }).click();
+  await main.getByText("테스트용 모의 Codex").waitFor();
   await main.getByLabel("메시지").fill("");
 }
 
