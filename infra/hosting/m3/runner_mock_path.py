@@ -122,9 +122,13 @@ def run_runner(root, origin, ca, settings, options, audit, permission_results):
             messages, successful = [], []
             for index in range(2):
                 session, request = str(uuid.uuid4()), str(uuid.uuid4())
+                if access and index == 1:
+                    session = messages[0][0]  # Actual web acceptance follows up the same conversation.
                 token = 'synthetic-tool-token-'+str(index)*40
                 authority[request] = {'token': token, 'session': session}
                 body = {'requestId': request, 'text': 'Synthetic explicit runner turn', 'tools': definitions(), 'toolToken': token}
+                if access and index == 1:
+                    body['expectedThreadId'] = successful[0]['threadId']
                 if index == 0:
                     assert client.post('/sessions/'+session+'/turn', headers={**headers, 'Authorization': 'Bearer wrong'}, json=body).status_code == 401
                     assert client.post('/sessions/'+session+'/turn', headers={**headers, 'X-Runner-State-Id': str(uuid.uuid4())}, json=body).status_code == 503
@@ -136,7 +140,7 @@ def run_runner(root, origin, ca, settings, options, audit, permission_results):
                 successful.append(value); messages.append((session, body))
                 assert client.post('/sessions/'+session+'/turn', headers=headers, json=body).status_code == 202
                 assert callbacks.count(request) == 1 and len(consumed()) == index+1
-            assert successful[0]['threadId'] != successful[1]['threadId']
+            assert (successful[0]['threadId'] == successful[1]['threadId']) if access else (successful[0]['threadId'] != successful[1]['threadId'])
             # Existing conversation resumes its private thread, failing after the third callback.
             session = messages[0][0]; request = str(uuid.uuid4()); token = 'synthetic-third-token-'+'3'*40
             authority[request] = {'token': token, 'session': session}
@@ -170,6 +174,7 @@ def run_runner(root, origin, ca, settings, options, audit, permission_results):
             if access:
                 assert value['errorCode'] == 'codex_auth_revoked'
                 assert audit['responsePosts'] == 5  # Two tool roundtrips + one401, no replay.
+                assert audit['nonResponsesPosts'] == 0  # No OAuth/managed-refresh POST on mock wire.
                 assert native.auth.state()['blocked'] == 'auth_revoked'
                 assert not (state_root/'codex'/'auth.json').exists()
                 options.unauthorized_access = False
