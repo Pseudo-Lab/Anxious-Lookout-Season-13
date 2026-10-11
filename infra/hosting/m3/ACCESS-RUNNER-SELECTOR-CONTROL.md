@@ -34,8 +34,14 @@ python -B /checks/access_runner_dns_control_prepare.py
 ```
 
 `services.json`은 **fresh/unfiltered** `kubectl get services -n codex-trial -o json` 전체 결과입니다.
-renderer는 유효한 namespace/name/UID/selector/list RV를 요구하고 control의 모든 labels로 selector를
-대조합니다. 어떤 기존 Service라도 control을 선택하면 중단합니다. app 조건 이외 selector도 검사합니다.
+renderer는 유효한 namespace/name/UID/selector/list RV를 요구하고 control의 모든 labels 및 예상되는
+자동 `job-name`, `batch.kubernetes.io/job-name`(둘 다 고정 control Job 이름)로 selector를 대조합니다.
+이 예상 labels는 gate 내부에만 추가하며 선언된 template는 변경하지 않습니다. 어떤 기존 Service라도
+control을 선택하면 중단합니다. app 조건 이외 selector도 검사합니다. 생성 전 Job UID는 알 수 없으므로
+`controller-uid`, `batch.kubernetes.io/controller-uid`를 포함한 Service selector는 다른 조건과 무관하게
+미지원으로 거부합니다. template에 남은 UID labels 또는 다른 Job 이름 labels도 거부합니다.
+비어 있지 않은 `metadata.continue`, 0이 아닌 `remainingItemCount` 및 잘못된 pagination 타입은
+거부합니다. 누락된 pagination 필드 또는 빈 continue/정수0만 허용합니다. 부분 목록을 gate에 쓰지 않습니다.
 selector가 없는 Service는 Pod를 선택하지 않습니다. 이 파일의 완전성/수집 시점과 기존 Runner label의
 Service membership 비교는 PM이 기록합니다. 목록의 형식만으로 freshness/누락 없음이 증명되지는 않습니다.
 
@@ -43,24 +49,37 @@ Service membership 비교는 PM이 기록합니다. 목록의 형식만으로 fr
 
 1. private0700 evidence directory 및 기존 bounded kubectl 방식(core0/TERM10+KILL2/출력256KiB)을
    사용합니다. API70 UID/spec/Ready1/updated1, runner replicas0/runner selector Pod0, mapping disabled,
-   window1 expired/requests0 및 기존 storage metadata를 확인합니다. 원본 auth/state/PVC 내용은 읽거나
+   기존 storage metadata를 확인합니다. window1 expired/requests0는 기존 보관 증거로만 취급하며
+   새 원본 state 확인을 하지 않습니다. 원본 auth/state/PVC 내용은 읽거나
    공급하지 않습니다. fresh snapshot/inputs/images 및 보관 direct-render bytes/source/provenance를 보존합니다.
 2. 현재 named Runner boundary/P1/CCNP의 UID/RV/spec, known DNS Service/EndpointSlice metadata 및
-   기존 runner node/DNS/template를 직전 actual 기준과 대조합니다. named boundary의 app selector 및
+   기존 runner node/DNS/template를 보관 기준과 대조합니다. known DNS Service/EndpointSlice는 과거
+   수집 provenance를 명시하고 fresh GET과 연결하며 direct run이 이를 새로 수집했다고 전제하지 않습니다.
+   named boundary의 app selector 및
    default-deny true/true와 namespace-based CCNP 적용 조건이 같아야 합니다. **어떤 drift나 미지원도 중단**합니다.
    다른 label-based 정책/identity 선택까지 동일하다고 주장하지 않습니다. 새 policy relaxation/namespace/
    node/image 변경을 섞지 않습니다. 기존 global CCNP는 같은 namespace에 계속 적용될 수 있습니다.
-3. 모든 Service의 실제 selector에 baseline/control 전체 labels를 각각 대조하고 control membership0을
-   보존합니다. `codex-trial/access-runner-selector-dns-v1` Job 부재, control selector
+3. pagination이 완결된 unfiltered Service 목록의 실제 selector에 baseline/control 전체 labels 및 각
+   Job의 예상 자동 name labels를 대조하고 control membership0을 보존합니다. UID selector가 있으면
+   새 UID 값을 예측해 허용하지 않고 중단합니다. `codex-trial/access-runner-selector-dns-v1` Job 부재, control selector
    `app=access-runner-dns-control` Pod0 및 runner selector Pod0를 **각각** 확인합니다. 같은 이름/label의
    잔여물이 있으면 재사용하거나 자동 삭제하지 않고 중단합니다. 컨트롤러 등 다른 metadata에서
    동일 control 이름/label 사용이 발견돼도 중단합니다.
 4. 위 renderer를 Docker로 실행합니다. baseline/control의 기계적 diff가 위 두 경로만인지 저장합니다.
-   server dry-run을 보존하고 실제 spec을 비교합니다. 자동 UID/controller labels/ownerReferences 및
+   server dry-run을 보존하고 실제 spec을 비교합니다. **server-defaulted template labels로 동일 전체
+   Service 목록을 재대조**하고 예상 name labels/UID selector 거부 기준을 적용합니다. selector나 labels가
+   바뀌면 생성 전에 다시 수집/대조하거나 중단합니다. 자동 UID/controller labels/ownerReferences 및
    Kubernetes defaulting은 lifecycle 차이로 별도 기록하고 arbitrary template 변경을 허용하지 않습니다.
    Pod 생성 시 추가된 Job controller labels는 원래 다른 labels 보존 검사를 대체하지 않습니다.
+   이 재대조는 Docker에서 `services_exclude_control(services, defaulted_job['spec']['template']['metadata']['labels'])`
+   로 실행할 수 있습니다. 실제 Pod labels도 같은 함수에 전달합니다. source emit은 template에 남은 UID
+   labels를 거부하지만 재대조 함수는 실제 UID labels를 입력받으며 UID-based Service selector는 계속 거부합니다.
 5. review 승인 후 PM이 **Job 한 번만 생성**하고 반환된 exact Job UID를 저장합니다. 해당 UID를 owner로
    가진 단일 Pod의 UID/imageID/command/labels/node/DNS/security/無 env·volume·token을 확인합니다.
+   **actual Pod labels와 fresh 전체 Service selector도 재대조**합니다. 예상하지 못한 admission labels/
+   selector 변화/선택이 있으면 unknown으로 인계하고 exact cleanup하며 재시도하지 않습니다. 실제 Pod
+   확인은 생성 뒤이므로 이미 시작된 진단을 예방했다는 증명이 아닙니다. 생성 전 dry-run 대조와 보수적
+   UID-selector 거부를 생략하지 않습니다. admission 또는 selector 변동 가능성을 판정할 수 없으면 생성하지 않습니다.
    OCI index2948→arm64 manifest b902→config2b017 및 CRI repoDigest/config id 연결로 provenance를
    검증합니다. 새 build/import/pull은 하지 않습니다. 실패/Pod replacement/restart/다중 Pod는 unknown이며
    재시도하지 않습니다. 고정 deadline 안에서 bounded safe JSON만 수집합니다. raw errors/packet/주소를 공개하지 않습니다.

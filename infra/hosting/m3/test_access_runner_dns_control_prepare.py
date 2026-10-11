@@ -75,3 +75,52 @@ def test_incomplete_or_unsupported_service_metadata_is_refused(runner_snapshot, 
 def test_selectorless_or_nonmatching_service_does_not_select_control(runner_snapshot, service_list, selector):
     service_list['items'][0]['spec']['selector'] = selector
     assert control.emit(*runner_snapshot, direct.emit(*runner_snapshot), service_list)['metadata']['name'] == control.CONTROL_JOB
+
+
+@pytest.mark.parametrize('key', control.JOB_NAME_LABELS)
+def test_generated_job_name_service_selector_is_refused(runner_snapshot, service_list, key):
+    service_list['items'][0]['spec']['selector'] = {key: control.CONTROL_JOB}
+    with pytest.raises(ValueError): control.emit(*runner_snapshot, direct.emit(*runner_snapshot), service_list)
+
+
+@pytest.mark.parametrize('key', control.JOB_NAME_LABELS)
+def test_other_job_name_selector_does_not_select_control(runner_snapshot, service_list, key):
+    service_list['items'][0]['spec']['selector'] = {key: 'other-job'}
+    assert control.emit(*runner_snapshot, direct.emit(*runner_snapshot), service_list)['metadata']['name'] == control.CONTROL_JOB
+
+
+@pytest.mark.parametrize('key', control.JOB_UID_LABELS)
+def test_unknowable_job_uid_selector_is_refused_even_with_other_condition(runner_snapshot, service_list, key):
+    service_list['items'][0]['spec']['selector'] = {key: 'future-controller-uid', 'app': 'other-app'}
+    with pytest.raises(ValueError): control.emit(*runner_snapshot, direct.emit(*runner_snapshot), service_list)
+
+
+@pytest.mark.parametrize('key', control.JOB_NAME_LABELS + control.JOB_UID_LABELS)
+def test_stale_controller_labels_in_template_are_not_overwritten(runner_snapshot, service_list, key):
+    runner_snapshot[0]['runner']['spec']['template']['metadata']['labels'][key] = 'old-job'
+    with pytest.raises(ValueError): control.emit(*runner_snapshot, direct.emit(*runner_snapshot), service_list)
+
+
+@pytest.mark.parametrize('metadata', [
+    {'continue': 'next-page-token', 'remainingItemCount': 1},
+    *({'continue': value} for value in (None, False, 0, [], {})),
+    *({'remainingItemCount': value} for value in (1, -1, None, False, 0.0, '0', [], {})),
+])
+def test_known_partial_or_malformed_pagination_is_refused(runner_snapshot, service_list, metadata):
+    service_list['metadata'].update(metadata)
+    with pytest.raises(ValueError): control.emit(*runner_snapshot, direct.emit(*runner_snapshot), service_list)
+
+
+def test_explicit_complete_list_pagination_is_accepted(runner_snapshot, service_list):
+    service_list['metadata'].update({'continue': '', 'remainingItemCount': 0})
+    assert control.emit(*runner_snapshot, direct.emit(*runner_snapshot), service_list)['metadata']['name'] == control.CONTROL_JOB
+
+
+def test_defaulted_and_actual_labels_can_be_rechecked_without_ignoring_admission_label(service_list):
+    labels = {'app': control.CONTROL_APP, **{key: control.CONTROL_JOB for key in control.JOB_NAME_LABELS},
+              **{key: 'actual-job-uid' for key in control.JOB_UID_LABELS}, 'admitted': 'value'}
+    before = copy.deepcopy(labels)
+    control.services_exclude_control(service_list, labels)
+    assert labels == before
+    service_list['items'][0]['spec']['selector'] = {'admitted': 'value'}
+    with pytest.raises(ValueError): control.services_exclude_control(service_list, labels)
