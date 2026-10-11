@@ -124,3 +124,34 @@ def test_defaulted_and_actual_labels_can_be_rechecked_without_ignoring_admission
     assert labels == before
     service_list['items'][0]['spec']['selector'] = {'admitted': 'value'}
     with pytest.raises(ValueError): control.services_exclude_control(service_list, labels)
+
+
+def test_observed_kubectl_aggregate_shape_with_empty_list_rv_stays_refused(runner_snapshot, service_list):
+    # Observed services.before.json shape; item RV cannot substitute for list snapshot RV.
+    service_list['metadata'] = {'resourceVersion': ''}
+    service_list['items'][0]['metadata']['resourceVersion'] = 'item-fixture-rv'
+    with pytest.raises(ValueError): control.emit(*runner_snapshot, direct.emit(*runner_snapshot), service_list)
+
+
+@pytest.mark.parametrize('omit_type', [False, True])
+def test_complete_typed_api_service_list_accepts_optional_nested_typemeta(runner_snapshot, service_list, omit_type):
+    service_list['kind'] = 'ServiceList'
+    if omit_type:
+        for key in ('kind', 'apiVersion'): del service_list['items'][0][key]
+    assert control.emit(*runner_snapshot, direct.emit(*runner_snapshot), service_list)['metadata']['name'] == control.CONTROL_JOB
+
+
+@pytest.mark.parametrize('change', ['generic_omission', 'wrong_kind', 'wrong_api', 'null_kind', 'null_api', 'empty_rv', 'partial', 'error'])
+def test_typed_api_context_never_accepts_conflict_partial_or_error(runner_snapshot, service_list, change):
+    service_list['kind'] = 'ServiceList'
+    if change == 'generic_omission':
+        service_list['kind'] = 'List'
+        del service_list['items'][0]['kind']
+    elif change == 'wrong_kind': service_list['items'][0]['kind'] = 'Pod'
+    elif change == 'wrong_api': service_list['items'][0]['apiVersion'] = 'apps/v1'
+    elif change == 'null_kind': service_list['items'][0]['kind'] = None
+    elif change == 'null_api': service_list['items'][0]['apiVersion'] = None
+    elif change == 'empty_rv': service_list['metadata']['resourceVersion'] = ''
+    elif change == 'partial': service_list['metadata'].update({'continue': 'next-page', 'remainingItemCount': 1})
+    elif change == 'error': service_list = {'apiVersion': 'v1', 'kind': 'Status', 'status': 'Failure', 'code': 403}
+    with pytest.raises(ValueError): control.emit(*runner_snapshot, direct.emit(*runner_snapshot), service_list)

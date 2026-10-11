@@ -33,7 +33,13 @@ python -B /checks/access_runner_dns_control_prepare.py
   --baseline /metadata/direct-render.json --services /metadata/services.json
 ```
 
-`services.json`은 **fresh/unfiltered** `kubectl get services -n codex-trial -o json` 전체 결과입니다.
+`services.json`은 **fresh/unfiltered 원본 API** 목록입니다. 고정 명령은
+`<trusted-absolute-kubectl> --request-timeout=8s get --raw=/api/v1/namespaces/codex-trial/services`입니다.
+`-o json`, resource 인자, label/field selector, limit/continue/resourceVersion/watch query를 붙이지 않습니다.
+수집 세부 기준 및 선행 read-only 비교는 [Service 목록 수집 보완](ACCESS-RUNNER-SERVICE-LIST.md)을 따릅니다.
+원문을 변경하지 않습니다. kind=ServiceList/apiVersion=v1/nonempty list RV를 수집 단계에서 확인합니다.
+typed ServiceList의 nested items는 타입 필드 생략을 허용하되 명시한 kind/apiVersion 충돌은 거부합니다.
+generic List는 여전히 개별 kind=Service/apiVersion=v1가 필요하고 빈 list RV는 계속 거부합니다.
 renderer는 유효한 namespace/name/UID/selector/list RV를 요구하고 control의 모든 labels 및 예상되는
 자동 `job-name`, `batch.kubernetes.io/job-name`(둘 다 고정 control Job 이름)로 selector를 대조합니다.
 이 예상 labels는 gate 내부에만 추가하며 선언된 template는 변경하지 않습니다. 어떤 기존 Service라도

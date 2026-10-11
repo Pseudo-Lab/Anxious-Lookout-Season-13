@@ -17,7 +17,7 @@ def canonical(value):
 
 
 def services_exclude_control(services, labels):
-    # Supply a fresh, unfiltered `get services -n codex-trial -o json` result.
+    # Supply a fresh raw /api/v1/namespaces/codex-trial/services response.
     metadata = services.get('metadata', {})
     if (services.get('kind') not in ('List', 'ServiceList') or services.get('apiVersion') != 'v1'
             or not isinstance(metadata, dict) or not isinstance(metadata.get('resourceVersion'), str)
@@ -33,10 +33,14 @@ def services_exclude_control(services, labels):
             raise ValueError()
         effective_labels[key] = CONTROL_JOB
     names = set()
+    typed = services['kind'] == 'ServiceList'
     for service in services['items']:
         metadata = service['metadata']
         name = metadata['name']
-        if (service.get('kind') != 'Service' or service.get('apiVersion') != 'v1'
+        # A typed v1 ServiceList already declares []Service; nested TypeMeta may be absent.
+        # Explicit conflicting TypeMeta is never accepted, nor is omission in a generic List.
+        if (service.get('kind', 'Service' if typed else None) != 'Service'
+                or service.get('apiVersion', 'v1' if typed else None) != 'v1'
                 or metadata.get('namespace') != 'codex-trial' or not isinstance(name, str)
                 or not name or name in names or not isinstance(metadata.get('uid'), str)
                 or not metadata['uid']):
