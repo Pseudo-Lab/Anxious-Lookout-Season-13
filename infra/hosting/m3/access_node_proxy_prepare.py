@@ -275,6 +275,23 @@ def select_initial(b):
     return ident(pod, 'Pod', 'kube-system')
 
 
+def policy_snapshot(policy):
+    value = copy.deepcopy(policy)
+    del value['policy-revision']  # Checked separately for positive equality.
+    l4 = value['l4']
+    if not isinstance(l4, dict):
+        raise ValueError()
+    # Cilium L4Policy.GetModel appends filters from Go maps, without row order.
+    # Sort only the outer ingress/egress rows. Preserve every field, inner
+    # array order, rule JSON string and duplicate multiplicity exactly.
+    for direction in ('ingress', 'egress'):
+        entries = l4[direction]
+        if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
+            raise ValueError()
+        l4[direction] = sorted(entries, key=canonical)
+    return value
+
+
 def endpoint_witnesses(values, agent_uid):
     if set(values) != {'api', 'dns'}:
         raise ValueError()
@@ -287,8 +304,8 @@ def endpoint_witnesses(values, agent_uid):
         revisions = [policy[k]['policy-revision'] for k in ('spec', 'realized')]
         if any(type(r) is not int or r <= 0 for r in revisions) or len(set(revisions)) != 1:
             raise ValueError()
-        realized = copy.deepcopy(policy['realized']); del realized['policy-revision']
-        wanted = copy.deepcopy(policy['spec']); del wanted['policy-revision']
+        realized = policy_snapshot(policy['realized'])
+        wanted = policy_snapshot(policy['spec'])
         if canonical(realized) != canonical(wanted):
             raise ValueError()
         out[alias] = {k: v[k] for k in ('podUid', 'cepUid', 'attachment')}

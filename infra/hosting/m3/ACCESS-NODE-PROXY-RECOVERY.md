@@ -114,7 +114,15 @@ and one numeric local endpoint GET each. Each entry has `podUid`, `cepUid`,
 Bind the CEP Pod owner UID/IP/attachment and agent Node before assembling.
 Only selected endpoint metadata is read, never an endpoint list. Both desired
 and realized revisions must agree and bepositive. Hashes cover the remaining
-realized policy fields, not revision counters. After each recreation, resolve
+realized policy fields, not revision counters. Only the outer L4 ingress/
+egress row order is ignored, by sorting complete row JSON in comparison
+copies and before hashing. [Cilium1.20.2 L4Policy.GetModel/Filters](https://github.com/cilium/cilium/blob/v1.20.2/pkg/policy/l4.go)
+appends filters from Go maps without sorting the output rows. This changes
+serialization order, not policy priority. Every row field, nested array order,
+embedded rule string and duplicate multiplicity remains exact; missing/extra/
+altered rows or any other policy field still refuse. Raw evidence is never
+rewritten, and equal positive revisions alone remain insufficient.
+After each recreation, resolve
 the new local endpoint ID from the exact CEP and recheck attachments, Pod/CEP
 UIDs, fresh agent UID, realization and original policy. If selected Pods/CEPs
 changed or serialized policy differs, stop/handoff; do not claim restoration.
