@@ -25,6 +25,9 @@ import SafeMarkdown from "@/components/research/SafeMarkdown";
 import { SESSION_STATE_LABELS } from "@/components/research/ItemLists";
 
 const POLL_MS = 2000;
+// 접수 종료 시각 뒤에도 서버가 아직 이용 가능이라고 답할 때의 재확인 간격(시계 차이·일시 조회 실패 대비)
+const EXPIRY_RECHECK_MIN_MS = 5000;
+const EXPIRY_RECHECK_MAX_MS = 30000;
 
 // 저장 기록은 실행하지 않고 텍스트로만 보여준다.
 function Inert({ value }: { value: unknown }) {
@@ -273,12 +276,27 @@ function SessionView({ id }: { id: string }) {
   }, [loaded, settledVersion, reloadCodex]);
 
   // 서버가 알려 준 접수 종료 시각이 지나면 상태를 다시 확인한다. 잠금 판정은 브라우저 시계가 아니라 서버 응답으로 한다.
+  // 브라우저 시계가 서버보다 빨라 일찍 물었거나 조회가 일시 실패해 여전히 이용 가능으로 남아 있으면,
+  // 서버가 접수 불가(또는 새 기한)를 알려 줄 때까지 간격을 늘려 가며 다시 묻는다. 상태 조회만 하고 전송은 하지 않는다.
   const expiresAt = codex.result?.ok === true && codex.result.data.available ? codex.result.data.accessExpiresAt : undefined;
   useEffect(() => {
     if (!expiresAt) return;
-    const delay = Math.min(Math.max(Date.parse(expiresAt) - Date.now(), 0) + 1000, 2_147_483_647);
-    const timer = setTimeout(() => void reloadCodex(), delay);
-    return () => clearTimeout(timer);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let retry = EXPIRY_RECHECK_MIN_MS;
+    const schedule = (delay: number) => {
+      timer = setTimeout(async () => {
+        await reloadCodex();
+        if (cancelled) return;
+        schedule(retry);
+        retry = Math.min(retry * 2, EXPIRY_RECHECK_MAX_MS);
+      }, delay);
+    };
+    schedule(Math.min(Math.max(Date.parse(expiresAt) - Date.now(), 0) + 1000, 2_147_483_647));
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [expiresAt, reloadCodex]);
 
   // 진행 중인 turn은 상세를 다시 조회해 확인한다. 재접속해도 같은 방식으로 이어진다.

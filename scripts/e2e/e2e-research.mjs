@@ -615,6 +615,67 @@ check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: 
   await main.getByLabel("메시지").fill("");
 }
 
+// R9x. 브라우저 시계가 서버보다 빠른 경우(리뷰 ACCESS-UI-R1): 기한 재확인이 일찍 '이용 가능'으로 끝나도
+//      간격을 늘려 다시 물어 서버가 만료를 알리면 잠근다. 상태 조회만 하고 전송은 하지 않는다.
+{
+  const sk = await context.newPage();
+  sk.on("console", (m) => {
+    if (m.type() === "error" && !/Failed to load resource/.test(m.text())) consoleErrors.push(`[skew] ${m.text()}`);
+  });
+  await sk.addInitScript(() => {
+    const real = Date.now;
+    Date.now = () => real() + 60000;
+  });
+  const reads = [];
+  const posts = [];
+  await sk.route("**/api/research/codex/status", async (route) => {
+    reads.push(Date.now());
+    return route.continue();
+  });
+  await sk.route("**/api/research/sessions/*/messages", async (route) => {
+    posts.push(1);
+    return route.continue();
+  });
+  await setMock("codex=fixture&window=8");
+  await sk.goto(sessionUrl);
+  const sm = sk.locator("main");
+  await sm.getByText(/이용 가능 기한/).waitFor();
+  await sm.getByLabel("메시지").fill("시계 차이 질문");
+  check("R9x. clock ahead: locked once server reports expiry", await appears(sm.getByText("보내기가 잠겨 있습니다"), 40000));
+  check("R9x. clock ahead: rechecked more than once after early answer", reads.length >= 3, String(reads.length));
+  check("R9x. clock ahead: no send, draft kept", posts.length === 0 && (await sm.getByLabel("메시지").inputValue()) === "시계 차이 질문");
+  await sk.close();
+}
+
+// R9y. 기한 재확인이 일시 실패해도(네트워크) 마지막 상태를 표시한 채 다시 물어, 회복 뒤 만료를 반영해 잠근다.
+{
+  await setMock("codex=fixture&window=4");
+  await page.goto(sessionUrl);
+  await main.getByText(/이용 가능 기한/).waitFor();
+  let failing = true;
+  let aborted = 0;
+  await page.route("**/api/research/codex/status", async (route) => {
+    if (failing) {
+      aborted++;
+      return route.abort();
+    }
+    return route.continue();
+  });
+  await main.getByLabel("메시지").fill("조회 실패 질문");
+  check("R9y. failed expiry recheck shown, last status kept", await appears(main.getByText("Codex 상태를 다시 확인하지 못했습니다"), 20000));
+  check("R9y. not locked from a failed read alone", !(await main.getByRole("button", { name: "보내기" }).isDisabled()));
+  await page.waitForTimeout(8000);
+  failing = false;
+  check("R9y. recheck retried after failure", aborted >= 2, String(aborted));
+  check("R9y. locked after reads recover", await appears(main.getByText("보내기가 잠겨 있습니다"), 40000));
+  check("R9y. draft kept", (await main.getByLabel("메시지").inputValue()) === "조회 실패 질문");
+  await page.unroute("**/api/research/codex/status");
+  await setMock("codex=fixture&window=&remaining=");
+  await main.getByRole("button", { name: "상태 다시 확인" }).click();
+  await main.getByText("테스트용 모의 Codex").waitFor();
+  await main.getByLabel("메시지").fill("");
+}
+
 // R12. 메시지 응답 유실 → polling으로 서버 version 변경 → 같은 내용 재전송: 모델 turn 중복 없음
 const userMessages = (t) => main.locator("li.bg-indigo-50", { hasText: t });
 async function dropFirstMessagePost() {
