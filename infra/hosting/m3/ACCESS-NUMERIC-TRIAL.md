@@ -4,6 +4,46 @@ This composes ACCESS-NUMERIC-TRANSPORT.md without extending its scope. PM
 operates it only from the exact source SHA approved for this entrypoint.
 Approval of individual helpers alone does not authorize this composition.
 
+## Clock-only follow-up after the recorded pre-arm refusal
+
+The actual4edbb34 invocation stopped at the host-clock boundary before arm.
+Its host response was not recorded, so boot/namespace/broker/skew causes
+cannot be distinguished retrospectively. Do not rerun that consumed invocation
+or claim a cause from the saved transcript.
+
+After independent approval and PM's next disposition, use the same clean
+reviewed checkout, trusted kubectl path and pinned seed with another new empty
+private0700 directory:
+
+```bash
+bash /reviewed/checkout/infra/hosting/m3/run_numeric_trial.sh \
+  /reviewed/checkout /trusted/absolute/kubectl \
+  /private/current/numeric.bundle.json /private/clock-NEW EXACT_REVIEWED_40_HEX_SHA \
+  --clock-only
+```
+
+Observation wait is capped at10s, followed by at most the existing3s+1kill
+local controller teardown; the host broker accepts only host/save/done.
+It makes no Kubernetes or prerequisite queries, image inspections, arm,
+holder/query/policy/worker or cleanup call. The provided kubectl is never
+invoked. This is a current read-only observation, not another diagnostic
+attempt and not retrospective proof of the earlier failure.
+
+The exact host response is saved as clock-host-response-ID.json before it
+is sent. host-clock-observation-clock-only.json and private controller-clock
+stderr preserve host sample, controller request/receipt BOOTTIME/boot/namespace,
+signed skew and each rejected predicate before validation. Broker/protocol
+failure is distinguished with a fixed reason and error type; a dead broker
+can leave only the private stderr observation. clock-result.json records
+clockGuardAccepted, armed=false and kubernetesCalls=0. Exit0 is capture
+completion only; it authorizes no subsequent live run.
+
+The250ms, exact boot and exact time-namespace checks are unchanged. Clock
+comparison uses the immediate receipt-time sample so saving the evidence
+cannot introduce an artificial skew. Observation is also saved on the regular
+before-arm/cleanup paths, with a distinct recovery filename to avoid journal
+collisions. Records remain private; relay only conclusions and evidence paths.
+
 ## Invocation and inputs
 
 On the retained Node's trusted root operator host, prepare a fresh empty0700

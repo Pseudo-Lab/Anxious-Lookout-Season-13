@@ -4,7 +4,9 @@ set -eu
 set -o noclobber
 umask 077
 ulimit -c 0
-[ "$#" = 5 ] || exit 1
+[ "$#" = 5 ] || [ "$#" = 6 ] || exit 1
+trial_run_mode=main
+if [ "$#" = 6 ]; then [ "$6" = --clock-only ] || exit 1; trial_run_mode=clock; fi
 trial_source=$1; trial_kubectl=$2; trial_seed=$3; trial_dir=$4; trial_sha=$5
 trial_image=sha256:e1cd49c5e8d36fae0689e727c06459529bbc67e823e08385602ea534c6397450
 case "$trial_source:$trial_seed:$trial_dir" in /*:/*:/*) ;; *) exit 1 ;; esac
@@ -29,6 +31,7 @@ trial_clock() {
 }
 trial_decode() { [ "$1" = - ] || printf '%s' "$1" | base64 -d; }
 trial_clock; trial_global_end=$((trial_now+12000))
+if [ "$trial_run_mode" = clock ]; then trial_global_end=$((trial_now+1000)); fi
 trial_main_end=$trial_global_end; trial_group_end=0; trial_cleaning=false
 trial_arm_seen=false; trial_done=false; trial_recovering=false
 trial_uid="numeric-controller-$$-$RANDOM"
@@ -55,6 +58,7 @@ trial_serve() {
   local trial_mode=$1 trial_seq=0 trial_line trial_deadline trial_count trial_index trial_rc trial_pid trial_op trial_body
   local -a trial_pids trial_fields trial_extra=()
   [ "$trial_mode" != cleanup ] || trial_extra=(--cleanup-only)
+  [ "$trial_mode" != clock ] || trial_extra=(--clock-only)
   coproc TRIAL_DOCKER { exec docker run --rm --init -i --pull=never --name "$trial_uid-$trial_mode" --log-driver=none \
     --network none --read-only --tmpfs /tmp:rw,nosuid --cap-drop ALL --security-opt no-new-privileges \
     --user 0:0 --env PYTHONPATH=/checks:/app \
@@ -83,6 +87,9 @@ trial_serve() {
     [[ "${trial_fields[2]}" =~ ^[0-9]{1,12}$ ]] || break
     trial_clock
     [ "$trial_now" -lt "$trial_read_end" ] || [ "${trial_fields[0]}" = cleanup ] || break
+    if [ "$trial_mode" = clock ]; then
+      case "${trial_fields[0]}" in host|save|done) ;; *) break ;; esac
+    fi
     trial_rc=0
     case "${trial_fields[0]}" in
       save)
@@ -125,7 +132,8 @@ trial_serve() {
         trial_ns=$(readlink /proc/self/ns/time)
         [[ "$trial_boot" =~ ^[a-f0-9-]{36}$ ]] && [[ "$trial_ns" =~ ^time:\[[0-9]+\]$ ]] || break
         trial_clock
-        printf '{"id":%s,"brokerOk":true,"bootId":"%s","timeNamespace":"%s","nowCs":%s}\n' "$trial_seq" "$trial_boot" "$trial_ns" "$trial_now" >&"$trial_in"
+        printf '{"id":%s,"brokerOk":true,"bootId":"%s","timeNamespace":"%s","nowCs":%s}\n' "$trial_seq" "$trial_boot" "$trial_ns" "$trial_now" >"$trial_dir/$trial_mode-host-response-$trial_seq.json"
+        cat "$trial_dir/$trial_mode-host-response-$trial_seq.json" >&"$trial_in"
         continue
         ;;
       batch)
@@ -191,5 +199,5 @@ trial_recovery() {
 }
 trap trial_recovery EXIT
 trap 'trial_recovery; exit 1' TERM INT
-trial_serve main
+trial_serve "$trial_run_mode"
 trap - EXIT TERM INT

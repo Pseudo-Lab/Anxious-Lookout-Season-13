@@ -309,6 +309,31 @@ def test_host_clock_identity_mismatch_refuses_before_arm(prepared,tmp_path,bad):
     io.call=call
     outcome=trial.Trial(io.seed,io,lambda:io.clock).run()
     assert outcome['cleanup']['status']=='not_armed' and io.counts['Job']==0
+    observed=json.loads((tmp_path/'host-clock-observation-before-arm.json').read_text())
+    expected={'boot':'bootMatches','namespace':'timeNamespaceMatches','clock':'clockSkewWithin250ms'}[bad]
+    assert observed['checks'][expected] is False and expected in observed['reasons']
+    assert observed['host'] is not None and not observed['accepted']
+
+
+@pytest.mark.parametrize('bad',[None,'namespace','broker_failure','journal_delay'])
+def test_clock_only_keeps_observation_and_never_calls_cluster_or_arm(prepared,tmp_path,bad):
+    io=FakeIO(prepared,tmp_path);original=io.call;save=io.save
+    def call(kind,**values):
+        if kind=='host' and bad=='broker_failure':raise ValueError()
+        value=original(kind,**values)
+        if kind=='host' and bad=='namespace':value['timeNamespace']='time:[0]'
+        return value
+    def delayed_save(*a,**k):
+        if bad=='journal_delay':io.clock+=300_000_000
+        return save(*a,**k)
+    io.call=call;io.save=delayed_save
+    result=trial.Trial(io.seed,io,lambda:io.clock).clock_capture()
+    assert result['clockGuardAccepted']==(bad in (None,'journal_delay'))
+    assert result['armed'] is False and result['kubernetesCalls']==0
+    assert set(k for k,_ in io.calls)<=set(('host','done'))
+    record=json.loads((tmp_path/'host-clock-observation-clock-only.json').read_text())
+    if bad=='broker_failure':assert record['reasons']==['broker_failure_or_invalid_response'] and record['host'] is None
+    else:assert record['accepted']==result['clockGuardAccepted']
 
 
 @pytest.mark.parametrize('bad',['float_id','extra_owner'])
@@ -320,7 +345,7 @@ def test_baseline_native_binding_rejects_nonexact_identity(prepared,tmp_path,bad
 
 
 @pytest.mark.skipif(os.getuid()!=0,reason='Private host broker contract requires root; run this case in root Docker')
-@pytest.mark.parametrize('fault',['images','job_unknown','controller_stall'])
+@pytest.mark.parametrize('fault',['images','job_unknown','controller_stall','clock_only','clock_forbidden'])
 def test_actual_shell_broker_and_wire_controller_refuse_without_retry(prepared,tmp_path,fault):
     # Docker/git/kubectl CLI substitutes execute INSIDE this network-none
     # test container. The actual shell broker and Wire controller are used.
@@ -367,6 +392,8 @@ for a in args[start:]:
  for alias,source in mapping.items():
   if a==alias or a.startswith(alias+'/'):a=source+a[len(alias):];break
  forward.append(a)
+if os.environ['MOCK_FAULT']=='clock_forbidden':
+ os.execv(sys.executable,[sys.executable,'-c',"import sys,time;print('arm\\t1\\t0',flush=True);time.sleep(10)"])
 if os.environ['MOCK_FAULT']=='controller_stall' and '--cleanup-only' not in forward:
  os.execv(sys.executable,[sys.executable,os.environ['MOCK_STALL'],mapping['/evidence'],mapping['/evidence']+'/seed.json'])
 os.execv(sys.executable,[sys.executable,'-B',*forward])
@@ -389,10 +416,20 @@ time.sleep(10)
     (helpers/'m3').symlink_to(Path(trial.__file__).parent,target_is_directory=True)
     evidence=tmp_path/'evidence';evidence.mkdir(mode=0o700)
     env=dict(os.environ,PATH=str(tools)+':'+os.environ['PATH'],MOCK_CALLS=str(calls),MOCK_TABLE=str(table),MOCK_FAULT=fault,MOCK_STALL=str(stall))
-    result=subprocess.run(['bash',str(Path(trial.__file__).with_name('run_numeric_trial.sh')),str(source),str(tools/'kubectl'),
-                           str(seed),str(evidence),'a'*40],env=env,capture_output=True,timeout=60)
-    assert result.returncode==(1 if fault=='controller_stall' else 0),(result.stderr.decode(),[(x.name,x.read_text()[-1000:]) for x in evidence.glob('controller-*.stderr')])
-    raw=[json.loads(l) for l in calls.read_text().splitlines()]
+    argv=['bash',str(Path(trial.__file__).with_name('run_numeric_trial.sh')),str(source),str(tools/'kubectl'),str(seed),str(evidence),'a'*40]
+    if fault in ('clock_only','clock_forbidden'):argv.append('--clock-only')
+    result=subprocess.run(argv,env=env,capture_output=True,timeout=60)
+    assert result.returncode==(1 if fault in ('controller_stall','clock_forbidden') else 0),(result.stderr.decode(),[(x.name,x.read_text()[-1000:]) for x in evidence.glob('controller-*.stderr')])
+    raw=[json.loads(l) for l in calls.read_text().splitlines()] if calls.exists() else []
+    if fault in ('clock_only','clock_forbidden'):
+        assert raw==[] and not (evidence/'operation.startCs').exists()
+        if fault=='clock_only':
+            result=json.loads((evidence/'clock-result.json').read_text())
+            assert result['clockGuardAccepted'] and result['armed'] is False
+            assert list(evidence.glob('clock-host-response-*.json'))
+            assert (evidence/'host-clock-observation-clock-only.json').exists()
+        else:assert not (evidence/'arm.stdout').exists()
+        return
     if fault=='controller_stall':
         recovered=json.loads((evidence/'recovery.json').read_text())
         assert recovered['status']=='verified' and recovered['fullFalseHealth']

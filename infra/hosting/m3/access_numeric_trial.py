@@ -124,6 +124,7 @@ class Trial:
         self.owned = {}; self.uncertain = []; self.b = None; self.holder_receipt = None
         self.nonce = secrets.token_hex(16); self.cleanup_mode = False
         self.job_dispatched_ns = None
+        self.recovery_mode = False; self.clock_only = False
 
     def boundary(self, seconds=13):
         end = self.arm_ns+(120 if self.cleanup_mode else 75)*1_000_000_000 if self.arm_ns else self.limit
@@ -262,11 +263,43 @@ class Trial:
         if self.now() >= (self.group_end or end): raise ValueError()
 
     def host_clock(self):
-        captured = self.io.call('host')
-        if (captured['bootId'] != Path('/proc/sys/kernel/random/boot_id').read_text().strip()
-                or captured['timeNamespace'] != str(Path('/proc/self/ns/time').readlink())
-                or type(captured['nowCs']) is not int or abs(self.now()-captured['nowCs']*10_000_000) > 250_000_000): raise ValueError()
+        phase = 'clock-only' if self.clock_only else ('recovery' if self.recovery_mode else ('cleanup' if self.cleanup_mode else 'before-arm'))
+        controller = {'bootId': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                      'timeNamespace': str(Path('/proc/self/ns/time').readlink()), 'requestNs': self.now()}
+        try:
+            captured = self.io.call('host')
+        except Exception as error:
+            controller['receivedNs'] = self.now()
+            observation = {'phase': phase, 'controller': controller, 'host': None,
+                           'accepted': False, 'reasons': ['broker_failure_or_invalid_response'], 'errorType': type(error).__name__}
+            print(json.dumps({'clockObservation': observation}), file=sys.stderr, flush=True)
+            self.io.save('host-clock-observation-'+phase+'.json', observation)
+            raise
+        controller['receivedNs'] = self.now()
+        valid_clock = type(captured.get('nowCs')) is int
+        skew = controller['receivedNs']-captured['nowCs']*10_000_000 if valid_clock else None
+        checks = {'bootMatches': captured.get('bootId') == controller['bootId'],
+                  'timeNamespaceMatches': captured.get('timeNamespace') == controller['timeNamespace'],
+                  'clockTypeValid': valid_clock, 'clockSkewWithin250ms': valid_clock and abs(skew) <= 250_000_000}
+        observation = {'phase': phase, 'host': captured, 'controller': controller, 'skewNs': skew,
+                       'checks': checks, 'accepted': all(checks.values()), 'reasons': [k for k,v in checks.items() if not v]}
+        # Preserve the receipt-time sample BEFORE rejection; journalling delay
+        # must not manufacture skew in the unchanged250ms predicate.
+        print(json.dumps({'clockObservation': observation}), file=sys.stderr, flush=True)
+        self.io.save('host-clock-observation-'+phase+'.json', observation)
+        if not observation['accepted']: raise ValueError()
         return captured
+
+    def clock_capture(self):
+        self.clock_only = True
+        result = {'clockOnly': True, 'armed': False, 'kubernetesCalls': 0, 'clockGuardAccepted': False}
+        try:
+            self.host_clock(); result['clockGuardAccepted'] = True
+        except Exception:
+            pass
+        self.io.save('clock-result.json', result)
+        self.io.call('done', outcome=result)
+        return result
 
     def create(self, kind, manifest):
         self.boundary()
@@ -459,11 +492,15 @@ class Trial:
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--seed', required=True); p.add_argument('--evidence', required=True)
-    p.add_argument('--cleanup-only', action='store_true'); args = p.parse_args()
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument('--cleanup-only', action='store_true'); mode.add_argument('--clock-only', action='store_true'); args = p.parse_args()
     io = Wire(args.evidence)
     try:
         trial = Trial(json.loads(Path(args.seed).read_text()), io)
-        if args.cleanup_only:
+        if args.clock_only:
+            trial.clock_capture()
+        elif args.cleanup_only:
+            trial.recovery_mode = True
             arm = json.loads((io.evidence/'arm.json').read_text()); trial.arm_ns = arm['armNs']; trial.nonce = arm['nonce']
             trial.b = json.loads((io.evidence/'baseline.json').read_text())
             for kind in ('Job', 'CiliumNetworkPolicy'):
