@@ -26,6 +26,21 @@ def name(value):
     return value
 
 
+def agent_version(text):
+    """The selected running agent reports separate Client and Daemon lines."""
+    if type(text) is not str: raise ValueError()
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) != 2: raise ValueError()
+    versions = {}
+    for line in lines:
+        match = re.fullmatch(r'(Client|Daemon):[ \t]+([^ \t\r\n]+)(?:[ \t]+([^\r\n]+))?', line)
+        if not match or match[1] in versions: raise ValueError()
+        if match[3] and re.search(r'\b(?:Client|Daemon):', match[3]): raise ValueError()
+        versions[match[1]] = match[2]
+    if versions != {'Client': '1.20.2', 'Daemon': '1.20.2'}: raise ValueError()
+    return versions['Daemon']
+
+
 def resource(obj):
     groups = {'Deployment': ('/apis/apps/v1', 'deployments'), 'ReplicaSet': ('/apis/apps/v1', 'replicasets'),
               'ConfigMap': ('/api/v1', 'configmaps'), 'PersistentVolumeClaim': ('/api/v1', 'persistentvolumeclaims'),
@@ -220,9 +235,7 @@ class Trial:
         native = self.native(agent, ceps)
         b['endpoints'] = {alias: baseline_endpoint(b[k], c, agent, ep) for alias, k, c, ep in zip(('api', 'dns'), ('apiPod', 'dnsPod'), ceps, native)}
         agent_raw = self.agent_calls(agent, [['version'], ['status', '-o', 'json']]+[['config', 'get', flag] for flag in FLAGS])
-        version = re.search(r'\bcilium(?:-dbg)?\s+(1\.20\.2)\b', agent_raw[0][1])
-        if not version: raise ValueError()
-        b['version'] = version.group(1); b['status'] = json.loads(agent_raw[1][1])
+        b['version'] = agent_version(agent_raw[0][1]); b['status'] = json.loads(agent_raw[1][1])
         b['settings'] = dict(zip(node.KEYS, [t.strip() for _, t in agent_raw[2:]]))
         server = self.read([{'argv': ['config', 'view', '--minify', '-o', 'jsonpath={.clusters[0].cluster.server}']}])[0][1].strip()
         b['independentApiServer'] = server

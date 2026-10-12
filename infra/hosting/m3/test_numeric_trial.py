@@ -18,6 +18,28 @@ from test_numeric_timing import original_fixture
 from test_access_endpoint_pin import metadata
 
 
+OBSERVED_VERSION = ('Client: 1.20.2 e0dc92bd 2026-09-15T15:51:54Z go version go1.26.8 linux/arm64\n'
+                    'Daemon: 1.20.2 e0dc92bd 2026-09-15T15:51:54Z go version go1.26.8 linux/arm64\n')
+
+
+def test_observed_client_and_running_daemon_version_envelope():
+    assert trial.agent_version(OBSERVED_VERSION)=='1.20.2'
+    assert trial.agent_version('Daemon: 1.20.2\nClient: 1.20.2\n')=='1.20.2'
+
+
+@pytest.mark.parametrize('text',[
+    'cilium-dbg 1.20.2\n', 'Client: 1.20.2\n', 'Daemon: 1.20.2\n',
+    'Client: 1.20.2\nClient: 1.20.2\n', 'Daemon: 1.20.2\nDaemon: 1.20.2\n',
+    'Client: 1.20.2\nDaemon: 1.20.3\n', 'Client: 1.20.3\nDaemon: 1.20.2\n',
+    'Client: 1.20.2\nDaemon: 1.20.20\n', 'Client: 1.20.2\nDaemon: 1.20.2+custom\n',
+    'Client: 1.20.2\nDaemon: 1.20.2\nDaemon: 1.20.2\n',
+    'Client: 1.20.2 Daemon: 1.20.3\nDaemon: 1.20.2\n',
+    'Client: 1.20.2\nDaemon: unavailable (1.20.2)\n',
+    'Warning: daemon unavailable\nClient: 1.20.2\nDaemon: 1.20.2\n', None])
+def test_version_requires_exact_unambiguous_client_and_daemon(text):
+    with pytest.raises(ValueError): trial.agent_version(text)
+
+
 class FakeIO:
     """Complete raw transport substitute, real controller/parser/owner checks."""
     def __init__(self, b, directory, fault=None):
@@ -140,7 +162,7 @@ class FakeIO:
                        'timeNamespace':str(Path('/proc/self/ns/time').readlink()),'bootId':self.seed['receipt']['binding']['bootId']}
             elif 'cilium-dbg' in argv:
                 tail=argv[argv.index('cilium-dbg')+1:]
-                if tail==['version']:value='cilium-dbg 1.20.2 test'
+                if tail==['version']:value=OBSERVED_VERSION
                 elif tail==['status','-o','json']:value=self.seed['status']
                 elif tail[0]=='config':value=self.seed['settings'][prep.node.KEYS[trial.FLAGS.index(tail[2])]]
                 else:
@@ -219,6 +241,24 @@ def test_fresh_complete_metadata_guard(prepared,tmp_path):
     current=controller.refresh()
     assert current['receipt']['baselineHash']==io.seed['receipt']['baselineHash']
     prep.holder(current,controller.nonce)
+
+
+@pytest.mark.parametrize('envelope',[
+    OBSERVED_VERSION.replace('Daemon: 1.20.2','Daemon: 1.20.3'),
+    OBSERVED_VERSION.split('Daemon:')[0],
+    OBSERVED_VERSION+'Daemon: 1.20.2\n'])
+def test_bad_running_daemon_envelope_stops_complete_controller_before_arm(prepared,tmp_path,envelope):
+    class BadVersion(FakeIO):
+        def batch(self,operations,deadline):
+            result=super().batch(operations,deadline)
+            for i,op in enumerate(operations):
+                if op['argv'][-2:]==['cilium-dbg','version']:result[i]=(0,envelope)
+            return result
+    io=BadVersion(prepared,tmp_path)
+    outcome=trial.Trial(io.seed,io,lambda:io.clock).run()
+    assert outcome['cleanup']['status']=='not_armed'
+    assert io.counts['Job']==io.counts['collector']==io.counts['worker']==0
+    assert not any(k=='arm' for k,_ in io.calls)
 
 
 @pytest.mark.parametrize('bad',['api_image','runner_cache','api_cache'])

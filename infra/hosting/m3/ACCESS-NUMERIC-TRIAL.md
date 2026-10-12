@@ -36,6 +36,13 @@ the running agent version/status/five flags and makes an explicit independent
 loopback API Node GET. Full preflight and false-health are recomputed and
 compared to the pinned baseline. Failed/foreign/partial/paginated inputs stop.
 
+The version response must contain exactly one Client and one Daemon line,
+with both first version tokens exactly1.20.2. Preserve full raw build metadata
+privately. Missing daemon, mismatch, duplicate/extra header, prefix-only
+output or suffix versions refuse before arm; finding1.20.2 elsewhere is not
+running-daemon verification. Regression uses the retained actual two-line
+Client/Daemon envelope rather than a synthesized cilium-dbg prefix.
+
 The actual API Pod's spec/imageID must match its current Deployment's immutable
 api image. This is the current service image, distinct from the diagnostic
 tooling image in images.api. Fresh Node.status.images must contain that exact
