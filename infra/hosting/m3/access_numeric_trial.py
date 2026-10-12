@@ -3,6 +3,7 @@ import argparse
 import base64
 import copy
 import json
+import os
 import re
 import secrets
 import sys
@@ -39,6 +40,31 @@ def agent_version(text):
         versions[match[1]] = match[2]
     if versions != {'Client': '1.20.2', 'Daemon': '1.20.2'}: raise ValueError()
     return versions['Daemon']
+
+
+def namespace_provenance():
+    """Own observer metadata only; these fields never decide guard acceptance."""
+    record = {'pid': os.getpid(), 'reader': 'python-in-process', 'namespaces': {}}
+    for kind in ('time', 'time_for_children'):
+        path = Path('/proc/self/ns')/kind
+        try:
+            link = str(path.readlink()); info = path.stat()
+            record['namespaces'][kind] = {'available': True, 'link': link, 'device': info.st_dev, 'inode': info.st_ino}
+        except OSError as error:
+            record['namespaces'][kind] = {'available': False, 'errorType': type(error).__name__}
+    try:
+        record['timensOffsets'] = {'available': True, 'base64': base64.b64encode(Path('/proc/self/timens_offsets').read_bytes()).decode()}
+    except OSError as error:
+        record['timensOffsets'] = {'available': False, 'errorType': type(error).__name__}
+    return record
+
+
+def provenance_collected(record):
+    if not isinstance(record, dict): return False
+    try:
+        return (all(record['namespaces'][k]['available'] is True for k in ('time', 'time_for_children'))
+                and record['timensOffsets']['available'] is True)
+    except (KeyError, TypeError): return False
 
 
 def resource(obj):
@@ -125,6 +151,7 @@ class Trial:
         self.nonce = secrets.token_hex(16); self.cleanup_mode = False
         self.job_dispatched_ns = None
         self.recovery_mode = False; self.clock_only = False
+        self.last_clock_observation = None
 
     def boundary(self, seconds=13):
         end = self.arm_ns+(120 if self.cleanup_mode else 75)*1_000_000_000 if self.arm_ns else self.limit
@@ -266,12 +293,16 @@ class Trial:
         phase = 'clock-only' if self.clock_only else ('recovery' if self.recovery_mode else ('cleanup' if self.cleanup_mode else 'before-arm'))
         controller = {'bootId': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
                       'timeNamespace': str(Path('/proc/self/ns/time').readlink()), 'requestNs': self.now()}
+        if self.clock_only:
+            controller['namespaceReader'] = 'python-in-process:/proc/self/ns/time'
+            controller['namespaceProvenance'] = namespace_provenance()
         try:
             captured = self.io.call('host')
         except Exception as error:
             controller['receivedNs'] = self.now()
             observation = {'phase': phase, 'controller': controller, 'host': None,
                            'accepted': False, 'reasons': ['broker_failure_or_invalid_response'], 'errorType': type(error).__name__}
+            observation['namespaceProvenanceStatus'] = 'unknown'; self.last_clock_observation = observation
             print(json.dumps({'clockObservation': observation}), file=sys.stderr, flush=True)
             self.io.save('host-clock-observation-'+phase+'.json', observation)
             raise
@@ -283,6 +314,10 @@ class Trial:
                   'clockTypeValid': valid_clock, 'clockSkewWithin250ms': valid_clock and abs(skew) <= 250_000_000}
         observation = {'phase': phase, 'host': captured, 'controller': controller, 'skewNs': skew,
                        'checks': checks, 'accepted': all(checks.values()), 'reasons': [k for k,v in checks.items() if not v]}
+        if self.clock_only:
+            observation['namespaceProvenanceStatus'] = ('collected' if provenance_collected(captured.get('namespaceProvenance'))
+                and provenance_collected(controller.get('namespaceProvenance')) else 'unknown')
+        self.last_clock_observation = observation
         # Preserve the receipt-time sample BEFORE rejection; journalling delay
         # must not manufacture skew in the unchanged250ms predicate.
         print(json.dumps({'clockObservation': observation}), file=sys.stderr, flush=True)
@@ -297,6 +332,7 @@ class Trial:
             self.host_clock(); result['clockGuardAccepted'] = True
         except Exception:
             pass
+        result['namespaceProvenanceStatus'] = (self.last_clock_observation or {}).get('namespaceProvenanceStatus', 'unknown')
         self.io.save('clock-result.json', result)
         self.io.call('done', outcome=result)
         return result

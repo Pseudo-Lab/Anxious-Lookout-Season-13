@@ -44,6 +44,20 @@ cannot introduce an artificial skew. Observation is also saved on the regular
 before-arm/cleanup paths, with a distinct recovery filename to avoid journal
 collisions. Records remain private; relay only conclusions and evidence paths.
 
+The next provenance-only revision preserves both original identity reads:
+external readlink of /proc/self/ns/time on the host, in-process Python on
+the controller. In clock-only mode it additionally records the broker's
+explicit BASHPID /proc/PID/ns/time and time_for_children links with followed
+device/inode, and its /proc/PID/timens_offsets bytes as base64. The controller
+records equivalent own-process metadata. No other PID/Pod/agent is inspected;
+no namespace/profile/offset is changed. These fields explain read provenance
+only and never decide acceptance. Missing/failed metadata is marked unknown;
+even matching extra device/inode or zero offsets cannot override differing
+original link identities. A new collected sample is not a configuration-cause
+diagnosis or historical proof. It requires its own source/scope review and
+explicit PM next disposition; use the same clock-only argv with its approved
+SHA/new directory. No additional clock/numeric invocation is implicit.
+
 ## Invocation and inputs
 
 On the retained Node's trusted root operator host, prepare a fresh empty0700

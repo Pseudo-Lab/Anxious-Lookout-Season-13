@@ -30,6 +30,27 @@ trial_clock() {
   trial_now=$((10#${trial_up%.*}*100+10#$trial_fraction+1))
 }
 trial_decode() { [ "$1" = - ] || printf '%s' "$1" | base64 -d; }
+trial_namespace_provenance() {
+  local trial_observer_pid=$1 trial_kind trial_link trial_stats trial_dev trial_ino trial_offset
+  [[ "$trial_observer_pid" =~ ^[0-9]+$ ]] || return 1
+  printf '{"pid":%s,"reader":"bash-explicit-broker-pid","namespaces":{' "$trial_observer_pid"
+  for trial_kind in time time_for_children; do
+    [ "$trial_kind" = time ] || printf ','
+    trial_link=$(readlink "/proc/$trial_observer_pid/ns/$trial_kind" 2>/dev/null) || trial_link=''
+    trial_stats=$(stat -Lc '%d %i' "/proc/$trial_observer_pid/ns/$trial_kind" 2>/dev/null) || trial_stats=''
+    read -r trial_dev trial_ino <<<"$trial_stats"
+    if [[ "$trial_link" =~ ^time:\[[0-9]+\]$ && "$trial_dev" =~ ^[0-9]+$ && "$trial_ino" =~ ^[0-9]+$ ]]; then
+      printf '"%s":{"available":true,"link":"%s","device":%s,"inode":%s}' "$trial_kind" "$trial_link" "$trial_dev" "$trial_ino"
+    else
+      printf '"%s":{"available":false,"errorType":"missing_or_unreadable"}' "$trial_kind"
+    fi
+  done
+  if trial_offset=$(base64 -w0 "/proc/$trial_observer_pid/timens_offsets" 2>/dev/null); then
+    printf '},"timensOffsets":{"available":true,"base64":"%s"}}' "$trial_offset"
+  else
+    printf '},"timensOffsets":{"available":false,"errorType":"missing_or_unreadable"}}'
+  fi
+}
 trial_clock; trial_global_end=$((trial_now+12000))
 if [ "$trial_run_mode" = clock ]; then trial_global_end=$((trial_now+1000)); fi
 trial_main_end=$trial_global_end; trial_group_end=0; trial_cleaning=false
@@ -127,12 +148,18 @@ trial_serve() {
         ;;
       host)
         [ "${#trial_fields[@]}" = 3 ] || break
-        local trial_boot trial_ns
+        local trial_boot trial_ns trial_provenance trial_observer_pid=$BASHPID
         IFS= read -r trial_boot </proc/sys/kernel/random/boot_id
         trial_ns=$(readlink /proc/self/ns/time)
         [[ "$trial_boot" =~ ^[a-f0-9-]{36}$ ]] && [[ "$trial_ns" =~ ^time:\[[0-9]+\]$ ]] || break
-        trial_clock
-        printf '{"id":%s,"brokerOk":true,"bootId":"%s","timeNamespace":"%s","nowCs":%s}\n' "$trial_seq" "$trial_boot" "$trial_ns" "$trial_now" >"$trial_dir/$trial_mode-host-response-$trial_seq.json"
+        if [ "$trial_mode" = clock ]; then
+          trial_provenance=$(trial_namespace_provenance "$trial_observer_pid")
+          trial_clock
+          printf '{"id":%s,"brokerOk":true,"bootId":"%s","timeNamespace":"%s","nowCs":%s,"namespaceReader":"external-readlink:/proc/self/ns/time","namespaceProvenance":%s}\n' "$trial_seq" "$trial_boot" "$trial_ns" "$trial_now" "$trial_provenance" >"$trial_dir/$trial_mode-host-response-$trial_seq.json"
+        else
+          trial_clock
+          printf '{"id":%s,"brokerOk":true,"bootId":"%s","timeNamespace":"%s","nowCs":%s}\n' "$trial_seq" "$trial_boot" "$trial_ns" "$trial_now" >"$trial_dir/$trial_mode-host-response-$trial_seq.json"
+        fi
         cat "$trial_dir/$trial_mode-host-response-$trial_seq.json" >&"$trial_in"
         continue
         ;;

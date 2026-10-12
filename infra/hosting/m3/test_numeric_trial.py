@@ -1,4 +1,5 @@
 import ast
+import base64
 import copy
 import hashlib
 import json
@@ -336,6 +337,26 @@ def test_clock_only_keeps_observation_and_never_calls_cluster_or_arm(prepared,tm
     else:assert record['accepted']==result['clockGuardAccepted']
 
 
+@pytest.mark.parametrize('kind',['matching_extra','unavailable_extra'])
+def test_provenance_cannot_override_differing_identity(prepared,tmp_path,monkeypatch,kind):
+    io=FakeIO(prepared,tmp_path);call=io.call
+    metadata={'pid':123,'reader':'substitute','namespaces':{k:{'available':True,'link':'time:[9]','device':1,'inode':9}
+              for k in ('time','time_for_children')},'timensOffsets':{'available':True,'base64':'MA=='}}
+    if kind=='unavailable_extra':metadata={'namespaces':{'time':{'available':False}},'timensOffsets':{'available':False}}
+    monkeypatch.setattr(trial,'namespace_provenance',lambda:copy.deepcopy(metadata))
+    def changed(kind,**values):
+        result=call(kind,**values)
+        if kind=='host':result.update(timeNamespace='time:[0]',namespaceProvenance=copy.deepcopy(metadata))
+        return result
+    io.call=changed
+    result=trial.Trial(io.seed,io,lambda:io.clock).clock_capture()
+    assert result['clockGuardAccepted'] is False
+    assert result['namespaceProvenanceStatus']==('collected' if kind=='matching_extra' else 'unknown')
+    observed=json.loads((tmp_path/'host-clock-observation-clock-only.json').read_text())
+    assert 'timeNamespaceMatches' in observed['reasons']
+    assert not any(k=='kubectl' or k=='arm' for k,_ in io.calls)
+
+
 @pytest.mark.parametrize('bad',['float_id','extra_owner'])
 def test_baseline_native_binding_rejects_nonexact_identity(prepared,tmp_path,bad):
     io=FakeIO(prepared,tmp_path);cep=copy.deepcopy(io.ceps['api']);response=copy.deepcopy(io.endpoints['api'])
@@ -428,6 +449,18 @@ time.sleep(10)
             assert result['clockGuardAccepted'] and result['armed'] is False
             assert list(evidence.glob('clock-host-response-*.json'))
             assert (evidence/'host-clock-observation-clock-only.json').exists()
+            observation=json.loads((evidence/'host-clock-observation-clock-only.json').read_text())
+            host=observation['host'];controller=observation['controller']
+            assert host['namespaceReader']=='external-readlink:/proc/self/ns/time'
+            assert controller['namespaceReader']=='python-in-process:/proc/self/ns/time'
+            assert host['namespaceProvenance']['pid']!=controller['namespaceProvenance']['pid']
+            for observer in (host,controller):
+                provenance=observer['namespaceProvenance']
+                for ns in ('time','time_for_children'):
+                    assert provenance['namespaces'][ns]['available']
+                    assert type(provenance['namespaces'][ns]['device']) is int and type(provenance['namespaces'][ns]['inode']) is int
+                assert base64.b64decode(provenance['timensOffsets']['base64'])
+            assert result['namespaceProvenanceStatus']=='collected'
         else:assert not (evidence/'arm.stdout').exists()
         return
     if fault=='controller_stall':
