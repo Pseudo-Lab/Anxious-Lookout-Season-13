@@ -73,7 +73,7 @@ def bundle(runner_snapshot):
     for expected in web.emit(snapshot, inputs, 'policy')['items']:
         next(p for p in policies if p['metadata']['name'] == expected['metadata']['name'])['spec'] = expected['spec']
     cm = meta('ConfigMap', 'cilium-config', 'kube-system') | {'data': {prep.FLAG: 'false'}}
-    p = {'policy-revision': 1, 'policy-enabled': 'both', 'l4': {'egress': [], 'ingress': []}}
+    p = {'policy-revision': 1, 'build': 1, 'policy-enabled': 'both', 'l4': {'egress': [], 'ingress': []}}
     endpoints = {alias: {'podUid': alias+'-pod', 'cepUid': alias+'-cep', 'attachment': alias+'-attachment',
                           'agentUid': pod['metadata']['uid'], 'state': 'ready',
                           'policy': {'spec': copy.deepcopy(p), 'realized': copy.deepcopy(p)}} for alias in ('api', 'dns')}

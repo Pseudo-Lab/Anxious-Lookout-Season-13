@@ -114,7 +114,42 @@ and one numeric local endpoint GET each. Each entry has `podUid`, `cepUid`,
 Bind the CEP Pod owner UID/IP/attachment and agent Node before assembling.
 Only selected endpoint metadata is read, never an endpoint list. Both desired
 and realized revisions must agree and bepositive. Hashes cover the remaining
-realized policy fields, not revision counters. Only the outer L4 ingress/
+realized policy fields, not revision counters. For fixed Cilium1.20.2,
+[GetPolicyModel](https://github.com/cilium/cilium/blob/v1.20.2/pkg/endpoint/api.go)
+assigns both `build` and `policy-revision` from the same realized revision,
+and both desired fields from the same desired revision. The
+[EndpointPolicy model](https://github.com/cilium/cilium/blob/v1.20.2/api/v1/models/endpoint_policy.go)
+describes policy-revision as agent-local. Each side's build must be a positive
+exact integer equal to its revision, and desired/realized revisions must be
+equal. Only after these checks are both aliases omitted from cross-agent
+content fingerprints. They can change when the agent restarts; this does not
+permit mismatched same-capture revision/build, policy ID/identity/CIDR/allow/
+deny/enforcement, L4 content or any other field change.
+[Repository](https://github.com/cilium/cilium/blob/v1.20.2/pkg/policy/repository.go)
+initializes its in-memory revision to1 and increments it on policy updates;
+revision numbers are not a policy-content identity across agent processes.
+
+Receipt endpointWitnessFormat is `cilium-1.20.2-stable-policy-v2`. Old hash
+receipts are rejected by health; regenerate the complete preflight receipt
+from its preserved original raw bundle under this source, then re-evaluate
+the preserved health bundle with that derived baseline in memory. Do not
+edit raw evidence, drop fields there, blindly transform an old hash or rewrite
+historical refusal results. Independent review must verify the new baseline
+derivation and full restored health before declaring restoration complete.
+
+After the stored restoration gate is independently closed, the shortest
+proposed continuation is a fresh P0 under this witness format, verify the
+existing successful P1 Node/boot/kernel/program/lifecycle binding, then one
+reviewed trial with the corrected health gate and original-label single DNS
+batch from the P2 procedure below. If the prior P1 binding changed, stop and
+reconcile its prerequisite before further mutation. Do not repeat an unchanged
+failed trial, bypass health, or add a new diagnostic framework. Record the
+concrete changed-source operating disposition through PM first. Both success
+and failure still clean the Job and default rollback; four DNS replies do not
+authorize persistent true, original credential supply, API enable or Native
+execution. Those existing holds remain for the subsequent user-visible flow.
+
+Only the outer L4 ingress/
 egress row order is ignored, by sorting complete row JSON in comparison
 copies and before hashing. [Cilium1.20.2 L4Policy.GetModel/Filters](https://github.com/cilium/cilium/blob/v1.20.2/pkg/policy/l4.go)
 appends filters from Go maps without sorting the output rows. This changes

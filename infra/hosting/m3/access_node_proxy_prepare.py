@@ -18,6 +18,7 @@ from access_node_proxy_probe import instructions, PROBE_TOOL_IMAGE
 CONFIG = 'access-dns-bpf-tproxy-trial-v1'
 FLAG = 'enable-bpf-tproxy'
 KEYS = (FLAG, 'enable-ipv4', 'enable-ipv6', 'install-iptables-rules', 'enable-endpoint-routes')
+ENDPOINT_WITNESS_FORMAT = 'cilium-1.20.2-stable-policy-v2'
 CILIUM_IMAGE = 'quay.io/cilium/cilium:v1.20.2@sha256:2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01'
 NODE_ENV = {'name': 'K8S_NODE_NAME', 'valueFrom': {'fieldRef': {'apiVersion': 'v1', 'fieldPath': 'spec.nodeName'}}}
 NAMESPACE_ENV = {'name': 'CILIUM_K8S_NAMESPACE', 'valueFrom': {'fieldRef': {'apiVersion': 'v1', 'fieldPath': 'metadata.namespace'}}}
@@ -277,7 +278,13 @@ def select_initial(b):
 
 def policy_snapshot(policy):
     value = copy.deepcopy(policy)
-    del value['policy-revision']  # Checked separately for positive equality.
+    revision, build = value['policy-revision'], value.get('build')
+    # Fixed GetPolicyModel populates Build and PolicyRevision from the same
+    # agent-local revision. Validate the alias before cross-agent comparison.
+    if type(revision) is not int or revision <= 0 or type(build) is not int or build != revision:
+        raise ValueError()
+    del value['policy-revision']
+    del value['build']
     l4 = value['l4']
     if not isinstance(l4, dict):
         raise ValueError()
@@ -388,6 +395,7 @@ def preflight(b):
             'configMapHash': digest(b['configMap']), 'nodeConfigsHash': digest(items(b['nodeConfigs'])),
             'policiesHash': digest(policy_witness(b['policies'])), 'baselineHash': digest(b['baseline']),
             'endpointWitnesses': endpoints,
+            'endpointWitnessFormat': ENDPOINT_WITNESS_FORMAT,
             'applicationWitness': application,
             'readySeconds': 120, 'normalAgentReplacements': 2, 'defaultRollback': True}
 
@@ -463,6 +471,8 @@ def delete_config(receipt, current, owned, emitted):
 
 
 def health(receipt, b, flag, excluded):
+    if receipt.get('endpointWitnessFormat') != ENDPOINT_WITNESS_FORMAT:
+        raise ValueError()
     pod = current_agent(receipt, b['nodes'], b['daemonset'], b['agents'])
     if pod['metadata']['uid'] in excluded:
         raise ValueError()
