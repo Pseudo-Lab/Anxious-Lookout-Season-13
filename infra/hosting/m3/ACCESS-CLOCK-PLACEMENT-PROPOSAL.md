@@ -65,6 +65,11 @@ ACCESS-PLACEMENT-ATTESTATION-RESCOPE.md. Its decision is whether a trusted
 native retained-Node operator route can be justified from authoritative
 records, rather than inferred from matching metadata or selected transport.
 There is no alternate command, runtime switch or guard relaxation proposed.
+PM subsequently reports no identified authoritative source/channel/native
+route in available session records; the relocation candidate is held. That
+does not establish global absence or make administrative export a product
+requirement. ACCESS-ACTOR-LOCAL-CLOCK-DESIGN.md reassesses a separate timing
+composition without that relocation prerequisite; it remains design-only.
 
 If those records establish a placement discrepancy, prepare an exact source/
 argv proposal to run the unchanged broker from a trusted direct operator on

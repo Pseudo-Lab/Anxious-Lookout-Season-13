@@ -15,6 +15,11 @@ the launch/namespace authority is missing?
 
 Required evidence is an existing administrative runtime/deployment launch
 record, exported or attested by its responsible platform/runtime operator.
+This applies only to the relocation candidate. Existing verifiable launch/
+deployment records may answer the fields directly; nobody must manufacture a
+new attestation or certification. Unknown fields remain explicit, and every
+derived value keeps its existing source reference. JSON is a bounded optional
+representation, not a product requirement or universal web-test prerequisite.
 Another inode/offset/transport/hostname match from inside the same opaque tool
 environment cannot answer this decision. Do not manufacture provenance from
 a file named "attestation", a digest, a self-declared node-host label or a
@@ -28,14 +33,19 @@ do not start another clock-capture cycle to compensate.
 
 ## Exact proposed input scope
 
-After independent scope review, consider only one provided private JSON
-export, at /private/issue7-placement-records/attestation.json, maximum16KiB,
-mode0600 in a caller-owned0700 directory, regular file with no symlink. The
+If an actual source becomes available, a future independently reviewed replay
+may use one bounded private representation of it. The illustrative JSON
+path /private/issue7-placement-records/attestation.json is not a requested new
+artifact or an authorized read target. Pin the actual path/digest and identify
+the already-trusted issuer channel/source record before replay. Any useful
+JSON representation is limited to16KiB, mode0600 in a caller-owned0700
+directory, regular file with no symlink. The
 real path and the export's digest must be pinned before any future replay.
 Only backend/reviewer offline Docker validation is proposed; no automatic
 live collection command exists here. Missing/unverifiable provenance is unknown.
 
-The administrative export must contain only these bounded metadata fields:
+The representation, if used, contains only these bounded metadata fields;
+source references accompany derived values and missing values stay unknown:
 
 | Field | Required meaning |
 | --- | --- |
@@ -59,6 +69,16 @@ credential content, cgroup/mount contents or new daemon/Kubernetes query is
 part of this input scope. Source-record review must verify the issuer/binding
 through an already trusted administrative channel; JSON schema validation or
 hash equality alone cannot establish authority.
+Provenance validation is separate from content validation: an offline parser
+can check size/schema/digest/bindings/consistency after the trusted origin has
+been established. It cannot authenticate issuer trust through authorityReference
+or turn a schema-only pass into authenticated placement.
+
+PM reports no identified source/channel/mapping/native route in the records
+available to this session. That selects held/unknown for relocation, not a
+claim that records are globally absent. No export, validator, private-file
+search or further observation is requested. The alternative design analysis
+in ACCESS-ACTOR-LOCAL-CLOCK-DESIGN.md does not require this administrative route.
 
 ## Outcome matrix
 
