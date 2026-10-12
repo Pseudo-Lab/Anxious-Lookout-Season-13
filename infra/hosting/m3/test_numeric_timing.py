@@ -95,6 +95,28 @@ def test_dispatch_receipt_refuses_late_mismatched_or_invalid_time(receipt):
     with pytest.raises(ValueError): timing.dispatched(1,1_000_000_000,receipt)
 
 
+@pytest.mark.parametrize('bad',['expired','public','symlink','short'])
+def test_collector_optional_absolute_deadline_refuses_or_caps_without_retry(tmp_path,bad):
+    evidence=tmp_path/'evidence';evidence.mkdir(mode=0o700)
+    now=int(float(Path('/proc/uptime').read_text().split()[0])*100)
+    (evidence/'operation.startCs').write_text(str(now)+'\n')
+    deadline=evidence/'collector.deadlineCs'
+    deadline.write_text(str(now+(150 if bad=='short' else 500))+'\n');deadline.chmod(0o600)
+    if bad=='expired':deadline.write_text(str(now-1)+'\n')
+    elif bad=='public':deadline.chmod(0o644)
+    elif bad=='symlink':deadline.unlink();deadline.symlink_to(tmp_path/'absent')
+    calls=tmp_path/'calls';tool=tmp_path/'kubectl'
+    tool.write_text('#!/bin/bash\necho called >> '+str(calls)+'\nexec sleep 3\n');tool.chmod(0o700)
+    source=tmp_path/'source';source.write_text('pass\n');source.chmod(0o600)
+    argv=['bash',str(Path(__file__).with_name('run_numeric_step.sh')),'collector',str(tool),'api-fixture',str(source),str(evidence)]
+    began=time.monotonic();result=subprocess.run(argv,capture_output=True,timeout=4)
+    assert result.returncode!=0
+    if bad=='short':
+        assert time.monotonic()-began<2.5 and calls.read_text()=='called\n'
+        assert subprocess.run(argv,capture_output=True).returncode!=0 and calls.read_text()=='called\n'
+    else:assert not calls.exists() and not (evidence/'collector.claim').exists()
+
+
 @pytest.mark.parametrize('mode', ['collector','worker','budget','budget-create','budget-read','budget-prepare','budget-result'])
 def test_late_host_admission_refuses_before_claim_or_new_call(tmp_path,mode):
     d=tmp_path/'evidence';d.mkdir(mode=0o700)

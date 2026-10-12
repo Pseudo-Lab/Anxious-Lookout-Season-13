@@ -7,6 +7,12 @@ removal, production Runner update, auth/Native call or frontend change occurs.
 Preparation is accepted; **live collection, temporary policy and provider
 traffic require this exact source/procedure review and PM disposition**.
 
+The complete backend-authored entrypoint is run_numeric_trial.sh, with exact
+argv, refreshed prerequisites, deadline-controlled Docker composition and
+recovery documented in ACCESS-NUMERIC-TRIAL.md. Its independent approval is
+required before arm; the manual individual-step interface below is not a
+PM-authored replacement for that entrypoint.
+
 Runtime remains source91577194a5a9343778b68fcaa258d5941f92aa5a and Runner image
 `docker.io/library/anxious-s13-access-runner-9157719@sha256:2948da59599ba7842406d3ce49fccf716f47010fb713a43721c95eeb3f08d2e7`.
 The worker overrides its entrypoint and mounts no state/credentials/SA token.

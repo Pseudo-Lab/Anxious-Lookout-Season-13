@@ -60,6 +60,20 @@ esac
 numeric_body=$(cat "$numeric_program")
 [ -n "$numeric_body" ] || exit 1
 numeric_admit || exit 1
+numeric_collector_bound() {
+  [ "$numeric_mode" = collector ] || return 0
+  if [ ! -e "$numeric_dir/collector.deadlineCs" ] && [ ! -L "$numeric_dir/collector.deadlineCs" ]; then return 0; fi
+  local numeric_deadline numeric_remaining
+  [ -f "$numeric_dir/collector.deadlineCs" ] && [ ! -L "$numeric_dir/collector.deadlineCs" ] || return 1
+  [ "$(stat -c %a "$numeric_dir/collector.deadlineCs")" = 600 ] && [ "$(stat -c %u "$numeric_dir/collector.deadlineCs")" = "$(id -u)" ] || return 1
+  read -r numeric_deadline <"$numeric_dir/collector.deadlineCs"
+  [[ "$numeric_deadline" =~ ^[0-9]{1,12}$ ]] || return 1
+  numeric_clock; numeric_remaining=$((numeric_deadline-numeric_now-100))
+  [ "$numeric_remaining" -gt 0 ] || return 1
+  [ "$numeric_remaining" -le 500 ] || numeric_remaining=500
+  printf -v numeric_seconds '%d.%02ds' "$((numeric_remaining/100))" "$((numeric_remaining%100))"
+}
+numeric_collector_bound || exit 1
 numeric_dispatch_admit() {
   numeric_clock
   [ "$numeric_now" -lt "$numeric_dispatch_deadline" ] && [ "$((numeric_dispatch_deadline-numeric_now))" -le 100 ]
@@ -78,6 +92,7 @@ fi
 numeric_exit=0
 (
   ulimit -f 128
+  numeric_collector_bound || exit 1
   if [ "$numeric_mode" = worker ]; then
     numeric_admit && numeric_dispatch_admit || exit 1
     printf '{"dispatchAdmittedCs":%s,"dispatchDeadlineCs":%s}\n' "$numeric_now" "$numeric_dispatch_deadline" >"$numeric_dir/worker.dispatch.json"
