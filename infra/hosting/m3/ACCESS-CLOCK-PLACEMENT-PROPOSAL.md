@@ -29,6 +29,20 @@ questions; the capture is not proof of an outer container or remote daemon.
 Use already-known operator/configuration provenance first. This proposal
 authorizes no new PID/container/daemon/config queries to fill missing records.
 
+PM's retained launch record now establishes escalated exec_command followed
+by sudo bash, the reviewed entrypoint and ordinary Docker CLI, without an
+explicit SSH/context/namespace wrapper. It does not independently locate
+the tool environment or daemon, and provides no established direct-node
+entrypoint. Placement discrepancy therefore remains unproven. Parser closure
+atbb3f303 includes no placement/capture approval.
+
+ACCESS-CLOCK-CLIENT-SELECTION-PROPOSAL.md scopes a smaller preparatory step:
+classify only the current Docker client's endpoint selection without any
+daemon connection, new controller, raw endpoint/config values or other PID
+reads. This narrows connection ambiguity but cannot locate an outer execution
+environment or prove the daemon's physical Node. It remains documentation
+only pending source preparation and independent review.
+
 If those records establish a placement discrepancy, prepare an exact source/
 argv proposal to run the unchanged broker from a trusted direct operator on
 the retained Node with its local Docker execution context. Treat that as a
