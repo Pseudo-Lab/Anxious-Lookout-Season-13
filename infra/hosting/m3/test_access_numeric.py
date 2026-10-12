@@ -145,6 +145,67 @@ def test_target_or_nonce_substitution_stops_before_collection(prepared, change):
         prep.collector_binding(b, NONCE); prep.holder(b, NONCE)
 
 
+def observed_named_ports(b):
+    """Observed API/CoreDNS port shape; synthetic identities stay in fixtures."""
+    service=b['callbackService'];pod=b['apiPod']
+    service['spec']['selector']={'app':'hosting-api'}
+    pod['metadata']['labels']={'app':'hosting-api'}
+    b['snapshot']['api']['spec']['template']['metadata']['labels']={'app':'hosting-api'}
+    service['spec']['ports']=[{'name':'http','port':8080,'protocol':'TCP','targetPort':'http'}]
+    pod['spec']['containers']=[{'name':'api','ports':[{'name':'http','containerPort':8080,'protocol':'TCP'}]}]
+    b['callbackSlices']['items'][0]['ports']=[{'name':'http','port':8080,'protocol':'TCP'}]
+    b['dnsService']['spec']['ports']=[{'name':'dns','port':53,'protocol':'UDP','targetPort':53},
+        {'name':'dns-tcp','port':53,'protocol':'TCP','targetPort':53},
+        {'name':'metrics','port':9153,'protocol':'TCP','targetPort':9153}]
+    b['dnsSlices']['items'][0]['ports']=[{'name':'dns','port':53,'protocol':'UDP'},
+        {'name':'dns-tcp','port':53,'protocol':'TCP'},{'name':'metrics','port':9153,'protocol':'TCP'}]
+    b['receipt']=node.preflight(b)
+    return b
+
+
+def test_observed_named_api_and_numeric_multiport_core_dns_shape(prepared):
+    b=observed_named_ports(prepared)
+    binding=prep.collector_binding(b,NONCE)
+    assert binding['callback']['servicePortName']=='http'
+    assert binding['callback']['targetPort']=='http' and binding['callback']['resolvedPort']==8080
+    assert binding['callback']['targetContainer']=='api' and binding['resolverIp']==b['dnsService']['spec']['clusterIP']
+    # A Service port name can differ from its named Pod target; match the
+    # EndpointSlice to the Service name and Pod declaration to targetPort.
+    b['callbackService']['spec']['ports'][0]['name']='callback'
+    b['callbackSlices']['items'][0]['ports'][0]['name']='callback'
+    assert prep.collector_binding(b,NONCE)['callback']['targetPort']=='http'
+
+
+@pytest.mark.parametrize('change',['missing','duplicate','other_container','wrong_container','udp','number',
+    'slice_name','slice_number','slice_duplicate','numeric_decoy','target_uid','slice_owner','unready','second_endpoint'])
+def test_named_mapping_refuses_ambiguity_substitution_and_unrelated_numeric_ports(prepared,change):
+    b=observed_named_ports(prepared);pod=b['apiPod'];s=b['callbackSlices']['items'][0]
+    p=pod['spec']['containers'][0]['ports'][0]
+    if change=='missing': pod['spec']['containers'][0]['ports']=[]
+    elif change=='duplicate': pod['spec']['containers'][0]['ports'].append(copy.deepcopy(p))
+    elif change=='other_container': pod['spec']['containers'].append({'name':'sidecar','ports':[copy.deepcopy(p)]})
+    elif change=='wrong_container': pod['spec']['containers'][0]['name']='sidecar'
+    elif change=='udp': p['protocol']='UDP'
+    elif change=='number': p['containerPort']=9090
+    elif change=='slice_name': s['ports'][0]['name']='other'
+    elif change=='slice_number': s['ports'][0]['port']=9090
+    elif change=='slice_duplicate': s['ports'].append(copy.deepcopy(s['ports'][0]))
+    elif change=='numeric_decoy': s['ports']=[{'name':'http','port':9090,'protocol':'TCP'},{'name':'other','port':8080,'protocol':'TCP'}]
+    elif change=='target_uid': s['endpoints'][0]['targetRef']['uid']='other'
+    elif change=='slice_owner': s['metadata']['ownerReferences'][0]['uid']='other'
+    elif change=='unready': pod['status']['conditions'][0]['status']='False'
+    else: s['endpoints'].append(copy.deepcopy(s['endpoints'][0]))
+    with pytest.raises(ValueError): prep.collector_binding(b,NONCE)
+
+
+def test_numeric_target_with_named_service_port_remains_bound_to_slice_name(prepared):
+    b=observed_named_ports(prepared)
+    b['callbackService']['spec']['ports'][0]['targetPort']=8080
+    assert prep.collector_binding(b,NONCE)['callback']['targetPort']==8080
+    b['callbackSlices']['items'][0]['ports'][0]['name']='unrelated'
+    with pytest.raises(ValueError): prep.collector_binding(b,NONCE)
+
+
 def runtime(monkeypatch, tmp_path):
     namespace = {'__name__': 'fixture'}; exec(prep.runtime_source(), namespace)
     expected = {'nonce': NONCE, 'podUid': 'pod', 'jobUid': 'job', 'callbackIp': '10.43.0.7', 'jobDeadlineNs': 50_000_000_000,

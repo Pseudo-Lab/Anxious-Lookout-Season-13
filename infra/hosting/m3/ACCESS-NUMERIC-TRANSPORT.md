@@ -125,6 +125,21 @@ CoreDNS selector/endpoint/IP53 must match, all ready, no terminating entries,
 no unbound second endpoint. Save raw GETs; collector binding includes Service
 UID/RV/IPs and selected API UID/containerID/restartCount/imageID/state.
 
+The observed API Service uses name=http/TCP8080/targetPort=http. Named
+targetPort is supported only for this callback: the exact bound Pod must have
+one matching named port declaration across its regular containers, belonging
+to containerapi, with TCP/containerPort8080. Missing/duplicate/other-container
+or different numeric/protocol declarations refuse. The selected EndpointSlice
+port must match the **Service port name** and TCP, uniquely resolve8080, and
+retain the exact Service owner/Pod targetRef UID/address. An unrelated8080
+entry cannot substitute. A Service port name may differ from targetPort; each
+is matched to its own counterpart. Numeric targetPort8080 remains supported;
+CoreDNS retains numeric targetPort53, including its actual UDP53/TCP53/metrics
+multiport Service shape. Slice port name must correspond to dns-tcp for TCP53.
+Callback binding records Service port name, original targetPort, resolved8080
+and named target container, so postcollection recomputation cannot silently
+change mapping. Production Service is not modified to fit the diagnostic.
+
 `access_numeric_prepare.py binding --bundle ...` checks the full baseline and
 these raw objects. Generate static collector program from that exact binding
 using actioncollector; it rechecks the binding against collectorBaseline.

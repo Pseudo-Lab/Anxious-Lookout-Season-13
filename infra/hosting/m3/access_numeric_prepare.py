@@ -88,13 +88,31 @@ def service_target(service, slices, pod, replica_set, deployment, port):
         raise ValueError()
     if owners[0]['kind'] != 'ReplicaSet' or parent[0]['kind'] != 'Deployment': raise ValueError()
     ports = [p for p in service['spec']['ports'] if p['port'] == port and p.get('protocol') == 'TCP']
-    if len(ports) != 1 or ports[0]['targetPort'] != port or service['spec'].get('publishNotReadyAddresses', False): raise ValueError()
+    if len(ports) != 1 or service['spec'].get('publishNotReadyAddresses', False): raise ValueError()
+    service_port = ports[0]
+    target = service_port['targetPort']
+    target_container = None
+    if type(target) is int:
+        if target != port: raise ValueError()
+    elif type(target) is str and target and port == 8080:
+        # Resolve only the bound Pod's regular api container, never another
+        # Pod/container or an unrelated numeric entry in the EndpointSlice.
+        declarations = [(c['name'], p) for c in pod['spec']['containers']
+                        for p in c.get('ports', []) if p.get('name') == target]
+        if (len(declarations) != 1 or declarations[0][0] != 'api'
+                or declarations[0][1].get('protocol', 'TCP') != 'TCP'
+                or type(declarations[0][1].get('containerPort')) is not int
+                or declarations[0][1]['containerPort'] != port): raise ValueError()
+        target_container = declarations[0][0]
+    else: raise ValueError()
     count = 0
     for s in node.items(slices):
         if s['metadata']['namespace'] != namespace or s['metadata']['labels']['kubernetes.io/service-name'] != expected_name:
             raise ValueError()
         if not any(o['uid'] == ref['uid'] and o['kind'] == 'Service' for o in s['metadata']['ownerReferences']): raise ValueError()
-        if s['addressType'] != 'IPv4' or not any(p['port'] == port and p['protocol'] == 'TCP' for p in s['ports']): raise ValueError()
+        resolved = [p for p in s['ports'] if p.get('name') == service_port.get('name') and p.get('protocol') == 'TCP']
+        if (s['addressType'] != 'IPv4' or len(resolved) != 1
+                or type(resolved[0].get('port')) is not int or resolved[0]['port'] != port): raise ValueError()
         for e in s['endpoints']:
             if e['conditions'].get('ready') is not True or e['conditions'].get('terminating', False): raise ValueError()
             t = e['targetRef']
@@ -102,7 +120,9 @@ def service_target(service, slices, pod, replica_set, deployment, port):
                 raise ValueError()
             count += 1
     if count != 1: raise ValueError()
-    return {'uid': ref['uid'], 'rv': ref['resourceVersion'], 'ip': ip, 'podUid': pod['metadata']['uid']}
+    return {'uid': ref['uid'], 'rv': ref['resourceVersion'], 'ip': ip, 'podUid': pod['metadata']['uid'],
+            'servicePortName': service_port.get('name'), 'targetPort': target,
+            'resolvedPort': port, 'targetContainer': target_container}
 
 
 def collector_binding(b, nonce):
