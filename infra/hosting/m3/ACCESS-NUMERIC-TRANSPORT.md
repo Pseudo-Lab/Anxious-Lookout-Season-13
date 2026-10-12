@@ -89,7 +89,9 @@ claim/results or transport ambiguity consumes the attempt. Do not extend the
 start timestamp, choose another address, relaunch a holder or refresh DNS.
 
 Holder Job deadline30s/backoff0; PID1 ends at28s from its own kernel start.
-First worker execution must start before18s. Batch alarm10s; each callback,
+First worker execution and actual callback connect must start before18s;
+the cutoff and10s remaining budget are rechecked after socket preparation,
+immediately before connect. Batch alarm10s; each callback,
 provider TCP and TLS stage has3s socket timeout. Remote effective deadline is
 the minimum of PID1+28s, actual Job start+30s and DNS lease expiry. Before
 callback require10s remaining, before provider TCP6s, before TLS3s. The last
@@ -209,9 +211,14 @@ and [IPv4 label conversion](https://github.com/cilium/cilium/blob/v1.20.2/pkg/la
 5. Fresh raw temporary CNP, PodList singleton, exact Pod/CEP/agent and numeric
    native endpoint response → scope. Emit trusted program0600; preserve the
    raw same-instance proof. Clock/ownership/policy/callback binding must pass.
-6. Worker once:
+6. Save the dispatch-stage deadline once as described below, then worker once:
    `bash run_numeric_step.sh worker /trusted/absolute/kubectl access-runner-numeric-tls-v1-EXACT /private/worker.py /private/run`.
-   Wrapper12s+1kill; remote own PID1/UID/start/command hash/nonce are checked,
+   The wrapper checks the saved1s dispatch deadline before claim and again
+   immediately before its sole timeout/kubectl invocation, recording historical
+   host admission. It then waits synchronously for the entire batch under
+   12s+1kill; do not wrap that batch in1s or apply the postbatch clock to the
+   dispatch deadline. Missing/expired dispatch input refuses before invocation.
+   Remote own PID1/UID/start/command hash/nonce are checked,
    atomic private /dev/shm claim consumed, numeric sockets only. Callback
    failure skips provider entirely. Provider uses normal TLS with fixed SNI,
    certificate/hostname validation; verification failure and deadline have
@@ -252,25 +259,79 @@ After actual holder PID1 start, the dependency chain is fixed:
 
 | Group | Outer bound including kill | Required work / stop behavior |
 | --- | --- | --- |
-| original |3s| Parallel raw owner/PodList/Service/CEP/agent reads plus numeric native reference and original-scope check; late→no collector |
+| original |3s| Independent raw owner/PodList/Service/CEP/agent reads, then CEP-derived numeric endpoint GET and original-scope check; late→no collector |
 | collector |6s| One fixed5s+1kill API exec, no retry; late→no later collection/create/provider |
 | binding |2s| Parallel current API/service/owner bindings, recompute exact equality; late→no CNP |
 | lease |1s| Parse complete raw A/CNAME response, TTL/clock and render exact /32; late→no CNP |
 | create |2s| One conditional new CNP create, save acknowledged identity; uncertain/late→cleanup/handoff |
-| realization |2s| Parallel fresh raw Pod/CEP/agent/policy sources plus numeric native response and exact scope; late→no worker |
+| realization |2s| Independent fresh raw Pod/CEP/agent/policy reads, then CEP-derived numeric endpoint GET and exact scope; late→no worker |
 | emit |1s| Recheck full scope and emit trusted worker bytes; late→no worker |
-| dispatch |1s| Start the worker transport; remote actual first-connect guard remains authoritative |
+| dispatch |1s admission only| Wrapper records/checks host admission before sole transport invocation; batch completion is handled separately below, remote actual first-connect guard remains authoritative |
 
 `access_numeric_timing.py --stage GROUP --holder /evidence/holder.json` in
-Docker returns one absolute stageDeadlineNs. Preserve it once. Bound each
-group to remainingMs, including its kill allowance; all reads in a listed
-group may run concurrently but preserve each complete raw response. Imports,
+Docker returns one absolute stageDeadlineNs and its conservative integer
+stageDeadlineCs. Preserve it once. For original through emit, bound each
+group to remainingMs, including its kill allowance; only independent reads
+may run concurrently and each complete raw response must be preserved.
+CEP lookup must precede GET of its returned numeric endpoint ID on the exact
+bound agent; both dependent calls and subsequent bundle checks count within
+the same saved original/realization deadline. Imports,
 tool startup, JSON assembly and validation count toward both the absolute18s
 holder cutoff and their group, never run outside a saved deadline. After the
-group, call the same command with `--completed /evidence/saved-stage.json`;
+group (original through emit), call the same command with
+`--completed /evidence/saved-stage.json`;
 missing/late/completion refusal enters cleanup **before** the next create or
 send. Never regenerate a deadline or widen a timeout to make a slow path fit.
 The host75s reservations apply in addition to these18s checks.
+
+Dispatch has explicit last-stage handling. Run the timing admission command
+inside the same reviewed Docker tooling environment, with holder receipt at
+/evidence/holder.json and metadata mount writable only for private output:
+
+```bash
+# Run INSIDE Docker, save stdout once to /evidence/dispatch.stage.json:
+python -B /checks/access_numeric_timing.py --stage dispatch --holder /evidence/holder.json
+```
+
+On the trusted operator host, umask077 and noclobber remain required. Extract
+the saved value once, then invoke the existing synchronous wrapper:
+
+```bash
+umask 077
+set -o noclobber
+jq -er '.stageDeadlineCs | select(type == "number" and . == floor)' /private/run/dispatch.stage.json > /private/run/dispatch.deadlineCs
+bash run_numeric_step.sh worker /trusted/absolute/kubectl access-runner-numeric-tls-v1-EXACT /private/worker.py /private/run
+```
+
+The bootstrap/import/JSON/extraction/wrapper startup must fit the saved1s
+dispatch window. Wrapper checks conservative host BOOTTIME centiseconds,
+requires a private0600 regular deadline file, checks main45s reservation,
+and refuses an expired or more-than1s-remaining deadline before its claim.
+It rechecks inside the child and writes worker.dispatch.json just before
+exec of timeout. This is **host admission evidence**, not a remote launch
+acknowledgement. Descheduling after the check cannot authorize late remote
+traffic: the worker rechecks actual first connect against PID1+18s and the
+10s/end/lease guards. A missing receipt or transport failure is unknown,
+consumes the one attempt and goes to cleanup; no retry.
+
+Wait synchronously for the bounded batch, preserving worker.stdout/stderr/
+exit, without a1s enclosing timeout. Afterward perform the reserved fresh
+owner read13s and dependent numeric endpoint read13s. Validate dispatch
+receipt and result together within the single remaining6s validation bound
+(including both tooling startups), not an extra budget. Run INSIDE Docker:
+
+```bash
+python -B /checks/access_numeric_timing.py --stage dispatch --holder /evidence/holder.json --completed /evidence/dispatch.stage.json --dispatched /evidence/worker.dispatch.json
+```
+
+This validates the recorded admission timestamp against the original saved
+deadline; it deliberately does not compare batch finish to that1s deadline.
+Generic dispatch completion without --dispatched refuses. All
+fresh postexec owner/native/receipt/result checks share the reserved32s, including
+remote entered/finishedNs and effective batch/end/lease limits. The wrapper
+12s+1kill, remote10s batch, host75s main/45s cleanup and whole120s limits are
+unchanged. A legitimate2s batch can complete after its dispatch deadline;
+that does not weaken any remote or result deadline.
 
 The sum of listed maxima is18s, so spending every maximum cannot pass the
 strict first-send cutoff; this is intentional refusal, not guaranteed
@@ -289,7 +350,12 @@ at each pre-worker stage refuses before the next step; pre-create failure
 keeps CNP0/provider0, post-create failure deletes only its exact owned CNP;
 Job cleanup occurs in every case. No raw binding check is removed. The
 separate same-command admission fixtures refuse at elapsed74s before any
-local claim/kubectl call, and delayed CA context never starts TLS.
+local claim/kubectl call, and delayed CA context never starts TLS. An actual
+wrapper fixture adapted from reviewer test_numeric_dispatch_gap.py runs a
+2s fake kubectl: batch succeeds, generic1s completion rejects as expected,
+and the historical dispatch receipt validates. Expired saved dispatch makes
+no kubectl call/claim; replay makes no second call. Socket preparation delayed
+to the actual18s cutoff makes callback/provider0 and closes the socket.
 
 Tests must include malformed/stale DNS chain/TTL/clock, target/nonce/UID
 substitution, foreign cleanup, singleton/native rule failures, callback

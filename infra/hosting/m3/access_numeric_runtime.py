@@ -58,7 +58,11 @@ def numeric_once(expected, socket_factory=socket.socket, context_factory=ssl.cre
         check(10)
         try:
             with socket_factory(socket.AF_INET, socket.SOCK_STREAM) as channel:
-                channel.settimeout(3); channel.connect((str(callback), 8080))
+                channel.settimeout(3)
+                check(10)
+                if time.clock_gettime_ns(time.CLOCK_BOOTTIME) >= start+18_000_000_000:
+                    raise NumericDeadline()
+                channel.connect((str(callback), 8080))
             report['callback'] = 'tcp_connected'
         except (OSError, ValueError):
             report['callback'] = 'failed'; return report

@@ -60,10 +60,28 @@ esac
 numeric_body=$(cat "$numeric_program")
 [ -n "$numeric_body" ] || exit 1
 numeric_admit || exit 1
+numeric_dispatch_admit() {
+  numeric_clock
+  [ "$numeric_now" -lt "$numeric_dispatch_deadline" ] && [ "$((numeric_dispatch_deadline-numeric_now))" -le 100 ]
+}
+if [ "$numeric_mode" = worker ]; then
+  # Saved once by the boot/time-namespace validated timing command; 1s is
+  # transport admission, not completion of the synchronous remote batch.
+  numeric_dispatch_file=$numeric_dir/dispatch.deadlineCs
+  [ -f "$numeric_dispatch_file" ] && [ ! -L "$numeric_dispatch_file" ] || exit 1
+  [ "$(stat -c %a "$numeric_dispatch_file")" = 600 ] && [ "$(stat -c %u "$numeric_dispatch_file")" = "$(id -u)" ] || exit 1
+  read -r numeric_dispatch_deadline <"$numeric_dispatch_file"
+  [[ "$numeric_dispatch_deadline" =~ ^[0-9]{1,12}$ ]] || exit 1
+  numeric_dispatch_admit || exit 1
+fi
 : >"$numeric_dir/$numeric_mode.claim"
 numeric_exit=0
 (
   ulimit -f 128
+  if [ "$numeric_mode" = worker ]; then
+    numeric_admit && numeric_dispatch_admit || exit 1
+    printf '{"dispatchAdmittedCs":%s,"dispatchDeadlineCs":%s}\n' "$numeric_now" "$numeric_dispatch_deadline" >"$numeric_dir/worker.dispatch.json"
+  fi
   exec timeout --signal=TERM --kill-after=1s "$numeric_seconds" "$numeric_kubectl" --request-timeout=8s \
     -n "$numeric_ns" exec "$numeric_pod" -c "$numeric_container" -- python -B -c "$numeric_body"
 ) >"$numeric_dir/$numeric_mode.stdout" 2>"$numeric_dir/$numeric_mode.stderr" || numeric_exit=$?

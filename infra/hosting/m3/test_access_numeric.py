@@ -287,6 +287,9 @@ def test_host_claim_transport_failure_is_consumed_without_retry(tmp_path,mode):
     source=tmp_path/'program'; source.write_text('print("fixture")'); source.chmod(0o600)
     wrapper=Path(__file__).with_name('run_numeric_step.sh')
     assert subprocess.run(['bash',str(wrapper),'arm',str(tool),'-','-',str(private)],capture_output=True).returncode==0
+    if mode=='worker':
+        deadline=private/'dispatch.deadlineCs'
+        deadline.write_text(str(int(float(Path('/proc/uptime').read_text().split()[0])*100)+100)+'\n'); deadline.chmod(0o600)
     pod='api-fixture' if mode=='collector' else prep.NAME+'-fixture'
     argv=['bash',str(wrapper),mode,str(tool),pod,str(source),str(private)]
     assert subprocess.run(argv,capture_output=True).returncode==1

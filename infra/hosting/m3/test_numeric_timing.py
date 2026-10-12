@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import ssl
 import subprocess
+import sys
 import time
 
 import pytest
@@ -34,6 +35,64 @@ def test_ca_preparation_consuming_lease_prevents_tls_and_closes_sockets(monkeypa
     assert r['deadlineExceeded'] and wrapped==[] and len(closed)==2
     with pytest.raises((FileExistsError,n['NumericDeadline'])): n['numeric_once'](e,lambda *a:Channel(),slow_context)
     assert wrapped==[]
+
+
+def test_actual_first_connect_refuses_when_socket_preparation_reaches_cutoff(monkeypatch,tmp_path):
+    n,e,now=runtime(monkeypatch,tmp_path);calls=[];closed=[]
+    now[0]=17_000_000_000
+    class Channel:
+        def __enter__(self): return self
+        def __exit__(self,*a): closed.append(True)
+        def settimeout(self,t): now[0]=19_000_000_000
+        def connect(self,target): calls.append(target)
+    result=n['numeric_once'](e,lambda *a:Channel(),ssl.create_default_context)
+    assert result['deadlineExceeded'] and calls==[] and closed==[True]
+    assert result['providerAttempts']==0
+
+
+@pytest.mark.parametrize('late',[False,True])
+def test_synchronous_two_second_batch_uses_dispatch_receipt_not_completion_clock(tmp_path,late):
+    # Adapted from review's test_numeric_dispatch_gap.py: same real wrapper
+    # and 2s fake kubectl, but explicit last-stage dispatch receipt contract.
+    evidence=tmp_path/'evidence';evidence.mkdir(mode=0o700)
+    now=time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+    start=now-1_000_000_000
+    deadline=timing.admit('dispatch',start,now)
+    (evidence/'operation.startCs').write_text(str(now//10_000_000)+'\n')
+    dispatch_file=evidence/'dispatch.deadlineCs'
+    dispatch_file.write_text(str((now-10_000_000 if late else deadline)//10_000_000)+'\n');dispatch_file.chmod(0o600)
+    tool=tmp_path/'kubectl';calls=tmp_path/'calls'
+    tool.write_text('#!/bin/bash\necho called > '+str(calls)+'\nsleep 2\nprintf "worker finished\\n"\n');tool.chmod(0o700)
+    program=tmp_path/'program';program.write_text('pass\n');program.chmod(0o600)
+    argv=['bash',str(Path(__file__).with_name('run_numeric_step.sh')),'worker',str(tool),prep.NAME+'-test',str(program),str(evidence)]
+    result=subprocess.run(argv,capture_output=True,timeout=5)
+    if late:
+        assert result.returncode!=0 and not calls.exists()
+        assert not (evidence/'worker.claim').exists() and not (evidence/'worker.dispatch.json').exists()
+    else:
+        assert result.returncode==0 and (evidence/'worker.exit').read_text()=='0\n'
+        end=time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+        assert end-now>=2_000_000_000
+        with pytest.raises(ValueError): timing.completed(start,deadline,end)
+        timing.dispatched(start,deadline,json.loads((evidence/'worker.dispatch.json').read_text()))
+        holder=evidence/'holder.json'
+        holder.write_text(json.dumps({'startNs':start,'bootId':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                                     'timeNamespace':str(Path('/proc/self/ns/time').readlink())}))
+        saved=evidence/'dispatch.stage.json'
+        saved.write_text(json.dumps({'stage':'dispatch','stageDeadlineNs':deadline}))
+        check=[sys.executable,'-B',str(Path(timing.__file__)),'--stage','dispatch','--holder',str(holder),'--completed',str(saved)]
+        assert subprocess.run(check,capture_output=True).returncode!=0
+        verified=subprocess.run(check+['--dispatched',str(evidence/'worker.dispatch.json')],capture_output=True)
+        assert verified.returncode==0 and json.loads(verified.stdout)['hostDispatchAdmittedWithinBound']
+        assert subprocess.run(argv,capture_output=True).returncode!=0
+        assert calls.read_text()=='called\n'
+
+
+@pytest.mark.parametrize('receipt',[{'dispatchAdmittedCs':100,'dispatchDeadlineCs':100},
+                                  {'dispatchAdmittedCs':99,'dispatchDeadlineCs':101},
+                                  {'dispatchAdmittedCs':True,'dispatchDeadlineCs':100}])
+def test_dispatch_receipt_refuses_late_mismatched_or_invalid_time(receipt):
+    with pytest.raises(ValueError): timing.dispatched(1,1_000_000_000,receipt)
 
 
 @pytest.mark.parametrize('mode', ['collector','worker','budget','budget-create','budget-read','budget-prepare','budget-result'])
