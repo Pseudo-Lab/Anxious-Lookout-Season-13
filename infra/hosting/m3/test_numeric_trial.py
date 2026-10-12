@@ -407,7 +407,7 @@ image='sha256:e1cd49c5e8d36fae0689e727c06459529bbc67e823e08385602ea534c6397450'
 state=Path(os.environ['MOCK_DOCKER_STATE'])
 if args[0]=='info':
  if os.environ['MOCK_FAULT']=='clock_timeout':time.sleep(5)
- print(json.dumps('runc') if 'DefaultRuntime' in args[-1] else 'runc\\nsysbox-runc');raise SystemExit()
+ print(json.dumps('runc') if 'DefaultRuntime' in args[-1] else 'runc\\nsysbox-runc\\n');raise SystemExit()
 if args[0]=='inspect':
  own=json.loads(state.read_text());assert args[-1]==own['id']
  if os.environ['MOCK_FAULT']=='clock_foreign':own['imageId']='sha256:'+'b'*64

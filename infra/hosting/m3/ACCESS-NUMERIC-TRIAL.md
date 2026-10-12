@@ -80,6 +80,14 @@ host-clock-observation-clock-only.json adds runtimeMetadata, and clock-result
 adds runtimeMetadataStatus. Missing, malformed, truncated, failed, late or
 foreign data is unknown. DefaultRuntime alone never supplies an effective
 controller runtime. Capture never selects a runtime or changes a guard/profile.
+The runtime-name parser removes only terminal LF separators added by Docker's
+range output framing; leading/interior empty lines, whitespace in names,
+duplicates, invalid names and an unlisted default still reject. Selected bytes
+are decoded without universal-newline conversion; missing terminal LF also
+rejects a truncated formatting frame. This allows offline replay
+of the retained formatting failure without recapture or altering the original
+unknown result. ACCESS-CLOCK-PLACEMENT-PROPOSAL.md records the next conditional
+placement assessment; it authorizes no operation.
 
 clock-budget.json records the startup deadline; clock-complete.json is
 written only after parsing and all requested evidence writes finish within

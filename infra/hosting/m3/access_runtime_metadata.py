@@ -25,9 +25,13 @@ def validate_runtime_metadata(descriptor, evidence):
             target = directory/(filename+'.stdout'); code = directory/(filename+'.exit')
             if target.is_symlink() or code.is_symlink() or target.stat().st_size > 65536: raise ValueError('invalid_evidence_file')
             if code.read_text().strip() != '0': raise ValueError('read_failed_or_unavailable')
-            raw[key] = target.read_text()
+            raw[key] = target.read_bytes().decode('utf-8')
         default = json.loads(raw['default'])
-        names = raw['names'].splitlines()
+        if not raw['names'].endswith('\n'): raise ValueError('runtime_names_invalid')
+        # Docker adds a final LF to the range template's per-name LFs.
+        # Remove only trailing LF separators; preserve blank/invalid entries
+        # elsewhere and do not normalize whitespace within runtime names.
+        names = raw['names'].rstrip('\n').split('\n')
         valid_name = lambda n: type(n) is str and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}', n)
         if not valid_name(default) or not names or len(names) > 64 or len(set(names)) != len(names) or any(not valid_name(n) for n in names) or default not in names:
             raise ValueError('runtime_names_invalid')

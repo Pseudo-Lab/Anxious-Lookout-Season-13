@@ -103,4 +103,12 @@ metadata source now implements the corrected bounded capture; its exact SHA
 still requires independent execution review. Source preparation and
 future execution dispositions are separate; all consumed invocation and
 DN12/Node/BPF/auth/state/PVC-content/API-enable/Native/turn/publication holds
-remain. No actual extra capture or profile/guard change has been performed.
+remain. This proposal itself authorized no capture or profile/guard change.
+
+The separately approved4e0afc8 metadata capture has now been consumed. Its
+terminal runtime-name framing is replayed offline by the corrected parser;
+the original unknown result is retained. Default and effective runtime both
+read runc while the original namespace guard still rejects. Do not repeat a
+capture for this parser fix or choose runc automatically. The conditional
+next placement assessment is in ACCESS-CLOCK-PLACEMENT-PROPOSAL.md and requires
+existing operator launch records and separate scope review before any action.
