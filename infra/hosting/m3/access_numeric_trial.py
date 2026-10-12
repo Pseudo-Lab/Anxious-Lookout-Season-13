@@ -13,6 +13,7 @@ from pathlib import Path
 import access_numeric_prepare as prep
 import access_numeric_timing as timing
 import access_node_proxy_prepare as node
+from access_runtime_metadata import validate_runtime_metadata
 
 NS = 'codex-trial'
 JOBS = '/apis/batch/v1/namespaces/codex-trial/jobs'
@@ -315,6 +316,7 @@ class Trial:
         observation = {'phase': phase, 'host': captured, 'controller': controller, 'skewNs': skew,
                        'checks': checks, 'accepted': all(checks.values()), 'reasons': [k for k,v in checks.items() if not v]}
         if self.clock_only:
+            observation['runtimeMetadata'] = validate_runtime_metadata(captured.get('runtimeMetadataDescriptor'), getattr(self.io, 'evidence', None))
             observation['namespaceProvenanceStatus'] = ('collected' if provenance_collected(captured.get('namespaceProvenance'))
                 and provenance_collected(controller.get('namespaceProvenance')) else 'unknown')
         self.last_clock_observation = observation
@@ -333,6 +335,7 @@ class Trial:
         except Exception:
             pass
         result['namespaceProvenanceStatus'] = (self.last_clock_observation or {}).get('namespaceProvenanceStatus', 'unknown')
+        result['runtimeMetadataStatus'] = (self.last_clock_observation or {}).get('runtimeMetadata', {}).get('status', 'unknown')
         self.io.save('clock-result.json', result)
         self.io.call('done', outcome=result)
         return result

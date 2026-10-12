@@ -8,6 +8,7 @@ from pathlib import Path
 import ssl
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -366,7 +367,7 @@ def test_baseline_native_binding_rejects_nonexact_identity(prepared,tmp_path,bad
 
 
 @pytest.mark.skipif(os.getuid()!=0,reason='Private host broker contract requires root; run this case in root Docker')
-@pytest.mark.parametrize('fault',['images','job_unknown','controller_stall','clock_only','clock_forbidden'])
+@pytest.mark.parametrize('fault',['images','job_unknown','controller_stall','clock_only','clock_forbidden','clock_collision','clock_foreign','clock_timeout','clock_exhausted','clock_signal'])
 def test_actual_shell_broker_and_wire_controller_refuse_without_retry(prepared,tmp_path,fault):
     # Docker/git/kubectl CLI substitutes execute INSIDE this network-none
     # test container. The actual shell broker and Wire controller are used.
@@ -398,13 +399,33 @@ print(value)
 ''')
     (tools/'git').write_text('#!/bin/bash\ncase "$*" in *rev-parse*) printf "%s\\n" '+('a'*40)+';; esac\n')
     (tools/'docker').write_text('#!'+python+'\n'+'''
-import os,sys
+import json,os,signal,sys,time
+from pathlib import Path
 args=sys.argv[1:]
+with open(os.environ['MOCK_DOCKER_CALLS'],'a') as f:f.write(json.dumps(args)+'\\n')
+image='sha256:e1cd49c5e8d36fae0689e727c06459529bbc67e823e08385602ea534c6397450'
+state=Path(os.environ['MOCK_DOCKER_STATE'])
+if args[0]=='info':
+ if os.environ['MOCK_FAULT']=='clock_timeout':time.sleep(5)
+ print(json.dumps('runc') if 'DefaultRuntime' in args[-1] else 'runc\\nsysbox-runc');raise SystemExit()
+if args[0]=='inspect':
+ own=json.loads(state.read_text());assert args[-1]==own['id']
+ if os.environ['MOCK_FAULT']=='clock_foreign':own['imageId']='sha256:'+'b'*64
+ print(own['id']+' '+own['imageId']+' '+own['name'])
+ if 'HostConfig' in args[args.index('--format')+1]:print(json.dumps(own))
+ raise SystemExit()
 if args[0]=='image':
  if os.environ['MOCK_FAULT']=='images':raise SystemExit(1)
  print('sha256:'+'a'*64);raise SystemExit()
 if args[0]=='stop':raise SystemExit()
 assert args[0]=='run' and args[args.index('--network')+1]=='none' and '--read-only' in args and '--pull=never' in args
+assert '--runtime' not in args and '--pid' not in args and '--privileged' not in args
+if os.environ['MOCK_FAULT']=='clock_collision':raise SystemExit(125)
+if os.environ['MOCK_FAULT']=='clock_exhausted':time.sleep(10)
+cid='c'*64;Path(args[args.index('--cidfile')+1]).write_text(cid)
+state.write_text(json.dumps({'id':cid,'name':'/'+args[args.index('--name')+1],'imageId':image,'imageRef':image,'user':'0:0','runtime':'runc','isolation':'','usernsMode':'','networkMode':'none','pidMode':'','readonlyRootfs':True,'privileged':False,'capDrop':['ALL'],'securityOpt':['no-new-privileges']}))
+if os.environ['MOCK_FAULT']=='clock_signal':
+ time.sleep(0.2);os.kill(os.getppid(),signal.SIGTERM);time.sleep(10)
 mounts=[args[i+1] for i,a in enumerate(args) if a=='--mount']
 mapping={m.split('dst=')[1].split(',')[0]:m.split('src=')[1].split(',')[0] for m in mounts}
 start=args.index('/checks/access_numeric_trial.py')
@@ -436,16 +457,37 @@ time.sleep(10)
     source=tmp_path/'source';helpers=source/'infra'/'hosting';helpers.mkdir(parents=True)
     (helpers/'m3').symlink_to(Path(trial.__file__).parent,target_is_directory=True)
     evidence=tmp_path/'evidence';evidence.mkdir(mode=0o700)
-    env=dict(os.environ,PATH=str(tools)+':'+os.environ['PATH'],MOCK_CALLS=str(calls),MOCK_TABLE=str(table),MOCK_FAULT=fault,MOCK_STALL=str(stall))
+    docker_calls=tmp_path/'docker-calls';docker_state=tmp_path/'docker-state'
+    env=dict(os.environ,PATH=str(tools)+':'+os.environ['PATH'],MOCK_CALLS=str(calls),MOCK_TABLE=str(table),MOCK_FAULT=fault,MOCK_STALL=str(stall),MOCK_DOCKER_CALLS=str(docker_calls),MOCK_DOCKER_STATE=str(docker_state))
     argv=['bash',str(Path(trial.__file__).with_name('run_numeric_trial.sh')),str(source),str(tools/'kubectl'),str(seed),str(evidence),'a'*40]
-    if fault in ('clock_only','clock_forbidden'):argv.append('--clock-only')
+    if fault.startswith('clock_'):argv.append('--clock-only')
+    started=time.monotonic()
     result=subprocess.run(argv,env=env,capture_output=True,timeout=60)
-    assert result.returncode==(1 if fault in ('controller_stall','clock_forbidden') else 0),(result.stderr.decode(),[(x.name,x.read_text()[-1000:]) for x in evidence.glob('controller-*.stderr')])
+    assert result.returncode==(1 if fault in ('controller_stall','clock_forbidden','clock_collision','clock_exhausted','clock_signal') else 0),(result.stderr.decode(),[(x.name,x.read_text()[-1000:]) for x in evidence.glob('controller-*.stderr')])
     raw=[json.loads(l) for l in calls.read_text().splitlines()] if calls.exists() else []
-    if fault in ('clock_only','clock_forbidden'):
+    docker_raw=[json.loads(l) for l in docker_calls.read_text().splitlines()]
+    assert all(a[-1]=='c'*64 for a in docker_raw if a[0] in ('inspect','stop'))
+    if fault in ('clock_collision','clock_foreign'):
+        assert not any(a[0]=='stop' for a in docker_raw)
+        if fault=='clock_collision':assert not any(a[0]=='inspect' for a in docker_raw)
+    if fault.startswith('clock_'):
         assert raw==[] and not (evidence/'operation.startCs').exists()
-        if fault=='clock_only':
+        if fault=='clock_signal':
+            assert time.monotonic()-started<5
+            assert sum(a[0]=='stop' for a in docker_raw)==1,(docker_raw,result.stderr.decode(),[(x.name,x.read_text()) for x in evidence.glob('controller-*.identity.*')])
+            assert not (evidence/'clock-complete.json').exists()
+            return
+        if fault=='clock_exhausted':
+            assert time.monotonic()-started<15
+            assert not (evidence/'clock-complete.json').exists()
+            assert not any(a[0] in ('info','inspect','stop') for a in docker_raw)
+            return
+        if fault in ('clock_only','clock_foreign','clock_timeout'):
             result=json.loads((evidence/'clock-result.json').read_text())
+            assert result['runtimeMetadataStatus']==('collected' if fault=='clock_only' else 'unknown')
+            complete=json.loads((evidence/'clock-complete.json').read_text())
+            budget=json.loads((evidence/'clock-budget.json').read_text())
+            assert complete['completedCs']<complete['deadlineCs']==budget['deadlineCs']
             assert result['clockGuardAccepted'] and result['armed'] is False
             assert list(evidence.glob('clock-host-response-*.json'))
             assert (evidence/'host-clock-observation-clock-only.json').exists()

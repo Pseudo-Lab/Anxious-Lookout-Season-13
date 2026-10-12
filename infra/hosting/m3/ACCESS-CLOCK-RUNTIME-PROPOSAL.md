@@ -21,8 +21,12 @@ larger than the first corrective path below. Keep all current guards first.
 
 Prepare one new clock-only capture at a separately reviewed source SHA/new
 private0700 directory. Retain the current controller profile, host/save/done
-whitelist,10s observation wait and bounded local teardown. Before teardown,
-read only the exact named temporary controller created by this invocation:
+whitelist,10s total observation budget and bounded local teardown. Before
+teardown, read only the Docker-receipted ID of this invocation's controller,
+checking its ID/image/name. The reviewed implementation procedure is in
+ACCESS-NUMERIC-TRIAL.md; predictable names alone never authorize inspection
+or stopping a container. Failed creation/name collision without that receipt
+must leave foreign containers untouched:
 
 1. Bounded Docker daemon metadata: DefaultRuntime and **runtime names only**.
    Do not collect runtime paths/arguments, daemon config files, sockets/TLS
@@ -39,7 +43,7 @@ Concrete read commands for the backend-authored bounded implementation:
 ```bash
 docker info --format '{{json .DefaultRuntime}}'
 docker info --format '{{range $name, $value := .Runtimes}}{{println $name}}{{end}}'
-docker inspect --type container --format '{{json .Name}} {{json .Id}} {{json .Image}} {{json .Config.Image}} {{json .Config.User}} {{json .HostConfig.Runtime}} {{json .HostConfig.Isolation}} {{json .HostConfig.UsernsMode}} {{json .HostConfig.NetworkMode}} {{json .HostConfig.PidMode}} {{json .HostConfig.ReadonlyRootfs}} {{json .HostConfig.Privileged}} {{json .HostConfig.CapDrop}} {{json .HostConfig.SecurityOpt}}' OWN_CONTROLLER_NAME_FROM_THIS_INVOCATION
+docker inspect --type container --format '{{json .Name}} {{json .Id}} {{json .Image}} {{json .Config.Image}} {{json .Config.User}} {{json .HostConfig.Runtime}} {{json .HostConfig.Isolation}} {{json .HostConfig.UsernsMode}} {{json .HostConfig.NetworkMode}} {{json .HostConfig.PidMode}} {{json .HostConfig.ReadonlyRootfs}} {{json .HostConfig.Privileged}} {{json .HostConfig.CapDrop}} {{json .HostConfig.SecurityOpt}}' VALIDATED_DOCKER_CREATED_ID_FROM_THIS_INVOCATION
 ```
 
 These are reviewable command specifications, not a standalone script to run
@@ -94,7 +98,9 @@ No actual web/HTTP/auth/Native success or final PR approval is implied.
 | Read budget exhausted | Stop unknown; no extra capture/deadline extension |
 | A successful clock-only observation | Evidence only; no automatic numeric replay |
 
-The present change is this concrete proposal only. Source preparation and
+This document retains the conditional future runtime proposal. The companion
+metadata source now implements the corrected bounded capture; its exact SHA
+still requires independent execution review. Source preparation and
 future execution dispositions are separate; all consumed invocation and
 DN12/Node/BPF/auth/state/PVC-content/API-enable/Native/turn/publication holds
 remain. No actual extra capture or profile/guard change has been performed.

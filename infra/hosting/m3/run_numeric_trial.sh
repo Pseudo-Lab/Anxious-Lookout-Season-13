@@ -24,7 +24,7 @@ cp -- "$trial_seed" "$trial_dir/seed.json"
 chmod 600 "$trial_dir/seed.json"
 trial_clock() {
   local trial_up trial_fraction
-  read -r trial_up _ </proc/uptime
+  IFS=' ' read -r trial_up _ </proc/uptime
   trial_fraction=${trial_up#*.}
   [[ "$trial_fraction" =~ ^[0-9]{2}$ ]] || return 1
   trial_now=$((10#${trial_up%.*}*100+10#$trial_fraction+1))
@@ -52,10 +52,63 @@ trial_namespace_provenance() {
   fi
 }
 trial_clock; trial_global_end=$((trial_now+12000))
-if [ "$trial_run_mode" = clock ]; then trial_global_end=$((trial_now+1000)); fi
+if [ "$trial_run_mode" = clock ]; then
+  trial_global_end=$((trial_now+1000))
+  printf '{"startCs":%s,"deadlineCs":%s}\n' "$trial_now" "$trial_global_end" >"$trial_dir/clock-budget.json"
+fi
 trial_main_end=$trial_global_end; trial_group_end=0; trial_cleaning=false
 trial_arm_seen=false; trial_done=false; trial_recovering=false
 trial_uid="numeric-controller-$$-$RANDOM"
+trial_active_mode=''; trial_active_pid=''; trial_active_owned_id=''
+# Commands share an absolute budget; reserve 0.5s for timeout's kill grace.
+trial_selected_read() {
+  local trial_target=$1 trial_limit=$2 trial_max=$3 trial_duration trial_left trial_status=125
+  shift 3
+  trial_clock; trial_left=$((trial_limit-trial_now-50))
+  [ "$trial_left" -le "$trial_max" ] || trial_left=$trial_max
+  if [ "$trial_left" -gt 0 ]; then
+    printf -v trial_duration '%d.%02ds' "$((trial_left/100))" "$((trial_left%100))"
+    ( ulimit -f 128; exec timeout --signal=TERM --kill-after=0.5s "$trial_duration" "$@" ) \
+      >"$trial_target.stdout" 2>/dev/null && trial_status=0 || trial_status=$?
+  else
+    : >"$trial_target.stdout"
+  fi
+  printf '%s\n' "$trial_status" >"$trial_target.exit"
+}
+trial_created_id() {
+  local trial_cid_file=$trial_dir/controller-$trial_mode.cid trial_size
+  trial_cid=''
+  [ -f "$trial_cid_file" ] && [ ! -L "$trial_cid_file" ] || return 1
+  [ "$(stat -c %u "$trial_cid_file")" = "$(id -u)" ] || return 1
+  trial_size=$(stat -c %s "$trial_cid_file")
+  [ "$trial_size" = 64 ] || [ "$trial_size" = 65 ] || return 1
+  trial_cid=$(cat "$trial_cid_file")
+  [[ "$trial_cid" =~ ^[a-f0-9]{64}$ ]]
+}
+trial_verify_selected() {
+  local trial_target=$1 trial_header
+  [ "$(cat "$trial_target.exit")" = 0 ] || return 1
+  IFS= read -r trial_header <"$trial_target.stdout" || return 1
+  [ "$trial_header" = "$trial_cid $trial_image /$trial_uid-$trial_mode" ]
+}
+trial_teardown_active() {
+  [ -n "$trial_active_pid" ] || return 0
+  local trial_mode=$trial_active_mode trial_stop_pid=$trial_active_pid
+  local trial_cid=$trial_active_owned_id trial_owned=false trial_teardown_end
+  # Clear first: signal/exit paths must not repeat the same teardown.
+  trial_active_mode=''; trial_active_pid=''; trial_active_owned_id=''
+  [ -z "$trial_cid" ] || trial_owned=true
+  trial_clock; trial_teardown_end=$((trial_now+400))
+  if [ "$trial_owned" = false ] && trial_created_id; then
+    trial_selected_read "$trial_dir/controller-$trial_mode.identity" "$trial_teardown_end" 100 docker inspect --type container --format '{{.Id}} {{.Image}} {{.Name}}' "$trial_cid"
+    if trial_verify_selected "$trial_dir/controller-$trial_mode.identity"; then trial_owned=true; fi
+  fi
+  if [ "$trial_owned" = true ]; then
+    trial_selected_read "$trial_dir/controller-$trial_mode.stop" "$trial_teardown_end" 200 docker stop --time 1 "$trial_cid"
+  fi
+  kill -KILL "$trial_stop_pid" 2>/dev/null || true
+  wait "$trial_stop_pid" 2>/dev/null || true
+}
 trial_one() {
   local trial_index=$1 trial_encoded=$2 trial_body=$3 trial_deadline=$4 trial_remaining trial_rc=0 trial_timeout
   local -a trial_argv
@@ -78,9 +131,10 @@ trial_one() {
 trial_serve() {
   local trial_mode=$1 trial_seq=0 trial_line trial_deadline trial_count trial_index trial_rc trial_pid trial_op trial_body
   local -a trial_pids trial_fields trial_extra=()
+  local trial_cid='' trial_owned=false
   [ "$trial_mode" != cleanup ] || trial_extra=(--cleanup-only)
   [ "$trial_mode" != clock ] || trial_extra=(--clock-only)
-  coproc TRIAL_DOCKER { exec docker run --rm --init -i --pull=never --name "$trial_uid-$trial_mode" --log-driver=none \
+  coproc TRIAL_DOCKER { exec docker run --rm --init -i --pull=never --name "$trial_uid-$trial_mode" --cidfile "$trial_dir/controller-$trial_mode.cid" --log-driver=none \
     --network none --read-only --tmpfs /tmp:rw,nosuid --cap-drop ALL --security-opt no-new-privileges \
     --user 0:0 --env PYTHONPATH=/checks:/app \
     --mount "type=bind,src=$trial_helpers,dst=/checks,readonly" \
@@ -88,6 +142,7 @@ trial_serve() {
     --entrypoint python "$trial_image" -B /checks/access_numeric_trial.py \
     --seed /evidence/seed.json --evidence /evidence "${trial_extra[@]}" 2>"$trial_dir/controller-$trial_mode.stderr"; }
   local trial_controller_pid=$TRIAL_DOCKER_PID
+  trial_active_mode=$trial_mode; trial_active_pid=$trial_controller_pid; trial_active_owned_id=''
   local trial_original_in=${TRIAL_DOCKER[1]} trial_original_out=${TRIAL_DOCKER[0]}
   exec {trial_in}>&"$trial_original_in" {trial_out}<&"$trial_original_out"
   exec {trial_original_in}>&- {trial_original_out}<&-
@@ -117,6 +172,7 @@ trial_serve() {
         [ "${#trial_fields[@]}" = 5 ] || break
         [[ "${trial_fields[3]}" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || break
         trial_decode "${trial_fields[4]}" >"$trial_dir/${trial_fields[3]}" || break
+        if [ "$trial_mode" = clock ]; then trial_clock; [ "$trial_now" -lt "$trial_global_end" ] || break; fi
         ;;
       arm)
         [ "${#trial_fields[@]}" = 3 ] && [ "$trial_mode" = main ] && [ "$trial_arm_seen" = false ] || break
@@ -154,8 +210,24 @@ trial_serve() {
         [[ "$trial_boot" =~ ^[a-f0-9-]{36}$ ]] && [[ "$trial_ns" =~ ^time:\[[0-9]+\]$ ]] || break
         if [ "$trial_mode" = clock ]; then
           trial_provenance=$(trial_namespace_provenance "$trial_observer_pid")
+          local trial_budget=false trial_cid_json=null
+          if trial_created_id; then
+            trial_cid_json="\"$trial_cid\""
+            local trial_format='{{.Id}} {{.Image}} {{.Name}}
+{"name":{{json .Name}},"id":{{json .Id}},"imageId":{{json .Image}},"imageRef":{{json .Config.Image}},"user":{{json .Config.User}},"runtime":{{json .HostConfig.Runtime}},"isolation":{{json .HostConfig.Isolation}},"usernsMode":{{json .HostConfig.UsernsMode}},"networkMode":{{json .HostConfig.NetworkMode}},"pidMode":{{json .HostConfig.PidMode}},"readonlyRootfs":{{json .HostConfig.ReadonlyRootfs}},"privileged":{{json .HostConfig.Privileged}},"capDrop":{{json .HostConfig.CapDrop}},"securityOpt":{{json .HostConfig.SecurityOpt}}}'
+            trial_selected_read "$trial_dir/clock-runtime-own" "$trial_global_end" 100 docker inspect --type container --format "$trial_format" "$trial_cid"
+            if trial_verify_selected "$trial_dir/clock-runtime-own"; then
+              trial_owned=true
+              trial_active_owned_id=$trial_cid
+              trial_selected_read "$trial_dir/clock-runtime-default" "$trial_global_end" 100 docker info --format '{{json .DefaultRuntime}}'
+              trial_selected_read "$trial_dir/clock-runtime-names" "$trial_global_end" 100 docker info --format '{{range $name,$value := .Runtimes}}{{println $name}}{{end}}'
+            fi
+          fi
           trial_clock
-          printf '{"id":%s,"brokerOk":true,"bootId":"%s","timeNamespace":"%s","nowCs":%s,"namespaceReader":"external-readlink:/proc/self/ns/time","namespaceProvenance":%s}\n' "$trial_seq" "$trial_boot" "$trial_ns" "$trial_now" "$trial_provenance" >"$trial_dir/$trial_mode-host-response-$trial_seq.json"
+          [ "$trial_now" -ge "$trial_global_end" ] || trial_budget=true
+          printf '{"id":%s,"brokerOk":true,"bootId":"%s","timeNamespace":"%s","nowCs":%s,"namespaceReader":"external-readlink:/proc/self/ns/time","namespaceProvenance":%s,"runtimeMetadataDescriptor":{"containerId":%s,"containerName":"%s","image":"%s","identityVerified":%s,"withinBudget":%s}}\n' "$trial_seq" "$trial_boot" "$trial_ns" "$trial_now" "$trial_provenance" "$trial_cid_json" "$trial_uid-$trial_mode" "$trial_image" "$trial_owned" "$trial_budget" >"$trial_dir/$trial_mode-host-response-$trial_seq.json"
+          # Parsing and all controller evidence writes must still finish before this deadline.
+          [ "$trial_now" -lt "$trial_global_end" ] || break
         else
           trial_clock
           printf '{"id":%s,"brokerOk":true,"bootId":"%s","timeNamespace":"%s","nowCs":%s}\n' "$trial_seq" "$trial_boot" "$trial_ns" "$trial_now" >"$trial_dir/$trial_mode-host-response-$trial_seq.json"
@@ -200,6 +272,12 @@ trial_serve() {
       done)
         [ "${#trial_fields[@]}" = 4 ] || break
         trial_decode "${trial_fields[3]}" >"$trial_dir/broker-$trial_mode-outcome.json" || break
+        if [ "$trial_mode" = clock ]; then
+          trial_clock; [ "$trial_now" -lt "$trial_global_end" ] || break
+          printf '{"completedCs":%s,"deadlineCs":%s}\n' "$trial_now" "$trial_global_end" >"$trial_dir/clock-complete.json"
+          trial_clock
+          if [ "$trial_now" -ge "$trial_global_end" ]; then rm -f -- "$trial_dir/clock-complete.json"; break; fi
+        fi
         trial_done=true
         printf '{"id":%s,"brokerOk":true}\n' "$trial_seq" >&"$trial_in"
         break
@@ -211,13 +289,12 @@ trial_serve() {
     printf '{"id":%s,"brokerOk":%s}\n' "$trial_seq" "$trial_ok" >&"$trial_in"
   done
   exec {trial_in}>&- {trial_out}<&-
-  timeout --kill-after=1s 3s docker stop --time 1 "$trial_uid-$trial_mode" >"$trial_dir/controller-$trial_mode.stop" 2>&1 || true
-  kill -KILL "$trial_controller_pid" 2>/dev/null || true
-  wait "$trial_controller_pid" 2>/dev/null || true
+  trial_teardown_active
   [ "$trial_done" = true ]
 }
 trial_recovery() {
   trap - EXIT TERM INT
+  trial_teardown_active
   if [ "$trial_arm_seen" = true ] && [ "$trial_done" = false ] && [ "$trial_recovering" = false ]; then
     trial_recovering=true
     trial_cleaning=true; trial_group_end=0

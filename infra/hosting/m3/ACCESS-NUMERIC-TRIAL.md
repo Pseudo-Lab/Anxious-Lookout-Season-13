@@ -22,9 +22,10 @@ bash /reviewed/checkout/infra/hosting/m3/run_numeric_trial.sh \
   --clock-only
 ```
 
-Observation wait is capped at10s, followed by at most the existing3s+1kill
-local controller teardown; the host broker accepts only host/save/done.
-It makes no Kubernetes or prerequisite queries, image inspections, arm,
+Startup, observation, selected metadata collection, parsing and evidence
+writes share a10s deadline, followed by at most4s local controller teardown;
+the host broker accepts only host/save/done.
+It makes no Kubernetes or prerequisite queries, diagnostic image inspections, arm,
 holder/query/policy/worker or cleanup call. The provided kubectl is never
 invoked. This is a current read-only observation, not another diagnostic
 attempt and not retrospective proof of the earlier failure.
@@ -57,6 +58,37 @@ original link identities. A new collected sample is not a configuration-cause
 diagnosis or historical proof. It requires its own source/scope review and
 explicit PM next disposition; use the same clock-only argv with its approved
 SHA/new directory. No additional clock/numeric invocation is implicit.
+
+The runtime-metadata revision adds only formatted Docker reads on the host:
+DefaultRuntime, runtime names (no paths/arguments), and selected fields of
+this invocation's Docker-created controller ID. Docker writes a fresh
+controller-clock.cid in the private directory. The broker checks that receipt
+and inspects its exact ID; the returned ID/image/name must match the fixed
+image and invocation before evidence is treated as owned. Failed create/name
+collision without a valid receipt never triggers a name lookup or stop.
+Teardown in every mode targets only a verified created ID/image/name, with
+at most1.5s identity verification plus2.5s stop including kill grace. Failure
+to verify means no stop and does not prove the container absent.
+
+clock-runtime-{own,default,names}.{stdout,exit} retain only selected output
+directly, capped in size. Docker read errors are suppressed rather than
+persisting arbitrary paths. Each read has at most1s execution plus0.5s kill,
+tightened to the original deadline. Selected controller fields are name,
+ID, image ID/reference, user, runtime, isolation, userns/network/pid modes,
+readonlyRootfs, privileged, capDrop and securityOpt; no Env or mount sources.
+host-clock-observation-clock-only.json adds runtimeMetadata, and clock-result
+adds runtimeMetadataStatus. Missing, malformed, truncated, failed, late or
+foreign data is unknown. DefaultRuntime alone never supplies an effective
+controller runtime. Capture never selects a runtime or changes a guard/profile.
+
+clock-budget.json records the startup deadline; clock-complete.json is
+written only after parsing and all requested evidence writes finish within
+that deadline. A complete invocation requires exit0, this completion receipt,
+and completedCs < deadlineCs matching clock-budget.json. Without them every
+partial metadata result remains unknown, even if an earlier intermediate
+observation says collected. These files remain private, with no automatic
+numeric invocation or runtime candidate selection. Exact-source execution
+review and PM disposition must precede the single fresh clock-only capture.
 
 ## Invocation and inputs
 
@@ -161,7 +193,7 @@ against the pre-arm baseline. No deletion retry, label mass-delete, force,
 prune, production restart or node mutation occurs.
 
 Before each DELETE it persists delete-attempt-KIND.json. If the controller or
-broker fails after arm, the host stops only its explicitly named controller
+broker fails after arm, the host stops only its verified created controller ID
 and starts one cleanup-only controller from the original journal/deadline.
 That path cannot arm or run another diagnostic. It refuses to repeat any
 journalled deletion attempt. Remaining time insufficient, uncertain create,
