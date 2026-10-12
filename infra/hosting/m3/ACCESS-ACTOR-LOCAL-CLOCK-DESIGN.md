@@ -97,10 +97,47 @@ with integer/rational arithmetic; no float underestimation. W independently
 retains10/6/3s socket/TLS checks, including after CA preparation.
 
 Joint constants apply for the entire horizon and include BOTH clocks' errors.
+Before admitting ANY qualified profile, its coverage proof must establish:
+
+```text
+B_operation = (120+a_H)/(1-rho_H)
+B_all = B_anchor_start + B_operation + B_termination
+U_contract >= B_all + strictly-positive coverage guard
+```
+
+B_anchor_start bounds the oldest request/read anchor before H's immutable arm
+epoch; B_termination bounds all relevant cancellation/kill/final-receipt
+uncertainty after it. Neither is a guessed zero. Verify every interval used
+in U (H/C/D lease and critical anchors, request-to-ACK aging, delayed/historical
+receipts and cleanup-controller replacement) against the qualified coverage,
+including suspension. Any pre-arm/startup anchor straddling activation must be
+included; a later activation cannot retrospectively qualify that sample.
+An additional path-specific interval longer than B_all must enlarge the bound
+or refuse. rho<1 alone is insufficient: rho_H0.9/a_H0 makes B_operation1200s,
+so a180s-only profile is inadmissible before any business request.
+
+Finite-horizon validity also requires a trusted fail-closed lifetime mechanism,
+separate from a post-horizon numerical sample: suspend-aware cancellation and
+irreversible expiry/invalidation must take effect before covered rights end,
+and remain latched across an arbitrarily long pause/resume. Alternatively a
+backend must supply an independently justified broader lifetime contract.
+Do not use the same now/elapsed reading whose error guarantee ended at U to
+certify that it is still within U. No such lifetime mechanism is implemented
+or qualified here; inability to supply it disqualifies the profile.
+
+After suspension or uncertain coverage, H/C admit no business request/message
+unless the already-qualified backend proves the interval remained covered;
+expired/unknown validity is terminal for that epoch. A new qualification
+cannot renew old tickets, ACKs, ownership deadlines or120s. Cleanup remains
+under the original proven budget or unknown/handoff; no clock self-certification
+or fresh observation loop is introduced by this precondition.
+
 For an illustrative profile only, rho_H=rho_C=rho_D=0.01, a_H=0.020s and
 a_C=a_D=0.002s. It is not a claim about this platform. H's120-local-second
-epoch under that contract ends within roughly121.24 reference seconds;
-bounded kill grace fits180s. Global75/45/120 remain H-local limits; C must
+epoch under that contract has B_operation approximately121.232324s;
+180s admits it ONLY if proven anchor-start/termination/all-interval coverage
+and a positive guard fit the remaining approximately58.767676s. No current
+evidence supplies those values. Global75/45/120 remain H-local limits; C must
 translate H grants, not treat C's75/120 as H deadlines. A horizon violation
 never renews an epoch; expired/suspended work refuses before business.
 
@@ -220,6 +257,9 @@ an empirical clock-sampling/administrative-export loop.
 | API/holder restart, boot/epoch change or backwards clock | Invalidate binding/ticket; no elapsed reset |
 | Old response/phase/nonce or repeated deletion journal | Reject replay; no repeated action |
 | Unbounded clock slowdown/error budget unsupported | No certified lease/deadline acceptance; hold the design |
+| rho_H0.9 with180s-only qualification |1200s operation envelope does not fit; profile refused before business |
+| Old anchor or final receipt lies outside qualified horizon | Reject that profile/interval; no retrospective qualification |
+| Arbitrarily long suspend exceeds numerical coverage | Trusted expiry/invalidation must stay latched; same-clock self-certification cannot authorize a new request |
 | Fastest supported D /slowest H/C and15/10/18 rounding edges | Use joint U; reject boundary failures before a business call, independently of W's later refusal |
 | Suspend before phase expiry or ACK arrives after it | BOOTTIME includes pause; original H deadline and joint ACK aging reject; no new business request/call |
 | Duplicate ACK/begin or queued expired phase command | No timer/grant reset; C emits none and H invokes no business command |
