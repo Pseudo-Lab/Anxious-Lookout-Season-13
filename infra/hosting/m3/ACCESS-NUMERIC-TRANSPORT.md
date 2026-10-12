@@ -71,9 +71,19 @@ endpoint and one ready CoreDNS endpoint on the retained Node. Multiple or
 different endpoints are unsupported, not a reason to select arbitrary ones.
 
 Arm host budget after these preparations, before the holder create. Whole
-operation120s includes45s cleanup reserve; no collection/new create/worker may
-start after75s. `run_numeric_step.sh arm/budget/collector/worker` makes that
-clock gate executable using host BOOTTIME uptime. Each directory is claimed
+operation120s includes45s cleanup reserve; main operations must **finish** by
+75s, not merely start before it. `run_numeric_step.sh` admission reserves the
+maximum active timeout plus kill allowance before a claim/call, and rechecks
+after reading the source immediately before the claim. Reservations are:
+collector6s; create/read13s; bounded prepare/result6s; worker45s (13s execution
+plus32s postexec ownership read13s, numeric native read13s and result check6s).
+Thus elapsed74s refuses collector, worker and every new preparation/read/
+create/result call. Modebudget aliases budget-create; budget-read,
+budget-prepare and budget-result cover the other stages. Call each gate before
+its corresponding command and keep that command within its reserved bound.
+The host BOOTTIME uptime gate leaves the45s cleanup reserve intact; inability
+to complete full cleanup/false health within it is unknown/handoff, not restored.
+Each directory is claimed
 once, root-owned0700, private source/outcome files0600 and exclusive. Existing
 claim/results or transport ambiguity consumes the attempt. Do not extend the
 start timestamp, choose another address, relaunch a holder or refresh DNS.
@@ -82,7 +92,11 @@ Holder Job deadline30s/backoff0; PID1 ends at28s from its own kernel start.
 First worker execution must start before18s. Batch alarm10s; each callback,
 provider TCP and TLS stage has3s socket timeout. Remote effective deadline is
 the minimum of PID1+28s, actual Job start+30s and DNS lease expiry. Before
-callback require10s remaining, before provider TCP6s, before TLS3s. Context
+callback require10s remaining, before provider TCP6s, before TLS3s. The last
+TLS admission occurs **after** CA context creation and flag validation,
+immediately before wrap_socket/ClientHello, checking ownership/clock again.
+An8s context delay leaving2s causes handshake0 and normal socket closure.
+Context
 clock is BOOTTIME in the same time namespace and Node boot. Realtime is only
 used to map the Job start timestamp; a >250ms realtime/BOOTTIME discrepancy
 refuses. No wall-clock-only TTL admission.
@@ -182,7 +196,9 @@ and [IPv4 label conversion](https://github.com/cilium/cilium/blob/v1.20.2/pkg/la
    static programs/templates and API/CoreDNS bindings. Fixed Job/CNP names
    must GETabsent; reject nonce collision. No resolve yet.
 2. Arm once: `bash run_numeric_step.sh arm /trusted/absolute/kubectl - - /private/run`.
-   Before each create call modebudget with the same unused placeholders.
+   Before each create call modebudget-create with the same unused placeholders
+   (13s reservation); before bounded source/check commands budget-prepare,
+   before reads budget-read and before outcome validation budget-result.
 3. Create Job once, save acknowledged UID/full defaulted specHash. Find only
    owned Running/Ready Pod; source command/image/nonce/pin/reference/Service
    must pass before collection. No DNS/connect is performed by PID1. If
@@ -212,7 +228,10 @@ and [IPv4 label conversion](https://github.com/cilium/cilium/blob/v1.20.2/pkg/la
    mass-delete, adoption, force/prune or new restart. Existing production/
    API/Service/config and false full health must still pass.
 
-Each GET/delete uses8s API/12s wall+1kill and private bounded output. Main
+Each ordinary GET/delete uses8s API/12s wall+1kill and private bounded output.
+The short pre-worker critical-path groups below use tighter outer bounds;
+those override longer per-command defaults and never omit raw binding checks.
+Main
 stage ends no later than75s from arm; reserve45s for cleanup/baseline, whole
 120s. If API/transport/ownership or cleanup deadline fails, stop and handoff
 saved nonce/UID/specHash/request/outcome and remaining Job/CNP explicitly to
@@ -220,6 +239,57 @@ PM's trusted host API operator. Do not claim restoration because TTL expired
 or Job exited. Unacknowledged create cannot be deleted by guessed name.
 
 ## Validation and next gate
+
+### Fixed sequential holder critical path
+
+Before arm/holder start: build/cache images; validate fresh full baseline and
+API/CoreDNS owner/service/slice sources; prepare static holder/collector source,
+raw-reading argv and policy/program templates; identify the original native
+reference and prepare source imports. No provider address is resolved early.
+Dynamic raw inputs and validation are not precomputed or skipped.
+
+After actual holder PID1 start, the dependency chain is fixed:
+
+| Group | Outer bound including kill | Required work / stop behavior |
+| --- | --- | --- |
+| original |3s| Parallel raw owner/PodList/Service/CEP/agent reads plus numeric native reference and original-scope check; late→no collector |
+| collector |6s| One fixed5s+1kill API exec, no retry; late→no later collection/create/provider |
+| binding |2s| Parallel current API/service/owner bindings, recompute exact equality; late→no CNP |
+| lease |1s| Parse complete raw A/CNAME response, TTL/clock and render exact /32; late→no CNP |
+| create |2s| One conditional new CNP create, save acknowledged identity; uncertain/late→cleanup/handoff |
+| realization |2s| Parallel fresh raw Pod/CEP/agent/policy sources plus numeric native response and exact scope; late→no worker |
+| emit |1s| Recheck full scope and emit trusted worker bytes; late→no worker |
+| dispatch |1s| Start the worker transport; remote actual first-connect guard remains authoritative |
+
+`access_numeric_timing.py --stage GROUP --holder /evidence/holder.json` in
+Docker returns one absolute stageDeadlineNs. Preserve it once. Bound each
+group to remainingMs, including its kill allowance; all reads in a listed
+group may run concurrently but preserve each complete raw response. Imports,
+tool startup, JSON assembly and validation count toward both the absolute18s
+holder cutoff and their group, never run outside a saved deadline. After the
+group, call the same command with `--completed /evidence/saved-stage.json`;
+missing/late/completion refusal enters cleanup **before** the next create or
+send. Never regenerate a deadline or widen a timeout to make a slow path fit.
+The host75s reservations apply in addition to these18s checks.
+
+The sum of listed maxima is18s, so spending every maximum cannot pass the
+strict first-send cutoff; this is intentional refusal, not guaranteed
+completion. Prepare static work earlier and require observed stages to be
+faster; if startup/import/cluster realization cannot fit, the attempt sends
+no worker traffic and closes without another holder/address/mode trial.
+There is no assumption that a single-node cluster meets these bounds.
+
+Offline `test_numeric_timing.py` runs the actual holder/owner/parser/binding/
+native scope/program/conditional deletion helpers with scripted I/O delays.
+Observed normal trace: original1.8s, collector2.8s, binding3.6s, lease4.2s,
+create4.5s, realization5.3s, emit5.8s, dispatch6.1s since holder start. Actual
+helper CPU in the first author run was6.053ms. These include scripted I/O
+and tooling costs; they are **not measured live latency**.14s delay injected
+at each pre-worker stage refuses before the next step; pre-create failure
+keeps CNP0/provider0, post-create failure deletes only its exact owned CNP;
+Job cleanup occurs in every case. No raw binding check is removed. The
+separate same-command admission fixtures refuse at elapsed74s before any
+local claim/kubectl call, and delayed CA context never starts TLS.
 
 Tests must include malformed/stale DNS chain/TTL/clock, target/nonce/UID
 substitution, foreign cleanup, singleton/native rule failures, callback

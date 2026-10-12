@@ -71,6 +71,9 @@ def numeric_once(expected, socket_factory=socket.socket, context_factory=ssl.cre
                 context = context_factory()
                 if context.verify_mode != ssl.CERT_REQUIRED or context.check_hostname is not True:
                     raise ValueError()
+                # CA loading/validation may itself consume time. The check
+                # guarding actual ClientHello must follow that preparation.
+                check(3)
                 with context.wrap_socket(channel, server_hostname='chatgpt.com') as secure:
                     if not secure.getpeercert(): raise ValueError()
                 report['provider'] = 'tls_verified'

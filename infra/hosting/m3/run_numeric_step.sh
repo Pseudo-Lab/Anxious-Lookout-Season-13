@@ -28,10 +28,21 @@ fi
 [ -f "$numeric_dir/operation.startCs" ] && [ ! -L "$numeric_dir/operation.startCs" ] || exit 1
 read -r numeric_start <"$numeric_dir/operation.startCs"
 [[ "$numeric_start" =~ ^[0-9]+$ ]] || exit 1
-# At least45s of the120s operation is reserved for cleanup. This budget gate
-# must also be called before each create through mode budget.
-[ "$numeric_now" -ge "$numeric_start" ] && [ "$numeric_now" -lt "$((numeric_start+7500))" ] || exit 1
-[ "$numeric_mode" != budget ] || exit 0
+# Admission reserves the operation bound, not merely its starting instant.
+# worker also reserves32s for postexec owner/native/result checks (13+13+6).
+case "$numeric_mode" in
+  collector) numeric_reserve=600 ;;
+  worker) numeric_reserve=4500 ;;
+  budget|budget-create|budget-read) numeric_reserve=1300 ;;
+  budget-prepare|budget-result) numeric_reserve=600 ;;
+  *) exit 1 ;;
+esac
+numeric_admit() {
+  numeric_clock
+  [ "$numeric_now" -ge "$numeric_start" ] && [ "$((numeric_now+numeric_reserve))" -le "$((numeric_start+7500))" ]
+}
+numeric_admit || exit 1
+case "$numeric_mode" in budget*) exit 0 ;; esac
 case "$numeric_mode" in
   collector)
     [[ "$numeric_pod" =~ ^api-[a-z0-9-]+$ ]] || exit 1
@@ -48,6 +59,7 @@ esac
 [ "$(stat -c %s "$numeric_program")" -le 65536 ] || exit 1
 numeric_body=$(cat "$numeric_program")
 [ -n "$numeric_body" ] || exit 1
+numeric_admit || exit 1
 : >"$numeric_dir/$numeric_mode.claim"
 numeric_exit=0
 (
