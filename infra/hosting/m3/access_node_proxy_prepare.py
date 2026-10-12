@@ -518,7 +518,7 @@ def dns_job(b, receipt, nonce):
     return job
 
 
-def service_membership(services, labels, pod_name):
+def service_membership(services, labels, pod_name, job_name=JOBS['node']):
     selected = []
     for service in items(services):
         m = service['metadata']
@@ -534,7 +534,7 @@ def service_membership(services, labels, pod_name):
             if service['spec'].get('publishNotReadyAddresses', False) is not False:
                 raise ValueError()
             selected.append({'name': m['name'], 'uid': m['uid']})
-    if len(selected) != 1 or not pod_name.startswith(JOBS['node']+'-'):
+    if len(selected) != 1 or not pod_name.startswith(job_name+'-'):
         raise ValueError()
     return selected
 

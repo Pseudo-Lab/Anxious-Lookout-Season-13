@@ -14,7 +14,7 @@ def pin(pod, cep, agent):
     node = pod['spec']['nodeName']
     if namespace == 'codex-trial':
         contrast = name.startswith(('access-runner-dns-l4-v1-', 'access-runner-dns-l7-v1-'))
-        if (not contrast and not name.startswith(('access-dns-observed-diagnose-v1-', 'access-dns-proxy-listener-diagnose-v1-', 'access-runner-dns-node-v1-'))
+        if (not contrast and not name.startswith(('access-dns-observed-diagnose-v1-', 'access-dns-proxy-listener-diagnose-v1-', 'access-runner-dns-node-v1-', 'access-runner-numeric-tls-v1-'))
                 or meta['labels'].get('app') != ('access-runner-dns-control' if contrast else 'access-web-runner')):
             raise ValueError()
     elif namespace == 'kube-system':

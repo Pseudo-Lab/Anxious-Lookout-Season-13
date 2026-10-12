@@ -47,17 +47,21 @@ def emit(snapshot, inputs, images, baseline, services, phase, nonce):
 
 
 def selected(job, pod, phase, nonce):
-    ref = identity(job, 'Job', JOBS[phase])
+    return selected_exact(job, pod, JOBS[phase], nonce, holder_command(nonce), 50)
+
+
+def selected_exact(job, pod, name, nonce, expected_command, deadline):
+    ref = identity(job, 'Job', name)
     template = job['spec']['template']
     c = template['spec']['containers'][0]
     if (len(template['spec']['containers']) != 1 or c['image'] != direct.RUNNER_IMAGE
-            or c['command'] != holder_command(nonce) or c['env'] != ENV
-            or job['spec']['backoffLimit'] != 0 or job['spec']['activeDeadlineSeconds'] != 50):
+            or c['command'] != expected_command or c['env'] != ENV
+            or job['spec']['backoffLimit'] != 0 or job['spec']['activeDeadlineSeconds'] != deadline):
         raise ValueError()
     meta, spec, status = pod['metadata'], pod['spec'], pod['status']
     owners = meta['ownerReferences']
     if (pod.get('kind') != 'Pod' or meta['namespace'] != 'codex-trial'
-            or not meta['name'].startswith(JOBS[phase]+'-') or not meta.get('uid') or meta.get('deletionTimestamp')
+            or not meta['name'].startswith(name+'-') or not meta.get('uid') or meta.get('deletionTimestamp')
             or len(owners) != 1 or owners[0].get('kind') != 'Job' or owners[0].get('name') != ref['name']
             or owners[0].get('uid') != ref['uid'] or owners[0].get('controller') is not True
             or status['phase'] != 'Running' or len(spec['containers']) != 1

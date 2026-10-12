@@ -187,3 +187,8 @@ and a separately approved one-node NodeConfig/agent recreation trial with
 default rollback. It includes exact UID/RV deletion guards, original Runner
 DNS policy/Service gates, two bounded agent replacements and host API recovery.
 The package does not authorize live execution or a persistent mode change.
+
+[ACCESS-NUMERIC-TRANSPORT.md](ACCESS-NUMERIC-TRANSPORT.md) prepares one separate
+anonymous callback TCP/provider TLS check with a short, validated A/CNAME lease
+and temporary nonce-selected /32 policy. Original DNS L7 and node configuration
+stay intact; exact cleanup and independent live review are required.
