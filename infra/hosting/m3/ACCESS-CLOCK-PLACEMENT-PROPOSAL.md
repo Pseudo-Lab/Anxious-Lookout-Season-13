@@ -43,6 +43,29 @@ reads. This narrows connection ambiguity but cannot locate an outer execution
 environment or prove the daemon's physical Node. It remains documentation
 only pending source preparation and independent review.
 
+## Consumed client-selection observation and remaining decision
+
+PM performed the separately approved9d2761e client-only observation once at
+/tmp/issue7-client-selection.gDreMg. Reported exit0 and retained receipts match:
+12cs within300cs; only budget/result/complete JSON files, mode0600. Offline
+replay validates the permitted result: current_context, both overrides false,
+unix, collected, reason none. Both physical placement fields remain unproven,
+both action authorizations false; result reports controllerCreated=false and
+daemonQueries/Kubernetes0. Those fields describe the fixed result and reviewed collector;
+the three files are not an independent system-call audit. Process exit0 is
+PM's execution report, not independently encoded by these receipts. Reviewer
+independently accepts the retained bounded selection evidence.
+No raw context name or endpoint was retained. This narrows client selection;
+a Unix transport is not proof of direct-node or local-daemon identity.
+
+The existing-provenance gap remains; another clock/client/identity probe would
+not supply the missing authority. The next concrete re-scope is administrative
+launch/daemon-placement attestation, defined in
+ACCESS-PLACEMENT-ATTESTATION-RESCOPE.md. Its decision is whether a trusted
+native retained-Node operator route can be justified from authoritative
+records, rather than inferred from matching metadata or selected transport.
+There is no alternate command, runtime switch or guard relaxation proposed.
+
 If those records establish a placement discrepancy, prepare an exact source/
 argv proposal to run the unchanged broker from a trusted direct operator on
 the retained Node with its local Docker execution context. Treat that as a
