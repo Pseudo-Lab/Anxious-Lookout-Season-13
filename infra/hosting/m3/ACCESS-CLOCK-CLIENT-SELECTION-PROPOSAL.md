@@ -5,6 +5,10 @@ record establishes the command chain, not the tool environment or daemon
 placement. The consumed runtime capture's corrected interpretation and
 parser closure atbb3f303 do not authorize another observation. Keep the
 direct-node placement candidate conditional and all original guards intact.
+The bounded source is now prepared separately in ACCESS-CLIENT-SELECTION.md;
+that concrete revision requires its own execution review. An isolated actual
+CLI both-variable counterexample is handled by refusing disagreement before
+inspect; it does not override the selected context or assert physical placement.
 
 ## Purpose and limits
 
