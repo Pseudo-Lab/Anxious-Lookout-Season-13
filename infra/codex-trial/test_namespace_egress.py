@@ -254,17 +254,23 @@ def test_api_ingress_guard_refuses_unusable_runner_path(drift):
 
 
 @pytest.mark.parametrize("drift", ["none", "not-listed", "pod-ready", "endpoint-ready", "endpoint-unknown",
-                                   "endpoint-serving", "publisher-change", "uid"])
-def test_live_canary_isolation_guard(tmp_path, drift):
+    "endpoint-serving", "publisher-change", "uid", "missing-reference-ready", "other-reference-ready",
+    "missing-reference-unready", "other-reference-unready", "uid-other-ip", "uid-extra-ip",
+    "uid-no-address", "pod-ip-mismatch", "pod-ips-missing", "family-mismatch", "unknown-family",
+    "other-reference-name", "other-reference-namespace", "other-reference-kind", "dual-stack",
+    "ipv6-missing-reference-ready", "unrelated-endpoint"])
+def test_live_canary_isolation_guard(drift):
     resources = service_snapshot()
     source = probe_emit("example.invalid/api@sha256:" + "a" * 64, resources, hosting_snapshot())["items"][1]
     source["metadata"]["uid"] = "owned-source"
-    source["status"] = {"phase": "Running", "conditions": [{"type": "Ready", "status": "False"}],
+    source["status"] = {"phase": "Running", "podIP": "10.77.1.123", "podIPs": [{"ip": "10.77.1.123"}],
+        "conditions": [{"type": "Ready", "status": "False"}],
         "containerStatuses": [{"ready": False, "state": {"running": {}}}]}
     resources["items"].append(source)
-    slices = {"kind": "EndpointSliceList", "items": [{"metadata": {
+    slices = {"kind": "EndpointSliceList", "items": [{"addressType": "IPv4", "metadata": {
         "namespace": NS, "labels": {"kubernetes.io/service-name": "access-web-runner-v1"}},
-        "endpoints": [{"targetRef": {"uid": "owned-source"}, "conditions": {"ready": False, "serving": False}}]}]}
+        "endpoints": [{"addresses": ["10.77.1.123"], "targetRef": {"uid": "owned-source", "kind": "Pod",
+            "namespace": NS, "name": "trial-egress-source-v1"}, "conditions": {"ready": False, "serving": False}}]}]}
     endpoint = slices["items"][0]["endpoints"][0]
     if drift == "not-listed":
         slices["items"] = []
@@ -280,7 +286,40 @@ def test_live_canary_isolation_guard(tmp_path, drift):
         resources["items"][0]["spec"]["publishNotReadyAddresses"] = True
     elif drift == "uid":
         source["metadata"]["uid"] = "replaced"
-    if drift in {"none", "not-listed"}:
+    elif drift in {"missing-reference-ready", "other-reference-ready", "missing-reference-unready", "other-reference-unready"}:
+        endpoint["targetRef"] = {} if drift.startswith("missing-reference") else {"uid": "stale-other-source"}
+        if drift.endswith("-ready"):
+            endpoint["conditions"] = {"ready": True, "serving": True}
+    elif drift == "uid-other-ip":
+        endpoint["addresses"] = ["10.77.1.124"]
+    elif drift == "uid-extra-ip":
+        endpoint["addresses"].append("10.77.1.124")
+    elif drift == "uid-no-address":
+        del endpoint["addresses"]
+    elif drift == "pod-ip-mismatch":
+        source["status"]["podIP"] = "10.77.1.124"
+    elif drift == "pod-ips-missing":
+        del source["status"]["podIPs"]
+    elif drift == "family-mismatch":
+        slices["items"][0]["addressType"] = "IPv6"
+    elif drift == "unknown-family":
+        slices["items"][0]["addressType"] = "FQDN"
+    elif drift in {"other-reference-name", "other-reference-namespace", "other-reference-kind"}:
+        endpoint["targetRef"][drift.split("-")[-1]] = "other"
+    elif drift in {"dual-stack", "ipv6-missing-reference-ready"}:
+        source["status"]["podIPs"].append({"ip": "fd00::123"})
+        ipv6 = deepcopy(slices["items"][0])
+        ipv6["addressType"] = "IPv6"
+        ipv6["endpoints"][0]["addresses"] = ["fd00::123"]
+        if drift == "ipv6-missing-reference-ready":
+            ipv6["endpoints"][0]["targetRef"] = {}
+            ipv6["endpoints"][0]["conditions"] = {"ready": True, "serving": True}
+        slices["items"].append(ipv6)
+    elif drift == "unrelated-endpoint":
+        endpoint["addresses"] = ["10.77.1.124"]
+        endpoint["targetRef"] = {"uid": "unrelated"}
+        endpoint["conditions"] = {"ready": True, "serving": True}
+    if drift in {"none", "not-listed", "dual-stack", "unrelated-endpoint"}:
         isolation_guard(resources, slices, "owned-source")
     else:
         with pytest.raises(ValueError):

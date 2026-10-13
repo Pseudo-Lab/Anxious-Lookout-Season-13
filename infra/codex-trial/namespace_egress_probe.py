@@ -47,6 +47,14 @@ def isolation_guard(resources, slices, source_uid):
     probe = source["spec"]["containers"][0]
     require(probe["readinessProbe"].get("exec") == {"command": ["python", "-B", "-c", "raise SystemExit(1)"]})
     require(probe["command"] == ["python", "-B", "/probe/namespace_egress_probe.py", "serve"])
+    addresses = source["status"].get("podIPs", [])
+    require(isinstance(addresses, list) and 1 <= len(addresses) <= 2)
+    source_ips = [ipaddress.ip_address(entry["ip"]) for entry in addresses]
+    require(source["status"].get("podIP") == addresses[0]["ip"])
+    require(all(str(value) == entry["ip"] and not (value.is_unspecified or value.is_loopback or
+                value.is_multicast or value.is_link_local) for value, entry in zip(source_ips, addresses)))
+    require(len({value.version for value in source_ips}) == len(source_ips))
+    source_addresses = {str(value) for value in source_ips}
     labels = source["metadata"]["labels"]
     names = {obj["metadata"]["name"] for obj in resources["items"] if obj.get("kind") == "Service" and
         obj["spec"].get("selector") and all(labels.get(key) == value
@@ -54,8 +62,22 @@ def isolation_guard(resources, slices, source_uid):
     for obj in slices["items"]:
         require(obj["metadata"].get("namespace") == NS)
         if obj["metadata"].get("labels", {}).get("kubernetes.io/service-name") in names:
+            require(obj.get("addressType") in {"IPv4", "IPv6"})
+            family = 4 if obj["addressType"] == "IPv4" else 6
             for endpoint in obj.get("endpoints", []):
-                if endpoint.get("targetRef", {}).get("uid") == source_uid:
+                values = endpoint.get("addresses", [])
+                require(isinstance(values, list) and values)
+                endpoint_ips = [ipaddress.ip_address(value) for value in values]
+                require(all(value.version == family and str(value) == raw for value, raw in zip(endpoint_ips, values)))
+                require(len(set(values)) == len(values))
+                reference = endpoint.get("targetRef", {})
+                require(isinstance(reference, dict))
+                if reference.get("uid") == source_uid or source_addresses.intersection(values):
+                    # Routing uses addresses, not targetRef. Either association
+                    # requires both identities to agree, even for unready entries.
+                    require(reference.get("uid") == source_uid and reference.get("kind") == "Pod" and
+                            reference.get("namespace") == NS and reference.get("name") == NAMES[0])
+                    require(set(values) == {str(value) for value in source_ips if value.version == family})
                     require(endpoint.get("conditions", {}).get("ready") is False)
                     require(endpoint.get("conditions", {}).get("serving") is not True)
     print(json.dumps({"sourceRunning": True, "sourceReady": False, "usableRunnerServiceEndpoint": False}))

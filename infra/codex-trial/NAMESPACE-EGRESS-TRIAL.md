@@ -133,7 +133,11 @@ rebuild is needed for this policy/source-only change.
    This requires source Running/Ready=False, the exact always-failing readiness,
    unchanged synthetic command, safe matching Service publication, and every
    matching source EndpointSlice entry explicitly ready=false (serving cannot be
-   true). Absence of a source entry is safe; ambiguous/ready entries are refused.
+   true). Match entries by either source UID or any canonical status.podIP/podIPs
+   address, then require both the Pod reference and family-specific routing
+   addresses to agree. Missing/stale targetRef for a source address, matching UID
+   with another address, ambiguous address families or conditions are refused even
+   if the entry claims to be unready. Absence of a source entry is safe.
    Repeat this guard after the connection test. PodReady and Cilium endpoint-ready
    are distinct: actual CEP realization/current revision is still required.
 4. Run peer and source's `loopback` mode with bounded `k -n codex-trial exec <pod>
@@ -278,4 +282,5 @@ actual BPF decisions. Original input checksums are retained for independent revi
 
 Primary sources: [Cilium deny precedence](https://docs.cilium.io/en/stable/security/policy/language/#deny-policies),
 [namespace selectors](https://docs.cilium.io/en/stable/security/policy/kubernetes/),
-[drop monitor](https://docs.cilium.io/en/stable/operations/troubleshooting/).
+[drop monitor](https://docs.cilium.io/en/stable/operations/troubleshooting/),
+[EndpointSlice addresses and targetRef](https://kubernetes.io/docs/reference/kubernetes-api/discovery/endpoint-slice-v1/).
