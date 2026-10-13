@@ -8,6 +8,9 @@ import pytest
 
 from namespace_egress import CNP_NAMES, KEY, NODE, NS, TENANT, emit, namespace_policy, patches, plan, rules, verify
 from namespace_egress_probe import emit as probe_emit
+from namespace_egress_probe import service_guard
+from namespace_egress_probe import api_ingress_guard
+from namespace_egress_probe import isolation_guard
 from render import policy
 
 
@@ -163,8 +166,30 @@ def test_fresh_guard_rejects_policy_and_namespace_drift(tmp_path, drift):
             verify(tmp_path / "before", tmp_path / "fresh")
 
 
+def service_snapshot():
+    return {"kind": "List", "items": [{"kind": "Service", "metadata": {
+        "name": "access-web-runner-v1", "namespace": NS}, "spec": {
+        "selector": {"app": "access-web-runner"}}}]}
+
+
+def hosting_snapshot():
+    expected = {"fromEndpoints": [{"matchLabels": {KEY: NS, "k8s:app": "access-web-runner"}}],
+        "toPorts": [{"ports": [{"port": "8080", "protocol": "TCP"}]}]}
+    def obj(name, spec):
+        return {"kind": "CiliumNetworkPolicy", "metadata": {"name": name, "namespace": "m2-hosting"}, "spec": spec}
+    return {"kind": "List", "items": [obj("hosting-access-web-link-v1", {
+        "endpointSelector": {"matchLabels": {"app": "hosting-api"}}, "ingress": [expected]}),
+        obj("hosting-boundary", {"endpointSelector": {"matchLabels": {"app": "hosting-api"}},
+            "enableDefaultDeny": {"ingress": True, "egress": True}, "ingress": [{
+                "fromEndpoints": [{"matchLabels": {KEY: "kube-system", "k8s:app.kubernetes.io/name": "traefik"}}],
+                "toPorts": [{"ports": [{"port": "8080", "protocol": "TCP"}]}]}]})]}
+
+
 def test_probe_artifacts_have_no_credentials_native_or_controller():
-    items = probe_emit("example.invalid/api@sha256:" + "a" * 64)["items"]
+    hosting = hosting_snapshot()
+    before = deepcopy(hosting)
+    items = probe_emit("example.invalid/api@sha256:" + "a" * 64, service_snapshot(), hosting)["items"]
+    assert hosting == before
     assert [i["kind"] for i in items] == ["ConfigMap", "Pod", "Pod", "Service"]
     for obj in items:
         assert obj["metadata"]["namespace"] == NS
@@ -174,6 +199,92 @@ def test_probe_artifacts_have_no_credentials_native_or_controller():
             assert spec["restartPolicy"] == "Never" and spec["activeDeadlineSeconds"] == 300
             assert not any("secret" in v or "persistentVolumeClaim" in v or "hostPath" in v for v in spec["volumes"])
             assert spec["containers"][0]["command"][-1] == "serve"
+            if obj["metadata"]["name"] == "trial-egress-source-v1":
+                assert obj["metadata"]["labels"]["app"] == "access-web-runner"
+                source = {KEY: NS, "k8s:app": obj["metadata"]["labels"]["app"]}
+                selector = hosting["items"][0]["spec"]["ingress"][0]["fromEndpoints"][0]["matchLabels"]
+                assert all(source.get(key) == value for key, value in selector.items())
+                readiness = spec["containers"][0]["readinessProbe"]["exec"]["command"]
+                result = subprocess.run(readiness, capture_output=True)
+                assert result.returncode == 1
+            else:
+                assert obj["metadata"]["labels"]["app"] == "trial-namespace-egress-probe"
+
+
+@pytest.mark.parametrize("drift", ["runner-publishes", "other-publishes", "runner-missing", "selector"])
+def test_service_guard_rejects_unready_canary_exposure(drift):
+    values = service_snapshot()
+    runner = values["items"][0]
+    if drift == "runner-publishes":
+        runner["spec"]["publishNotReadyAddresses"] = True
+    elif drift == "other-publishes":
+        other = deepcopy(runner)
+        other["metadata"]["name"] = "other"
+        other["spec"]["publishNotReadyAddresses"] = True
+        values["items"].append(other)
+    elif drift == "runner-missing":
+        values["items"] = []
+    else:
+        runner["spec"]["selector"] = {}
+    with pytest.raises(ValueError):
+        service_guard(values)
+
+
+def test_service_guard_allows_unrelated_published_peer_service():
+    values = service_snapshot()
+    values["items"].append({"kind": "Service", "metadata": {"name": "peer", "namespace": NS},
+        "spec": {"selector": {"app": "different"}, "publishNotReadyAddresses": True}})
+    service_guard(values)
+
+
+@pytest.mark.parametrize("drift", ["source-label", "port", "deny", "unknown-policy"])
+def test_api_ingress_guard_refuses_unusable_runner_path(drift):
+    values = hosting_snapshot()
+    bridge, boundary = values["items"]
+    if drift == "source-label":
+        bridge["spec"]["ingress"][0]["fromEndpoints"][0]["matchLabels"]["k8s:app"] = "other"
+    elif drift == "port":
+        bridge["spec"]["ingress"][0]["toPorts"][0]["ports"][0]["port"] = "18080"
+    elif drift == "deny":
+        boundary["spec"]["ingressDeny"] = [{"fromEntities": ["all"]}]
+    else:
+        values["items"].append(deepcopy(boundary))
+    with pytest.raises(ValueError):
+        api_ingress_guard(values)
+
+
+@pytest.mark.parametrize("drift", ["none", "not-listed", "pod-ready", "endpoint-ready", "endpoint-unknown",
+                                   "endpoint-serving", "publisher-change", "uid"])
+def test_live_canary_isolation_guard(tmp_path, drift):
+    resources = service_snapshot()
+    source = probe_emit("example.invalid/api@sha256:" + "a" * 64, resources, hosting_snapshot())["items"][1]
+    source["metadata"]["uid"] = "owned-source"
+    source["status"] = {"phase": "Running", "conditions": [{"type": "Ready", "status": "False"}],
+        "containerStatuses": [{"ready": False, "state": {"running": {}}}]}
+    resources["items"].append(source)
+    slices = {"kind": "EndpointSliceList", "items": [{"metadata": {
+        "namespace": NS, "labels": {"kubernetes.io/service-name": "access-web-runner-v1"}},
+        "endpoints": [{"targetRef": {"uid": "owned-source"}, "conditions": {"ready": False, "serving": False}}]}]}
+    endpoint = slices["items"][0]["endpoints"][0]
+    if drift == "not-listed":
+        slices["items"] = []
+    elif drift == "pod-ready":
+        source["status"]["conditions"][0]["status"] = "True"
+    elif drift == "endpoint-ready":
+        endpoint["conditions"]["ready"] = True
+    elif drift == "endpoint-unknown":
+        del endpoint["conditions"]["ready"]
+    elif drift == "endpoint-serving":
+        endpoint["conditions"]["serving"] = True
+    elif drift == "publisher-change":
+        resources["items"][0]["spec"]["publishNotReadyAddresses"] = True
+    elif drift == "uid":
+        source["metadata"]["uid"] = "replaced"
+    if drift in {"none", "not-listed"}:
+        isolation_guard(resources, slices, "owned-source")
+    else:
+        with pytest.raises(ValueError):
+            isolation_guard(resources, slices, "owned-source")
 
 
 @pytest.mark.parametrize("kind,name,accepted", [("pods", "trial-egress-source-v1", True),

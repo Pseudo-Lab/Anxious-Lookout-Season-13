@@ -65,6 +65,12 @@ confirm runner still0, no running trial Pods, PVC/init UID/state preserved,
 hosting api/web/postgres Ready, API mapping disabled and original routes healthy.
 Refresh before applying; check current namespace labels/unchanged tenant selector
 again after the test. A conflicting concurrent policy update stops the trial.
+Capture includes current m2-hosting CNPs; the canary emitter separately requires
+that fresh `hosting-cnp.json` and `resources.json`. It validates the unchanged
+hosting API bridge's exact runner namespace/app/TCP8080 ingress, rejects matching
+ingress deny or unrecognized hosting policy selectors, and refuses any trial
+Service selecting the source with publishNotReadyAddresses=true. Retain these
+hosting ingress/Service inputs unchanged for after-test comparison too.
 
 Every JSON Patch tests exact UID and entire spec/specs. Status changes alone are
 allowed; replacement, changed ingress or concurrent rule changes are refused.
@@ -94,7 +100,8 @@ rebuild is needed for this policy/source-only change.
    GET updated CNP generation and Valid=True; confirm the exact rule appears in
    source-node agent `cilium-dbg policy get`. API success/Valid=True is not datapath
    proof. Keep every old restriction unchanged at this point.
-2. Render `namespace_egress_probe.py emit <existing-reviewed-imported-API@sha256:...>`
+2. Render `namespace_egress_probe.py emit <existing-reviewed-imported-API@sha256:...>
+   --resources /fresh/resources.json --hosting-policies /fresh/hosting-cnp.json`
    in the same Docker source mount into a private `probe.json`. PM verifies existing
    containerd image provenance/UID10001 and does not import a fixture/tag-only image.
    The result contains one ConfigMap, two300s Pods and one Service. No credentials,
@@ -103,14 +110,32 @@ rebuild is needed for this policy/source-only change.
    Server dry-run and `k create -f "$EGRESS_PROBE" -o json` retaining each UID.
    All four names must have been absent. If create partially succeeds, GET these
    exact names and record which newly created UIDs belong to this attempt.
-3. Wait up to60s for both Pods Ready; retain Pod/CEP/Service/EndpointSlice GETs.
+3. Wait up to60s for peer Ready and source Running with a running probe container.
+   Source **must stay Ready=False**: its readiness exec always exits1, from startup.
+   Retain Pod/CEP/Service/EndpointSlice GETs.
    Source/peer are `trial-egress-source-v1`/`trial-egress-peer-v1`, label
-   `app=trial-namespace-egress-probe`. Existing CNP role selectors do not select
-   them, tenant selector is false, and new CNP enforces egress only. Confirm peer
+   source `app=access-web-runner` and peer `app=trial-namespace-egress-probe`.
+   This matches the API's existing runner ingress without changing it. The source
+   is selected by the old runner CNP and the new namespace policy; peer is selected
+   only by the new namespace policy. Tenant selector is false. Confirm peer
    endpoint realized ingress enforcement is disabled (no ingress drop policy),
    and source endpoint realized egress is enabled with new deny at current policy
    revision. Verify peer Pod UID/IP is the exact Ready EndpointSlice targetRef for
    its Service. IPv4 only for this package's listener; an IPv6-only target stops.
+   Source is also selected by the existing Runner Service but must never become
+   a usable endpoint: its unready state and publishNotReadyAddresses=false exclude
+   it from Kubernetes Service routing. It runs no native/HTTP8080/credential/PVC.
+   Before traffic, capture fresh `get pods,services,pvc -n codex-trial -o json`
+   as `resources.json` and `get endpointslices -n codex-trial -o json` as
+   `slices.json` to a new private directory. Run the Docker-mounted tool:
+   `namespace_egress_probe.py isolation --resources /fresh/resources.json
+   --slices /fresh/slices.json --source-uid <retained-create-UID>`.
+   This requires source Running/Ready=False, the exact always-failing readiness,
+   unchanged synthetic command, safe matching Service publication, and every
+   matching source EndpointSlice entry explicitly ready=false (serving cannot be
+   true). Absence of a source entry is safe; ambiguous/ready entries are refused.
+   Repeat this guard after the connection test. PodReady and Cilium endpoint-ready
+   are distinct: actual CEP realization/current revision is still required.
 4. Run peer and source's `loopback` mode with bounded `k -n codex-trial exec <pod>
    -c probe -- python -B /probe/namespace_egress_probe.py loopback` and retain exit0.
    This proves both listeners before the deny attempt. Source readiness alone is
@@ -152,8 +177,9 @@ rebuild is needed for this policy/source-only change.
 
 Only after this evidence passes may existing restrictions be relaxed. There are
 no live trial runtime endpoints at baseline; only these two canaries may run.
-That absence plus realized canary policy avoids an unprotected live role endpoint
-while updating the old policies. New runtime admission remains disabled.
+The source canary is selected by the existing runner CNP, but its new namespace
+deny must already be realized before that CNP is relaxed. No original runner/native
+is running and API mapping remains disabled throughout the connection test.
 
 ## Relaxation, bounded connection checks, and recovery
 
@@ -195,7 +221,18 @@ or port exception, but UDP same-namespace, IPv6, SCTP, ICMP, hostNetwork, node-l
 redirect and preexisting established connections are not datapath-tested here.
 No endpoints are guessed and no failed model turn is retried.
 
-Recovery on failure **or after this connection-only trial**:
+On connection/deny/isolation success, the PM-requested disposition is to keep
+the independently verified egress policies for the existing Codex follow-up.
+UID-delete both canary Pods first, verify actual absence (max60s), then UID-delete
+their Service/ConfigMap and confirm the original Runner Service has no canary
+endpoint, runner still0, mapping disabled and existing hosting/PVC/init/ingress
+unchanged. Keep the namespace policy and five changed policies, including the
+node exception. Record exact retained generations/UIDs/specs and actual results.
+This disposition requires review of this revised source/procedure and successful
+actual evidence; do not retain a partially applied or failed trial as success.
+
+On failure, partial/ambiguous apply, or a later decision to end this overlay,
+use the following recovery:
 
 1. Keep API mapping disabled and runner0; do not supply credentials or start native
    while recovering. Delete only newly created canary Pods using
@@ -218,9 +255,11 @@ Recovery on failure **or after this connection-only trial**:
    completed init/hosting deployments/DB/ingress and original routes. Failed wait
    leaves deny in place. Never delete namespace/PVC/DB/old init or reset the ledger.
 
-An alternative disposition retaining this policy for a separately reviewed live
-Codex continuation must be explicitly recorded by PM/review; cleanup of canaries
-still occurs. This package itself starts no existing runner and supplies no auth.
+Retaining the overlay does not itself authorize new credentials/native operations
+outside the existing reviewed continuation. This package starts no existing runner
+and supplies no auth. Never reapply the old access-web policy renderer during
+continuation: its egress/DNS allow-list would change the verified overlay, while
+its hosting ingress must stay unchanged.
 Actual Codex readiness requires the retained reviewed access-web runtime/import,
 private selected source/owner/state/window, API mapping/lifecycle procedure and
 existing max3 durable budget. Report missing/expired inputs individually. Network
