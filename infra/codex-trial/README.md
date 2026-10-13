@@ -1,5 +1,11 @@
 # Existing K3s /codex-trial private HTTPS candidate (#7)
 
+For the user-authorized 2026-10-13 namespace egress connection trial, use
+[NAMESPACE-EGRESS-TRIAL.md](NAMESPACE-EGRESS-TRIAL.md). That reviewed overlay
+preserves existing ingress and changes only the live trial egress scope and its
+node-protection exception. The renderer below still emits the original restricted
+bootstrap/enable policies; do not reapply its policy part during the overlay trial.
+
 This is an **emit-only, independently reviewable candidate** for `task/m3-codex-login`.
 PM operates after exact source/image/procedure review and supplies actual inputs privately.
 No command in `render.py` connects to Kubernetes, a database or provider. Never apply
