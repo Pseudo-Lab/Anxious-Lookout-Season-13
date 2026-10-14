@@ -131,3 +131,17 @@ def test_fixture_stopping_uses_synthetic_binding(admin, owner, t0):
     set_phase(admin, owner, 'stopping')
     row = inspect(admin, owner)
     assert row['phase'] == 'stopping' and row['podBound'] and not row['creationReserved']
+
+
+@pytest.mark.parametrize('suffix', ['?host=operating.invalid', '?user=other&password=synthetic-override',
+    '?dbname=other', '?hostaddr=192.0.2.1', '?service=other', '?connect_timeout=3'])
+def test_fixture_rejects_all_url_options_before_engine(monkeypatch, suffix):
+    monkeypatch.setenv('APP_ENV', 'test')
+    monkeypatch.setenv('OAUTH_MODE', 'mock')
+    monkeypatch.setenv('RUNNER_HTTP_FIXTURE', 'true')
+    monkeypatch.setenv('ADMIN_DATABASE_URL',
+        'postgresql+psycopg://postgres:disposable-runner-admin@db/runner_runtime_test' + suffix)
+    def unexpected_engine(*args, **kwargs):
+        pytest.fail('Invalid URL reached engine construction')
+    monkeypatch.setattr('tests.runner_phase_fixture.create_engine', unexpected_engine)
+    with pytest.raises(Refused): fixture_engine()

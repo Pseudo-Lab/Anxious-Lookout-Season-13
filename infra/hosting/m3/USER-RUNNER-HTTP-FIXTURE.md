@@ -65,6 +65,11 @@ fixture account/project; never clear receipts. No fixture endpoint is added to A
 
 The phase script guards APP_ENV=test, OAUTH_MODE=mock, RUNNER_HTTP_FIXTURE=true,
 the db hostname, disposable database names and exact synthetic admin credentials.
+It accepts only the postgresql+psycopg driver and the default5432 port (implicit
+or explicit). All URL query parameters are rejected before engine construction,
+including otherwise harmless options, because libpq options can override the
+validated host, user, password or database. Keep the disposable Compose connection
+URL without query options.
 The helper lives in the test-only `tests` package. Test-origin flags and synthetic
 phase transitions are not operations evidence. Front should verify GET read-only,
 account isolation/late responses, drafts/history preservation, no automatic POST

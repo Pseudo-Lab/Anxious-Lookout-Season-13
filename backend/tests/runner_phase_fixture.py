@@ -23,9 +23,13 @@ def fixture_engine():
             and os.getenv('RUNNER_HTTP_FIXTURE') == 'true')
     raw = os.environ['ADMIN_DATABASE_URL']
     url = make_url(raw)
+    # libpq query parameters override URL authority fields. Reject all options
+    # before constructing an engine, including alternate drivers/ports.
+    require(not url.query and url.drivername == 'postgresql+psycopg'
+            and url.port in {None, 5432})
     require(url.host == 'db' and url.database in {'hosting_test', 'runner_runtime_test'}
             and url.username == 'postgres' and url.password in {'disposable-test-admin', 'disposable-runner-admin'})
-    return create_engine(raw, hide_parameters=True)
+    return create_engine(url, hide_parameters=True)
 
 
 def set_phase(engine, owner, phase, *, creation_reserved=False):
