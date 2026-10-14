@@ -18,6 +18,7 @@ import { clearDraft, loadDraft, saveDraft } from "@/lib/research/chatState";
 import { useAuth } from "@/hooks/useAuth";
 import type { AcceptedScope, PageDescriptor, SessionDetail, SessionItem, ToolCallItem } from "@/lib/research/types";
 import { describePage, kindText, sameDescriptor, unsupportedHint } from "@/lib/research/pageContext";
+import { own } from "@/lib/research/own";
 import { formatDateTime, toDisplayText } from "@/lib/research/format";
 import {
   CodexStatusView,
@@ -79,7 +80,7 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
           <span className="font-mono text-stone-800">{item.name}</span>
         </span>
         <span className={`text-xs ${item.status === "rejected" ? "font-medium text-amber-700" : "text-stone-500"}`}>
-          {TOOL_STATUS_LABELS[item.status] ?? item.status}
+          {own(TOOL_STATUS_LABELS, item.status) ?? item.status}
         </span>
       </button>
       {item.status === "rejected" && (

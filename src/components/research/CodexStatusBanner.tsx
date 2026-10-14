@@ -3,6 +3,8 @@
 import type { FetchResult } from "@/lib/api/client";
 import type { CodexStatus } from "@/lib/research/types";
 import { useCodexRunner, useCodexStatus } from "@/components/research/CodexStatusProvider";
+import { isUncertain } from "@/lib/research/idempotency";
+import { own } from "@/lib/research/own";
 import { formatDateTime } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
@@ -50,7 +52,7 @@ const ACTION_LABELS: Record<RunnerAction, string> = { prepare: "대화 준비", 
 /** 실행 환경 상태(아는 reason)면 그 안내. */
 export function runnerState(result: FetchResult<CodexStatus> | null): RunnerState | null {
   if (!result?.ok || result.data.available || !result.data.reason) return null;
-  return RUNNER_STATES[result.data.reason] ?? null;
+  return own(RUNNER_STATES, result.data.reason) ?? null;
 }
 
 /** 실행 환경 준비 버튼(대화 준비·다시 시도·환경 다시 켜기). 누를 때마다 새 준비 요청이다. 준비 대상 계정에만 보인다. */
@@ -70,9 +72,14 @@ export function RunnerActionButton({ result }: { result: FetchResult<CodexStatus
   );
 }
 
-/** 서버가 접수할 수 없다고 확인한 상태(available:false)인지. 조회 실패는 잠그지 않는다(서버가 선접수에서 다시 거른다). */
+/**
+ * 보내기를 잠글지. 서버가 접수할 수 없다고 확인한 상태(available:false)와 확정 조회 거절(401/403 등, 이전 API의
+ * 권한 없음 포함)은 잠근다. 일시적 조회 실패(네트워크·timeout·5xx)만으로는 잠그지 않는다(서버가 선접수에서 다시 거른다).
+ */
 export function codexBlocked(result: FetchResult<CodexStatus> | null): boolean {
-  return result?.ok === true && !result.data.available;
+  if (!result) return false;
+  if (!result.ok) return !isUncertain(result.failure);
+  return !result.data.available;
 }
 
 // Codex 연결 상태. 서버가 보고한 그대로 표시하고, 확인되지 않은 연결을 정상으로 보이게 하지 않는다.
@@ -90,7 +97,7 @@ export function CodexStatusView({ result }: { result: FetchResult<CodexStatus> |
       {s.remainingAdmissions !== undefined && <span className="block text-xs">남은 요청 횟수: {s.remainingAdmissions}</span>}
     </>
   );
-  const runner = RUNNER_STATES[s.available ? "" : (s.reason ?? "")];
+  const runner = s.available ? undefined : own(RUNNER_STATES, s.reason);
   if (runner) {
     return (
       <Notice tone={runner.action === "retry" ? "warn" : "info"}>
@@ -111,7 +118,7 @@ export function CodexStatusView({ result }: { result: FetchResult<CodexStatus> |
     );
   }
   if (!s.available) {
-    const why = (s.reason && UNAVAILABLE_REASONS[s.reason]) ?? "Codex를 사용할 수 없습니다.";
+    const why = own(UNAVAILABLE_REASONS, s.reason) ?? "Codex를 사용할 수 없습니다.";
     return (
       <Notice tone="warn">
         {why} 새 대화를 진행할 수 없지만 이전 대화 기록은 계속 볼 수 있습니다. 다른 모델로 자동 전환하지 않습니다.

@@ -94,7 +94,7 @@ function runnerStatus(owner) {
   if (runnerMode.hint !== "") {
     const n = Number(runnerMode.hint);
     out.retryAfterSeconds = Number.isNaN(n) ? runnerMode.hint : n;
-  } else if (RUNNER_HINT[st]) out.retryAfterSeconds = RUNNER_HINT[st];
+  } else if (Object.hasOwn(RUNNER_HINT, st)) out.retryAfterSeconds = RUNNER_HINT[st];
   return out;
 }
 function prepareRunner(owner, b) {
@@ -392,7 +392,8 @@ function handleMutation(owner, method, path, b, user) {
       const scope = resolved.scope;
       // #10: 실행 환경이 사용 가능하지 않으면 접수 전 확정 거절(예약·기록 없음)
       if (runnerMode.initial && runnerOf(owner) !== "ready") {
-        return fail(503, RUNNER_PREFLIGHT[runnerOf(owner)] ?? "codex_unavailable", "Runner is not ready");
+        const st = runnerOf(owner);
+        return fail(503, Object.hasOwn(RUNNER_PREFLIGHT, st) ? RUNNER_PREFLIGHT[st] : "codex_unavailable", "Runner is not ready");
       }
       if (GATED_REASONS.includes(researchMode.codex)) return fail(503, `codex_${researchMode.codex}`, "Codex is not available");
       // 계약에 없는 codex_* 503: 결과 불명으로 취급되어야 한다(서버는 아무것도 하지 않음)

@@ -18,6 +18,7 @@ import { canPrepareRunner, canUseResearch } from "@/lib/auth/api";
 import { API_ENABLED } from "@/lib/constants";
 import { getCodexStatus, prepareCodexRunner } from "@/lib/research/api";
 import { isUncertain, uuidV4 } from "@/lib/research/idempotency";
+import { own } from "@/lib/research/own";
 import type { CodexStatus } from "@/lib/research/types";
 
 // Codex 연결·실행 환경 상태(api-contracts/issue10-user-runners-interface-v1.md). 모든 페이지에서 한 곳만 관리한다.
@@ -195,16 +196,19 @@ export function CodexStatusProvider({ children }: { children: ReactNode }) {
   // 일시 상태 다시 조회: 열린 대화창이 있고 탭이 보일 때만, 안내 간격(없으면 기본) ±15% 흔들림, 연결 문제·조회 실패는 늘려 가며 최대 60초.
   const visible = useSyncExternalStore(subscribeVisibility, () => document.visibilityState === "visible", () => true);
   const shown = current.result?.ok ? current.result.data : null;
-  const transientReason = shown && !shown.available && shown.reason && shown.reason in TRANSIENT ? shown.reason : null;
+  // 직접 가진 키만 일시 상태로 본다(`__proto__` 등 상속 속성·모르는 reason은 다시 조회하지 않음).
+  const fallbackDelay = shown && !shown.available ? own(TRANSIENT, shown.reason) : undefined;
+  const transientReason = fallbackDelay !== undefined && shown ? shown.reason : null;
   const polling = watchers.pollers > 0 && visible && transientReason !== null;
   useEffect(() => {
-    if (!polling || !transientReason || !shown) return;
-    const base = shown.retryAfterSeconds ?? TRANSIENT[transientReason];
+    if (!polling || !transientReason || !shown || fallbackDelay === undefined) return;
+    const hinted = shown.retryAfterSeconds ?? fallbackDelay;
+    const base = Number.isFinite(hinted) && hinted >= 1 ? hinted : fallbackDelay;
     const backoff = Math.min(MAX_DELAY_S, base * 2 ** Math.min(current.misses, 4));
     const delay = Math.max(1, Math.min(MAX_DELAY_S, backoff)) * (0.85 + Math.random() * 0.3) * 1000;
     const timer = setTimeout(() => void reload(), delay);
     return () => clearTimeout(timer);
-  }, [polling, transientReason, shown, current.misses, current.refreshFailure, reload]);
+  }, [polling, transientReason, fallbackDelay, shown, current.misses, current.refreshFailure, reload]);
 
   // 숨었던 탭이 다시 보이면(열린 대화창이 있을 때) 한 번 조회한다. 조회는 준비를 시작하지 않는다.
   const wasVisible = useRef(visible);

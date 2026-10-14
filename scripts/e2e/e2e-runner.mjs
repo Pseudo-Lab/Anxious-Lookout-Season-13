@@ -457,14 +457,92 @@ await step("N11", async () => {
 
 // N12. 두 탭: 각 탭의 진입이 1회씩(합침은 서버 책임)
 await step("N12", async () => {
+  // 직전 단계(새로고침 진입)의 늦은 POST가 섞이지 않게 탭별로 센다.
+  const isPrepare = (r) => r.method() === "POST" && new URL(r.url()).pathname.endsWith("/research/codex/runner");
+  const fromFirst = [];
+  const fromSecond = [];
+  const onFirst = (r) => isPrepare(r) && fromFirst.push(r.url());
+  page.on("request", onFirst);
   const p0 = (await prepares()).length;
   const second = await track(await context.newPage());
+  second.on("request", (r) => isPrepare(r) && fromSecond.push(r.url()));
   await second.goto(U("/posts/"));
   await second.waitForLoadState("networkidle");
   await second.waitForTimeout(800);
-  const all = await prepares();
-  check("N12. second tab entry sends one POST", all.length === p0 + 1);
+  page.off("request", onFirst);
+  const delta = (await prepares()).length - p0;
+  const detail = `second=${fromSecond.length} first=${fromFirst.length} server=${delta}`;
+  check("N12. second tab entry sends one POST", fromSecond.length === 1, detail);
+  check("N12. first tab sends no POST meanwhile", fromFirst.length === 0, detail);
   await second.close();
+});
+
+// N16. 리뷰(c6b3432) 반례: 같은 코드라도 정확한 503이 아니면(500/502) 결과 불명 — 원 key·body 보관, "보내지 않았습니다" 없음.
+//      정확한 503은 확정 거절(N5). 결과 불명 뒤 같은 내용 다시 보내기는 같은 key.
+await step("N16", async () => {
+  await setMock("runnerAll=ready&codex=fixture&turnMs=2500");
+  await chat.getByRole("button", { name: "← 대화 목록" }).click().catch(() => {});
+  await chat.getByRole("link", { name: /준비 대화/ }).click();
+  for (const status of [500, 502]) {
+    await chat.getByLabel("메시지").fill(`${status} 불명 질문`);
+    await chat.locator("button:not([disabled])", { hasText: /^보내기$/ }).waitFor({ timeout: 8000 });
+    const keys = [];
+    await page.route("**/api/research/sessions/*/messages", (route) => {
+      keys.push(route.request().headers()["idempotency-key"]);
+      return route.fulfill({ status, contentType: "application/json", body: JSON.stringify({ error: { code: "codex_provisioning", message: "x" } }) });
+    });
+    await sendBtn().click();
+    check(`N16. ${status}+codex_provisioning: uncertain notice`, await appears(chat.getByText(/이전 전송의 결과를 확인하지 못했습니다/)));
+    check(`N16. ${status}: no "not sent" confirmation`, (await chat.getByText(/보내지 않았습니다/).count()) === 0);
+    check(`N16. ${status}: original request kept`, (await pendingSends()) === 1 && (await chat.getByLabel("메시지").inputValue()) === `${status} 불명 질문`);
+    await page.unroute("**/api/research/sessions/*/messages");
+    // 같은 내용 다시 보내기는 같은 key(실제 서버가 처리)
+    await chat.getByRole("button", { name: "다시 보내기" }).click();
+    await chat.getByText(`모의 응답: ${status} 불명 질문`).waitFor({ timeout: 15000 });
+    const last = (await mockCalls()).filter((c) => c.method === "POST" && /\/messages$/.test(c.path)).at(-1);
+    check(`N16. ${status}: retry reuses the original key, then settles`, last?.idempotencyKey === keys[0] && (await pendingSends()) === 0, `${last?.idempotencyKey} vs ${keys[0]}`);
+    await chat.getByLabel("메시지").and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
+  }
+});
+
+// N17. 리뷰 반례: 상태 조회 확정 거절(403)은 보내기 잠금(초안·기록 유지), 일시 조회 실패(네트워크)는 마지막 상태 유지·잠그지 않음
+await step("N17", async () => {
+  await chat.getByLabel("메시지").fill("403 상태 질문");
+  await chat.locator("button:not([disabled])", { hasText: /^보내기$/ }).waitFor({ timeout: 8000 });
+  await page.route("**/api/research/codex/status", (route) => route.abort());
+  await chat.getByRole("button", { name: "← 대화 목록" }).click();
+  await chat.getByRole("link", { name: /준비 대화/ }).click();
+  await page.waitForTimeout(1200);
+  check("N17. transient status read failure does not lock send", !(await sendBtn().isDisabled()));
+  await page.unroute("**/api/research/codex/status");
+  await page.route("**/api/research/codex/status", (route) =>
+    route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: { code: "forbidden", message: "x" } }) })
+  );
+  await chat.getByRole("button", { name: "← 대화 목록" }).click();
+  await chat.getByRole("link", { name: /준비 대화/ }).click();
+  check("N17. status 403: error shown", await appears(chat.getByText(/Codex 상태를 확인하지 못했습니다/)));
+  check("N17. status 403: send locked, draft kept", (await sendBtn().isDisabled()) && (await chat.getByLabel("메시지").inputValue()) === "403 상태 질문");
+  check("N17. status 403: history still visible", await appears(chat.getByText("모의 응답: 500 불명 질문")));
+  await page.unroute("**/api/research/codex/status");
+  await chat.getByLabel("메시지").fill("");
+});
+
+// N18. 리뷰 반례: 상속 속성 이름의 reason은 모르는 reason — 일반 안내·전송 잠금·자동 다시 조회 없음(바쁜 반복 없음)
+await step("N18", async () => {
+  for (const reason of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
+    await setMock(`runnerAll=${reason}&hint=`);
+    await chat.getByRole("button", { name: "← 대화 목록" }).click().catch(() => {});
+    await chat.getByRole("link", { name: /준비 대화/ }).click();
+    await chat.getByLabel("메시지").fill(`${reason} 질문`);
+    check(`N18. ${reason}: generic copy`, await appears(chat.getByText(/Codex를 사용할 수 없습니다/)));
+    check(`N18. ${reason}: send locked`, await sendBtn().isDisabled());
+    const r0 = await statusReads();
+    await sleep(5000);
+    const n = (await statusReads()) - r0;
+    check(`N18. ${reason}: no automatic polling`, n === 0, String(n));
+  }
+  await setMock("runnerAll=ready");
+  await chat.getByLabel("메시지").fill("");
 });
 
 // N13. 연구 권한 상실(같은 계정 commenter로 변경): 준비 POST·상태 조회 없음, 기존 권한 안내

@@ -89,6 +89,8 @@ docker run --rm --network "container:$NAME" --ipc=host -e HOME=/tmp \
     chown -R $(id -u):$(id -g) /shots; exit \$rc" || STATUS=$?
 
 if [ "$MODE" = node ]; then
+  # 서버 로그 전체를 남긴다(진단 경로 확인용).
+  docker logs "$NAME" > "$WORK/server.log" 2>&1 || true
   echo "== server log: EACCES=$(docker logs "$NAME" 2>&1 | grep -c EACCES || true) NoFallbackError=$(docker logs "$NAME" 2>&1 | grep -c NoFallbackError || true)"
   [ "$(docker logs "$NAME" 2>&1 | grep -c EACCES || true)" = 0 ] || STATUS=1
 fi

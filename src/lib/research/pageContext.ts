@@ -3,6 +3,7 @@
 // 여기 문구는 안내용이다(권한 근거가 아니다).
 
 import type { PageDescriptor, PageKind } from "@/lib/research/types";
+import { own } from "@/lib/research/own";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -73,7 +74,7 @@ const KIND_TEXT: Record<string, KindText> = {
 };
 
 export function kindText(kind: string): KindText {
-  return KIND_TEXT[kind] ?? { label: "알 수 없는 범위", can: "서버가 정한 범위로 처리되었습니다." };
+  return own(KIND_TEXT, kind) ?? { label: "알 수 없는 범위", can: "서버가 정한 범위로 처리되었습니다." };
 }
 
 // 이 페이지에서 할 수 없는 일의 안내: 관계 연결·보관은 대화창에서 하지 않고 각 화면에서 직접 한다.

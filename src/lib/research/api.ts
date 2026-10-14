@@ -610,9 +610,21 @@ export const archiveSession = (id: string, expectedVersion: number, ctx: Mutatio
 
 // ---- 오류 안내 ----
 
+const RUNNER_REFUSAL_CODES = new Set([
+  "codex_runner_not_prepared",
+  "codex_provisioning",
+  "codex_capacity_wait",
+  "codex_runner_unreachable",
+  "codex_runner_failed",
+  "codex_runner_stopped",
+]);
+
 /** 계약의 오류 코드를 사용자 안내 문구로 바꾼다. 알 수 없는 실패는 null(호출 측이 일반 문구 사용). */
 export function researchErrorMessage(failure: FetchFailure): string | null {
   if (failure.kind !== "http") return null;
+  // #10 실행 환경 거절 문구는 "보내지 않았습니다"를 확정하므로 정확한 503(접수 전 거절)이나 서버가 확정한
+  // 실패 세션의 오류(status 0으로 전달)에만 쓴다. 같은 코드의 500·502 등은 결과 불명이라 일반 안내로 둔다.
+  if (RUNNER_REFUSAL_CODES.has(failure.code ?? "") && failure.status !== 503 && failure.status !== 0) return null;
   switch (failure.code) {
     case "unauthenticated":
       return "로그인이 필요합니다. 다시 로그인해 주세요.";
