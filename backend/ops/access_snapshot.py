@@ -22,6 +22,18 @@ class SourceFailure(CodexFailure):
         self.diagnostic = diagnostic
 
 
+def service_envelope(source, inputs):
+    """Token transport only: bind the one selected source to one reviewed owner/state."""
+    token, account, expiry = source
+    if (not isinstance(inputs, dict) or set(inputs) != {"ownerId", "stateId", "snapshotId", "expectedAccountId"}
+            or inputs["expectedAccountId"] != account):
+        raise CodexFailure("policy_refused")
+    for field in ("ownerId", "stateId", "snapshotId"):
+        canonical_uuid(inputs[field])
+    return {"version": 2, "ownerId": inputs["ownerId"], "stateId": inputs["stateId"],
+            "snapshotId": inputs["snapshotId"], "accountId": account, "accessToken": token, "expiresAt": expiry}
+
+
 def selected_file(path):
     path = Path(path)
     if not path.is_absolute() or path != path.resolve() or path.is_symlink():
@@ -63,7 +75,8 @@ def selected_file(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', required=True, help='Exactly operator-selected canonical file')
-    parser.add_argument('--inputs', help='Private ownerId/stateId/windowId/newWindow JSON; contains no tokens')
+    parser.add_argument('--inputs', help='Private reviewed per-mode metadata JSON; contains no tokens')
+    parser.add_argument('--supply-mode', choices=('trial', 'service'), default='trial')
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--diagnose', action='store_true')
     mode.add_argument('--export', action='store_true')
@@ -79,6 +92,9 @@ def main():
             if not args.inputs:
                 raise CodexFailure('policy_refused')
             value = read_private(Path(args.inputs))
+            if args.supply_mode == 'service':
+                print(json.dumps(service_envelope((token, account, expiry), value)))
+                return 0
             if set(value) != {'ownerId', 'stateId', 'windowId', 'newWindow'} or type(value['newWindow']) is not bool:
                 raise CodexFailure('policy_refused')
             for field in ('ownerId', 'stateId', 'windowId'):

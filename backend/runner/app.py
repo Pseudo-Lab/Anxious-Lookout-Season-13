@@ -23,6 +23,7 @@ from .auth import PersonalAuth, read_private, write_private
 from .projection import PROJECTION_VERSION
 from .binding import canonical_uuid, require_binding
 from .access import AccessAuth, SupplySocket
+from .service_access import ServiceAccessAuth
 from app.page_scope import Scope, scope_summary, tool_allowed
 
 
@@ -89,7 +90,8 @@ class Native:
         if self.fixture and os.getenv("APP_ENV") != "test":
             raise CodexFailure("policy_refused")
         if auth and not self.fixture:
-            if os.getenv("APP_ENV") != "personal-test" or os.getenv("CODEX_EXECUTION_SCOPE") != "personal-private":
+            expected = ("operator-service", "operator-access-service") if getattr(auth, "service", False) else ("personal-test", "personal-private")
+            if (os.getenv("APP_ENV"), os.getenv("CODEX_EXECUTION_SCOPE")) != expected:
                 raise CodexFailure("policy_refused")
         if not self.fixture:
             from .install_codex import EXPECTED_SHA256, HOST_SHA256
@@ -700,13 +702,18 @@ def create_app():
                     if os.getenv('CODEX_EXECUTION_SCOPE') != 'personal-private' or os.getenv('APP_ENV') != 'personal-test' or not state_id:
                         raise CodexFailure('policy_refused')
                     auth = AccessAuth(os.environ['CODEX_ACCESS_CONTROL_DIR'], owner, state_id)
+                elif mode == 'access-service':
+                    if os.getenv('CODEX_EXECUTION_SCOPE') != 'operator-access-service' or os.getenv('APP_ENV') != 'operator-service' or not state_id:
+                        raise CodexFailure('policy_refused')
+                    account = read_private(Path(os.environ['CODEX_OPERATOR_ACCOUNT_FILE']), json_format=False).strip()
+                    auth = ServiceAccessAuth(os.environ['CODEX_ACCESS_CONTROL_DIR'], owner, state_id, account)
                 elif mode != "none":
                     raise CodexFailure("policy_refused")
                 def start_native():
                     return Native(root, model, os.environ.get('CODEX_BIN', '/usr/local/bin/codex'),
                                   os.environ['RESEARCH_TOOL_CALLBACK_URL'], auth=auth,
                                   binding_check=(lambda: require_binding(root, owner, state_id)) if state_id else None)
-                if mode == 'access-only':
+                if mode in {'access-only', 'access-service'}:
                     app.state.auth_failure = 'not_configured'
                     def apply(envelope):
                         if app.state.stopping:
