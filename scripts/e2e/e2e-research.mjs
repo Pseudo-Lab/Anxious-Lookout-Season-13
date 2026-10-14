@@ -643,21 +643,41 @@ check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: 
   });
   const reads = [];
   const posts = [];
+  // 화면이 기한을 보인 뒤 첫 재확인은 "아직 이용 가능"(마지막 응답 그대로)으로 고정한다. 느린 환경에서 첫 재확인이
+  // 이미 서버 만료 뒤에 도착해 이른 응답 경로를 건너뛰지 않게 한다(리뷰 c0815aa 질문). 이후 조회는 실제 모의 응답.
+  // 각 조회의 시각(모의 기한 설정 기준 초)과 응답(ok/expired, 고정 응답은 *)을 남겨 실패 시 원인을 구분한다.
+  let armed = false;
+  let lastBody = null;
+  let forced = 0;
+  let t0 = 0;
+  const trace = () => reads.map((r) => `${(r.at / 1000).toFixed(1)}s:${r.available ? "ok" : "expired"}${r.forced ? "*" : ""}`).join(" ");
   await sk.route("**/api/research/codex/status", async (route) => {
-    reads.push(Date.now());
-    return route.continue();
+    const res = await route.fetch();
+    const body = await res.json();
+    if (armed && forced === 0 && lastBody?.available === true) {
+      forced++;
+      reads.push({ at: Date.now() - t0, available: true, forced: true });
+      return route.fulfill({ response: res, json: lastBody });
+    }
+    reads.push({ at: Date.now() - t0, available: body.available === true });
+    lastBody = body;
+    return route.fulfill({ response: res, json: body });
   });
   await sk.route("**/api/research/sessions/*/messages", async (route) => {
     posts.push(1);
     return route.continue();
   });
+  t0 = Date.now();
   await setMock("codex=fixture&window=8");
   await sk.goto(sessionUrl);
   const sm = sk.locator("#chat-panel");
   await sm.getByText(/이용 가능 기한/).waitFor();
+  armed = true;
+  const readsBefore = reads.length;
   await sm.getByLabel("메시지").fill("시계 차이 질문");
-  check("R9x. clock ahead: locked once server reports expiry", await appears(sm.getByText("보내기가 잠겨 있습니다"), 40000));
-  check("R9x. clock ahead: rechecked more than once after early answer", reads.length >= 3, String(reads.length));
+  check("R9x. clock ahead: locked once server reports expiry", await appears(sm.getByText("보내기가 잠겨 있습니다"), 40000), trace());
+  check("R9x. clock ahead: early recheck answered available (setup)", forced === 1, trace());
+  check("R9x. clock ahead: rechecked again after early answer", reads.length - readsBefore >= 2 && reads.at(-1)?.available === false, trace());
   check("R9x. clock ahead: no send, draft kept", posts.length === 0 && (await sm.getByLabel("메시지").inputValue()) === "시계 차이 질문");
   await sk.close();
 }

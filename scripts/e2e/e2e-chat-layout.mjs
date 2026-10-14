@@ -130,8 +130,16 @@ async function lastColumn() {
     const panel = document.getElementById("chat-panel");
     const th = [...panel.querySelectorAll(".prose table th")].at(-1);
     if (!th) return { found: false };
+    // 스크롤 이벤트 뒤 가장자리 표시가 갱신될 때까지 기다린다(고정 대기 대신, 최대 2초).
+    const until = (cond) =>
+      new Promise((r) => {
+        const t0 = Date.now();
+        const tick = () => (cond() || Date.now() - t0 > 2000 ? r() : requestAnimationFrame(tick));
+        tick();
+      });
+    const frameOf = () => th.closest(".table-scroll")?.parentElement;
     th.scrollIntoView({ block: "center", inline: "end" });
-    await new Promise((r) => setTimeout(r, 150));
+    await until(() => frameOf()?.hasAttribute("data-more-left") && !frameOf()?.hasAttribute("data-more-right"));
     const pr = panel.getBoundingClientRect();
     const r = th.getBoundingClientRect();
     const hit = document.elementFromPoint(r.left + Math.min(r.width / 2, 20), r.top + r.height / 2);
@@ -140,7 +148,7 @@ async function lastColumn() {
     const box = th.closest(".table-scroll");
     out.edgeAtEnd = !!box?.parentElement?.hasAttribute("data-more-left") && !box?.parentElement?.hasAttribute("data-more-right");
     if (box) box.scrollLeft = 0;
-    await new Promise((r) => setTimeout(r, 150));
+    await until(() => frameOf()?.hasAttribute("data-more-right") && !frameOf()?.hasAttribute("data-more-left"));
     return out;
   });
 }
@@ -376,6 +384,7 @@ await step("C7 shots", async () => {
 });
 
 // C9. 계정 전환: 폭은 계정별로 저장되고 다른 계정으로 새지 않는다
+let accountB = null;
 if (resizable) {
   await step("C9", async () => {
     await sep.focus();
@@ -384,7 +393,7 @@ if (resizable) {
     check("C9. account A width 384", (await panelWidth()) === 384);
     await switchAccount();
     await page.reload();
-    const accountB = await accountId();
+    accountB = await accountId();
     check("C9. setup: switched to account B", accountB !== accountA);
     await openPanel().catch(async () => {
       await chat.getByLabel("새 대화 제목").waitFor();
@@ -400,6 +409,120 @@ if (resizable) {
     check("C9. back to A: A's width 384 restored", (await panelWidth()) === 384 && (await accountId()) === accountA, String(await panelWidth()));
     check("C9. back to A: draft kept", (await chat.getByLabel("메시지").inputValue()) === "폭 조절 중 초안");
     await setMock("as=");
+  });
+}
+
+// C11. 리뷰(c0815aa) 반례 회귀: A에서 끄는 도중 같은 탭이 B로 바뀌면 그 끌기는 버리고, 늦은 놓기가 B의 저장 폭을 덮어쓰지 않는다
+if (resizable && accountB) {
+  await step("C11", async () => {
+    await chat.getByRole("button", { name: "← 대화 목록" }).click();
+    const title = chat.getByLabel("새 대화 제목");
+    await title.fill("전환 유도");
+    await title.focus();
+    const aBefore = await storedWidth(accountA);
+    const bBefore = await storedWidth(accountB);
+    check("C11. setup: A and B have different saved widths", aBefore === 384 && bBefore === 920, JSON.stringify([aBefore, bBefore]));
+    // 다른 탭에서 B로 로그인(쿠키 교체). 이 탭은 아직 A 화면이다.
+    await setMock(`as=${accountB}`);
+    await switchAccount();
+    await setMock("as=");
+    const b = await sep.boundingBox();
+    const cx = b.x + b.width / 2;
+    const cy = b.y + b.height / 2;
+    await page.mouse.move(cx, cy);
+    await page.mouse.down();
+    await page.mouse.move(cx - 100, cy, { steps: 5 });
+    check("C11. setup: A is dragging (484px live)", (await panelWidth()) === 484 && (await title.evaluate((el) => el === document.activeElement)));
+    // 끄는 중 Enter: 이전 계정 CSRF의 새 대화 요청이 거절되고 me 재조회로 이 탭이 B가 된다
+    await page.keyboard.press("Enter");
+    const switched = await page
+      .waitForFunction(() => Math.round(document.getElementById("chat-panel")?.getBoundingClientRect().width ?? 0) === 920, null, { timeout: 10000 })
+      .then(() => true)
+      .catch(() => false);
+    check("C11. setup: tab switched to B mid-drag (B's 920px shown)", switched, String(await panelWidth()));
+    // 계정이 바뀐 뒤 계속 끌고 놓는다(늦은 이벤트)
+    await page.mouse.move(cx - 300, cy, { steps: 5 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+    const st = await page.evaluate(() => ({ flag: document.documentElement.hasAttribute("data-chat-resizing"), select: getComputedStyle(document.body).userSelect }));
+    check("C11. late drag/drop does not overwrite B's saved width", (await storedWidth(accountB)) === bBefore && (await panelWidth()) === 920, JSON.stringify([await storedWidth(accountB), await panelWidth()]));
+    check("C11. A's saved width unchanged", (await storedWidth(accountA)) === aBefore, String(await storedWidth(accountA)));
+    check("C11. no resizing state left after account switch", !st.flag && st.select !== "none", JSON.stringify(st));
+    // 같은 탭의 B에서 새로 끌면 정상 저장
+    const b2 = await sep.boundingBox();
+    await page.mouse.move(b2.x + b2.width / 2, cy);
+    await page.mouse.down();
+    await page.mouse.move(b2.x + b2.width / 2 + 100, cy, { steps: 5 });
+    await page.mouse.up();
+    check("C11. new drag in B saves to B", (await storedWidth(accountB)) === 820 && (await storedWidth(accountA)) === aBefore, JSON.stringify([await storedWidth(accountB), await storedWidth(accountA)]));
+  });
+}
+
+// C12. 리뷰(c0815aa) 반례 회귀: 끄는 도중 닫기·작은 화면 전환은 취소이며, 그 뒤의 놓기·포인터 해제·창 포커스 이탈·재열기 후 이동은 저장하지 않는다
+if (resizable) {
+  await step("C12", async () => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await openPanel().catch(() => {});
+    const acc = await accountId();
+    const before = await panelWidth();
+    const saved = await storedWidth(acc);
+    const closeBtn = chat.getByRole("button", { name: "대화창 닫기" });
+    const openBtn = page.getByRole("button", { name: "Codex 대화창 열기" });
+    async function dragStart() {
+      const b = await sep.boundingBox();
+      const cx = b.x + b.width / 2;
+      const cy = b.y + b.height / 2;
+      await page.mouse.move(cx, cy);
+      await page.mouse.down();
+      await page.mouse.move(cx - 100, cy, { steps: 5 });
+      return { cx, cy };
+    }
+    const unchanged = async (name) => {
+      const st = await page.evaluate(() => ({ flag: document.documentElement.hasAttribute("data-chat-resizing"), select: getComputedStyle(document.body).userSelect }));
+      check(name, (await panelWidth()) === before && (await storedWidth(acc)) === saved && !st.flag && st.select !== "none", JSON.stringify([await panelWidth(), await storedWidth(acc), st]));
+    };
+    // a) 닫기 버튼에 초점 → 끌기 → Space로 닫기 → 놓기 → 다시 열기
+    await closeBtn.focus();
+    let p0 = await dragStart();
+    await page.keyboard.press("Space");
+    await chat.waitFor({ state: "hidden" });
+    await page.mouse.move(p0.cx - 200, p0.cy, { steps: 3 });
+    await page.mouse.up();
+    await openBtn.click();
+    await chat.waitFor();
+    await unchanged("C12a. close mid-drag then release: not saved, width unchanged");
+    // b) 닫은 뒤 창 포커스 이탈(blur) → 놓기
+    await closeBtn.focus();
+    p0 = await dragStart();
+    await page.keyboard.press("Space");
+    await chat.waitFor({ state: "hidden" });
+    await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+    await page.mouse.up();
+    await openBtn.click();
+    await chat.waitFor();
+    await unchanged("C12b. close mid-drag then window blur: not saved");
+    // c) 닫고 키보드로 다시 연 뒤에도 같은 끌기를 이어 가지 않음
+    await closeBtn.focus();
+    p0 = await dragStart();
+    await page.keyboard.press("Space");
+    await chat.waitFor({ state: "hidden" });
+    await page.keyboard.press("Enter");
+    await chat.waitFor();
+    await page.mouse.move(p0.cx - 250, p0.cy, { steps: 5 });
+    await page.mouse.up();
+    await unchanged("C12c. reopened while pointer held: old drag not resumed or saved");
+    // d) 끄는 도중 작은 화면(전체 화면 dialog)으로 바뀐 뒤 놓기
+    p0 = await dragStart();
+    await page.setViewportSize({ width: 600, height: 800 });
+    await page.waitForTimeout(200);
+    await page.mouse.up();
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.waitForTimeout(200);
+    await unchanged("C12d. switched to small screen mid-drag: not saved");
+    // e) 정상 끌기는 여전히 저장
+    p0 = await dragStart();
+    await page.mouse.up();
+    check("C12e. normal drag still saves", (await storedWidth(acc)) === before + 100 && (await panelWidth()) === before + 100, JSON.stringify([await storedWidth(acc), await panelWidth()]));
   });
 }
 

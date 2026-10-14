@@ -93,14 +93,16 @@ export default function ChatDock() {
   const mounted = mountedFor === accountKey;
   const visibleHeight = useVisibleHeight(chat.open && isMobile);
 
-  // 넓은 화면 폭: 끄는 동안은 화면에만 반영하고(liveWidth) 놓을 때 저장한다. 저장한 폭은 지금 화면에 맞춰 줄여 그린다.
-  const [liveWidth, setLiveWidth] = useState<number | null>(null);
-  const drag = useRef<{ pointerId: number; startX: number; startWidth: number; current: number } | null>(null);
-  // 대화창을 닫거나 작은 화면이 되면 진행 중이던 폭 조절은 버린다(조절 상태가 남지 않게).
-  if (liveWidth !== null && (!chat.open || isMobile || !mounted)) setLiveWidth(null);
-  const resizing = liveWidth !== null;
+  // 넓은 화면 폭: 끄는 동안은 화면에만 반영하고(live) 놓을 때 저장한다. 저장한 폭은 지금 화면에 맞춰 줄여 그린다.
+  // 끌기는 시작한 계정에 묶는다. 끄는 도중 같은 탭의 계정이 바뀌면 그 끌기는 버리고, 늦게 오는 놓기·포커스 이탈도
+  // 새 계정의 저장 폭을 바꾸지 못하게 한다.
+  const [live, setLive] = useState<{ width: number; account: string } | null>(null);
+  const drag = useRef<{ pointerId: number; account: string; startX: number; startWidth: number; current: number } | null>(null);
+  // 계정이 바뀌거나 대화창을 닫거나 작은 화면이 되면 진행 중이던 폭 조절은 버린다(조절 상태가 남지 않게).
+  if (live !== null && (live.account !== accountKey || !chat.open || isMobile || !mounted)) setLive(null);
+  const resizing = live !== null;
   const bounds = panelBounds(viewport);
-  const width = clampPanelWidth(liveWidth ?? chat.width ?? PANEL_DEFAULT, viewport);
+  const width = clampPanelWidth(live?.width ?? chat.width ?? PANEL_DEFAULT, viewport);
   const wideWidth = clampPanelWidth(PANEL_WIDE, viewport);
   const canWiden = wideWidth > clampPanelWidth(PANEL_DEFAULT, viewport);
   const isWide = canWiden && width >= wideWidth;
@@ -173,12 +175,17 @@ export default function ChatDock() {
     return () => document.removeEventListener("keydown", onKey);
   }, [chat.open, isMobile, setOpen]);
 
+  // 끌기가 아직 살아 있는지: 시작한 계정이 지금 계정이고, 대화창 닫기·작은 화면 전환·계정 변경으로 live가 지워지지 않았다.
+  // 이미 취소된 끌기의 늦은 이동·놓기·포인터 해제·창 포커스 이탈은 아무것도 바꾸지 않는다.
+  const dragAlive = (d: { account: string }) => live !== null && live.account === d.account && d.account === accountKey;
+
   // 폭 조절 끝내기. commit이면 마지막 폭을 저장하고, 아니면(취소) 시작 폭으로 되돌린다.
+  // 살아 있는 끌기만 저장한다(setWidth는 지금 계정의 상태를 바꾼다).
   function finishResize(commit: boolean) {
     const d = drag.current;
     drag.current = null;
-    setLiveWidth(null);
-    if (d && commit && d.current !== d.startWidth) setWidth(d.current);
+    setLive(null);
+    if (d && commit && dragAlive(d) && d.current !== d.startWidth) setWidth(d.current);
   }
   const finishRef = useRef(finishResize);
   useLayoutEffect(() => {
@@ -210,16 +217,21 @@ export default function ChatDock() {
     if (e.button !== 0) return;
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
-    drag.current = { pointerId: e.pointerId, startX: e.clientX, startWidth: width, current: width };
-    setLiveWidth(width);
+    drag.current = { pointerId: e.pointerId, account: accountKey, startX: e.clientX, startWidth: width, current: width };
+    setLive({ width, account: accountKey });
   }
   function onResizeMove(e: ReactPointerEvent<HTMLDivElement>) {
     const d = drag.current;
     // 누른 채 끄는 포인터만 따른다(마우스를 올리기만 한 이동은 무시).
     if (!d || e.pointerId !== d.pointerId || !e.currentTarget.hasPointerCapture(e.pointerId)) return;
+    // 취소된 끌기(다른 계정에서 시작, 닫기·작은 화면 전환)는 이어 가지 않고 버린다(놓을 때도 저장하지 않음).
+    if (!dragAlive(d)) {
+      drag.current = null;
+      return;
+    }
     // 대화창은 오른쪽에 붙어 있으므로 경계를 왼쪽으로 끌면 넓어진다.
     d.current = clampPanelWidth(d.startWidth + d.startX - e.clientX, viewport);
-    setLiveWidth(d.current);
+    setLive({ width: d.current, account: d.account });
   }
   function onResizeKey(e: ReactKeyboardEvent<HTMLDivElement>) {
     const step = e.shiftKey ? PANEL_STEP * 4 : PANEL_STEP;
