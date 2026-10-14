@@ -37,8 +37,11 @@ Outbox insertion is atomic with lifecycle state. Delivery is at least once; an
 actual controller must re-check current owner/state/generation/revision/Pod fence,
 eligibility and operator capacity decision before external actions, then reconcile
 uncertain creation or stop results. Stale outbox rows never authorize a second Pod.
-No worker dispatch/claim, actual create/delete/lease/termination barrier or periodic
-loop is started in this source chunk. Stop work means Pod only, with no PVC, native,
+The later `runner_controller` source unit reserves one create permission by
+settling ensure outbox rows before external I/O; settlement is not readiness or
+successful delivery. See `USER-RUNNER-CONTROLLER.md` for lookup-only reconciliation
+of uncertain reservations. No worker loop or actual Kubernetes client is started.
+Stop work means Pod only, with no PVC, native,
 control, admission, conversation, research or original account deletion.
 
 ## Explicit additive migration and grants
