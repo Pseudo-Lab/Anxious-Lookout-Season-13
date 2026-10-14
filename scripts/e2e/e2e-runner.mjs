@@ -261,7 +261,7 @@ await step("N5", async () => {
     ["not_prepared", /대화 환경이 아직 준비되지 않아 보내지 않았습니다/],
     ["provisioning", /환경 활성화 중이라 보내지 않았습니다/],
     ["capacity_wait", /사용 대기 중이라 보내지 않았습니다/],
-    ["runner_unreachable", /환경에 연결하지 못해 보내지 않았습니다/],
+    ["runner_unreachable", /환경 연결을 확인하는 중이라 보내지 않았습니다/],
     ["runner_failed", /환경을 준비하지 못해 보내지 않았습니다/],
   ]) {
     await setMock("runnerAll=ready");
@@ -291,6 +291,12 @@ await step("N6", async () => {
   await setMock("hint=&runnerAll=runner_unreachable");
   await chat.getByRole("button", { name: "← 대화 목록" }).click();
   check("N6. unreachable shown", await appears(chat.getByText("환경 연결 확인 중").first()));
+  // 생성 결과 확인 중에도 쓰이는 상태: 짧게 끝난다·새 환경을 만든다·복구됐다고 안내하지 않고, 준비 버튼도 없다.
+  {
+    const text = await chat.innerText();
+    check("N6. unreachable makes no recovery/new-environment claim", !/잠시|새 환경|복구/.test(text), text.replace(/\s+/g, " ").slice(0, 160));
+    check("N6. unreachable offers no prepare/retry button", (await chat.getByRole("button", { name: /^(대화 준비|다시 시도|환경 다시 켜기)$/ }).count()) === 0);
+  }
   const r0 = await statusReads();
   await sleep(16000);
   const n = (await statusReads()) - r0;

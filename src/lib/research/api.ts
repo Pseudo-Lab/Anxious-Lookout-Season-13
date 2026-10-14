@@ -674,7 +674,7 @@ export function researchErrorMessage(failure: FetchFailure): string | null {
     case "codex_capacity_wait":
       return "사용 대기 중이라 보내지 않았습니다. 환경이 켜지면 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
     case "codex_runner_unreachable":
-      return "환경에 연결하지 못해 보내지 않았습니다. 연결이 돌아오면 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+      return "환경 연결을 확인하는 중이라 보내지 않았습니다. 연결이 확인되면 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
     case "codex_runner_failed":
       return "환경을 준비하지 못해 보내지 않았습니다. ‘다시 시도’를 누른 뒤 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
     case "codex_runner_stopped":

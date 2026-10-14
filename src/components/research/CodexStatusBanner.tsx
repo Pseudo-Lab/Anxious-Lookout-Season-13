@@ -39,7 +39,8 @@ const RUNNER_STATES: Record<string, RunnerState> = {
     title: "사용 대기 중",
     body: "지금은 이용자가 많아 환경을 켤 자리를 기다리고 있습니다. 자리가 나면 서버가 접수된 준비 요청을 이어서 처리합니다.",
   },
-  runner_unreachable: { title: "환경 연결 확인 중", body: "환경에 잠시 연결하지 못해 상태를 다시 확인하고 있습니다.", progress: true },
+  // 연결 문제·생성 결과 확인 중을 함께 뜻한다. 짧게 끝난다거나 새 환경을 만든다고 약속하지 않는다.
+  runner_unreachable: { title: "환경 연결 확인 중", body: "환경 연결과 준비 결과를 확인하고 있습니다.", progress: true },
   runner_failed: { title: "환경을 준비하지 못했습니다", body: "‘다시 시도’를 누르면 다시 준비합니다.", action: "retry" },
   idle_stopped: {
     title: "환경이 쉬는 중",
