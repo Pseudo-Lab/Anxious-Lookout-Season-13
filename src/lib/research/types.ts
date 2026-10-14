@@ -182,6 +182,8 @@ export interface CodexStatus {
   accessExpiresAt?: string;
   // 현재 시험 창에서 남은 접수 횟수.
   remainingAdmissions?: number;
+  // #10: 일시 상태(환경 활성화 중·사용 대기·연결 확인)에서 다시 조회할 간격 안내(초, 1–60). 준비·전송 지시가 아니다.
+  retryAfterSeconds?: number;
 }
 
 export type SessionState = "idle" | "running" | "failed";

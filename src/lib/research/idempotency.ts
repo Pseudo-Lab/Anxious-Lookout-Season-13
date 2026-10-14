@@ -25,6 +25,13 @@ const PRE_ADMISSION_REFUSALS = new Set([
   "codex_policy_refused",
   "codex_budget_exhausted",
   "codex_rate_limited",
+  // #10 실행 환경 상태(api-contracts/issue10-user-runners-interface-v1.md). codex_runner_lost는 접수 뒤 실패라 넣지 않는다.
+  "codex_runner_not_prepared",
+  "codex_provisioning",
+  "codex_capacity_wait",
+  "codex_runner_unreachable",
+  "codex_runner_failed",
+  "codex_runner_stopped",
 ]);
 
 /** 결과를 알 수 없는 실패(서버에 반영됐을 수 있음): 같은 내용의 재시도는 같은 key를 써야 한다. */

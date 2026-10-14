@@ -360,6 +360,8 @@ function parseCodexStatus(v: unknown): CodexStatus | null {
   // 표시 전용 선택 필드. 형식이 맞지 않으면 버리고 나머지 상태는 그대로 쓴다(접수 판정은 available과 서버가 한다).
   if (isStr(v.accessExpiresAt) && !Number.isNaN(Date.parse(v.accessExpiresAt))) out.accessExpiresAt = v.accessExpiresAt;
   if (isInt(v.remainingAdmissions) && v.remainingAdmissions >= 0) out.remainingAdmissions = v.remainingAdmissions;
+  // 범위 밖·정수가 아닌 안내는 버린다(front가 정한 기본 간격을 쓴다).
+  if (isInt(v.retryAfterSeconds) && v.retryAfterSeconds >= 1 && v.retryAfterSeconds <= 60) out.retryAfterSeconds = v.retryAfterSeconds;
   return out;
 }
 
@@ -580,6 +582,10 @@ export const getPublicDocument = (documentId: string) =>
 
 export const getCodexStatus = () => fetchJson(apiUrl("/research/codex/status"), parseCodexStatus);
 
+// #10 실행 환경 준비 요청. 200(준비됨)·202(준비·대기 접수) 모두 상태 조회와 같은 본문이다. 모델 질문 접수가 아니다.
+export const prepareCodexRunner = (ctx: MutationContext) =>
+  mutate("/research/codex/runner", "POST", {}, parseCodexStatus, ctx);
+
 export const listSessions = (cursor?: string | null) =>
   fetchJson(apiUrl(`/research/sessions${listQuery(cursor)}`), parsePage(parseSessionSummary));
 
@@ -648,6 +654,22 @@ export function researchErrorMessage(failure: FetchFailure): string | null {
       return "Codex 제공자의 사용 한도에 걸려 요청을 처리하지 못했습니다. 자동으로 다시 보내지 않습니다. 입력과 이전 대화는 그대로 있습니다.";
     case "codex_failed":
       return "Codex 요청이 실패했습니다. 자동으로 다시 실행하거나 다른 모델로 바꾸지 않습니다. 이전 대화는 그대로 있습니다.";
+    // #10 실행 환경 상태로 접수 전에 거절된 질문(초안은 남는다). 자동으로 다시 보내지 않는다.
+    case "codex_runner_not_prepared":
+      return "대화 환경이 아직 준비되지 않아 보내지 않았습니다. ‘대화 준비’를 누른 뒤 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+    case "codex_provisioning":
+      return "환경 활성화 중이라 보내지 않았습니다. 준비가 끝나면 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+    case "codex_capacity_wait":
+      return "사용 대기 중이라 보내지 않았습니다. 환경이 켜지면 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+    case "codex_runner_unreachable":
+      return "환경에 연결하지 못해 보내지 않았습니다. 연결이 돌아오면 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+    case "codex_runner_failed":
+      return "환경을 준비하지 못해 보내지 않았습니다. ‘다시 시도’를 누른 뒤 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+    case "codex_runner_stopped":
+      return "환경이 쉬는 중이라 보내지 않았습니다. ‘환경 다시 켜기’를 누른 뒤 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+    // 접수 뒤 실행 중 환경이 중단된 것이 확인된 실패(접수 전 거절 아님).
+    case "codex_runner_lost":
+      return "실행 중 환경이 중단되어 이 요청을 마치지 못했습니다. 자동으로 다시 실행하지 않습니다. 이전 대화는 그대로 있습니다.";
     case "not_ready":
       return "서비스가 준비되지 않았습니다. 잠시 후 다시 시도해 주세요.";
     default:
