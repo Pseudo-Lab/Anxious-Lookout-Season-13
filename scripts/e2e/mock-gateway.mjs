@@ -2,7 +2,7 @@
 // 나머지는 Next standalone 서버로 전달한다. 실제 backend/GitHub/DB를 대체하는 테스트 도구일 뿐이다.
 import http from "node:http";
 import crypto from "node:crypto";
-import { handleResearch, researchCounts, researchMode } from "./mock-research.mjs";
+import { handleResearch, researchCounts, researchMode, runnerMode, setRunnerAll } from "./mock-research.mjs";
 
 const BASE = process.env.BASE_PATH ?? "";
 const NEXT = { host: "127.0.0.1", port: Number(process.env.NEXT_PORT ?? 3000) };
@@ -11,7 +11,8 @@ const PORT = Number(process.env.GATEWAY_PORT ?? 8080);
 const sessions = new Map(); // sid -> { user, csrf }
 // reuse=1: 다음 로그인이 직전 계정(같은 accountId)으로 다시 로그인한다(세션 만료 후 재로그인 검증용).
 // as=<accountId>: 다음 로그인이 그 계정으로 로그인한다.
-const mode = { me: "normal", health: "normal", nextLogin: "pending", logout: "normal", reuse: "0", as: "" };
+// codexRunner: ""면 me에 필드 없음(이전 API), "true"/"false"면 그 값(#10 준비 요청 대상 신호)
+const mode = { me: "normal", health: "normal", nextLogin: "pending", logout: "normal", reuse: "0", as: "", codexRunner: "" };
 let lastUser = null;
 const users = new Map(); // accountId -> user
 const calls = []; // 검증용 요청 기록
@@ -87,7 +88,8 @@ function api(req, res, path, url) {
     }
     const s = sessions.get(sid(req));
     if (!s) return err(res, 401, "unauthenticated", "Authentication required");
-    return json(res, 200, { user: s.user, csrfToken: s.csrf });
+    const user = mode.codexRunner === "" ? s.user : { ...s.user, codexRunner: mode.codexRunner === "true" };
+    return json(res, 200, { user, csrfToken: s.csrf });
   }
   if (path === "/auth/logout") {
     if (req.method !== "POST") return err(res, 405, "method_not_allowed", "Method not allowed", { Allow: "POST" });
@@ -181,7 +183,18 @@ http
   .createServer((req, res) => {
     const url = new URL(req.url, "http://x");
     if (url.pathname === "/__mock/set") {
-      for (const k of ["me", "health", "nextLogin", "logout", "reuse", "as"]) if (url.searchParams.has(k)) mode[k] = url.searchParams.get(k);
+      for (const k of ["me", "health", "nextLogin", "logout", "reuse", "as", "codexRunner"]) if (url.searchParams.has(k)) mode[k] = url.searchParams.get(k);
+      // #10 실행 환경: runner=<처음 상태|"">, prepare=<동작>, readyMs=<ms>, hint=<retryAfterSeconds>, runnerAll=<모든 계정 상태|"">
+      for (const k of ["prepare", "hint"]) if (url.searchParams.has(k)) runnerMode[k] = url.searchParams.get(k);
+      if (url.searchParams.has("runner")) runnerMode.initial = url.searchParams.get("runner");
+      if (url.searchParams.has("readyMs")) runnerMode.readyMs = Number(url.searchParams.get("readyMs"));
+      if (url.searchParams.has("runnerAll")) setRunnerAll(url.searchParams.get("runnerAll"));
+      if (url.searchParams.has("turnMs")) researchMode.turnMs = Number(url.searchParams.get("turnMs"));
+      // demote=<accountId>: 그 계정을 승인 해제된 commenter로 바꾼다(연구 권한 상실 검증용, 기존 session에도 반영)
+      if (url.searchParams.get("demote")) {
+        const u = users.get(url.searchParams.get("demote"));
+        if (u) Object.assign(u, { role: "commenter", isApproved: false });
+      }
       // expire=1: 모든 로그인 session 만료(서버 측 폐기)
       if (url.searchParams.get("expire") === "1") sessions.clear();
       for (const k of ["access", "publish", "codex", "csrf"]) if (url.searchParams.has(k)) researchMode[k] = url.searchParams.get(k);
@@ -194,7 +207,7 @@ http
         const n = url.searchParams.get("remaining");
         researchMode.remaining = n === "" ? null : Number(n);
       }
-      return json(res, 200, { ...mode, ...researchMode });
+      return json(res, 200, { ...mode, ...researchMode, runner: { ...runnerMode } });
     }
     if (url.pathname === "/__mock/counts") return json(res, 200, researchCounts());
     if (url.pathname === "/__mock/calls") return json(res, 200, calls);

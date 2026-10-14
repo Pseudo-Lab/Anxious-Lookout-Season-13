@@ -38,6 +38,8 @@ export const researchMode = {
   // 시험 창: 접수 종료 시각(ms)과 남은 접수 횟수. null이면 표시·제한하지 않는다.
   windowEnd: null,
   remaining: null,
+  // 모의 turn 실행 시간(ms). 긴 실행 안내 검증용.
+  turnMs: 2500,
 };
 
 // 시험 창 상태(fixture 연결에만 적용): 종료 시각이 지나면 auth_expired, 횟수가 0이면 budget_exhausted
@@ -58,7 +60,64 @@ function windowFields() {
 const MIDTURN = {
   midturn_expired: { code: "codex_auth_expired", then: "auth_expired", recorded: false },
   midturn_revoked: { code: "codex_auth_revoked", then: "auth_revoked", recorded: true },
+  // #10: 접수 뒤 실행 중 환경 유실이 확정된 실패(입력은 미기록으로 남김). 접수 전 거절 코드가 아니다.
+  runner_lost: { code: "codex_runner_lost", then: "fixture", recorded: false },
 };
+
+// #10 사용자별 실행 환경(api-contracts/issue10-user-runners-interface-v1.md). initial이 ""이면 기존(시험·정적) 동작이고
+// 준비 경로가 없는 이전 API처럼 POST /research/codex/runner는 404다.
+// prepare: "ok"(준비 시작 → readyMs 뒤 사용 가능) | "hold"(활성화 중에 머묾) | "fail"(readyMs 뒤 준비 실패)
+//          | "capacity"(사용 대기에 머묾) | "403" | "404" | "405" | "500"
+// hint: ""면 계약 표의 안내 간격, 그 밖의 값은 그대로 retryAfterSeconds로 보낸다(범위 밖·문자열 검증용).
+// 모의 서버의 계정별 합침은 backend 중복 생성 방지의 증거가 아니다.
+export const runnerMode = { initial: "", prepare: "ok", readyMs: 2500, hint: "" };
+const runnerStates = new Map(); // owner -> "ready" | reason
+const RUNNER_HINT = { provisioning: 2, capacity_wait: 15, runner_unreachable: 5 };
+const RUNNER_PREFLIGHT = {
+  not_prepared: "codex_runner_not_prepared",
+  provisioning: "codex_provisioning",
+  capacity_wait: "codex_capacity_wait",
+  runner_unreachable: "codex_runner_unreachable",
+  runner_failed: "codex_runner_failed",
+  idle_stopped: "codex_runner_stopped",
+};
+const runnerOf = (owner) => runnerStates.get(owner) ?? runnerMode.initial;
+/** 모든 계정의 실행 환경 상태를 바꾼다(유휴 회수 등). 빈 값이면 계정별 상태를 지운다. */
+export function setRunnerAll(state) {
+  if (state === "") runnerStates.clear();
+  else for (const k of [...runnerStates.keys()]) runnerStates.set(k, state);
+}
+function runnerStatus(owner) {
+  const st = runnerOf(owner);
+  if (st === "ready") return { available: true, reason: null, verification: "fixture", model: FIXED_MODEL };
+  const out = { available: false, reason: st, verification: "unverified", model: FIXED_MODEL };
+  if (runnerMode.hint !== "") {
+    const n = Number(runnerMode.hint);
+    out.retryAfterSeconds = Number.isNaN(n) ? runnerMode.hint : n;
+  } else if (RUNNER_HINT[st]) out.retryAfterSeconds = RUNNER_HINT[st];
+  return out;
+}
+function prepareRunner(owner, b) {
+  if (!runnerMode.initial) return fail(404, "not_found", "Not found");
+  const m = runnerMode.prepare;
+  if (m === "403") return fail(403, "forbidden", "Runner preparation is not permitted");
+  if (m === "404") return fail(404, "not_found", "Not found");
+  if (m === "405") return fail(405, "method_not_allowed", "Method not allowed");
+  if (m === "500") return fail(500, "internal_error", "Internal error");
+  if (Object.keys(b).length) return fail(422, "validation_error", "Unknown field");
+  const st = runnerOf(owner);
+  if (st === "ready") return ok(200, runnerStatus(owner));
+  // 이미 준비 중·대기 중이면 같은 의도로 합친다(새 준비를 시작하지 않음).
+  if (st === "provisioning" || st === "capacity_wait") return ok(202, runnerStatus(owner));
+  const next = m === "capacity" ? "capacity_wait" : "provisioning";
+  runnerStates.set(owner, next);
+  if (next === "provisioning" && m !== "hold") {
+    setTimeout(() => {
+      if (runnerStates.get(owner) === "provisioning") runnerStates.set(owner, m === "fail" ? "runner_failed" : "ready");
+    }, runnerMode.readyMs);
+  }
+  return ok(202, runnerStatus(owner));
+}
 
 const items = new Map(); // id -> item
 const relations = new Map(); // id -> relation
@@ -195,6 +254,7 @@ const stale = (b, current) => !Number.isInteger(b.expectedVersion) || b.expected
 // ---- 처리 ----
 
 function handleMutation(owner, method, path, b, user) {
+  if (path === "/research/codex/runner" && method === "POST") return prepareRunner(owner, b);
   let m;
   // 자료·문서 생성
   if (method === "POST" && (m = /^\/research\/(materials|documents)$/.exec(path))) {
@@ -330,6 +390,10 @@ function handleMutation(owner, method, path, b, user) {
       const resolved = resolvePage(owner, b.page);
       if (resolved.error) return resolved.error;
       const scope = resolved.scope;
+      // #10: 실행 환경이 사용 가능하지 않으면 접수 전 확정 거절(예약·기록 없음)
+      if (runnerMode.initial && runnerOf(owner) !== "ready") {
+        return fail(503, RUNNER_PREFLIGHT[runnerOf(owner)] ?? "codex_unavailable", "Runner is not ready");
+      }
       if (GATED_REASONS.includes(researchMode.codex)) return fail(503, `codex_${researchMode.codex}`, "Codex is not available");
       // 계약에 없는 codex_* 503: 결과 불명으로 취급되어야 한다(서버는 아무것도 하지 않음)
       if (researchMode.codex === "unknown_code") return fail(503, "codex_upstream_timeout", "Upstream timeout");
@@ -429,7 +493,7 @@ function handleMutation(owner, method, path, b, user) {
         s.state = "idle";
         s.version++;
         s.updatedAt = now();
-      }, 2500);
+      }, researchMode.turnMs);
       return ok(202, sessionSummary(s));
     }
   }
@@ -555,6 +619,8 @@ function handleRead(owner, path, url) {
     return v ? ok(200, previewOf(doc, v)) : fail(404, "not_found", "Not found");
   }
   if (path === "/research/codex/status") {
+    // #10 service mode: 계정별 실행 환경 상태(조회는 상태를 바꾸지 않는다). 시험 창 필드는 보내지 않는다.
+    if (runnerMode.initial) return ok(200, runnerStatus(owner));
     if (GATED_REASONS.includes(researchMode.codex)) {
       // #7 계약: 계정별 선접수 불가 사유 + 서버 고정 모델(인증 정보·계정 식별자 없음)
       return ok(200, { available: false, reason: researchMode.codex, verification: "unverified", model: FIXED_MODEL });
