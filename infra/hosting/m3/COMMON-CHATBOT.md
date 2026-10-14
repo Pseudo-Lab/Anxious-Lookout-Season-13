@@ -118,3 +118,9 @@ final shared branch must contain the matching front, API and runner changes.
 
 Final images, imported references, fresh baseline patches and live outcome are
 separate evidence still required before production execution/final rollout approval.
+
+The concrete emit-only package and PM sequence are documented in
+[COMMON-CHATBOT-OPERATIONS.md](COMMON-CHATBOT-OPERATIONS.md). It preserves the
+existing reconnection authorization: the reviewed same-account/source/environment
+supply procedure can be executed by PM within that authority, without requiring
+repeated user permission. This preparation performs no supply or automatic rearm.
