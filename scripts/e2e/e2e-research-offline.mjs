@@ -37,8 +37,13 @@ async function waitFile(name, timeoutMs = 300_000) {
 
 const browser = await chromium.launch();
 const consoleErrors = [];
+// #10 feature-off(CODEX_USER_RUNNERS_ENABLE 기본 false): 새 web은 준비 POST를 보내지 않고 기존 상태 조회로 동작해야 한다.
+const runnerPosts = [];
 async function newPage() {
   const context = await browser.newContext();
+  context.on("request", (r) => {
+    if (r.method() === "POST" && new URL(r.url()).pathname.endsWith("/research/codex/runner")) runnerPosts.push(r.url());
+  });
   const page = await context.newPage();
   page.on("console", (m) => {
     if (m.type() === "error" && !/Failed to load resource/.test(m.text())) consoleErrors.push(m.text());
@@ -108,6 +113,7 @@ const B = await newPage();
 const userA = await approvedAccount("A", A.page);
 const userB = await approvedAccount("B", B.page);
 check("setup. two approved fixture accounts", userA.isApproved && userB.isApproved && userA.accountId !== userB.accountId);
+check("setup. feature-off API: codexRunner is false (not absent)", userA.codexRunner === false && userB.codexRunner === false, `${userA.codexRunner} ${userB.codexRunner}`);
 await waitFile("offline.ready");
 
 const page = A.page;
@@ -540,6 +546,7 @@ console.log(`INFO dropped message POST timings: ${JSON.stringify(postTimings)}`)
   );
 }
 
+check("feature-off: no runner preparation POST from any tab", runnerPosts.length === 0, String(runnerPosts.length));
 check("console has no errors", consoleErrors.length === 0, consoleErrors.join(" | "));
 await browser.close();
 const failed = results.filter((r) => !r.ok);
