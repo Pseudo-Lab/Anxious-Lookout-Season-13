@@ -53,7 +53,7 @@ def test_more_than_three_admissions_and_beyond_fifteen_minutes_keep_real_expiry(
     for _ in range(8): auth.consume(str(uuid4()))
     monkeypatch.setattr("runner.service_access.time.time", lambda: start + 1801)
     auth.check()
-    assert len(auth.state()["requests"]) == 8 and auth.state()["deadline"] == envelope["expiresAt"] - 60
+    assert auth.state()["requests"] == 8 and auth.state()["deadline"] == envelope["expiresAt"] - 60
     assert auth.status() == {} and not (home / "auth.json").exists()
     monkeypatch.setattr("runner.service_access.time.time", lambda: envelope["expiresAt"] - 60)
     with pytest.raises(CodexFailure, match="codex_auth_expired"): auth.check()
@@ -84,19 +84,19 @@ def test_source_token_refresh_never_resets_reservations_projection_or_identity(t
     update = refreshed(envelope)
     auth.install(update)
     assert auth.journal.key == key and auth.state()["trialId"] == context
-    assert auth.state()["requests"] == [{"id":request}]
+    assert auth.state()["requests"] == 1 and auth.has_request(request)
     assert auth.sanitize({"old":envelope["accessToken"], "new":update["accessToken"]}) == {"old":"[redacted]", "new":"[redacted]"}
     with pytest.raises(CodexFailure): auth.consume(request)
     with pytest.raises(CodexFailure): auth.install(envelope)  # Old snapshot cannot roll back the current source.
     with pytest.raises(CodexFailure): auth.install({**update, "accessToken":envelope["accessToken"]})
-    contents = "".join(path.read_text() for path in auth.control.iterdir() if path.is_file())
-    assert envelope["accessToken"] not in contents and update["accessToken"] not in contents
+    contents = b"".join(path.read_bytes() for path in auth.control.iterdir() if path.is_file())
+    assert envelope["accessToken"].encode() not in contents and update["accessToken"].encode() not in contents
     assert not (home / "auth.json").exists()
     auth.close()
     restarted = ServiceAccessAuth(auth.control, auth.owner, auth.state_id, ACCOUNT)
     with pytest.raises(CodexFailure, match="codex_unavailable"): restarted.check()
     restarted.install(update); restarted.attach(home)
-    assert restarted.journal.key == key and restarted.state()["requests"] == [{"id":request}]
+    assert restarted.journal.key == key and restarted.state()["requests"] == 1 and restarted.has_request(request)
     assert restarted.sanitize(envelope["accessToken"]) == "[redacted]"
     with pytest.raises(CodexFailure): restarted.consume(request)
     restarted.close()
@@ -109,7 +109,7 @@ def test_auth_failure_needs_different_valid_snapshot_not_relabeling_old_token(tm
     auth.consume(str(uuid4())); auth.block(reason)
     with pytest.raises(CodexFailure): auth.install({**envelope, "snapshotId":str(uuid4())})
     auth.install(refreshed(envelope)); auth.check()
-    assert len(auth.state()["requests"]) == 1
+    assert auth.state()["requests"] == 1
     auth.close()
 
 
@@ -131,7 +131,7 @@ def test_two_platform_owners_share_only_operator_credential_not_control_or_nativ
     b.install(shared); b.attach(home_b)
     assert a.owner != b.owner and a.state_id != b.state_id and a.journal.key != b.journal.key
     a.consume(str(uuid4()))
-    assert len(a.state()["requests"]) == 1 and b.state()["requests"] == []
+    assert a.state()["requests"] == 1 and b.state()["requests"] == 0
     before = (b.control / LEDGER).read_bytes()
     with pytest.raises(CodexFailure): b.install(envelope_a)
     assert (b.control / LEDGER).read_bytes() == before
@@ -187,8 +187,9 @@ def test_selected_source_service_export_is_read_only_access_only_and_account_bou
 def test_corrupted_service_control_refused(tmp_path, field, value):
     auth, _, envelope = setup(tmp_path)
     auth.install(envelope)
-    ledger = read_private(auth.control / LEDGER); ledger[field] = value
-    write_private(auth.control / LEDGER, ledger)
+    with auth.store.transaction() as db:
+        ledger = auth._state(db); ledger[field] = value
+        db.execute('UPDATE metadata SET payload=?', (json.dumps(ledger),))
     with pytest.raises(CodexFailure): auth.check()
 
 
