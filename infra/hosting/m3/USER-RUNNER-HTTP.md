@@ -20,6 +20,10 @@ Operators must not enable this intermediate source as a completed feature.
 - Response200 means an existing Pod-bound lifecycle intent is reused;202 means a
   durable preparation/wait intent. Both use the unwrapped GET status parser. They
   reserve no model turn. Same-key/coalesced preparation never extends activity.
+  HTTP supplies a clock sampled after the per-owner database lock. Request arrival
+  order may differ from lock order without producing a stale activity timestamp.
+  Actual sampled clock reversal is still refused; timestamps are not clamped and
+  replay/coalesced preparation still leaves last_activity unchanged.
 - Enabled `GET /api/research/codex/status` validates the research/runner schema and
   reads only the caller's registry phase. An authenticated ineligible caller gets
   200/not_enabled_for_account; unauthenticated gets401. GET never creates/wakes/

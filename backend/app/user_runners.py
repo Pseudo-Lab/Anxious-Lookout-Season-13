@@ -28,6 +28,10 @@ def feature_enabled():
     return value == 'true'
 
 
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
 def eligible(account, policy):
     return bool(account and account.is_approved and account.role in {'editor', 'admin'} and policy != 'pending')
 
@@ -110,7 +114,7 @@ def register(app, sessions, settings, current_session):
                 fail('validation_error', 'A UUID Idempotency-Key is required', 422)
             registry = checked_registry(db)
             try:
-                state, _ = registry.enter(account.id, key, datetime.now(timezone.utc))
+                state, _ = registry.enter(account.id, key, utc_now)
             except Refused:
                 fail('codex_runner_unreachable', 'Runner state requires reconciliation', 503)
             # Body shares GET's parser, and contains no private runtime identities.

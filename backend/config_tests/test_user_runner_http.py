@@ -100,11 +100,22 @@ def test_preparation_me_status_replay_and_get_are_real_http_and_read_only(client
     assert all(field not in first.json() for field in ('ownerId', 'stateId', 'podUid', 'accessExpiresAt', 'remainingAdmissions'))
 
 
-def test_concurrent_tabs_coalesce_into_single_owner_runtime_and_outbox(client, admin):
+def test_concurrent_tabs_coalesce_into_single_owner_runtime_and_outbox(client, admin, monkeypatch):
+    import sys
+    from app.main import log
+    errors = []
+    original_warning = log.warning
+    def warning(*args, **kwargs):
+        failure = sys.exception()
+        # Class/SQLSTATE only: never print SQL, credentials or payloads.
+        errors.append((type(failure).__name__, getattr(getattr(failure, 'orig', None), 'sqlstate', None)))
+        original_warning(*args, **kwargs)
+    monkeypatch.setattr(log, 'warning', warning)
     owner, auth = identity(client, admin)
     with ThreadPoolExecutor(max_workers=6) as pool:
         responses = list(pool.map(lambda _: client.post('/api/research/codex/runner', json={}, headers=headers(auth)), range(12)))
-    assert all(response.status_code == 202 for response in responses)
+    assert all(response.status_code == 202 for response in responses), (
+        [(response.status_code, response.json()) for response in responses], errors)
     state = read(admin, owner)
     assert state.generation == 1
     with admin.begin() as db:
@@ -324,3 +335,102 @@ def test_enable_flag_defaults_false_and_rejects_invalid_configuration(client, mo
     assert feature_enabled() is False
     monkeypatch.setenv('CODEX_USER_RUNNERS_ENABLE','yes')
     with pytest.raises(ValueError): create_app(client.app.state.settings)
+
+
+@pytest.mark.parametrize('same_key', [False, True])
+@pytest.mark.parametrize('already_ready', [False, True])
+def test_delayed_earlier_http_entry_accepts_after_newer_commit_without_stale_time(client, admin, monkeypatch, same_key, already_ready):
+    from threading import Event
+    owner, auth = identity(client, admin)
+    if already_ready:
+        client.post('/api/research/codex/runner', json={}, headers=headers(auth))
+        state = read(admin, owner)
+        with admin.begin() as db:
+            Registry(db).observe(Fence.of(state), pod_uid=uuid4(), ready=True,
+                active_requests=0, ambiguous=False, verified=True, now=datetime.now(timezone.utc))
+    older_key = uuid4(); newer_key = older_key if same_key else uuid4()
+    reached, release = Event(), Event()
+    original = Registry.enter
+    def delayed(self, account, key, clock):
+        # Delay only the first arrival, before it obtains the owner lock.
+        if key == older_key and not reached.is_set():
+            reached.set()
+            assert release.wait(30)
+        return original(self, account, key, clock)
+    monkeypatch.setattr(Registry, 'enter', delayed)
+    path = '/api/research/codex/runner'
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        older = pool.submit(client.post, path, json={}, headers=headers(auth, older_key))
+        assert reached.wait(30)
+        try:
+            newer = client.post(path, json={}, headers=headers(auth, newer_key))
+            expected = 200 if already_ready else 202
+            assert newer.status_code == expected, newer.text
+            after_newer = read(admin, owner)
+            snapshot = preservation_snapshot(admin)
+        finally:
+            release.set()
+        reply = older.result(timeout=30)
+    assert reply.status_code == expected and reply.json() == newer.json(), reply.text
+    final = read(admin, owner)
+    assert final.state_id == after_newer.state_id and final.generation == after_newer.generation == 1
+    assert final.pod_uid == after_newer.pod_uid
+    if same_key:
+        assert preservation_snapshot(admin) == snapshot
+    elif not already_ready:
+        assert final == after_newer  # Coalescing cannot extend activity.
+    else:
+        assert final.last_activity >= after_newer.last_activity and final.revision == after_newer.revision + 1
+    with admin.begin() as db:
+        assert db.execute(text('SELECT count(*) FROM runner_runtime.outbox')).scalar_one() == 1
+        assert db.execute(text('SELECT count(*) FROM runner_runtime.admissions')).scalar_one() == 0
+        older_time = db.execute(text('SELECT created_at FROM runner_runtime.entry_receipts WHERE owner_id=:owner AND key=:key'),
+                                {'owner': owner, 'key': older_key}).scalar_one()
+        newer_time = db.execute(text('SELECT created_at FROM runner_runtime.entry_receipts WHERE owner_id=:owner AND key=:key'),
+                                {'owner': owner, 'key': newer_key}).scalar_one()
+        assert older_time >= newer_time
+
+
+def test_http_clock_not_sampled_while_waiting_on_real_database_owner_lock(client, admin, monkeypatch):
+    from threading import Event
+    from app import user_runners
+    owner, auth = identity(client, admin)
+    attempting, sampled = Event(), Event()
+    original_lock, original_clock = Registry._lock, user_runners.utc_now
+    def lock(self, account):
+        attempting.set()
+        return original_lock(self, account)
+    def clock():
+        sampled.set()
+        return original_clock()
+    monkeypatch.setattr(Registry, '_lock', lock)
+    monkeypatch.setattr(user_runners, 'utc_now', clock)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with admin.begin() as db:
+            original_lock(Registry(db), owner)
+            future = pool.submit(client.post, '/api/research/codex/runner', json={}, headers=headers(auth))
+            assert attempting.wait(30)
+            assert not sampled.is_set()
+        result = future.result(timeout=30)
+    assert result.status_code == 202 and sampled.is_set(), result.text
+
+
+@pytest.mark.parametrize('replay', [False, True])
+def test_sampled_clock_reversal_remains_refused_for_replay_and_coalescing_without_mutation(client, admin, monkeypatch, replay):
+    owner, auth = identity(client, admin); key = uuid4()
+    assert client.post('/api/research/codex/runner', json={}, headers=headers(auth, key)).status_code == 202
+    state = read(admin, owner); snapshot = preservation_snapshot(admin)
+    monkeypatch.setattr('app.user_runners.utc_now', lambda: state.last_activity - timedelta(seconds=1))
+    response = client.post('/api/research/codex/runner', json={}, headers=headers(auth, key if replay else uuid4()))
+    assert response.status_code == 503 and response.json()['error']['code'] == 'codex_runner_unreachable'
+    assert preservation_snapshot(admin) == snapshot
+    # A reversed candidate clock cannot trigger an early idle reclaim either.
+    with admin.begin() as db:
+        state = Registry(db).observe(Fence.of(state), pod_uid=uuid4(), ready=True, active_requests=0,
+            ambiguous=False, verified=True, now=state.last_activity)
+    snapshot = preservation_snapshot(admin)
+    from runner.lifecycle import Refused
+    with pytest.raises(Refused):
+        with admin.begin() as db:
+            Registry(db).idle(Fence.of(state), now=state.last_activity - timedelta(seconds=1), verified=True)
+    assert preservation_snapshot(admin) == snapshot

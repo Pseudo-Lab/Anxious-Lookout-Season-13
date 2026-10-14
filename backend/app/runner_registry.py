@@ -82,8 +82,14 @@ class Registry:
     @atomic
     def enter(self, owner, key, now):
         self._eligible(owner)  # Membership lock precedes owner lock and replay.
-        require(isinstance(key, UUID) and isinstance(now, datetime) and now.tzinfo is not None)
+        require(isinstance(key, UUID))
         self._lock(owner)
+        # HTTP supplies a clock rather than an arrival timestamp. Sample after
+        # serialization so a delayed older request cannot precede a newer row's
+        # activity time. Explicit timestamps remain available to offline callers;
+        # the kernel still refuses actual clock reversal without clamping.
+        now = now() if callable(now) else now
+        require(isinstance(now, datetime) and now.tzinfo is not None)
         state = self.read(owner)
         if state is None:
             state = State(owner, uuid4(), now)
