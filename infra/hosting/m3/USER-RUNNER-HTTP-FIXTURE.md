@@ -78,3 +78,31 @@ project name or the same command against a shared persistent environment.
 ```sh
 docker compose -p anxious-s13-front-runner-http -f backend/compose.m3-integration.yml -f backend/compose.user-runner-http-test.yml down --volumes
 ```
+
+## Additional frontend controls
+
+`--account` aliases `--owner`; canonical DB phase names also alias the short
+names above. `stopping` binds a synthetic UID and projects runner_unreachable.
+`not_prepared` only verifies that a fresh account has no registry; it refuses to
+reset an existing row. Use a separate fresh account before its first entry POST
+for this case. UID selection is automatic: ready/unreachable/stopping have a
+synthetic UID, other phases do not. Arbitrary incompatible phase/UID pairs are
+not supported.
+
+Use the same runner-phase service with `--account UUID --inspect` for a read-only
+snapshot: phase, generation, podBound, creationReserved, entryReceipts (all owner
+entry records), pendingEnsure (all unsettled ensure rows), lastActivity. No API
+restart is needed after a setter transaction commits; preflight reads current DB
+state for every request. Inspect uses a repeatable-read/read-only transaction.
+
+To test the unbound reserved projection, use `--account UUID --phase provisioning
+--creation-reserved` on a separate disposable account. This settles the synthetic
+ensure receipt without external creation and projects runner_unreachable. It is
+irreversible through this fixture: subsequent phase setters refuse that account.
+Do not force reserved → failed/stopped in one test sequence; use independent
+accounts/projects for those cases. R1 entryReceipts can increase for distinct
+entry keys while one pendingEnsure/state is coalesced; receipts are not Pod counts.
+
+The existing admin permission CLI deletes every session for an account whenever
+approval/role is changed. Test eligibility transitions through re-login; an old
+session is not retained across this change.

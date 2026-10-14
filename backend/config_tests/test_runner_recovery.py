@@ -95,3 +95,39 @@ def test_fixture_entrypoint_refuses_operational_environment(monkeypatch, variabl
     monkeypatch.setenv('RUNNER_HTTP_FIXTURE', 'true')
     monkeypatch.setenv(variable, value)
     with pytest.raises(Refused): fixture_engine()
+
+
+def test_fixture_inspect_new_and_refuse_reset(admin, owner, t0):
+    from tests.runner_phase_fixture import inspect
+    set_phase(admin, owner, 'not_prepared')
+    assert inspect(admin, owner) == {'phase': 'not_prepared', 'generation': None,
+        'podBound': False, 'creationReserved': False, 'entryReceipts': 0,
+        'pendingEnsure': 0, 'lastActivity': None}
+    enter(admin, owner, uuid4(), t0)
+    before = preservation_snapshot(admin)
+    with pytest.raises(Refused): set_phase(admin, owner, 'not_prepared')
+    first = inspect(admin, owner)
+    assert first == inspect(admin, owner)
+    assert first['entryReceipts'] == first['pendingEnsure'] == 1
+    assert preservation_snapshot(admin) == before
+
+
+def test_fixture_reserved_is_unbound_and_cannot_be_reset(admin, owner, t0):
+    from tests.runner_phase_fixture import inspect
+    from app.user_runners import status_body
+    enter(admin, owner, uuid4(), t0)
+    set_phase(admin, owner, 'provisioning', creation_reserved=True)
+    row = inspect(admin, owner)
+    assert row['creationReserved'] and not row['podBound'] and row['pendingEnsure'] == 0
+    assert status_body(read(admin, owner), creation_reserved=True)['reason'] == 'runner_unreachable'
+    before = preservation_snapshot(admin)
+    with pytest.raises(Refused): set_phase(admin, owner, 'runner_failed')
+    assert preservation_snapshot(admin) == before
+
+
+def test_fixture_stopping_uses_synthetic_binding(admin, owner, t0):
+    from tests.runner_phase_fixture import inspect
+    enter(admin, owner, uuid4(), t0)
+    set_phase(admin, owner, 'stopping')
+    row = inspect(admin, owner)
+    assert row['phase'] == 'stopping' and row['podBound'] and not row['creationReserved']

@@ -206,3 +206,32 @@ procedure for unresolved reservations remain **unit2, incomplete**. The module's
 pending scan is a diagnostic primitive, not a reviewed release tool. If termination
 or prevention of late creation cannot be established, release stays unavailable
 and activation remains blocked; user records must never be deleted as a workaround.
+
+### API IP and certificate verification before deployment
+
+PM must select the exact literal IP and port that the controller container will
+reach, not the application ingress, a node chosen by guesswork, or a hostname's
+unrecorded current resolution. Record the selected endpoint and route privately.
+For k3s this may be its API Service ClusterIP or a deliberately configured API
+server/LB IP; use only the endpoint reachable under the reviewed controller
+network policy. A load balancer's TLS terminator certificate is the relevant
+serving certificate when TLS terminates there.
+
+From an authorized diagnostic container on the same network path, inspect the
+certificate actually served at that IP:port using OpenSSL `s_client` with the
+configured controller CA file, `-verify_return_error` and `-verify_ip API_IP`
+(and `-connect IP:PORT`, bracketed for IPv6). Inspect the returned leaf with
+`openssl x509 -noout -ext subjectAltName -dates`. The selected IP must occur as
+an IP SAN; a DNS SAN or matching subject CN does not satisfy this requirement.
+The verified chain must terminate at the exact trusted CA supplied to KubePods.
+These checks need no bearer token; do not print tokens, private keys or kubeconfig
+contents. Record verification result, leaf fingerprint/expiry and source SHA,
+without credentials. Repeat against every serving backend if the route can select
+multiple certificates, and after endpoint/CA/certificate changes.
+
+A missing IP SAN, unknown CA, expired certificate, unreachable endpoint or
+unverified alternate backend blocks activation. Do not add verify=false, use a
+DNS endpoint, or silently choose another IP to bypass the condition. Coordinate a
+reviewed endpoint/certificate correction with PM, then repeat the actual adapter
+TLS and namespace-scoped GET checks before enabling. This document describes the
+check; no current cluster certificate or route has been verified by backend.
