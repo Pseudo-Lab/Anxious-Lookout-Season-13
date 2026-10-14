@@ -40,7 +40,7 @@ def can_prepare(app, account):
     return bool(app.state.user_runners_enabled and eligible(account, app.state.research_policy))
 
 
-def status_body(state=None, *, permitted=True):
+def status_body(state=None, *, permitted=True, creation_reserved=False):
     result = {'available': False, 'reason': 'not_prepared', 'verification': 'unverified', 'model': MODEL}
     if not permitted:
         return {**result, 'reason': 'not_enabled_for_account'}
@@ -49,6 +49,8 @@ def status_body(state=None, *, permitted=True):
     # No trusted service transport is connected in this HTTP source chunk.
     # A ready Pod cannot establish actual authentication/model availability.
     reason = {Phase.READY: 'runner_unreachable', Phase.STOPPING: 'runner_unreachable'}.get(state.phase, state.phase.value)
+    if state.pod_uid is None and creation_reserved:
+        reason = 'runner_unreachable'
     result['reason'] = reason
     hint = {'provisioning': 2, 'capacity_wait': 15, 'runner_unreachable': 5}.get(reason)
     if hint is not None:
@@ -67,8 +69,13 @@ def checked_registry(db):
 
 
 def preflight(store):
-    status = status_body(checked_registry(store.db).read(store.owner))
+    status = registry_status(checked_registry(store.db), store.owner)
     fail(RUNNER_PREFLIGHT_ERRORS.get(status['reason'], 'codex_unavailable'), 'Codex cannot accept this request', 503)
+
+
+def registry_status(registry, owner, state=None):
+    state = registry.read(owner) if state is None else state
+    return status_body(state, creation_reserved=registry.creation_reserved(state))
 
 
 def register(app, sessions, settings, current_session):
@@ -100,7 +107,7 @@ def register(app, sessions, settings, current_session):
         with authenticated(request) as (db, account, permitted):
             if not permitted:
                 return response(status_body(permitted=False))
-            return response(status_body(checked_registry(db).read(account.id)))
+            return response(registry_status(checked_registry(db), account.id))
 
     @app.post(prefix + '/runner')
     def prepare(body: dict, request: Request):
@@ -119,6 +126,6 @@ def register(app, sessions, settings, current_session):
                 fail('codex_runner_unreachable', 'Runner state requires reconciliation', 503)
             # Body shares GET's parser, and contains no private runtime identities.
             code = 200 if state.pod_uid is not None else 202
-            return response(status_body(state), code)
+            return response(registry_status(registry, account.id, state), code)
 
     return status

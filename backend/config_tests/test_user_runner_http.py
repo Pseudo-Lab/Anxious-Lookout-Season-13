@@ -434,3 +434,50 @@ def test_sampled_clock_reversal_remains_refused_for_replay_and_coalescing_withou
         with admin.begin() as db:
             Registry(db).idle(Fence.of(state), now=state.last_activity - timedelta(seconds=1), verified=True)
     assert preservation_snapshot(admin) == snapshot
+
+
+def test_reserved_unbound_generation_projects_connection_issue_without_retry_or_activity(client, admin):
+    from app.runner_controller import Controller
+    owner, auth = identity(client, admin)
+    key = uuid4()
+    initial = client.post('/api/research/codex/runner', json={}, headers=headers(auth, key))
+    assert initial.json()['reason'] == 'provisioning'
+    state = read(admin, owner)
+    conversation = create_conversation(client, auth)
+    # Reservation only: no Pod adapter or provider operation is called.
+    Controller(admin, None, lambda: datetime.now(timezone.utc), max_pods=1).reserve(Fence.of(state))
+    snapshot = preservation_snapshot(admin)
+    status = client.get('/api/research/codex/status')
+    assert status.json() == {'available': False, 'reason': 'runner_unreachable', 'verification': 'unverified',
+                             'model': 'gpt-6.1-sol', 'retryAfterSeconds': 5}
+    for _ in range(2):
+        reply = client.post('/api/research/codex/runner', json={}, headers=headers(auth, key))
+        assert reply.status_code == 202 and reply.json() == status.json()
+        assert client.get('/api/research/codex/status').json() == status.json()
+    assert preservation_snapshot(admin) == snapshot
+    fresh = client.post('/api/research/codex/runner', json={}, headers=headers(auth))
+    assert fresh.status_code == 202 and fresh.json() == status.json()
+    assert read(admin, owner) == state
+    with admin.begin() as db:
+        assert db.execute(text("SELECT count(*) FROM runner_runtime.outbox WHERE kind='ensure'")).scalar_one() == 1
+    # Actual message preflight uses the same projection and never dispatches.
+    reply = client.post('/api/research/sessions/'+conversation['id']+'/messages',
+                        json={'text': 'retained draft', 'expectedVersion': 1}, headers=headers(auth))
+    assert reply.status_code == 503 and reply.json()['error']['code'] == 'codex_runner_unreachable'
+
+
+def test_retained_create_receipt_does_not_hide_idle_stopped_status(client, admin):
+    from app.runner_controller import Controller
+    owner, auth = identity(client, admin)
+    client.post('/api/research/codex/runner', json={}, headers=headers(auth))
+    state = read(admin, owner)
+    Controller(admin, None, lambda: datetime.now(timezone.utc), max_pods=1).reserve(Fence.of(state))
+    with admin.begin() as db:
+        registry = Registry(db)
+        ready = registry.observe(Fence.of(state), pod_uid=uuid4(), ready=True, active_requests=0,
+                                 ambiguous=False, verified=True, now=state.last_activity)
+        stopping = registry.idle(Fence.of(ready), now=state.last_activity + timedelta(minutes=30), verified=True)
+        registry.stopped(Fence.of(stopping), terminated_pod_uid=stopping.pod_uid, verified=True)
+    snapshot = preservation_snapshot(admin)
+    assert client.get('/api/research/codex/status').json()['reason'] == 'idle_stopped'
+    assert preservation_snapshot(admin) == snapshot

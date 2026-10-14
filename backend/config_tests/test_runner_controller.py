@@ -260,3 +260,60 @@ def test_schema_drift_refuses_before_external_operations(admin, owner, t0, pods,
         assert issued(admin, state) == 1  # Reserved permission is never reset.
     else:
         assert preservation_snapshot(admin) == before
+
+
+def test_pending_keyset_scan_and_lookup_only_missing_are_read_only(admin, owner, t0, pods):
+    states = [candidate(admin, owner, t0), candidate(admin, new_owner(admin), t0)]
+    worker = controller(admin, pods, t0, 2)
+    for state in states:
+        worker.reserve(Fence.of(state))
+    before = preservation_snapshot(admin)
+    first = worker.pending(limit=1)
+    second = worker.pending(after=first[0].owner, limit=1)
+    assert len(first) == len(second) == 1 and first[0].owner < second[0].owner
+    assert set(f.owner for f in first + second) == set(s.owner for s in states)
+    for fence in first + second:
+        assert worker.reconcile(fence) is None
+    assert pods.creates == [] and preservation_snapshot(admin) == before
+
+
+def test_reconcile_tracks_lost_response_even_after_eligibility_revoked(admin, owner, t0, pods):
+    state = candidate(admin, owner, t0)
+    worker = controller(admin, pods, t0)
+    pods.failure = 'after'
+    with pytest.raises(TimeoutError): worker.ensure(Fence.of(state))
+    with admin.begin() as db:
+        db.execute(text('UPDATE auth.accounts SET is_approved=false WHERE id=:owner'), {'owner': owner})
+    assert worker.pending() == [Fence.of(state)]
+    result = worker.reconcile(Fence.of(state))
+    assert result.ambiguous and result.last_activity == state.last_activity
+    assert result.pod_uid == pods.values[Identity.of(state).name].uid
+    assert worker.pending() == [] and len(pods.creates) == 1
+
+
+def test_reconcile_refuses_unreserved_generation_before_lookup(admin, owner, t0, pods):
+    state = candidate(admin, owner, t0)
+    with pytest.raises(Refused): controller(admin, pods, t0).reconcile(Fence.of(state))
+    assert not pods.creates and issued(admin, state) == 0
+
+
+def test_kubernetes_adapter_lost_post_reconciles_with_real_registry(admin, owner, t0):
+    import httpx
+    from app.runner_kube import KubePods, Plan, Reference
+    from config_tests.test_runner_kube import Server
+    state = candidate(admin, owner, t0)
+    plan = Plan(Identity.of(state), 'registry.invalid/runner@sha256:'+'a'*64,
+                Reference('native', uuid4(), 'native-pv'), Reference('control', uuid4(), 'control-pv'),
+                Reference('transport', uuid4()), 'https://api.invalid/tools', 'runner')
+    server = Server(plan)
+    server.mode = 'lost'
+    port = KubePods('https://kube.invalid', 'isolated', 'k'*40, None, [plan], _transport=httpx.MockTransport(server))
+    try:
+        worker = controller(admin, port, t0)
+        with pytest.raises(Refused): worker.ensure(Fence.of(state))
+        assert read(admin, owner) == state and worker.pending() == [Fence.of(state)]
+        bound = worker.reconcile(Fence.of(state))
+        assert bound.pod_uid and bound.ambiguous and bound.last_activity == t0
+        assert [method for method, _ in server.requests].count('POST') == 1
+    finally:
+        port.close()

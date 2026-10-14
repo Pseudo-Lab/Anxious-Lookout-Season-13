@@ -71,6 +71,42 @@ class Controller:
         require(type(max_pods) is int and max_pods >= 0 and callable(clock))
         self.engine, self.pods, self.clock, self.max_pods = engine, pods, clock, max_pods
 
+    def pending(self, *, after=None, limit=100):
+        """Bounded keyset scan, including settled permissions absent from outbox queues."""
+        require(after is None or isinstance(after, UUID))
+        require(type(limit) is int and 1 <= limit <= 100)
+        with self.engine.begin() as db:
+            validate(db)
+            owners = db.execute(text('''SELECT r.owner_id FROM runner_runtime.registry r
+                WHERE r.pod_uid IS NULL AND r.phase='provisioning'
+                AND (CAST(:after AS uuid) IS NULL OR r.owner_id>CAST(:after AS uuid))
+                AND EXISTS (SELECT 1 FROM runner_runtime.outbox o WHERE o.owner_id=r.owner_id
+                    AND o.state_id=r.state_id AND o.generation=r.generation
+                    AND o.kind='ensure' AND o.settled)
+                ORDER BY r.owner_id LIMIT :limit'''), {'after': after, 'limit': limit}).scalars().all()
+            return [Fence.of(Registry(db).read(owner)) for owner in owners]
+
+    def reconcile(self, fence):
+        """Lookup-only recovery, including revoked accounts; never grants dispatch.
+
+        An absent object leaves the reservation intact. Tracking an existing Pod
+        must not depend on continuing membership; creating one still does.
+        """
+        require(isinstance(fence, Fence))
+        with self.engine.begin() as db:
+            validate(db)
+            registry = Registry(db)
+            current = registry._current(fence.owner)
+            fenced(current, fence)
+            require(current.phase == Phase.PREPARING and current.pod_uid is None
+                    and registry.creation_reserved(current))
+            pod = self.pods.lookup(Identity.of(current))
+            if pod is None:
+                return None
+            require(isinstance(pod, Pod) and pod.identity == Identity.of(current))
+            return registry.observe(Fence.of(current), pod_uid=pod.uid, ready=False,
+                                    active_requests=0, ambiguous=True, verified=True, now=self.clock())
+
     def reserve(self, fence):
         """Commit the only create permission BEFORE external I/O.
 

@@ -58,6 +58,15 @@ class Registry:
         require(state is not None)
         return state
 
+    def creation_reserved(self, state):
+        """Read-only projection; a receipt is not proof of delivery or readiness."""
+        if state is None or state.phase != Phase.PREPARING or state.pod_uid is not None:
+            return False
+        return self.db.execute(text('''SELECT 1 FROM runner_runtime.outbox
+            WHERE owner_id=:owner AND state_id=:state AND generation=:generation
+            AND kind='ensure' AND settled LIMIT 1'''),
+            {'owner': state.owner, 'state': state.state_id, 'generation': state.generation}).first() is not None
+
     def _save(self, previous, current, work=None):
         if current != previous:
             result = self.db.execute(text('''UPDATE runner_runtime.registry
