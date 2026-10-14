@@ -58,8 +58,19 @@ def references(baseline, objects):
             entry["resourceVersion"] = meta["resourceVersion"]
         elif obj["kind"] == "ConfigMap":
             entry.update(data=obj["data"], immutable=obj.get("immutable"))
+        elif obj["kind"] == "CiliumNetworkPolicy":
+            # Cilium supports one rule or a rule array. Keep declared fields and
+            # array order intact; never flatten/ignore a policy representation.
+            fields = {key: obj[key] for key in ("spec", "specs") if key in obj}
+            require(fields)
+            if "spec" in fields:
+                require(isinstance(fields["spec"], dict) and fields["spec"])
+            if "specs" in fields:
+                require(isinstance(fields["specs"], list) and fields["specs"]
+                    and all(isinstance(rule, dict) and rule for rule in fields["specs"]))
+            entry.update(fields)
         else:
-            require(obj["kind"] in {"PersistentVolumeClaim", "PersistentVolume", "Service", "CiliumNetworkPolicy"})
+            require(obj["kind"] in {"PersistentVolumeClaim", "PersistentVolume", "Service"})
             entry["spec"] = obj["spec"]
         result.append(entry)
     require(REQUIRED_REFS <= set(indexed))

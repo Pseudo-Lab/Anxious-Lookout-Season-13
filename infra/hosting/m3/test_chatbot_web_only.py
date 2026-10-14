@@ -22,6 +22,10 @@ def web_bundle(bundle, monkeypatch):
         if namespace: obj["metadata"]["namespace"] = namespace
         if kind == "ConfigMap": obj.update(immutable=True, data={"MODE":"unchanged"})
         elif kind != "Secret": obj["spec"] = {"unchanged": True}
+        if kind == "CiliumNetworkPolicy" and name in {"trial-boundary", "hosting-boundary"}:
+            del obj["spec"]
+            obj["specs"] = [{"endpointSelector":{"matchLabels":{"fixture":"rule-"+str(index)}}, "egress":[]}
+                for index in range(6 if name == "trial-boundary" else 4)]
         if kind == "PersistentVolumeClaim":
             claim_uid, _ = web.CLAIMS[name]
             obj["metadata"]["uid"] = claim_uid
@@ -142,3 +146,52 @@ def test_existing_archive_import_auditor_supports_a_distinct_web_source(images):
     (imported/"cri.json").write_text(json.dumps(cri)); pod["specImage"] = ref
     result = audit("web", source, build, imported, ref, pod)
     assert result["role"] == "web" and result["sourceSha"] == source and result["podAssociationChecked"] is True
+
+
+def test_live_shaped_mix_of_five_specs_and_two_rule_arrays_seals_without_conversion(web_bundle):
+    baseline, snapshot, known, preservation, release, source = web_bundle
+    policies = [obj for obj in snapshot["references"] if obj["kind"] == "CiliumNetworkPolicy"]
+    assert sum("spec" in obj for obj in policies) == 5
+    assert sorted(len(obj["specs"]) for obj in policies if "specs" in obj) == [4,6]
+    original = copy.deepcopy(snapshot)
+    assert web.seal(baseline, snapshot, known) == preservation
+    assert web.patch(baseline, preservation, snapshot, release, source, "upgrade")["target"]["name"] == "web"
+    assert snapshot == original
+
+
+@pytest.mark.parametrize("fields", [
+    {}, {"spec":None}, {"spec":{}}, {"spec":[]}, {"spec":"invalid"},
+    {"specs":None}, {"specs":[]}, {"specs":{}}, {"specs":"invalid"},
+    {"specs":[None]}, {"specs":[{}]}, {"specs":[[]]}, {"specs":[1]},
+    {"spec":{"valid":True},"specs":[]}, {"spec":None,"specs":[{"valid":True}]},
+])
+def test_missing_empty_or_malformed_policy_representations_fail_closed(web_bundle, fields):
+    baseline, snapshot, known, _, _, _ = web_bundle
+    policy = next(obj for obj in snapshot["references"] if obj["kind"] == "CiliumNetworkPolicy")
+    policy.pop("spec",None); policy.pop("specs",None); policy.update(fields)
+    with pytest.raises(ValueError): web.seal(baseline, snapshot, known)
+
+
+@pytest.mark.parametrize("damage", ["spec-content","specs-content","reorder","add-rule","remove-rule",
+    "representation","add-second-field","both-spec","both-specs","remove-second-field"])
+def test_each_declared_policy_field_and_array_order_is_preserved_for_recovery(web_bundle, damage):
+    baseline, snapshot, known, _, release, source = web_bundle
+    one = next(obj for obj in snapshot["references"] if obj["kind"] == "CiliumNetworkPolicy" and "spec" in obj)
+    many = next(obj for obj in snapshot["references"] if obj["kind"] == "CiliumNetworkPolicy" and "specs" in obj)
+    if damage.startswith("both-") or damage == "remove-second-field":
+        one["specs"] = [{"additionalRule":True}]
+    preservation = web.seal(baseline, snapshot, known)
+    packet = web.patch(baseline, preservation, snapshot, release, source, "upgrade")
+    snapshot["objects"]["web"]["spec"] = copy.deepcopy(packet["patch"][-1]["value"])
+    assert web.patch(baseline, preservation, snapshot, release, source, "rollback")["target"]["name"] == "web"
+    if damage in {"spec-content","both-spec"}: one["spec"]["changed"] = True
+    elif damage == "specs-content": many["specs"][0]["changed"] = True
+    elif damage == "reorder": many["specs"].reverse()
+    elif damage == "add-rule": many["specs"].append({"newRule":True})
+    elif damage == "remove-rule": many["specs"].pop()
+    elif damage == "representation": one["specs"] = [one.pop("spec")]
+    elif damage == "add-second-field": one["specs"] = [{"newRule":True}]
+    elif damage == "both-specs": one["specs"][0]["changed"] = True
+    else: del one["specs"]
+    assert web.references(baseline, snapshot["references"]) != preservation["referenceDigest"]
+    with pytest.raises(ValueError): web.patch(baseline, preservation, snapshot, release, source, "rollback")

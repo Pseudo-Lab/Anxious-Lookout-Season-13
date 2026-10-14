@@ -70,6 +70,12 @@ captured metadata is
 Other reference objects retain metadata and full spec, ConfigMaps also data/
 immutable, PVC/PV status for existing Bound/Retain/UID/node checks. References are
 normalized/hash-compared by the tool; Secret UID/RV rotations are refused.
+CiliumNetworkPolicy retains every declared spec/specs field without converting
+between representations or dropping array rules/order. At least one is required;
+spec must be a nonempty object, specs a nonempty list of nonempty objects. Both
+may be present and are both digested. Empty/null/wrong types are refused even if
+the other field is valid. A change to either representation or its contents/order
+is reference drift. Do not transform the original policy input to make it pass.
 Before initial seal, PM compares these actual inputs against reviewed post-rollout/
 reconnection reference evidence. Unexpected drift is a handoff, not a new baseline.
 
