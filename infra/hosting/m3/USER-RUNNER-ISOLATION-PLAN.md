@@ -161,3 +161,17 @@ No numeric limit or operational enablement is selected by this design.
 - [Kubernetes RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/): named-resource permissions and create restrictions.
 - [Validating Admission Policy](https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/): policy failure handling and binding enforcement actions.
 - [NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/): additive policies, supporting network plugin requirement and enforcement limitations.
+
+## Preparation bundle and provider dependency
+
+The separately reviewable `user-runner-isolated/README.md` and three JSON templates
+provide namespace/zero-Pod bootstrap quota/default-deny/service accounts, an
+explicit static-PV claim path, and an immutable synthetic transport Secret.
+They require concrete target/storage/Secret inputs and user authorization before
+PM applies anything. Cluster baseline is still unknown; CEL versus webhook is
+unselected. No controller grants or runner workload are included.
+
+Supported operator ChatGPT authentication refresh remains an unresolved prerequisite
+for provider egress design. Keep provider routes closed until that investigation
+and the resulting route are reviewed. Backend's load fixtures run only in isolated
+Docker; PM/review assess recorded results, not an unapproved operating-cluster run.
