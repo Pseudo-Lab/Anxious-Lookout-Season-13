@@ -1,4 +1,4 @@
-// 공통 대화창의 계정별 상태(열림·선택한 대화·넓게 보기)와 대화별 작성 중 입력(이 탭의 sessionStorage).
+// 공통 대화창의 계정별 상태(열림·선택한 대화·패널 폭)와 대화별 작성 중 입력(이 탭의 sessionStorage).
 // 새로고침이나 같은 탭의 로그인 이동 뒤에도 이어지게 한다. 키에 accountId를 넣어 다른 계정에는 보이지 않으며,
 // pendingStore와 같은 접두어라 명시적 로그아웃 때 함께 지워진다. 인증 정보는 담지 않는다.
 
@@ -7,10 +7,11 @@ import { PREFIX } from "@/lib/research/pendingStore";
 export interface ChatUiState {
   open: boolean;
   sessionId: string | null;
-  wide: boolean;
+  /** 사용자가 고른 넓은 화면 패널 폭(px). null이면 기본 폭. 화면에 맞춘 실제 폭은 ChatDock이 정한다. */
+  width: number | null;
 }
 
-export const CLOSED_CHAT: ChatUiState = { open: false, sessionId: null, wide: false };
+export const CLOSED_CHAT: ChatUiState = { open: false, sessionId: null, width: null };
 
 const uiKey = (accountId: string) => `${PREFIX}${accountId}:chat-ui`;
 const draftKey = (accountId: string, sessionId: string) => `${PREFIX}${accountId}:chat-draft:${sessionId}`;
@@ -23,7 +24,7 @@ export function loadChatUi(accountId: string): ChatUiState {
       return {
         open: v.open === true,
         sessionId: typeof v.sessionId === "string" ? v.sessionId : null,
-        wide: v.wide === true,
+        width: typeof v.width === "number" && Number.isFinite(v.width) && v.width > 0 ? Math.round(v.width) : null,
       };
     }
   } catch {

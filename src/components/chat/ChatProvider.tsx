@@ -14,7 +14,8 @@ interface ChatContextValue extends ChatUiState {
   openSession: (sessionId: string | null) => void;
   /** 그 대화가 아직 열려 있을 때만 대화 목록으로 돌아간다(보관 완료 등 늦은 완료가 다른 대화를 닫지 않게). */
   leaveSession: (sessionId: string) => void;
-  setWide: (wide: boolean) => void;
+  /** 넓은 화면 패널 폭(px). null이면 기본 폭으로 되돌린다. */
+  setWidth: (width: number | null) => void;
 }
 
 const ChatContext = createContext<ChatContextValue>({
@@ -22,7 +23,7 @@ const ChatContext = createContext<ChatContextValue>({
   setOpen: () => {},
   openSession: () => {},
   leaveSession: () => {},
-  setWide: () => {},
+  setWidth: () => {},
 });
 
 export function ChatProvider({ children }: { children: ReactNode }) {
@@ -65,11 +66,14 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     (sessionId: string) => update((s) => (s.sessionId === sessionId ? { ...s, sessionId: null } : s)),
     [update]
   );
-  const setWide = useCallback((wide: boolean) => update((s) => ({ ...s, wide })), [update]);
+  const setWidth = useCallback(
+    (width: number | null) => update((s) => (s.width === width ? s : { ...s, width })),
+    [update]
+  );
 
   const value = useMemo(
-    () => ({ ...ui, setOpen, openSession, leaveSession, setWide }),
-    [ui, setOpen, openSession, leaveSession, setWide]
+    () => ({ ...ui, setOpen, openSession, leaveSession, setWidth }),
+    [ui, setOpen, openSession, leaveSession, setWidth]
   );
   return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;
 }

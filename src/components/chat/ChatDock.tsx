@@ -1,10 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import dynamic from "next/dynamic";
 import { useAuth } from "@/hooks/useAuth";
 import { API_ENABLED } from "@/lib/constants";
 import { useChat } from "@/components/chat/ChatProvider";
+import { PANEL_DEFAULT, PANEL_STEP, PANEL_WIDE, clampPanelWidth, panelBounds } from "@/components/chat/panelWidth";
 
 // 대화창 내용은 처음 열 때 불러온다(모든 페이지의 초기 로딩·조회 부담을 줄인다).
 const ChatPanel = dynamic(() => import("@/components/chat/ChatPanel"), {
@@ -25,6 +34,20 @@ function useIsMobile() {
     subscribeMedia,
     () => window.matchMedia(MOBILE_QUERY).matches,
     () => false
+  );
+}
+
+function subscribeResize(onChange: () => void) {
+  window.addEventListener("resize", onChange);
+  return () => window.removeEventListener("resize", onChange);
+}
+
+// 스크롤 막대를 뺀 화면 폭. 창 크기·확대 비율이 바뀌면 다시 읽는다.
+function useViewportWidth() {
+  return useSyncExternalStore(
+    subscribeResize,
+    () => document.documentElement.clientWidth,
+    () => 1280
   );
 }
 
@@ -58,6 +81,7 @@ export default function ChatDock() {
   const { status, user } = useAuth();
   const chat = useChat();
   const isMobile = useIsMobile();
+  const viewport = useViewportWidth();
   const buttonRef = useRef<HTMLButtonElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const panelRef = useRef<HTMLElement>(null);
@@ -69,6 +93,18 @@ export default function ChatDock() {
   const mounted = mountedFor === accountKey;
   const visibleHeight = useVisibleHeight(chat.open && isMobile);
 
+  // 넓은 화면 폭: 끄는 동안은 화면에만 반영하고(liveWidth) 놓을 때 저장한다. 저장한 폭은 지금 화면에 맞춰 줄여 그린다.
+  const [liveWidth, setLiveWidth] = useState<number | null>(null);
+  const drag = useRef<{ pointerId: number; startX: number; startWidth: number; current: number } | null>(null);
+  // 대화창을 닫거나 작은 화면이 되면 진행 중이던 폭 조절은 버린다(조절 상태가 남지 않게).
+  if (liveWidth !== null && (!chat.open || isMobile || !mounted)) setLiveWidth(null);
+  const resizing = liveWidth !== null;
+  const bounds = panelBounds(viewport);
+  const width = clampPanelWidth(liveWidth ?? chat.width ?? PANEL_DEFAULT, viewport);
+  const wideWidth = clampPanelWidth(PANEL_WIDE, viewport);
+  const canWiden = wideWidth > clampPanelWidth(PANEL_DEFAULT, viewport);
+  const isWide = canWiden && width >= wideWidth;
+
   // 열고 닫을 때 포커스: 열면 대화창 제목, 닫으면 버튼으로 돌려준다(처음 그릴 때는 옮기지 않는다).
   const previous = useRef(chat.open);
   useEffect(() => {
@@ -78,17 +114,22 @@ export default function ChatDock() {
     else buttonRef.current?.focus();
   }, [chat.open]);
 
-  // 넓은 화면: 대화창이 본문을 가리지 않게 오른쪽 여백을 둔다(globals.css).
+  // 넓은 화면: 대화창이 본문을 가리지 않게 대화창 폭만큼 오른쪽 여백을 둔다(globals.css). 폭과 같은 프레임에 맞춘다.
+  useLayoutEffect(() => {
+    if (!chat.open || isMobile) return;
+    const root = document.documentElement;
+    root.dataset.chatOpen = "";
+    root.style.setProperty("--chat-panel-width", `${width}px`);
+    return () => {
+      delete root.dataset.chatOpen;
+      root.style.removeProperty("--chat-panel-width");
+    };
+  }, [chat.open, isMobile, width]);
+
   // 작은 화면: 대화창이 화면 전체를 쓰므로 뒤 페이지를 조작·스크롤할 수 없게 한다.
   useEffect(() => {
+    if (!chat.open || !isMobile) return;
     const root = document.documentElement;
-    if (!chat.open) return;
-    if (!isMobile) {
-      root.dataset.chatOpen = chat.wide ? "wide" : "normal";
-      return () => {
-        delete root.dataset.chatOpen;
-      };
-    }
     const behind = Array.from(document.querySelectorAll<HTMLElement>("body > header, body > main, body > footer"));
     behind.forEach((el) => el.setAttribute("inert", ""));
     root.style.overflow = "hidden";
@@ -96,11 +137,11 @@ export default function ChatDock() {
       behind.forEach((el) => el.removeAttribute("inert"));
       root.style.overflow = "";
     };
-  }, [chat.open, chat.wide, isMobile]);
+  }, [chat.open, isMobile]);
 
   // 작은 화면의 모달 대화창: Tab/Shift+Tab을 대화창 안에서 순환하고, 포커스가 밖(body 등)으로 나갔어도
   // Tab은 대화창으로 되돌리고 Escape는 닫는다(문서 단위로 받는다).
-  const { setOpen } = chat;
+  const { setOpen, setWidth } = chat;
   useEffect(() => {
     if (!chat.open || !isMobile) return;
     const onKey = (e: KeyboardEvent) => {
@@ -132,7 +173,71 @@ export default function ChatDock() {
     return () => document.removeEventListener("keydown", onKey);
   }, [chat.open, isMobile, setOpen]);
 
+  // 폭 조절 끝내기. commit이면 마지막 폭을 저장하고, 아니면(취소) 시작 폭으로 되돌린다.
+  function finishResize(commit: boolean) {
+    const d = drag.current;
+    drag.current = null;
+    setLiveWidth(null);
+    if (d && commit && d.current !== d.startWidth) setWidth(d.current);
+  }
+  const finishRef = useRef(finishResize);
+  useLayoutEffect(() => {
+    finishRef.current = finishResize;
+  });
+
+  // 끄는 동안: 문서 전체 커서·글자 선택 막기(globals.css), Escape는 취소(대화창은 닫지 않음), 창을 벗어나면 그 폭으로 끝낸다.
+  useEffect(() => {
+    if (!resizing) return;
+    const root = document.documentElement;
+    root.dataset.chatResizing = "";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      finishRef.current(false);
+    };
+    const onBlur = () => finishRef.current(true);
+    document.addEventListener("keydown", onKey, true);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      delete root.dataset.chatResizing;
+      document.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [resizing]);
+
+  function onResizeStart(e: ReactPointerEvent<HTMLDivElement>) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    drag.current = { pointerId: e.pointerId, startX: e.clientX, startWidth: width, current: width };
+    setLiveWidth(width);
+  }
+  function onResizeMove(e: ReactPointerEvent<HTMLDivElement>) {
+    const d = drag.current;
+    // 누른 채 끄는 포인터만 따른다(마우스를 올리기만 한 이동은 무시).
+    if (!d || e.pointerId !== d.pointerId || !e.currentTarget.hasPointerCapture(e.pointerId)) return;
+    // 대화창은 오른쪽에 붙어 있으므로 경계를 왼쪽으로 끌면 넓어진다.
+    d.current = clampPanelWidth(d.startWidth + d.startX - e.clientX, viewport);
+    setLiveWidth(d.current);
+  }
+  function onResizeKey(e: ReactKeyboardEvent<HTMLDivElement>) {
+    const step = e.shiftKey ? PANEL_STEP * 4 : PANEL_STEP;
+    const next =
+      e.key === "ArrowLeft" ? width + step
+      : e.key === "ArrowRight" ? width - step
+      : e.key === "Home" ? bounds.min
+      : e.key === "End" ? bounds.max
+      : null;
+    if (next === null) return;
+    e.preventDefault();
+    setWidth(clampPanelWidth(next, viewport));
+  }
+
   if (!API_ENABLED) return null;
+
+  const iconButton =
+    "flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-stone-500 hover:bg-stone-100 hover:text-stone-800 md:h-8 md:w-8";
 
   return (
     <>
@@ -169,36 +274,73 @@ export default function ChatDock() {
               chat.setOpen(false);
             }
           }}
-          style={isMobile && visibleHeight ? { height: visibleHeight } : undefined}
-          className={`fixed z-50 flex flex-col bg-white shadow-2xl ring-1 ring-stone-200 ${
-            isMobile ? "inset-x-0 top-0 h-[100dvh]" : `inset-y-0 right-0 ${chat.wide ? "w-[min(48rem,60vw)]" : "w-[26rem]"}`
+          style={isMobile ? (visibleHeight ? { height: visibleHeight } : undefined) : { width }}
+          className={`fixed z-50 flex flex-col bg-white ${
+            isMobile ? "inset-x-0 top-0 h-[100dvh]" : "inset-y-0 right-0 border-l border-stone-200 shadow-[-8px_0_24px_-16px_rgba(28,25,23,0.25)]"
           }`}
         >
-          <div className="flex items-center gap-2 border-b border-stone-200 px-4 py-2">
+          {!isMobile && (
+            // 왼쪽 경계: 끌어서(포인터) 또는 ←/→·Home/End 키로 폭 조절, 두 번 누르면 기본 폭.
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="대화창 폭 조절"
+              aria-controls={PANEL_ID}
+              aria-valuemin={bounds.min}
+              aria-valuemax={bounds.max}
+              aria-valuenow={width}
+              aria-valuetext={`${width}픽셀`}
+              tabIndex={0}
+              title="끌거나 ←/→ 키로 폭 조절 · 두 번 누르면 기본 폭"
+              onPointerDown={onResizeStart}
+              onPointerMove={onResizeMove}
+              onPointerUp={() => finishResize(true)}
+              onPointerCancel={() => finishResize(false)}
+              onLostPointerCapture={() => finishResize(true)}
+              onKeyDown={onResizeKey}
+              onDoubleClick={() => setWidth(null)}
+              data-resizing={resizing || undefined}
+              className="group absolute inset-y-0 -left-2 z-10 w-4 cursor-col-resize touch-none outline-none"
+            >
+              <span
+                aria-hidden="true"
+                className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-transparent transition-colors group-hover:bg-indigo-300 group-focus-visible:bg-indigo-500 group-data-[resizing]:bg-indigo-500"
+              />
+              <span
+                aria-hidden="true"
+                className="absolute left-1/2 top-1/2 h-10 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-stone-300 transition-colors group-hover:bg-indigo-400 group-focus-visible:bg-indigo-600 group-data-[resizing]:bg-indigo-600"
+              />
+            </div>
+          )}
+          <div className="flex shrink-0 items-center gap-1 border-b border-stone-100 py-1 pl-4 pr-2">
             <h2 id="chat-panel-title" ref={headingRef} tabIndex={-1} className="flex-1 text-sm font-semibold text-stone-800 outline-none">
               Codex 대화
             </h2>
-            {!isMobile && (
+            {!isMobile && canWiden && (
               <button
                 type="button"
-                onClick={() => chat.setWide(!chat.wide)}
-                className="min-h-11 rounded-lg px-3 text-xs text-stone-500 hover:bg-stone-100 hover:text-stone-800"
+                onClick={() => setWidth(isWide ? null : wideWidth)}
+                aria-label={isWide ? "대화창 기본 폭으로" : "대화창 넓게"}
+                title={isWide ? "기본 폭으로" : "넓게"}
+                className={iconButton}
               >
-                {chat.wide ? "좁게 보기" : "넓게 보기"}
+                <svg aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  {isWide ? (
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 12h6m12 0h-6M6 9l3 3-3 3m12-6-3 3 3 3" />
+                  ) : (
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 12h18M7 8l-4 4 4 4m10-8 4 4-4 4" />
+                  )}
+                </svg>
               </button>
             )}
-            <button
-              type="button"
-              onClick={() => chat.setOpen(false)}
-              aria-label="대화창 닫기"
-              className="flex h-11 w-11 items-center justify-center rounded-lg text-stone-500 hover:bg-stone-100 hover:text-stone-800"
-            >
+            <button type="button" onClick={() => chat.setOpen(false)} aria-label="대화창 닫기" title="닫기" className={iconButton}>
               <svg aria-hidden="true" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
               </svg>
             </button>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4">
+          {/* 세로로만 스크롤한다. 넓은 표·코드는 각자 안에서 가로로 스크롤한다. */}
+          <div data-chat-scroll className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4">
             {/* 계정이 바뀌면 이전 계정의 조회 결과·입력·늦은 응답을 버리고 새로 그린다. */}
             <ChatPanel key={accountKey} />
           </div>

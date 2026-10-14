@@ -461,7 +461,7 @@ check("R9. running state shown", await appears(chat.getByText("Codex가 응답�
 await page.reload(); // 진행 중 재접속
 check("R9. reply after reconnect (polling)", await appears(chat.getByText("모의 응답:"), 15000));
 // 대화 목록 탭은 general(도구 없음): 모의 모델의 research_list 호출은 서버 거부로 표시된다.
-check("R9. user message shows accepted scope (general)", await appears(chat.locator("li.bg-indigo-50", { hasText: "질문 하나" }).getByText("보낸 범위: 일반 질문")));
+check("R9. user message shows accepted scope (general)", await appears(chat.locator("li[data-role=user]", { hasText: "질문 하나" }).getByText("보낸 범위: 일반 질문")));
 check("R9. out-of-scope tool call shown as rejected", await appears(chat.getByText("허용되지 않는 도구라 서버가 실행하지 않았습니다").first()));
 await chat.getByRole("button", { name: /research_list/ }).first().click();
 check("R9. tool input shown inert", await appears(chat.locator("pre", { hasText: '"query": "질문 하나"' })));
@@ -474,7 +474,7 @@ check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: 
   await chat.getByLabel("메시지").fill("거절 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
   check("R9b. failed codex_rejected shown", await appears(chat.getByText("Codex가 이 요청을 받지 않았습니다")));
-  const rejected = chat.locator("li.bg-indigo-50", { hasText: "거절 질문" });
+  const rejected = chat.locator("li[data-role=user]", { hasText: "거절 질문" });
   check("R9b. platform input labeled 미기록", await appears(rejected.getByText("미기록 입력")));
   check("R9b. not presented as Codex record", await appears(rejected.getByText("Codex 대화 기록에 반영되지 않은 입력입니다")));
   await rejected.getByRole("button", { name: "보존된 입력 기록" }).click();
@@ -483,7 +483,7 @@ check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: 
   await chat.getByLabel("메시지").fill("거절 후 새 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
   check("R9b. new explicit message after failure works", await appears(chat.getByText("모의 응답: 거절 후 새 질문"), 15000));
-  check("R9b. rejected input still preserved after new turn", (await chat.locator("li.bg-indigo-50", { hasText: "거절 질문" }).count()) === 1);
+  check("R9b. rejected input still preserved after new turn", (await chat.locator("li[data-role=user]", { hasText: "거절 질문" }).count()) === 1);
 }
 
 // R9g. #7 선접수 실패(503 codex_*)는 확정 거절: 안내 + 입력 유지 + 같은 key 재전송 대상 아님 / 접수 후 모델 불일치는 명시 실패
@@ -547,7 +547,7 @@ check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: 
     (await appears(chat.getByText("마지막 요청이 실패했습니다"))) && (await appears(chat.getByText("고정된 모델을 사용할 수 없어")))
   );
   check("R9g. raw provider text not shown", !(await chat.innerText()).includes("gpt-other"));
-  const mm = chat.locator("li.bg-indigo-50", { hasText: "모델 불일치 질문" });
+  const mm = chat.locator("li[data-role=user]", { hasText: "모델 불일치 질문" });
   check("R9g. mismatched turn items badged as not a normal response", await appears(mm.getByText("정상 응답 아님")));
   check("R9g. mismatched tool call badged", await appears(chat.locator("li", { hasText: "research_document_save" }).filter({ hasText: "정상 응답 아님" })));
   check("R9g. no assistant answer shown for mismatched turn", (await chat.getByText("모의 응답:").count()) === answersBefore);
@@ -588,7 +588,7 @@ check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: 
     await chat.getByRole("button", { name: "보내기" }).click();
     check(`R9h. ${mode}: failed turn explained`, (await appears(chat.getByText("마지막 요청이 실패했습니다"))) && (await appears(chat.getByText(text).first())));
     check(`R9h. ${mode}: provider text not shown`, !(await chat.innerText()).includes("acct_secret") && !(await chat.innerText()).includes("token_expired"));
-    const item = chat.locator("li.bg-indigo-50", { hasText: `${mode} 질문` });
+    const item = chat.locator("li[data-role=user]", { hasText: `${mode} 질문` });
     check(
       `R9h. ${mode}: input shown as ${recorded ? "Codex record" : "unrecorded platform input"}`,
       (await item.count()) === 1 && (await item.getByText("미기록 입력").count()) === (recorded ? 0 : 1)
@@ -692,7 +692,7 @@ check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: 
 }
 
 // R12. 메시지 응답 유실 → polling으로 서버 version 변경 → 같은 내용 재전송: 모델 turn 중복 없음
-const userMessages = (t) => chat.locator("li.bg-indigo-50", { hasText: t });
+const userMessages = (t) => chat.locator("li[data-role=user]", { hasText: t });
 async function dropFirstMessagePost() {
   let dropped = false;
   await page.route("**/api/research/sessions/*/messages", async (route) => {
@@ -878,7 +878,7 @@ async function confirmSingleTurn(label, text) {
   await page.waitForURL(U("/"));
   await chat.getByText("모의 응답: 자료 페이지 질문").waitFor({ timeout: 15000 });
   check("R22. material page sends material + id", bodies.at(-1)?.page?.kind === "material" && bodies.at(-1)?.page?.resourceId === materialId, JSON.stringify(bodies.at(-1)?.page));
-  check("R22. navigation during run: sent scope stays material", await appears(chat.locator("li.bg-indigo-50", { hasText: "자료 페이지 질문" }).getByText(/보낸 범위: 이 자료/)));
+  check("R22. navigation during run: sent scope stays material", await appears(chat.locator("li[data-role=user]", { hasText: "자료 페이지 질문" }).getByText(/보낸 범위: 이 자료/)));
   check("R22. next scope follows current page", await appears(chat.getByText("다음 질문 범위: 일반 질문")));
   check("R22. material scope: list tool rejected", await appears(lastTool().getByText("거부됨")));
   await page.unroute("**/api/research/sessions/*/messages");
@@ -939,7 +939,7 @@ async function confirmSingleTurn(label, text) {
   await chat.getByRole("button", { name: "보내기" }).click();
   check("R22. unknown resource -> not found before admission", await appears(chat.getByText("메시지를 보내지 못했습니다.")));
   check("R22. input kept after 404", (await chat.getByLabel("메시지").inputValue()) === "없는 자료 질문");
-  check("R22. 404 send not recorded as a message", (await chat.locator("li.bg-indigo-50", { hasText: "없는 자료 질문" }).count()) === 0);
+  check("R22. 404 send not recorded as a message", (await chat.locator("li[data-role=user]", { hasText: "없는 자료 질문" }).count()) === 0);
   await chat.getByLabel("메시지").fill("");
 
   // 작은 화면: 전체 화면 dialog, 뒤 페이지 조작 불가, 44px 이상, 키보드(보이는 높이)에 맞춤
@@ -1355,7 +1355,7 @@ let docEUrl;
       posts.length === 2 && posts[0].key === posts[1].key && posts[0].body === posts[1].body,
       JSON.stringify(posts.map((x) => x.key.slice(0, 8)))
     );
-    check("R23d. still one user message A", (await rc.locator("li.bg-indigo-50", { hasText: "미확인 질문 A" }).count()) === 1);
+    check("R23d. still one user message A", (await rc.locator("li[data-role=user]", { hasText: "미확인 질문 A" }).count()) === 1);
     check("R23d. uncertain request cleared after confirmation", !(await pendingA()).includes("미확인 질문 A"));
     await rc.getByLabel("메시지").fill("새 초안 B");
     await rc.getByRole("button", { name: "보내기" }).click();

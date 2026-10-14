@@ -32,14 +32,20 @@ body {
   color: var(--foreground);
 }
 
-/* 넓은 화면에서 공통 대화창이 열려 있으면 본문이 가려지지 않게 오른쪽을 비운다(ChatDock 너비와 같게). */
+/* 넓은 화면에서 공통 대화창이 열려 있으면 본문이 가려지지 않게 대화창 폭(ChatDock이 정함)만큼 오른쪽을 비운다. */
 @media (min-width: 768px) {
-  html[data-chat-open="normal"] body {
-    padding-right: 26rem;
+  html[data-chat-open] body {
+    padding-right: var(--chat-panel-width, 26rem);
   }
-  html[data-chat-open="wide"] body {
-    padding-right: min(48rem, 60vw);
-  }
+}
+
+/* 대화창 폭을 끄는 동안: 어디서든 조절 커서를 유지하고 본문 글자가 선택되지 않게 한다. */
+html[data-chat-resizing],
+html[data-chat-resizing] * {
+  cursor: col-resize !important;
+}
+html[data-chat-resizing] body {
+  user-select: none;
 }
 
 /* Prose styling for MDX content */
@@ -100,6 +106,7 @@ body {
   margin-bottom: 1em;
   padding: 1em;
   border-radius: 0.75rem;
+  max-width: 100%;
   overflow-x: auto;
   font-size: 0.875em;
   background: #1e1e2e;
@@ -120,6 +127,64 @@ body {
   margin-top: 1em;
   margin-bottom: 1em;
   border-collapse: collapse;
+}
+
+/* 표는 감싼 상자 안에서 가로로 스크롤한다(SafeMarkdown). 칸은 내용 폭(최대 18rem, 좁으면 표 영역의 3/4)까지 넓히고 넘으면 줄바꿈한다.
+   표 전체가 상자보다 넓으면 상자만 스크롤되고, 가려진 쪽 가장자리에 그림자를 보인다. */
+.prose .scroll-frame {
+  position: relative;
+  margin-top: 1em;
+  margin-bottom: 1em;
+}
+.prose .scroll-frame::before,
+.prose .scroll-frame::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1.25rem;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.prose .scroll-frame::before {
+  left: 0;
+  background: linear-gradient(to right, rgb(28 25 23 / 0.14), transparent);
+}
+.prose .scroll-frame::after {
+  right: 0;
+  background: linear-gradient(to left, rgb(28 25 23 / 0.14), transparent);
+}
+.prose .scroll-frame[data-more-left]::before,
+.prose .scroll-frame[data-more-right]::after {
+  opacity: 1;
+}
+.prose .table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  container-type: inline-size;
+}
+.prose .table-scroll > table {
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+}
+.prose .table-scroll .cell {
+  display: block;
+  min-width: 3rem;
+  /* 한 칸은 보이는 표 영역 안에 다 들어오게(좁은 대화창에서도 칸 하나를 한눈에) */
+  max-width: min(18rem, 75cqw);
+  overflow-wrap: anywhere;
+}
+.prose .table-scroll th,
+.prose .table-scroll td {
+  vertical-align: top;
+}
+
+.prose .table-scroll:focus-visible,
+.prose pre:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .prose th,
@@ -154,4 +219,37 @@ body {
   color: var(--color-muted);
   margin-top: 1em;
   margin-bottom: 1em;
+}
+
+/* 대화창 답변: 좁은 폭에 맞춘 제목 크기·문단 여백 */
+.prose-compact > :first-child {
+  margin-top: 0;
+}
+.prose-compact > :last-child {
+  margin-bottom: 0;
+}
+.prose-compact h1,
+.prose-compact h2 {
+  margin-top: 1.25em;
+  margin-bottom: 0.5em;
+  font-size: 1.125em;
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.prose-compact h3 {
+  margin-top: 1em;
+  font-size: 1em;
+}
+.prose-compact p {
+  margin-top: 0.6em;
+  margin-bottom: 0.6em;
+  line-height: 1.7;
+}
+.prose-compact pre {
+  border-radius: 0.5rem;
+  padding: 0.75em;
+}
+.prose-compact th,
+.prose-compact td {
+  padding: 0.375em 0.625em;
 }

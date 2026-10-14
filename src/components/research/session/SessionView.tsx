@@ -57,13 +57,13 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
   const [open, setOpen] = useState(false);
   const [raw, setRaw] = useState(false);
   return (
-    <li className="rounded-lg bg-stone-50 ring-1 ring-stone-200">
+    <li className="rounded-md bg-stone-50 text-xs">
       <button
         onClick={() => setOpen(!open)}
         aria-expanded={open}
-        className="flex w-full items-center justify-between gap-3 px-4 py-2 text-left text-sm"
+        className="flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left hover:bg-stone-100"
       >
-        <span>
+        <span className="min-w-0 break-words">
           <span className="mr-2 text-xs text-stone-500">도구</span>
           <span className="font-mono text-stone-800">{item.name}</span>
         </span>
@@ -72,7 +72,7 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
         </span>
       </button>
       {item.status === "rejected" && (
-        <p className="px-4 pb-2 text-xs text-amber-800">
+        <p className="px-3 pb-2 text-xs text-amber-800">
           {item.error?.code === "tool_not_allowed"
             ? "이 질문을 보낸 페이지의 범위에서 허용되지 않는 도구라 서버가 실행하지 않았습니다."
             : "서버가 이 도구 호출을 실행하지 않았습니다."}
@@ -80,12 +80,12 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
         </p>
       )}
       {item.modelMismatch && (
-        <div className="px-4 pb-2">
+        <div className="px-3 pb-2">
           <ModelMismatchNote />
         </div>
       )}
       {open && (
-        <div className="space-y-3 px-4 pb-4">
+        <div className="space-y-3 px-3 pb-3">
           <div className="space-y-1">
             <p className="text-xs font-medium text-stone-600">입력</p>
             <Inert value={item.input} />
@@ -123,7 +123,7 @@ function ModelMismatchNote() {
 function ScopeBadge({ scope }: { scope: AcceptedScope }) {
   const text = kindText(scope.page.kind);
   return (
-    <span className="rounded-full bg-white px-2 py-0.5 font-normal text-stone-600 ring-1 ring-stone-200" title={text.can}>
+    <span className="max-w-full break-words rounded bg-white/80 px-1.5 py-0.5 font-normal text-stone-500 ring-1 ring-stone-200" title={text.can}>
       보낸 범위: {text.label}
       {scope.page.title ? ` · ${scope.page.title}` : ""}
     </span>
@@ -136,19 +136,25 @@ function Message({ sessionId, item }: { sessionId: string; item: Extract<Session
   // 플랫폼이 보존한 입력: Codex 원본 이력에 기록되지 않았으므로 모델이 본 대화나 성공으로 표시하지 않는다.
   const platform = item.source === "platform";
   return (
+    // 내 질문은 오른쪽의 옅은 말풍선, Codex 답변은 테두리 없이 본문처럼 보여 답변을 중심에 둔다.
     <li
-      className={`rounded-lg px-4 py-3 ${mine ? "bg-indigo-50" : "bg-white ring-1 ring-stone-200"} ${
+      data-role={item.role}
+      className={`min-w-0 ${mine ? "ml-auto w-fit max-w-[90%] rounded-2xl bg-stone-100 px-3 py-2" : "py-1"} ${
         platform ? "border border-dashed border-amber-400" : ""
       }`}
     >
-      <p className="mb-1 flex flex-wrap items-center gap-2 text-xs font-medium text-stone-500">
+      <p className="mb-1 flex flex-wrap items-center gap-1.5 text-[11px] font-medium text-stone-400">
         {mine ? "나" : "Codex"}
         {mine && item.scope && <ScopeBadge scope={item.scope} />}
         {platform && item.status && (
           <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-800">{PLATFORM_STATUS_LABELS[item.status]}</span>
         )}
       </p>
-      {mine ? <p className="whitespace-pre-wrap text-sm text-stone-800">{item.text}</p> : <SafeMarkdown content={item.text} />}
+      {mine ? (
+        <p className="whitespace-pre-wrap text-sm text-stone-800 [overflow-wrap:anywhere]">{item.text}</p>
+      ) : (
+        <SafeMarkdown content={item.text} compact />
+      )}
       {item.modelMismatch && <ModelMismatchNote />}
       {platform && (
         <p className="mt-1 text-xs text-amber-800">
@@ -157,11 +163,11 @@ function Message({ sessionId, item }: { sessionId: string; item: Extract<Session
             : "Codex 대화 기록에 반영되지 않은 입력입니다. 내 대화에는 보존되며, 필요하면 새 메시지로 다시 보내세요."}
         </p>
       )}
-      <div className="mt-2">
+      <div className="mt-1">
         {raw ? (
           <RawItem sessionId={sessionId} itemId={item.id} label={platform ? "보존된 입력 기록 (Codex 원본 아님)" : undefined} />
         ) : (
-          <button onClick={() => setRaw(true)} className="text-xs text-stone-400 hover:text-stone-700">
+          <button onClick={() => setRaw(true)} className="text-[11px] text-stone-400 hover:text-stone-700">
             {platform ? "보존된 입력 기록" : "원본 기록"}
           </button>
         )}
@@ -171,17 +177,21 @@ function Message({ sessionId, item }: { sessionId: string; item: Extract<Session
 }
 
 // 다음 질문에 적용될 범위. 같은 대화의 이전 내용은 그대로 이어지며, 이 범위는 이번 질문에 새로 제공하는 페이지 문맥과 실행 권한이다.
+// 범위 이름은 입력창 옆(NextScope), 설명은 입력창 바로 위 본문 흐름(ScopeHint)에 둔다.
 function NextScope({ page }: { page: PageDescriptor }) {
   const text = kindText(page.kind);
   return (
-    <div className="rounded-lg bg-indigo-50/60 px-3 py-2 text-xs text-stone-600 ring-1 ring-indigo-100" aria-live="polite">
-      <p>
-        <span className="font-medium text-stone-800">다음 질문 범위: {text.label}</span> — {text.can}
-      </p>
-      <p className="mt-0.5 text-stone-500">
-        {unsupportedHint(page.kind)} 이전 대화 내용은 이 대화에 계속 이어집니다.
-      </p>
-    </div>
+    <p className="min-w-0 flex-1 truncate text-xs text-stone-500" title={text.can} aria-live="polite">
+      <span className="font-medium text-stone-700">다음 질문 범위: {text.label}</span>
+    </p>
+  );
+}
+
+function ScopeHint({ page }: { page: PageDescriptor }) {
+  return (
+    <p className="text-xs leading-relaxed text-stone-400">
+      {kindText(page.kind).can} {unsupportedHint(page.kind)} 이전 대화 내용은 이 대화에 계속 이어집니다.
+    </p>
   );
 }
 
@@ -285,53 +295,61 @@ function Composer({
 
   const retrying = pending !== null && pending.text === text.trim();
 
+  // 안내는 본문 흐름에 두고, 입력창과 보내기는 대화창 아래에 붙여 긴 대화에서도 바로 쓸 수 있게 한다.
   return (
-    <form onSubmit={submit} className="space-y-2">
-      <NextScope page={page} />
-      <textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        rows={4}
-        disabled={running}
-        placeholder={running ? "Codex가 응답하는 중입니다..." : "이어서 질문하기"}
-        aria-label="메시지"
-        className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm disabled:bg-stone-50"
-      />
-      {failure && <ErrorNotice failure={failure} prefix="메시지를 보내지 못했습니다." />}
-      {blocked && (
-        <Notice tone="warn">
-          지금은 Codex가 요청을 받을 수 없어 보내기가 잠겨 있습니다(위 연결 상태 참고). 입력한 내용과 이전 대화는 그대로 있습니다.{" "}
-          <button type="button" onClick={onRecheck} className="font-medium underline hover:no-underline">
-            상태 다시 확인
+    <>
+      <div className="mt-auto space-y-2 pt-2">
+        <ScopeHint page={page} />
+        {failure && <ErrorNotice failure={failure} prefix="메시지를 보내지 못했습니다." />}
+        {blocked && (
+          <Notice tone="warn">
+            지금은 Codex가 요청을 받을 수 없어 보내기가 잠겨 있습니다(위 연결 상태 참고). 입력한 내용과 이전 대화는 그대로 있습니다.{" "}
+            <button type="button" onClick={onRecheck} className="font-medium underline hover:no-underline">
+              상태 다시 확인
+            </button>
+          </Notice>
+        )}
+        {pending && (
+          <Notice tone="warn">
+            이전 전송의 결과를 확인하지 못했습니다. 위 대화 기록에 메시지가 이미 있는지 확인하세요.{" "}
+            {retrying ? (
+              "같은 내용으로 다시 보내면 이미 처리된 요청은 중복 실행되지 않습니다."
+            ) : (
+              <>
+                지금 입력은 새 요청으로 처리됩니다. 결과를 모르는 이전 질문을 같은 요청으로 다시 보내려면{" "}
+                <button type="button" onClick={() => setText(pending.text)} className="font-medium underline hover:no-underline">
+                  이전 질문 불러오기
+                </button>
+                를 누른 뒤 보내세요.
+              </>
+            )}
+            {retrying && !sameDescriptor(pending.page, page) &&
+              ` 다시 보내기는 지금 페이지가 아니라 처음 보낸 범위(${kindText(pending.page?.kind ?? "general").label})로 처리됩니다.`}
+          </Notice>
+        )}
+      </div>
+      <form onSubmit={submit} className="sticky bottom-0 z-10 -mx-4 space-y-2 border-t border-stone-100 bg-white px-4 pb-3 pt-2">
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={3}
+          disabled={running}
+          placeholder={running ? "Codex가 응답하는 중입니다..." : "이어서 질문하기"}
+          aria-label="메시지"
+          className="block max-h-[40vh] w-full resize-y rounded-lg border border-stone-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100 disabled:bg-stone-50"
+        />
+        <div className="flex items-center gap-2">
+          <NextScope page={page} />
+          <button
+            type="submit"
+            disabled={busy || running || blocked || text.trim() === ""}
+            className="min-h-11 shrink-0 rounded-lg bg-indigo-600 px-4 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 md:min-h-9"
+          >
+            {busy ? "보내는 중..." : retrying ? "다시 보내기" : "보내기"}
           </button>
-        </Notice>
-      )}
-      {pending && (
-        <Notice tone="warn">
-          이전 전송의 결과를 확인하지 못했습니다. 위 대화 기록에 메시지가 이미 있는지 확인하세요.{" "}
-          {retrying ? (
-            "같은 내용으로 다시 보내면 이미 처리된 요청은 중복 실행되지 않습니다."
-          ) : (
-            <>
-              지금 입력은 새 요청으로 처리됩니다. 결과를 모르는 이전 질문을 같은 요청으로 다시 보내려면{" "}
-              <button type="button" onClick={() => setText(pending.text)} className="font-medium underline hover:no-underline">
-                이전 질문 불러오기
-              </button>
-              를 누른 뒤 보내세요.
-            </>
-          )}
-          {retrying && !sameDescriptor(pending.page, page) &&
-            ` 다시 보내기는 지금 페이지가 아니라 처음 보낸 범위(${kindText(pending.page?.kind ?? "general").label})로 처리됩니다.`}
-        </Notice>
-      )}
-      <button
-        type="submit"
-        disabled={busy || running || blocked || text.trim() === ""}
-        className="min-h-11 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
-      >
-        {busy ? "보내는 중..." : retrying ? "다시 보내기" : "보내기"}
-      </button>
-    </form>
+        </div>
+      </form>
+    </>
   );
 }
 
@@ -406,26 +424,32 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
   }
 
   return (
-    <div className="space-y-4">
-      <header className="space-y-1">
-        <h2 className="text-lg font-bold text-stone-900">{s.title || "(제목 없음)"}</h2>
-        <p className="text-xs text-stone-500">
-          {SESSION_STATE_LABELS[s.state]} · 시작 {formatDateTime(s.createdAt)} · 최근 {formatDateTime(s.updatedAt)}
-        </p>
-        {s.context && (
+    <div className="flex flex-1 flex-col gap-3">
+      <header className="flex items-start gap-2">
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <h3 className="break-words text-base font-semibold text-stone-900">{s.title || "(제목 없음)"}</h3>
           <p className="text-xs text-stone-500">
-            공개 글에서 시작:{" "}
-            <Link href={`/public/document/?id=${encodeURIComponent(s.context.documentId)}`} className="text-indigo-600 hover:text-indigo-800">
-              {s.context.title || "(제목 없음)"}
-            </Link>{" "}
-            — 질문마다 읽을 수 있는 자료는 보낼 때 보고 있는 페이지 기준입니다. 이 글을 다시 읽으며 질문하려면 그 공개 글 페이지에서 보내세요.
+            {SESSION_STATE_LABELS[s.state]} · 시작 {formatDateTime(s.createdAt)} · 최근 {formatDateTime(s.updatedAt)}
           </p>
-        )}
-        <button onClick={() => void archive()} disabled={busy || running} className="text-sm text-stone-500 hover:text-red-700 disabled:opacity-50">
+          {s.context && (
+            <p className="text-xs text-stone-500">
+              공개 글에서 시작:{" "}
+              <Link href={`/public/document/?id=${encodeURIComponent(s.context.documentId)}`} className="text-indigo-600 hover:text-indigo-800">
+                {s.context.title || "(제목 없음)"}
+              </Link>{" "}
+              — 질문마다 읽을 수 있는 자료는 보낼 때 보고 있는 페이지 기준입니다. 이 글을 다시 읽으며 질문하려면 그 공개 글 페이지에서 보내세요.
+            </p>
+          )}
+        </div>
+        <button
+          onClick={() => void archive()}
+          disabled={busy || running}
+          className="min-h-11 shrink-0 rounded-md px-2 text-xs text-stone-500 hover:bg-stone-100 hover:text-red-700 disabled:opacity-50 md:min-h-8"
+        >
           보관
         </button>
-        {archiveFailure && <ErrorNotice failure={archiveFailure} prefix="보관하지 못했습니다." />}
       </header>
+      {archiveFailure && <ErrorNotice failure={archiveFailure} prefix="보관하지 못했습니다." />}
 
       <CodexStatusView result={codex.result} />
       {codex.refreshFailure && (
@@ -435,7 +459,7 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
       {s.items.length === 0 ? (
         <p className="text-sm text-stone-500">아직 주고받은 메시지가 없습니다.</p>
       ) : (
-        <ol className="space-y-3">
+        <ol className="space-y-4">
           {s.items.map((item) =>
             item.type === "message" ? (
               <Message key={item.id} sessionId={s.id} item={item} />

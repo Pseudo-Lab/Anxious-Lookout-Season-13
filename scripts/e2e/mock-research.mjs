@@ -3,6 +3,26 @@
 import crypto from "node:crypto";
 
 export const FIXED_MODEL = "gpt-6.1-sol";
+// 넓은 표·코드·긴 문자열이 있는 답변(대화창 폭·가로 넘침 검증용). 마지막 열 머리글은 "마지막열"로 끝을 확인한다.
+const WIDE_ANSWER = [
+  "모의 응답: 비교 표입니다.",
+  "",
+  "| 항목 | 모델 | 데이터셋 | 정확도 | 지연(ms) | 메모리 | 라이선스 | 출처 링크 | 비고 마지막열 |",
+  "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+  "| 1 | Transformer-XL | WikiText-103 | 0.912 | 120 | 16GB | Apache-2.0 | https://example.com/papers/transformer-xl/very/long/path/to/the/reference/document | 긴 한글 설명이 들어가는 칸으로 줄바꿈이 필요합니다 |",
+  "| 2 | Longformer | arXiv | 0.887 | 98 | 12GB | MIT | https://example.com/b | 표의 마지막 열 내용 |",
+  "",
+  "```python",
+  "result = compare_models(models=[\"transformer-xl\", \"longformer\", \"bigbird\"], dataset=\"wikitext-103\", metrics=[\"accuracy\", \"latency\", \"memory\"], seed=42)",
+  "```",
+  "",
+  "긴 주소: https://example.com/a/really/long/url/that/does/not/contain/any/spaces/and/keeps/going/until/it/would/overflow/the/panel?query=1&other=2",
+  "",
+  "긴 영문: Pneumonoultramicroscopicsilicovolcanoconiosis_and_another_identifier_without_breaks_ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+  "",
+  "긴 한글: 띄어쓰기없이아주길게이어지는한글문장이패널폭을넘지않고줄바꿈되는지확인하기위한검증용문자열입니다",
+].join("\n");
+
 // 선접수 단계에서 거절되는 사유(POST 503 codex_<reason>)
 const GATED_REASONS = ["not_enabled_for_account", "auth_expired", "auth_revoked", "model_unavailable", "policy_refused", "budget_exhausted"];
 
@@ -404,7 +424,8 @@ function handleMutation(owner, method, path, b, user) {
           const output = { error: { code: "tool_not_allowed" } };
           s.items.push({ id: uuid(), type: "tool_call", name: "research_list", input, output, status: "rejected", error: { code: "tool_not_allowed" }, raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
         }
-        s.items.push({ id: uuid(), type: "message", role: "assistant", text: `모의 응답: **${b.text}**`, raw: { kind: "agent_message", fixture: true } });
+        const answer = b.text.includes("/fixture/wide-answer") ? WIDE_ANSWER : `모의 응답: **${b.text}**`;
+        s.items.push({ id: uuid(), type: "message", role: "assistant", text: answer, raw: { kind: "agent_message", fixture: true } });
         s.state = "idle";
         s.version++;
         s.updatedAt = now();

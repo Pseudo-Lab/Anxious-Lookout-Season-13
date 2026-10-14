@@ -116,7 +116,7 @@ const chat = chatOf(page);
 const api = apiClient(page);
 const fixtureDocs = async (p = api) =>
   (await p.get("/research/documents?limit=100")).body.items.filter((d) => d.title === "Fixture document").length;
-const userMsgs = (m, text) => m.locator("li.bg-indigo-50", { hasText: text });
+const userMsgs = (m, text) => m.locator("li[data-role=user]", { hasText: text });
 
 // 새 대화는 페이지 이동 없이 대화창에 열린다. 그 뒤 질문할 페이지(기본: 문서 작업 공간)로 옮긴다. 반환값은 기존 대화 링크.
 async function newSession(p, title, at = DOCS) {
@@ -495,7 +495,7 @@ console.log(`INFO dropped message POST timings: ${JSON.stringify(postTimings)}`)
   await send(bm, "/fixture/early-started-missing-mismatch");
   check("O11. early mismatch -> fixed-model failure shown", await appears(bm.getByText("고정된 모델을 사용할 수 없어")));
   await settled(bm);
-  const early = bm.locator("li.bg-indigo-50", { hasText: "/fixture/early-started-missing-mismatch" });
+  const early = bm.locator("li[data-role=user]", { hasText: "/fixture/early-started-missing-mismatch" });
   const labels = await early.allInnerTexts();
   check(
     "O11. early-mismatch input shown only as unrecorded and/or not-normal",

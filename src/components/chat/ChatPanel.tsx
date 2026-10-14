@@ -30,12 +30,13 @@ function PanelContent() {
   }
 
   if (chat.sessionId) {
+    // 대화 본문은 위에서 아래로 이어지고 입력창은 대화창 아래에 붙는다(SessionView의 Composer).
     return (
-      <div className="space-y-3">
+      <div className="flex min-h-full flex-col">
         <button
           type="button"
           onClick={() => chat.openSession(null)}
-          className="min-h-11 text-sm text-stone-500 hover:text-stone-800"
+          className="-ml-2 min-h-11 self-start rounded-md px-2 text-xs text-stone-500 hover:bg-stone-100 hover:text-stone-800 md:min-h-8"
         >
           ← 대화 목록
         </button>
@@ -45,22 +46,27 @@ function PanelContent() {
   }
 
   return (
-    <SessionList
-      action={
-        <div className="space-y-3">
-          <CodexStatusBanner />
-          <NewSessionForm defaultTitle={pageTitle()} />
-        </div>
-      }
-    />
+    <div className="py-3">
+      <SessionList
+        compact
+        action={
+          <div className="space-y-3">
+            <CodexStatusBanner />
+            <NewSessionForm defaultTitle={pageTitle()} />
+          </div>
+        }
+      />
+    </div>
   );
 }
 
 /** 대화창 내용: 로그인·권한 안내, 대화 목록·새 대화, 선택한 대화. */
 export default function ChatPanel() {
   return (
-    <AuthGate>
-      <PanelContent />
-    </AuthGate>
+    <div className="flex min-h-full flex-col [&>p]:my-3">
+      <AuthGate>
+        <PanelContent />
+      </AuthGate>
+    </div>
   );
 }
