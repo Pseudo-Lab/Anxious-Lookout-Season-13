@@ -52,6 +52,15 @@ drifted schema is refused without repair, stamping or downgrade. Re-run of the
 known schema preserves records. Existing auth/research revisions/permissions are
 not widened. Reflection defaults for existing research remain unchanged.
 
+Runner-only catalog checks also require RLS and FORCE RLS to be off on every
+runtime table and no row security policy, even a policy on a disabled table.
+All four foreign keys retain the reviewed NO ACTION update/delete and MATCH
+SIMPLE semantics, immediate/validated/enforced non-period constraints, and no
+delete-action column subset. Same-column/same-target FK replacements with changed
+actions or MATCH are refused without altering data or DDL. These checks supplement
+the existing structural JSON without changing the research contract format;
+they do not claim to cover every possible PostgreSQL catalog change.
+
 The API role has SELECT/INSERT on lifecycle data and UPDATE only on mutable state,
 completion timestamps and outbox settlement. It cannot delete/truncate history,
 update owner/state IDs/admission identities, create runtime objects, or update auth

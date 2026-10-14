@@ -296,3 +296,85 @@ def test_existing_research_contract_remains_valid_after_additive_runtime_migrati
         assert validate_research(db) == '0004_publication'
         validate(db)
         assert db.execute(text('SELECT role,is_approved FROM auth.accounts WHERE id=:owner'), {'owner': owner}).one() == ('editor', True)
+
+
+def preservation_snapshot(engine):
+    """All lifecycle rows plus relevant DDL, captured after intentional drift."""
+    import json
+    from app.runner_schema import TABLES
+    with engine.begin() as db:
+        rows = {name: sorted(json.dumps(row[0], sort_keys=True) for row in
+                db.execute(text('SELECT to_jsonb(t) FROM runner_runtime.' + name + ' t')))
+                for name in TABLES}
+        constraints = db.execute(text('''SELECT t.relname,c.conname,pg_get_constraintdef(c.oid,true),
+            c.confupdtype::text,c.confdeltype::text,c.confmatchtype::text,c.condeferrable,
+            c.condeferred,c.convalidated,c.conenforced,c.conperiod,c.confdelsetcols
+            FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid
+            JOIN pg_namespace n ON n.oid=t.relnamespace
+            WHERE n.nspname='runner_runtime' ORDER BY t.relname,c.conname''')).all()
+        modes = db.execute(text('''SELECT relname,relrowsecurity,relforcerowsecurity
+            FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='runner_runtime' AND c.relkind='r' ORDER BY relname''')).all()
+        policies = db.execute(text("SELECT tablename,policyname,permissive,roles,cmd,qual,with_check FROM pg_policies WHERE schemaname='runner_runtime' ORDER BY tablename,policyname")).all()
+    return rows, constraints, modes, policies
+
+
+def seed_preserved_lifecycle(engine, owner, now):
+    state = ready(engine, owner, now)
+    with engine.begin() as db:
+        Registry(db).admit(Fence.of(state), uuid4(), now)
+    return preservation_snapshot(engine)[0]
+
+
+@pytest.mark.parametrize('table', ['schema_version', 'registry', 'entry_receipts', 'admissions', 'outbox'])
+@pytest.mark.parametrize('damage', ['enabled', 'forced', 'policy_without_rls'])
+def test_runner_row_security_drift_refused_without_changing_rows_or_ddl(admin, owner, t0, table, damage):
+    data = seed_preserved_lifecycle(admin, owner, t0)
+    with admin.begin() as db:
+        if damage == 'enabled':
+            db.execute(text('ALTER TABLE runner_runtime.' + table + ' ENABLE ROW LEVEL SECURITY'))
+        elif damage == 'forced':
+            db.execute(text('ALTER TABLE runner_runtime.' + table + ' FORCE ROW LEVEL SECURITY'))
+        else:
+            # Policies still drift from the reviewed schema when RLS is disabled.
+            db.execute(text('CREATE POLICY unexpected_runner_policy ON runner_runtime.' + table + ' USING (true)'))
+    try:
+        before = preservation_snapshot(admin)
+        assert before[0] == data
+        with pytest.raises(RuntimeError, match='row security'):
+            migrate()
+        assert preservation_snapshot(admin) == before
+    finally:
+        with admin.begin() as db:
+            db.execute(text('DROP POLICY IF EXISTS unexpected_runner_policy ON runner_runtime.' + table))
+            db.execute(text('ALTER TABLE runner_runtime.' + table + ' NO FORCE ROW LEVEL SECURITY'))
+            db.execute(text('ALTER TABLE runner_runtime.' + table + ' DISABLE ROW LEVEL SECURITY'))
+    migrate()
+    assert preservation_snapshot(admin)[0] == data
+
+
+@pytest.mark.parametrize('table,target', [('registry','auth.accounts(id)'),
+                                         ('entry_receipts','runner_runtime.registry(owner_id)'),
+                                         ('admissions','runner_runtime.registry(owner_id)'),
+                                         ('outbox','runner_runtime.registry(owner_id)')])
+@pytest.mark.parametrize('behavior', ['ON DELETE CASCADE', 'ON UPDATE CASCADE', 'MATCH FULL',
+                                    'ON DELETE SET NULL (owner_id)'])
+def test_runner_foreign_key_behavior_drift_refused_without_changing_rows_or_ddl(admin, owner, t0, table, target, behavior):
+    data = seed_preserved_lifecycle(admin, owner, t0)
+    name = table + '_owner_id_fkey'
+    replacement = 'ALTER TABLE runner_runtime.' + table + ' ADD CONSTRAINT ' + name + ' FOREIGN KEY(owner_id) REFERENCES ' + target
+    with admin.begin() as db:
+        db.execute(text('ALTER TABLE runner_runtime.' + table + ' DROP CONSTRAINT ' + name))
+        db.execute(text(replacement + ' ' + behavior))
+    try:
+        before = preservation_snapshot(admin)
+        assert before[0] == data
+        with pytest.raises(RuntimeError, match='foreign key behavior'):
+            migrate()
+        assert preservation_snapshot(admin) == before
+    finally:
+        with admin.begin() as db:
+            db.execute(text('ALTER TABLE runner_runtime.' + table + ' DROP CONSTRAINT ' + name))
+            db.execute(text(replacement))
+    migrate()
+    assert preservation_snapshot(admin)[0] == data
