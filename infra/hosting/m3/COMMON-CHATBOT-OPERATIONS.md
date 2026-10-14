@@ -375,6 +375,16 @@ that authority and executes the reviewed step when appropriate. Back performs
 no supply or automatic rearm during preparation. New account, destructive changes
 or ambiguous turn replay are separate scope.
 
+The supply wrapper retains its legacy access-runner guard and adds only the
+approved/imported exact #9 runner reference:
+`docker.io/library/anxious-s13-chatbot-runner-e9f5943@sha256:0158f92ebeeedcf2c237a7ca5847c46ba0c4d4335913af848456071e099bd76c`.
+PM uses that ref from the audited imported-images.json, the current exact Pod UID
+and the original reviewed wrappers/selected-source procedure. Other chatbot
+SHAs/digests/tags are refused. This does not change source selection, owner/state,
+API Docker ID, source-stat checks, nonlogged direct pipe or admission/window rules.
+The supply-tool supplement requires review at its exact operator SHA; approved
+application images and their build provenance remain unchanged.
+
 Preserve owner/state/provider binding, old windows, lifetime reservations, request
 dedup and projection journal. Use existing same-window vs new-window rules; never
 restore a prior ledger or auto-create a window to replenish budget. Verify source

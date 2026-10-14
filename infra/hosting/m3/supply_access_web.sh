@@ -13,7 +13,9 @@ declare -F ACCESS_SUPPLY_KUBECTL >/dev/null
 : "${ACCESS_SUPPLY_RUNNER_REF:?Reviewed immutable production runner reference}"
 [[ $ACCESS_SUPPLY_IMAGE =~ ^sha256:[a-f0-9]{64}$ ]]
 [[ $ACCESS_SUPPLY_POD =~ ^access-web-runner-v1-[a-z0-9-]+$ && $ACCESS_SUPPLY_POD_UID =~ ^[a-f0-9-]{36}$ ]]
-[[ $ACCESS_SUPPLY_RUNNER_REF =~ ^docker.io/library/anxious-s13-access-runner-[a-f0-9]+@sha256:[a-f0-9]{64}$ ]]
+# Keep legacy reviewed refs; add only #9's approved/imported exact runner.
+[[ $ACCESS_SUPPLY_RUNNER_REF =~ ^docker.io/library/anxious-s13-access-runner-[a-f0-9]+@sha256:[a-f0-9]{64}$ ||
+   $ACCESS_SUPPLY_RUNNER_REF == 'docker.io/library/anxious-s13-chatbot-runner-e9f5943@sha256:0158f92ebeeedcf2c237a7ca5847c46ba0c4d4335913af848456071e099bd76c' ]]
 for ACCESS_SUPPLY_PATH in "$ACCESS_SUPPLY_SOURCE" "$ACCESS_SUPPLY_INPUT_DIR"; do
   [[ $ACCESS_SUPPLY_PATH == /* && $ACCESS_SUPPLY_PATH != *,* && $ACCESS_SUPPLY_PATH != *$'\n'* && ! -L $ACCESS_SUPPLY_PATH ]]
   [[ $(realpath -e -- "$ACCESS_SUPPLY_PATH") == "$ACCESS_SUPPLY_PATH" ]]
