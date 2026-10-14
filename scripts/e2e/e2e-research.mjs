@@ -1301,6 +1301,70 @@ let docEUrl;
   check("R23a. late success of a left composer keeps the newer draft", (await rc.getByLabel("메시지").inputValue()) === "새로 쓴 초안", await rc.getByLabel("메시지").inputValue());
   await rc.getByLabel("메시지").fill("");
 
+  // R23d. (리뷰 798095e) 결과 미확인 전송 A를 둔 채 새 초안 B: 새로고침·목록 재진입 뒤에도 B를 복원하고 A의 key·body는 보관,
+  //       자동 재전송 없음, 비운 초안은 빈 입력으로 복원, "이전 질문 불러오기"는 A를 같은 key·body로, 새 초안은 새 key로 보낸다.
+  {
+    const s4 = await rapi.send("POST", "/research/sessions", { title: "미확인 초안 대화" });
+    await rp.goto(U(`/research/session/?id=${s4.body.id}`));
+    await rc.getByLabel("메시지").waitFor();
+    const posts = [];
+    let dropped = false;
+    await rp.route("**/api/research/sessions/*/messages", async (route) => {
+      posts.push({ key: route.request().headers()["idempotency-key"], body: route.request().postData() });
+      if (!dropped) {
+        dropped = true;
+        await route.fetch();
+        return route.abort().catch(() => {});
+      }
+      return route.continue().catch(() => {});
+    });
+    const pendingA = () =>
+      rp.evaluate(() =>
+        Object.entries(sessionStorage)
+          .filter(([k]) => k.includes(":session-send:"))
+          .map(([, v]) => v)
+          .join("")
+      );
+    const input = () => rc.getByLabel("메시지").inputValue();
+    await rc.getByLabel("메시지").fill("미확인 질문 A");
+    await rc.getByRole("button", { name: "보내기" }).click();
+    await rc.getByText("이전 전송의 결과를 확인하지 못했습니다").waitFor();
+    await rc.getByText("모의 응답: 미확인 질문 A").waitFor({ timeout: 15000 });
+    await rc.getByLabel("메시지").and(rc.locator(":enabled")).waitFor({ timeout: 15000 });
+    await rc.getByLabel("메시지").fill("새 초안 B");
+    await rp.reload();
+    await rc.getByLabel("메시지").waitFor();
+    check("R23d. reload restores newer draft, not the uncertain request", (await input()) === "새 초안 B", await input());
+    check("R23d. uncertain request kept after reload", (await pendingA()).includes("미확인 질문 A"));
+    check("R23d. notice offers loading the previous question", await appears(rc.getByRole("button", { name: "이전 질문 불러오기" })));
+    await rc.getByRole("button", { name: "← 대화 목록" }).click();
+    await rc.getByRole("link", { name: /미확인 초안 대화/ }).click();
+    await rc.getByLabel("메시지").waitFor();
+    check("R23d. list re-entry restores newer draft", (await input()) === "새 초안 B", await input());
+    await rc.getByLabel("메시지").fill("");
+    await rp.reload();
+    await rc.getByLabel("메시지").waitFor();
+    check("R23d. explicitly emptied draft restored as empty", (await input()) === "", await input());
+    check("R23d. no automatic send", posts.length === 1, String(posts.length));
+    await rc.getByRole("button", { name: "이전 질문 불러오기" }).click();
+    check("R23d. previous question loaded on request", (await input()) === "미확인 질문 A");
+    await rc.getByRole("button", { name: "다시 보내기" }).click();
+    await rc.getByRole("button", { name: "보내기", exact: true }).waitFor();
+    check(
+      "R23d. previous question resent with original key and body",
+      posts.length === 2 && posts[0].key === posts[1].key && posts[0].body === posts[1].body,
+      JSON.stringify(posts.map((x) => x.key.slice(0, 8)))
+    );
+    check("R23d. still one user message A", (await rc.locator("li.bg-indigo-50", { hasText: "미확인 질문 A" }).count()) === 1);
+    check("R23d. uncertain request cleared after confirmation", !(await pendingA()).includes("미확인 질문 A"));
+    await rc.getByLabel("메시지").fill("새 초안 B");
+    await rc.getByRole("button", { name: "보내기" }).click();
+    await rc.getByText("모의 응답: 새 초안 B").waitFor({ timeout: 15000 });
+    check("R23d. new draft sent as a new request (new key)", posts.length === 3 && posts[2].key !== posts[0].key);
+    await rp.unroute("**/api/research/sessions/*/messages");
+    await rc.getByLabel("메시지").and(rc.locator(":enabled")).waitFor({ timeout: 15000 });
+  }
+
   // R23b. 계정 X의 대화 생성 201 보류 → 같은 탭이 계정 Y로 바뀜 → X 응답 전달: Y의 대화창 선택·화면은 그대로
   const before = (await rapi.get("/auth/me")).user.accountId;
   await rp.goto(U("/research/?tab=sessions"));

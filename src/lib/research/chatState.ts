@@ -38,17 +38,28 @@ export function saveChatUi(accountId: string, state: ChatUiState): void {
   } catch {}
 }
 
-export function loadDraft(accountId: string, sessionId: string): string {
+/** 저장된 초안. 없으면 null(빈 문자열은 사용자가 입력을 비운 초안이다). */
+export function loadDraft(accountId: string, sessionId: string): string | null {
   try {
-    return sessionStorage.getItem(draftKey(accountId, sessionId)) ?? "";
+    return sessionStorage.getItem(draftKey(accountId, sessionId));
   } catch {
-    return "";
+    return null;
   }
 }
 
-export function saveDraft(accountId: string, sessionId: string, text: string): void {
+/**
+ * 초안 저장. 빈 입력은 keepEmpty일 때만 빈 초안으로 남긴다(결과 미확인 전송이 있을 때 그 내용 대신 빈 입력을 복원하도록).
+ * 그 밖의 빈 입력은 초안이 없는 것과 같으므로 지운다.
+ */
+export function saveDraft(accountId: string, sessionId: string, text: string, keepEmpty = false): void {
   try {
-    if (text) sessionStorage.setItem(draftKey(accountId, sessionId), text);
+    if (text || keepEmpty) sessionStorage.setItem(draftKey(accountId, sessionId), text);
     else sessionStorage.removeItem(draftKey(accountId, sessionId));
+  } catch {}
+}
+
+export function clearDraft(accountId: string, sessionId: string): void {
+  try {
+    sessionStorage.removeItem(draftKey(accountId, sessionId));
   } catch {}
 }

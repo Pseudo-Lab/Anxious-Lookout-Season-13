@@ -14,7 +14,7 @@ import {
   type PendingSend,
 } from "@/lib/research/pendingSend";
 import { storeGeneration } from "@/lib/research/pendingStore";
-import { loadDraft, saveDraft } from "@/lib/research/chatState";
+import { clearDraft, loadDraft, saveDraft } from "@/lib/research/chatState";
 import { useAuth } from "@/hooks/useAuth";
 import type { AcceptedScope, PageDescriptor, SessionDetail, SessionItem, ToolCallItem } from "@/lib/research/types";
 import { describePage, kindText, sameDescriptor, unsupportedHint } from "@/lib/research/pageContext";
@@ -211,14 +211,16 @@ function Composer({
     knownKeys: new Set<string>(pending ? [pending.key] : []),
   }));
   // 작성 중 입력은 대화창을 닫거나 다른 대화로 옮겨도 남도록 계정·대화별로 보관한다.
-  const [text, setTextState] = useState(() => pending?.text ?? loadDraft(accountId, session.id));
+  // 저장된 초안(비운 입력 포함)은 입력창을 그대로 따라가므로 가장 최근 입력이다. 초안이 없을 때만 결과 미확인 전송의 내용을 복원한다.
+  // 미확인 전송의 key·body는 따로 보관되며, "이전 질문 불러오기"로 다시 꺼내 같은 요청으로 재전송할 수 있다(자동 재전송 없음).
+  const [text, setTextState] = useState(() => loadDraft(accountId, session.id) ?? pending?.text ?? "");
   // 늦게 끝난 전송이 그 뒤에 쓴 입력을 지우지 않도록, 지금 화면에 있는지와 최신 입력을 따로 둔다.
   const latestText = useRef(text);
   const mounted = useRef(false);
   const setText = (value: string) => {
     setTextState(value);
     latestText.current = value;
-    saveDraft(accountId, session.id, value);
+    saveDraft(accountId, session.id, value, pending !== null);
   };
   useEffect(() => {
     mounted.current = true;
@@ -264,9 +266,13 @@ function Composer({
       // 보낸 내용 그대로인 입력만 비운다. 응답을 기다리는 동안 새로 쓴 입력, 화면을 떠난 뒤 다른 입력창이
       // 저장한 초안, 로그아웃 이후(보관소 세대 변경)의 보관소는 건드리지 않는다.
       if (mounted.current) {
-        if (latestText.current.trim() === request.text) setText("");
-      } else if (storeGeneration() === guard.generation && loadDraft(accountId, session.id).trim() === request.text) {
-        saveDraft(accountId, session.id, "");
+        if (latestText.current.trim() === request.text) {
+          setTextState("");
+          latestText.current = "";
+          clearDraft(accountId, session.id);
+        }
+      } else if (storeGeneration() === guard.generation && loadDraft(accountId, session.id)?.trim() === request.text) {
+        clearDraft(accountId, session.id);
       }
       setFailure(null);
     } else {
@@ -303,9 +309,17 @@ function Composer({
       {pending && (
         <Notice tone="warn">
           이전 전송의 결과를 확인하지 못했습니다. 위 대화 기록에 메시지가 이미 있는지 확인하세요.{" "}
-          {retrying
-            ? "같은 내용으로 다시 보내면 이미 처리된 요청은 중복 실행되지 않습니다."
-            : "내용을 바꿔 보내면 새 요청으로 처리됩니다."}
+          {retrying ? (
+            "같은 내용으로 다시 보내면 이미 처리된 요청은 중복 실행되지 않습니다."
+          ) : (
+            <>
+              지금 입력은 새 요청으로 처리됩니다. 결과를 모르는 이전 질문을 같은 요청으로 다시 보내려면{" "}
+              <button type="button" onClick={() => setText(pending.text)} className="font-medium underline hover:no-underline">
+                이전 질문 불러오기
+              </button>
+              를 누른 뒤 보내세요.
+            </>
+          )}
           {retrying && !sameDescriptor(pending.page, page) &&
             ` 다시 보내기는 지금 페이지가 아니라 처음 보낸 범위(${kindText(pending.page?.kind ?? "general").label})로 처리됩니다.`}
         </Notice>
