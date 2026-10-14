@@ -94,6 +94,7 @@ def runner_links(root, control, owner, state):
     sessions = []
     for session, entry in sorted(json.loads(raw).items()):
         sessions.append({"session": opaque("session", session), "request": opaque("request", entry["request"]),
+            "turn": opaque("turn", entry.get("turn_id")),
             "thread": opaque("thread", entry.get("thread")), "state": entry["state"],
             "requests": sorted(opaque("request", request) for request in entry["requests"]),
             "turns": sorted(opaque("turn", turn["id"]) for turn in entry["record"].get("turns", []))})

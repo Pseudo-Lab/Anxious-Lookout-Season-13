@@ -308,11 +308,27 @@ python -B /checks/common_chatbot_links.py --before /inputs/db-before.json
 Redirect to links-check.json. The comparator requires identical pre/post DB
 snapshot (excluding capture time), owner/state binding, every broker session
 backed by an owned DB row, every native-bound DB row backed by broker, matching
-thread/latest accepted request/state, matching native turn IDs and every recorded
-platform request→turn link. A later definite unreserved failed request is explicitly
+thread/latest accepted request/state and matching native turn IDs. runner-links
+also carries the actual broker latest turn_id as an opaque digest. If DB has a
+recorded platform entry for that latest request, its turn must equal that exact
+broker turn_id, not simply any turn in the session. Duplicate per-request entries,
+swapped latest pairs and a null latest recorded link are refused. A later definite unreserved failed request is explicitly
 counted rather than claimed as dispatched. It also requires the native protected
 digests/reservation count match the original anchor. This proves stored binding/
 preservation, not access to or entitlement on the provider's remote history.
+
+Historical request→turn pairs have no independent per-request broker mapping.
+For those, verify only request/turn membership and exact pre/post DB metadata
+preservation, retaining the unchanged native/broker/ledger/journal anchor. Do not
+claim membership proves pair correctness, infer historical pairs, or rewrite data.
+The proof and final receipt report latestRecordedPairsVerified,
+latestRequestsWithoutPlatformMetadata (legacy records), latestRequestsWithoutRecordedTurn
+(failed unrecorded requests), historicalRecordedPairsPreserved and
+historicalPairVerification=membership_and_pre_post_preservation_only. A legacy
+absence or unrecorded request is explicit and never counted as a verified pair.
+dbNativeLinksVerified means these limited binding/preservation checks passed;
+it does not mean all historical request→turn pair correctness was independently
+verified. Review this scope and the preserved original snapshots with the proof.
 
 For safe authenticated local health output, on the exact new runner Pod:
 

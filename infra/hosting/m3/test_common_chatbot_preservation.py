@@ -21,7 +21,7 @@ def state(tmp_path):
     journal.observe({"synthetic-private-credential"})
     record = {"turns": [{"id": "synthetic-turn", "content": "Private native history"}]}
     (native / "broker.json").write_text(json.dumps({"session": {"state": "idle", "request": "already-reserved",
-        "requests": {"already-reserved": "f" * 64}, "thread": "synthetic-thread", "record": record, "projectionVersion": 4,
+        "requests": {"already-reserved": "f" * 64}, "thread": "synthetic-thread", "turn_id": "synthetic-turn", "record": record, "projectionVersion": 4,
         "projectionMac": journal.projection_mac("session", "synthetic-thread", record)}}))
     (control / "access-ledger.json").write_text(json.dumps({"version": 1, "owner": "synthetic-owner", "stateId": "synthetic-state",
         "trialId": "synthetic-trial", "accountId": "synthetic-account", "windowId": "prior-window",

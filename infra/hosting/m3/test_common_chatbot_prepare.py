@@ -38,6 +38,9 @@ def evidence(current):
             "runnerPodCount": 0, "backupPodCount": 0, "apiReady": True, "webReady": True, "runnerReady": True,
             "podImagesVerified": True, "ownerStateVerified": True, "publicReadVerified": True,
             "dbNativeLinksVerified": True, "authCheckVerified": True, "runnerPodDigest": "e"*64,
+            "nativeSessions": 1, "latestRecordedPairsVerified": 1, "latestRequestsWithoutPlatformMetadata": 0,
+            "latestRequestsWithoutRecordedTurn": 0, "historicalRecordedPairsPreserved": 0,
+            "historicalPairVerification": prepare.HISTORICAL_PAIR_SCOPE,
             "authReason": "not_configured", "authAvailable": False}
 
 

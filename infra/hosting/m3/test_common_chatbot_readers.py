@@ -14,6 +14,8 @@ from sqlalchemy import text
 from common_chatbot_links import compare
 from common_chatbot_probe import api_links, health_check, health_fields, opaque, runner_links
 from common_chatbot_prepare import receipt, patch
+from common_chatbot_prepare import HISTORICAL_PAIR_SCOPE
+from runner.projection import ProjectionJournal
 from test_common_chatbot_prepare import bundle, step
 from test_common_chatbot_preservation import state
 from test_common_chatbot_database import research_schema, schema, admin, client, create_session, identity
@@ -52,6 +54,7 @@ def test_links_health_receipt_and_resume_require_actual_reader_proofs(links, bun
         "synthetic-owner", "synthetic-state", "pod"), "checkedAt": now}
     proof = receipt(current, api, native, observed, preservation=anchor, links_check=link_proof, health_check=health)
     assert proof["authAvailable"] is False and proof["dbNativeLinksVerified"] is True
+    assert proof["latestRecordedPairsVerified"] == 1 and proof["historicalPairVerification"] == HISTORICAL_PAIR_SCOPE
     assert patch(*bundle, current, "resume-api", proof)["target"]["name"] == "api"
     for removed in ("dbNativeLinksVerified", "authCheckVerified"):
         bad = copy.deepcopy(proof); del bad[removed]
@@ -64,6 +67,81 @@ def test_links_health_receipt_and_resume_require_actual_reader_proofs(links, bun
         links_check={**link_proof, "currentDigest": "wrong"}, health_check=health)
     with pytest.raises(ValueError): receipt(current, api, native, observed, preservation=anchor,
         links_check={**link_proof, "ownerDigest": "wrong"}, health_check=health)
+    for change in ({"historicalPairVerification": "all_pairs_verified"}, {"latestRecordedPairsVerified": False},
+                   {"latestRecordedPairsVerified": 2}):
+        with pytest.raises(ValueError): receipt(current, api, native, observed, preservation=anchor,
+            links_check={**link_proof, **change}, health_check=health)
+
+
+@pytest.fixture
+def two_turns(state, bundle):
+    native, control = state
+    ledger = json.loads((control / "access-ledger.json").read_text())
+    ledger["requests"].append({"id": "request-2", "windowId": "prior-window"})
+    (control / "access-ledger.json").write_text(json.dumps(ledger))
+    broker = json.loads((native / "broker.json").read_text())
+    entry = broker["session"]
+    entry.update(request="request-2", turn_id="turn-2", record={"turns": [{"id": "turn-1"}, {"id": "turn-2"}]})
+    entry["requests"]["request-2"] = "a" * 64
+    journal = ProjectionJournal(json.loads((control / "access-projection.json").read_text()), "synthetic-owner", "synthetic-trial")
+    entry["projectionMac"] = journal.projection_mac("session", "synthetic-thread", entry["record"])
+    (native / "broker.json").write_text(json.dumps(broker))
+    checked = runner_links(native, control, "synthetic-owner", "synthetic-state")
+    checked["checkedAt"] = datetime.now(timezone.utc).isoformat()
+    session = checked["sessions"][0]
+    db = {"admissionHeld": True, "checkedAt": checked["checkedAt"], "ownerDigest": checked["ownerDigest"],
+        "stateDigest": checked["stateDigest"], "sessions": [{"session": session["session"], "request": session["request"],
+        "thread": session["thread"], "state": "idle", "error": None, "turns": session["turns"], "platformRequests": [
+        {"request": opaque("request", "already-reserved"), "turn": opaque("turn", "turn-1")},
+        {"request": opaque("request", "request-2"), "turn": opaque("turn", "turn-2")}]}]}
+    return db, copy.deepcopy(db), checked, {key: checked[key] for key in ("protectedState", "lifetimeReservations")}, copy.deepcopy(bundle[0]["objects"])
+
+
+def test_two_turns_verify_only_latest_pair_and_preserve_historical_metadata(two_turns):
+    result = compare(*two_turns)
+    assert result["latestRecordedPairsVerified"] == result["historicalRecordedPairsPreserved"] == 1
+    assert result["historicalPairVerification"] == HISTORICAL_PAIR_SCOPE
+    assert two_turns[2]["sessions"][0]["turn"] == opaque("turn", "turn-2")
+    # Removing legacy per-request metadata does not fabricate a verified pair.
+    for value in two_turns[:2]: value["sessions"][0]["platformRequests"] = []
+    result = compare(*two_turns)
+    assert result["latestRecordedPairsVerified"] == 0 and result["latestRequestsWithoutPlatformMetadata"] == 1
+
+
+@pytest.mark.parametrize("damage", ["swapped", "latest-turn", "latest-null", "broker-latest", "duplicate-latest"])
+def test_latest_request_turn_pair_mismatch_is_refused_even_with_valid_membership(two_turns, damage):
+    before, after, native, _, _ = two_turns
+    assert compare(*two_turns)["dbNativeLinksVerified"] is True
+    for db in (before, after):
+        pairs = db["sessions"][0]["platformRequests"]
+        if damage == "swapped": pairs[0]["turn"], pairs[1]["turn"] = pairs[1]["turn"], pairs[0]["turn"]
+        elif damage == "latest-turn": pairs[1]["turn"] = pairs[0]["turn"]
+        elif damage == "latest-null": pairs[1]["turn"] = None
+        elif damage == "duplicate-latest": pairs.append(copy.deepcopy(pairs[1]))
+    if damage == "broker-latest": native["sessions"][0]["turn"] = opaque("turn", "turn-1")
+    with pytest.raises(ValueError): compare(*two_turns)
+
+
+def test_historical_membership_is_not_claimed_as_independent_pair_correctness(two_turns):
+    before, after, native, _, _ = two_turns
+    # A wrong historical pair with no authoritative historical mapping can only
+    # be described as membership and unchanged DB metadata, not independently verified.
+    for db in (before, after): db["sessions"][0]["platformRequests"][0]["turn"] = opaque("turn", "turn-2")
+    result = compare(*two_turns)
+    assert result["latestRecordedPairsVerified"] == 1 and result["historicalRecordedPairsPreserved"] == 1
+    assert result["historicalPairVerification"] == "membership_and_pre_post_preservation_only"
+    after["sessions"][0]["platformRequests"][0]["turn"] = opaque("turn", "turn-1")
+    with pytest.raises(ValueError): compare(*two_turns)
+
+
+def test_failed_latest_unrecorded_request_is_explicit_and_never_claimed_as_a_pair(two_turns):
+    before, after, native, _, _ = two_turns
+    native["sessions"][0].update(state="failed", turn=None)
+    for db in (before, after):
+        db["sessions"][0].update(state="failed", error="codex_policy_refused")
+        db["sessions"][0]["platformRequests"][1]["turn"] = None
+    result = compare(*two_turns)
+    assert result["latestRecordedPairsVerified"] == 0 and result["latestRequestsWithoutRecordedTurn"] == 1
 
 
 @pytest.mark.parametrize("damage", ["owner", "state", "thread", "request", "orphan-native", "lost-native", "db-change",

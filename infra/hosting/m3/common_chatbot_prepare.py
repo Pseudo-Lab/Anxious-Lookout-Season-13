@@ -16,6 +16,9 @@ CONFIG_DIGEST = "11def41a5073cac218133eefa0dfa1678fc34665a5bee2f8483fb3f8b6b7839
 ROLES = {"api", "runner", "web"}
 PROTECTED_FILES = {"native/account-id", "native/state-binding.json", "native/broker.json",
                    "control/access-ledger.json", "control/access-projection.json"}
+HISTORICAL_PAIR_SCOPE = "membership_and_pre_post_preservation_only"
+PAIR_COUNTS = ("latestRecordedPairsVerified", "latestRequestsWithoutPlatformMetadata",
+               "latestRequestsWithoutRecordedTurn", "historicalRecordedPairsPreserved")
 ACTIONS = {"hold-api", "upgrade-api", "upgrade-web", "stop-runner", "upgrade-runner", "start-runner",
            "resume-api", "rollback-api", "rollback-web", "rollback-runner", "resume-old-api"}
 
@@ -122,6 +125,7 @@ def check_evidence(evidence, current, backup=False, ready=False):
         require(evidence.get("dbRestoreVerified") is True and evidence.get("nativeControlArchiveVerified") is True)
     if ready:
         require(evidence.get("dbNativeLinksVerified") is True and evidence.get("authCheckVerified") is True)
+        check_pair_scope(evidence)
         require(isinstance(evidence.get("runnerPodDigest"), str) and re.fullmatch(r"[a-f0-9]{64}", evidence["runnerPodDigest"]))
         for key in ("apiReady", "webReady", "runnerReady", "podImagesVerified", "ownerStateVerified", "publicReadVerified"):
             require(evidence.get(key) is True)
@@ -137,6 +141,14 @@ def no_pods(evidence, key):
 def validate_protected(value):
     require(isinstance(value, dict) and set(value) == PROTECTED_FILES)
     require(all(isinstance(item, str) and re.fullmatch(r"[a-f0-9]{64}", item) for item in value.values()))
+
+
+def check_pair_scope(proof):
+    require(proof.get("historicalPairVerification") == HISTORICAL_PAIR_SCOPE)
+    require(type(proof.get("nativeSessions")) is int and proof["nativeSessions"] > 0)
+    for key in PAIR_COUNTS:
+        require(type(proof.get(key)) is int and proof[key] >= 0)
+    require(sum(proof[key] for key in PAIR_COUNTS[:3]) == proof["nativeSessions"])
 
 
 def receipt(current, api_probe, runner_probe, observations, backups=None, preservation=None, links_check=None, health_check=None):
@@ -161,8 +173,10 @@ def receipt(current, api_probe, runner_probe, observations, backups=None, preser
         require(links_check["protectedState"] == preservation["protectedState"]
                 and type(links_check["lifetimeReservations"]) is int and links_check["lifetimeReservations"] == preservation["lifetimeReservations"])
         check_reader_binding(current, links_check)
+        check_pair_scope(links_check)
         times.append(datetime.fromisoformat(links_check["checkedAt"].replace("Z", "+00:00")))
         result["dbNativeLinksVerified"] = True
+        result.update({key: links_check[key] for key in (*PAIR_COUNTS, "historicalPairVerification", "nativeSessions")})
     if health_check is not None:
         check_reader_binding(current, health_check)
         require(health_check["authCheckVerified"] is True and health_check["ownerStateVerified"] is True)
