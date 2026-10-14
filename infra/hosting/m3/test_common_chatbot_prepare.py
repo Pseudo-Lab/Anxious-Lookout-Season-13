@@ -32,6 +32,7 @@ def bundle(monkeypatch):
 
 def evidence(current):
     return {"currentDigest": prepare.identity_digest(current), "checkedAt": datetime.now(timezone.utc).isoformat(),
+            "protectedStateVerified": True, "protectedState": {name: "d" * 64 for name in prepare.PROTECTED_FILES}, "lifetimeReservations": 1,
             "apiHoldObserved": True, "referenceMetadataVerified": True, "schemaReady": True, "noAmbiguousTurns": True, "apiRunning": 0, "nativeRunning": 0,
             "dbBackupSha256": "b" * 64, "nativeControlBackupSha256": "c" * 64, "dbRestoreVerified": True, "nativeControlArchiveVerified": True,
             "runnerPodCount": 0, "backupPodCount": 0, "apiReady": True, "webReady": True, "runnerReady": True,
@@ -83,7 +84,8 @@ def test_unrelated_drift_is_refused_before_any_patch_including_recovery(bundle, 
 
 
 @pytest.mark.parametrize("change", [{"apiRunning": 1}, {"nativeRunning": 1}, {"nativeRunning": False}, {"noAmbiguousTurns": False},
-    {"apiHoldObserved": False}, {"currentDigest": "different"}, {"checkedAt": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()},
+    {"apiHoldObserved": False}, {"protectedStateVerified": False}, {"protectedState": {}}, {"lifetimeReservations": False},
+    {"currentDigest": "different"}, {"checkedAt": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()},
     {"dbBackupSha256": ""}, {"dbRestoreVerified": False}, {"nativeControlArchiveVerified": False}, {"backupPodCount": 1}, {"runnerPodCount": False}])
 def test_unverified_stale_or_busy_stage_refuses_upgrade(bundle, change):
     baseline, release, source = bundle
@@ -131,13 +133,24 @@ def test_receipts_bind_fresh_read_checks_to_current_metadata_and_refuse_busy_or_
     step(bundle, current, "hold-api")
     now = datetime.now(timezone.utc).isoformat()
     api = {"checkedAt": now, "admissionHeld": True, "schemaReady": True, "apiRunning": 0, "ambiguous": 0}
-    runner = {"checkedAt": now, "ownerStateVerified": True, "nativeRunning": 0, "ambiguous": 0}
+    preservation = {"protectedState": {name: "d" * 64 for name in prepare.PROTECTED_FILES}, "lifetimeReservations": 1}
+    runner = {"checkedAt": now, "ownerStateVerified": True, "nativeRunning": 0, "ambiguous": 0, **preservation}
     observed = {"checkedAt": now, "apiHoldObserved": True, "referenceMetadataVerified": True, "runnerPodCount": 0, "backupPodCount": 0}
-    result = prepare.receipt(current, api, runner, observed)
+    result = prepare.receipt(current, api, runner, observed, preservation=preservation)
     assert result["currentDigest"] == prepare.identity_digest(current) and result["noAmbiguousTurns"] is True
-    with pytest.raises(ValueError): prepare.receipt(current, {**api, "apiRunning": 1}, runner, observed)
-    with pytest.raises(ValueError): prepare.receipt(current, api, {**runner, "ambiguous": 1}, observed)
-    with pytest.raises(ValueError): prepare.receipt(current, api, runner, {**observed, "credential": "must-not-copy"})
+    with pytest.raises(ValueError): prepare.receipt(current, {**api, "apiRunning": 1}, runner, observed, preservation=preservation)
+    with pytest.raises(ValueError): prepare.receipt(current, api, {**runner, "ambiguous": 1}, observed, preservation=preservation)
+    with pytest.raises(ValueError): prepare.receipt(current, api, runner, {**observed, "credential": "must-not-copy"}, preservation=preservation)
+    with pytest.raises(ValueError): prepare.receipt(current, api, {**runner, "protectedState": {name: "e" * 64 for name in prepare.PROTECTED_FILES}}, observed, preservation=preservation)
+    with pytest.raises(ValueError): prepare.receipt(current, api, runner, observed)
+    for selected in range(3):
+        for offset in (timedelta(days=365), -timedelta(minutes=5)):
+            inputs = [copy.deepcopy(value) for value in (api, runner, observed)]
+            inputs[selected]["checkedAt"] = (datetime.now(timezone.utc) + offset).isoformat()
+            with pytest.raises(ValueError): prepare.receipt(current, *inputs, preservation=preservation)
+    backups = {**{key: evidence(current)[key] for key in ("dbBackupSha256", "nativeControlBackupSha256", "dbRestoreVerified", "nativeControlArchiveVerified")}, **preservation}
+    assert prepare.receipt(current, api, runner, observed, backups, preservation)["protectedStateVerified"] is True
+    with pytest.raises(ValueError): prepare.receipt(current, api, runner, observed, {**backups, "lifetimeReservations": 2}, preservation)
 
 
 @pytest.mark.parametrize("kind", ["Pod", "CiliumNetworkPolicy"])

@@ -14,6 +14,8 @@ TARGETS = {
 }
 CONFIG_DIGEST = "11def41a5073cac218133eefa0dfa1678fc34665a5bee2f8483fb3f8b6b7839e"
 ROLES = {"api", "runner", "web"}
+PROTECTED_FILES = {"native/account-id", "native/state-binding.json", "native/broker.json",
+                   "control/access-ledger.json", "control/access-projection.json"}
 ACTIONS = {"hold-api", "upgrade-api", "upgrade-web", "stop-runner", "upgrade-runner", "start-runner",
            "resume-api", "rollback-api", "rollback-web", "rollback-runner", "resume-old-api"}
 
@@ -109,6 +111,9 @@ def check_evidence(evidence, current, backup=False, ready=False):
     require(captured.tzinfo is not None and 0 <= (datetime.now(timezone.utc) - captured).total_seconds() <= 120)
     for key in ("apiHoldObserved", "schemaReady", "noAmbiguousTurns", "referenceMetadataVerified"):
         require(evidence.get(key) is True)
+    require(evidence.get("protectedStateVerified") is True)
+    validate_protected(evidence["protectedState"])
+    require(type(evidence.get("lifetimeReservations")) is int and evidence["lifetimeReservations"] > 0)
     for key in ("apiRunning", "nativeRunning"):
         require(type(evidence.get(key)) is int and evidence[key] == 0)
     if backup:
@@ -127,18 +132,32 @@ def no_pods(evidence, key):
     require(type(evidence.get(key)) is int and evidence[key] == 0)
 
 
-def receipt(current, api_probe, runner_probe, observations, backups=None):
+def validate_protected(value):
+    require(isinstance(value, dict) and set(value) == PROTECTED_FILES)
+    require(all(isinstance(item, str) and re.fullmatch(r"[a-f0-9]{64}", item) for item in value.values()))
+
+
+def receipt(current, api_probe, runner_probe, observations, backups=None, preservation=None):
     require(api_probe["admissionHeld"] is True and api_probe["schemaReady"] is True and runner_probe["ownerStateVerified"] is True)
     times = [datetime.fromisoformat(value["checkedAt"].replace("Z", "+00:00")) for value in (api_probe, runner_probe, observations)]
-    require(all(value.tzinfo is not None for value in times))
+    now = datetime.now(timezone.utc)
+    require(all(value.tzinfo is not None and 0 <= (now - value).total_seconds() <= 120 for value in times))
+    require(preservation is not None and set(preservation) == {"protectedState", "lifetimeReservations"})
+    validate_protected(preservation["protectedState"])
+    require(type(preservation["lifetimeReservations"]) is int and preservation["lifetimeReservations"] > 0)
+    require(runner_probe["protectedState"] == preservation["protectedState"])
+    require(type(runner_probe["lifetimeReservations"]) is int and runner_probe["lifetimeReservations"] == preservation["lifetimeReservations"])
     allowed = {"checkedAt", "apiHoldObserved", "referenceMetadataVerified", "runnerPodCount", "backupPodCount", "apiReady", "webReady", "runnerReady",
                "podImagesVerified", "publicReadVerified", "authReason", "authAvailable"}
     require(not (set(observations) - allowed))
     result = {**observations, "checkedAt": min(times).isoformat(), "currentDigest": identity_digest(current),
               "schemaReady": True, "ownerStateVerified": True, "apiRunning": api_probe["apiRunning"], "nativeRunning": runner_probe["nativeRunning"],
+              "protectedStateVerified": True, **preservation,
               "noAmbiguousTurns": api_probe["ambiguous"] == 0 and runner_probe["ambiguous"] == 0}
     if backups:
-        require(set(backups) == {"dbBackupSha256", "nativeControlBackupSha256", "dbRestoreVerified", "nativeControlArchiveVerified"})
+        require(set(backups) == {"dbBackupSha256", "nativeControlBackupSha256", "dbRestoreVerified", "nativeControlArchiveVerified", "protectedState", "lifetimeReservations"})
+        require(backups["protectedState"] == preservation["protectedState"]
+                and type(backups["lifetimeReservations"]) is int and backups["lifetimeReservations"] == preservation["lifetimeReservations"])
         result.update(backups)
     check_evidence(result, current)
     return result
@@ -253,6 +272,7 @@ def main():
     parser.add_argument("--current"); parser.add_argument("--evidence")
     parser.add_argument("--api-probe"); parser.add_argument("--runner-probe"); parser.add_argument("--observations"); parser.add_argument("--backups")
     parser.add_argument("--created")
+    parser.add_argument("--preservation")
     args = parser.parse_args()
     try:
         read = lambda path: json.loads(Path(path).read_text())
@@ -261,7 +281,7 @@ def main():
         elif args.action == "cleanup": result = cleanup(read(args.baseline), read(args.created), read(args.current))
         elif args.action == "receipt":
             validate_baseline(read(args.baseline))
-            result = receipt(read(args.current), read(args.api_probe), read(args.runner_probe), read(args.observations), read(args.backups) if args.backups else None)
+            result = receipt(read(args.current), read(args.api_probe), read(args.runner_probe), read(args.observations), read(args.backups) if args.backups else None, read(args.preservation) if args.preservation else None)
         else: result = patch(read(args.baseline), read(args.release), args.approved_source_sha, read(args.current), args.action, read(args.evidence) if args.evidence else None)
         print(json.dumps(result, indent=2))  # Operator redirects full specs to private files.
     except Exception:

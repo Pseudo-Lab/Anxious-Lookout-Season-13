@@ -40,9 +40,10 @@ def stream(native, control, output):
             raise ValueError("State changed during backup")
 
 
-def verify(path):
+def verify(path, expected=None):
     # List/check only. Never extract over live native/control state or a ledger.
-    roots, names = set(), set()
+    from common_chatbot_probe import PROTECTED_FILES, protected_check
+    roots, names, protected = set(), set(), {}
     with tarfile.open(path, "r:") as archive:
         for item in archive:
             parts = Path(item.name).parts
@@ -50,25 +51,36 @@ def verify(path):
                 raise ValueError()
             roots.add(parts[0]); names.add(item.name)
             if item.isfile():
+                if item.name in PROTECTED_FILES:
+                    if item.size > (64_000_000 if item.name == "native/broker.json" else 2_000_000):
+                        raise ValueError()
+                    protected[item.name] = archive.extractfile(item).read()
                 source = archive.extractfile(item)
                 remaining = item.size
                 while remaining:
                     block = source.read(min(remaining, 1_000_000))
                     if not block: raise ValueError()
                     remaining -= len(block)
-    if roots != {"native", "control"} or "native/state-binding.json" not in names or "native/account-id" not in names:
+    if roots != {"native", "control"} or set(protected) != set(PROTECTED_FILES) or expected is None:
         raise ValueError()
-    return {"nativeControlArchiveVerified": True, "entries": len(names), "restored": False}
+    binding = json.loads(protected["native/state-binding.json"])
+    result = protected_check(protected, binding["ownerId"], binding["stateId"])
+    if (result["nativeRunning"] or result["ambiguous"] or result["protectedState"] != expected["protectedState"]
+            or result["lifetimeReservations"] != expected["lifetimeReservations"]):
+        raise ValueError()
+    return {"nativeControlArchiveVerified": True, "entries": len(names), "restored": False,
+            "protectedState": result["protectedState"], "lifetimeReservations": result["lifetimeReservations"]}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("stream", "verify"))
     parser.add_argument("--archive")
+    parser.add_argument("--expected-state")
     args = parser.parse_args()
     try:
         if args.mode == "stream": stream(Path("/native/access-web"), Path("/control/access-web"), sys.stdout.buffer)
-        else: print(json.dumps(verify(args.archive)))
+        else: print(json.dumps(verify(args.archive, json.loads(Path(args.expected_state).read_text()))))
     except Exception:
         raise SystemExit("Chatbot archive failed; preserve partial output privately, do not use or retry automatically")
 

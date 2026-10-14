@@ -141,6 +141,21 @@ they are data inputs, not an instruction for PM to write new code.
    both running counts0 and ambiguous counts0. Unknown/failed-unavailable work
    requires reconciliation with safe records; do not replay, reset or archive
    it merely to pass this gate. A failed/timeout check is unconfirmed.
+   This package supports only the **existing used access-only owner**, not a new
+   unused installation. The five protected files are native account-id,
+   state-binding.json and broker.json, plus control access-ledger.json and
+   access-projection.json. All must exist as owned regular files. The probe checks
+   ledger owner/state/trial/window and unique reservations, exact ledger↔broker
+   dedup coverage (no orphaned or multiply assigned reservations), journal binding
+   and integrity MAC, and saved history projection
+   MACs without loading auth or starting native. A missing/empty broker or ledger,
+   missing journal, or inconsistency stops the operation without initialization.
+   Save the first successful held/quiescent runner check unchanged. Extract its
+   safe comparison anchor with the fixed command
+   `jq '{protectedState,lifetimeReservations}' runner-check.json > preservation.json`.
+   Keep this original anchor throughout the operation; do not regenerate it to
+   bless a changed file. Compare it against every stopped-reader and post-start
+   probe. It contains only five SHA256 digests and the lifetime count, not contents.
 3. Save observations.json as **verified data** from fresh Deployment/Pod/health/
    public-read evidence: `checkedAt`, `apiHoldObserved`, `runnerPodCount`,
    `backupPodCount`, `referenceMetadataVerified` (the unchanged external references
@@ -152,6 +167,7 @@ they are data inputs, not an instruction for PM to write new code.
    python -B /checks/common_chatbot_prepare.py receipt --baseline /inputs/baseline.json
      --current /inputs/current.json --api-probe /inputs/api-check.json
      --runner-probe /inputs/runner-check.json --observations /inputs/observations.json
+     --preservation /inputs/preservation.json
      [--backups /inputs/backups.json]
    ```
 
@@ -159,6 +175,9 @@ they are data inputs, not an instruction for PM to write new code.
    result to current UID/full-spec digest. Checks expire after120s; refresh them
    before each mutation. This is an operator receipt, not cryptographic proof of
    review or of its capture origin. Review the underlying logs/Pod associations.
+   All three timestamps are checked individually, including future clocks.
+   Receipt requires exact protected-file digests/count against the unchanged
+   preservation anchor and records them with protectedStateVerified=true.
 4. Render/apply `stop-runner`; normal graceful termination, no force deletion.
    Require Deployment0 and selected runner Pod count0. No source auth is supplied.
    Render `backup-reader --baseline ...` without any release input. Verify the
@@ -176,8 +195,13 @@ they are data inputs, not an instruction for PM to write new code.
    transfer. The source is bounded, owned, no symlinks, with only the exact stale
    supply socket skipped, and detects any inventory/file change. Partial output
    stays private and is not a valid backup. Verify locally in an offline read-only
-   Docker with `common_chatbot_archive.py verify --archive /backup/state.tar`.
+   Docker with `common_chatbot_archive.py verify --archive /backup/state.tar
+   --expected-state /inputs/preservation.json`, with /checks on PYTHONPATH.
    It only inspects; it never extracts or restores a live ledger. Record SHA256.
+   Verification requires all five files in the tar, repeats binding/reservation/
+   journal/history integrity checks from their archived bytes, and compares their
+   exact digests/count to the original anchor. Structurally valid but changed or
+   incomplete archives are rejected. Save the safe archive-check.json result.
 6. Create a fresh full logical DB dump with the existing reviewed
    `infra/hosting/db-backup.sh k3s FRESH_PRIVATE_DB_DUMP` and record its checksum.
    Verify in an isolated Docker clone with:
@@ -192,6 +216,8 @@ they are data inputs, not an instruction for PM to write new code.
    temporary clone. Nothing is copied back into production. backups.json contains
    `dbBackupSha256,nativeControlBackupSha256,dbRestoreVerified,
    nativeControlArchiveVerified`, derived from successful actual checks.
+   Also copy `protectedState,lifetimeReservations` from archive-check.json into
+   backups.json. Receipt requires these equal the original preservation anchor.
 7. Remove **only** the exact newly created reader Pod/CNP with UID-preconditioned
    DeleteOptions through the reviewed raw delete path. Preserve all original
    resources. Wait for reader Pod count0 and release of its RWO mounts. Do not
@@ -217,6 +243,13 @@ they are data inputs, not an instruction for PM to write new code.
    Capture the actual runner health through its already reviewed authenticated
    local transport path; do not export that transport secret. Record the safe
    auth availability/reason separately from Pod readiness.
+   Run the same read-only runner probe on the exact new Pod before any auth supply
+   or question and compare it to preservation.json in receipt. A complete but
+   changed ledger/broker/journal is not accepted as preserved. Keep pre/reader/
+   archive/post receipts privately for review. Confirm existing conversations and
+   their native session/request associations against the DB snapshot using the
+   reviewed read-only records; these file checks do not substitute for DB/native
+   request-by-request reconciliation. Any mismatch stops admission restoration.
 10. Only if all three new specs match and read-only checks pass, `resume-api`
     restores the original enable=true env. It does not install an access token.
     In the existing owner's authenticated browser, read `/api/research/codex/status`
@@ -254,7 +287,12 @@ stages are supported; unrelated drift fails closed. Native/control and DB remain
 the latest retained data. Start the original runner only after reader/runner Pod0,
 verify all three original specs/readiness/image/binding, then `resume-old-api`.
 Never DB-downgrade, overwrite current history, extract an old control backup or
-replay a #9 request with old code. The old UI may display new native preambles and
+replay a #9 request with old code. Never reset the preservation anchor to make a mismatch pass. After authorized supply/
+real turns, protected files legitimately change; an earlier maintenance anchor
+cannot authorize a later rollback. Stop and obtain independently reviewed
+reconciliation of the latest DB/native/control records and a new private anchor
+with its lineage before rendering that later operation. Preserve the old anchor.
+The old UI may display new native preambles and
 lacks #9 scope badges; rollback restores the prior application behavior. Catastrophic
 storage recovery is outside these image patches and needs a separately reviewed
 data reconciliation procedure; the backup is recovery evidence, not an automatic

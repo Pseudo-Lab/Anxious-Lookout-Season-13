@@ -1,12 +1,80 @@
 """Reviewed stdin-exec read-only checks. No model RPC, supply or automatic retry."""
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import signal
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
+
+PROTECTED_FILES = ("native/account-id", "native/state-binding.json", "native/broker.json",
+                   "control/access-ledger.json", "control/access-projection.json")
+
+
+def protected_check(files, owner, state):
+    """Existing used access-only owner. Missing state is never a new installation."""
+    binding = json.loads(files["native/state-binding.json"])
+    if type(binding.get("version")) is not int or binding != {"version": 1, "ownerId": owner, "stateId": state} or files["native/account-id"].decode().strip() != owner:
+        raise ValueError()
+    ledger = json.loads(files["control/access-ledger.json"])
+    if (type(ledger.get("version")) is not int or ledger["version"] != 1 or ledger.get("owner") != owner
+            or ledger.get("stateId") != state or not isinstance(ledger.get("accountId"), str) or not ledger["accountId"]
+            or not isinstance(ledger.get("trialId"), str) or not ledger["trialId"]
+            or not isinstance(ledger.get("windows"), list) or not ledger["windows"]
+            or any(not isinstance(window, str) or not window for window in ledger["windows"])
+            or len(set(ledger["windows"])) != len(ledger["windows"]) or ledger.get("windowId") not in ledger["windows"]
+            or not isinstance(ledger.get("requests"), list) or not ledger["requests"]):
+        raise ValueError()
+    requests = set()
+    for request in ledger["requests"]:
+        if (not isinstance(request, dict) or set(request) != {"id", "windowId"}
+                or not isinstance(request["id"], str) or not request["id"] or request["id"] in requests
+                or request["windowId"] not in ledger["windows"]):
+            raise ValueError()
+        requests.add(request["id"])
+    journal = json.loads(files["control/access-projection.json"])
+    if (set(journal) != {"version", "owner", "trialId", "key", "values", "mac"}
+            or type(journal["version"]) is not int or journal["version"] != 1
+            or journal["owner"] != owner or journal["trialId"] != ledger["trialId"]
+            or not isinstance(journal["values"], list) or len(journal["values"]) > 512):
+        raise ValueError()
+    key = bytes.fromhex(journal["key"])
+    if len(key) != 32: raise ValueError()
+    encoded = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    signature = lambda prefix, value: hmac.new(key, prefix + encoded(value), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature(b"journal-v1\0", {name: value for name, value in journal.items() if name != "mac"}), journal["mac"]):
+        raise ValueError()
+    for length, filter_hash, fingerprint in journal["values"]:
+        if type(length) is not int or not 1 <= length <= 65536 or type(filter_hash) is not int or not 0 <= filter_hash < 2**64 or len(bytes.fromhex(fingerprint)) != 32:
+            raise ValueError()
+    broker = json.loads(files["native/broker.json"])
+    if not isinstance(broker, dict) or not broker: raise ValueError()
+    recorded = set()
+    for session, entry in broker.items():
+        if (not isinstance(entry, dict) or entry.get("state") not in {"running", "idle", "failed"}
+                or type(entry.get("projectionVersion")) is not int or entry["projectionVersion"] != 4
+                or entry.get("request") not in requests or not isinstance(entry.get("requests"), dict)
+                or entry["request"] not in entry["requests"] or not set(entry["requests"]) <= requests):
+            raise ValueError()
+        if (recorded & set(entry["requests"]) or any(not isinstance(value, str) or len(value) != 64
+                or any(char not in "0123456789abcdef" for char in value) for value in entry["requests"].values())):
+            raise ValueError()
+        recorded.update(entry["requests"])
+        record = entry.get("record")
+        if not isinstance(record, dict): raise ValueError()
+        if record.get("turns") or "modelMismatchBaseline" in record:
+            expected = signature(b"projection-v4\0", [owner, ledger["trialId"], session, entry.get("thread"), record])
+            if not isinstance(entry.get("projectionMac"), str) or not hmac.compare_digest(expected, entry["projectionMac"]):
+                raise ValueError()
+    # Orphaned reservations may represent lost broker history or an ambiguous
+    # interrupted save. Neither is accepted as intact existing history.
+    if recorded != requests: raise ValueError()
+    return {"ownerStateVerified": True, "nativeRunning": sum(entry["state"] == "running" for entry in broker.values()),
+            "ambiguous": sum(entry.get("error") == "codex_unavailable" for entry in broker.values()),
+            "ledgerSha256": hashlib.sha256(files["control/access-ledger.json"]).hexdigest(), "lifetimeReservations": len(requests),
+            "protectedState": {name: hashlib.sha256(files[name]).hexdigest() for name in PROTECTED_FILES}}
 
 
 def read_owned(path, maximum=64_000_000):
@@ -52,28 +120,17 @@ def runner_check(root, control, owner, state):
     for path in (root, control):
         if path.resolve() != path or not path.is_dir() or path.stat().st_uid != os.getuid():
             raise ValueError()
-    binding = read_json(root / "state-binding.json", 10000)
-    if type(binding.get("version")) is not int or binding != {"version": 1, "ownerId": owner, "stateId": state} or read_owned(root / "account-id", 1000).decode().strip() != owner:
-        raise ValueError()
-    broker = read_json(root / "broker.json") if (root / "broker.json").exists() else {}
-    if not isinstance(broker, dict):
-        raise ValueError()
-    if any(not isinstance(entry, dict) or entry.get("state") not in {"running", "idle", "failed"} for entry in broker.values()):
-        raise ValueError()
-    running = sum(entry.get("state") == "running" for entry in broker.values())
-    ambiguous = sum(entry.get("error") == "codex_unavailable" for entry in broker.values())
-    ledger = control / "access-ledger.json"
-    ledger_digest = None
-    reservations = None
-    if ledger.exists():
-        raw = read_owned(ledger, 2_000_000)
-        value = json.loads(raw)
-        if value.get("owner") != owner or value.get("stateId") != state or not isinstance(value.get("requests"), list):
+    try:
+        files = {name: read_owned((root if name.startswith("native/") else control) / name.split("/", 1)[1],
+                                 64_000_000 if name == "native/broker.json" else 2_000_000) for name in PROTECTED_FILES}
+    except OSError:
+        raise ValueError() from None
+    result = protected_check(files, owner, state)
+    # Detect replacement/concurrent changes even during this bounded check.
+    for name, raw in files.items():
+        if read_owned((root if name.startswith("native/") else control) / name.split("/", 1)[1]) != raw:
             raise ValueError()
-        ledger_digest = hashlib.sha256(raw).hexdigest()
-        reservations = len(value["requests"])
-    return {"ownerStateVerified": True, "nativeRunning": running, "ambiguous": ambiguous,
-            "ledgerSha256": ledger_digest, "lifetimeReservations": reservations}
+    return result
 
 
 def main():
