@@ -6,11 +6,98 @@ import json
 import os
 import signal
 import stat
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 PROTECTED_FILES = ("native/account-id", "native/state-binding.json", "native/broker.json",
                    "control/access-ledger.json", "control/access-projection.json")
+AUTH_REASONS = {"not_configured", "auth_expired", "auth_revoked", "budget_exhausted", "provider_rate_limited",
+                "model_unavailable", "policy_refused", "unavailable"}
+SAFE_ERRORS = {"codex_rejected", "codex_failed", "codex_unavailable", "codex_auth_expired", "codex_auth_revoked",
+               "codex_budget_exhausted", "codex_policy_refused", "codex_model_unavailable", "codex_rate_limited", "codex_not_enabled_for_account", None}
+
+
+def opaque(kind, value):
+    if value is None: return None
+    if not isinstance(value, str) or not value or len(value) > 200: raise ValueError()
+    return hashlib.sha256(("chatbot-link-v1\0" + kind + "\0" + value).encode()).hexdigest()
+
+
+def health_fields(value, owner, state, pod):
+    if (value.get("ownerId") != owner or value.get("stateId") != state or value.get("podUid") != pod
+            or value.get("model") != "gpt-6.1-sol" or value.get("verification") not in {"unverified", "real"}
+            or type(value.get("available")) is not bool or value.get("reason") not in AUTH_REASONS | {None}
+            or value["available"] != (value.get("reason") is None)):
+        raise ValueError()
+    return {"authCheckVerified": True, "ownerStateVerified": True, "podDigest": opaque("pod", pod),
+            "ownerDigest": opaque("owner", owner), "stateDigest": opaque("state", state),
+            "authAvailable": value["available"], "authReason": value.get("reason"), "verification": value["verification"]}
+
+
+def health_check():
+    token_path = os.environ["RUNNER_TOKEN_FILE"]
+    if token_path != "/run/transport/transport-token": raise ValueError()
+    owner, state, pod = (os.environ[key] for key in ("RUNNER_ACCOUNT_ID", "RUNNER_STATE_ID", "RUNNER_POD_UID"))
+    token = Path(token_path).read_text().strip()
+    if len(token) < 32 or len(token) > 10000 or "\n" in token or "\r" in token: raise ValueError()
+    request = urllib.request.Request("http://127.0.0.1:8080/health", headers={
+        "Authorization": "Bearer " + token, "X-Runner-State-Id": state})
+    # Fixed localhost only; no proxy environment, redirects or session/history RPC.
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs): return None
+    with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(request, timeout=2) as response:
+        raw = response.read(10001)
+    if len(raw) > 10000: raise ValueError()
+    return health_fields(json.loads(raw), owner, state, pod)
+
+
+def api_links():
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.pool import NullPool
+    from app.settings import secret
+    # Existing mounted mapping supplies only owner/state; never read transport token.
+    if api_check() != {"admissionHeld": True, "schemaReady": True, "apiRunning": 0, "ambiguous": 0}: raise ValueError()
+    owner = os.environ["CODEX_PERSONAL_ACCOUNT_ID"]
+    mapping = json.loads(Path(os.environ["CODEX_RUNNERS_FILE"]).read_text())
+    if set(mapping) != {owner}: raise ValueError()
+    state = mapping[owner]["stateId"]
+    engine = create_engine(secret("DATABASE_URL"), poolclass=NullPool, hide_parameters=True, connect_args={"connect_timeout": 3})
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+            connection.execute(text("SET LOCAL statement_timeout='3000ms'"))
+            connection.execute(text("SET LOCAL lock_timeout='1000ms'"))
+            rows = connection.execute(text("""SELECT id::text,request_id::text,state,error_code,archived,version,
+                native_record->>'nativeThreadId',encode(sha256(convert_to(native_record::text,'UTF8')),'hex'),
+                coalesce((SELECT jsonb_agg(jsonb_build_object('request',p->>'requestId','turn',p->>'turnId'))
+                  FROM jsonb_array_elements(coalesce(native_record->'platformRequests','[]'::jsonb)) p),'[]'::jsonb),
+                coalesce((SELECT jsonb_agg(t->>'id') FROM jsonb_array_elements(coalesce(native_record->'turns','[]'::jsonb)) t),'[]'::jsonb)
+                FROM research.conversations WHERE owner_id=:owner ORDER BY id LIMIT 10001"""), {"owner": owner}).all()
+        if len(rows) > 10000: raise ValueError()
+        result = []
+        for session, request, status, error, archived, version, thread, record_hash, requests, turns in rows:
+            if status not in {"idle", "failed"} or error not in SAFE_ERRORS: raise ValueError()
+            result.append({"session": opaque("session", session), "request": opaque("request", request), "thread": opaque("thread", thread),
+                "state": status, "error": error, "archived": archived, "version": version, "recordSha256": record_hash,
+                "turns": sorted(opaque("turn", turn) for turn in turns),
+                "platformRequests": [{"request": opaque("request", item["request"]), "turn": opaque("turn", item["turn"])} for item in requests]})
+        return {"admissionHeld": True, "ownerDigest": opaque("owner", owner), "stateDigest": opaque("state", state), "sessions": result}
+    finally: engine.dispose()
+
+
+def runner_links(root, control, owner, state):
+    result = runner_check(root, control, owner, state)
+    if result["nativeRunning"] or result["ambiguous"]: raise ValueError()
+    raw = read_owned(root / "broker.json")
+    if hashlib.sha256(raw).hexdigest() != result["protectedState"]["native/broker.json"]: raise ValueError()
+    sessions = []
+    for session, entry in sorted(json.loads(raw).items()):
+        sessions.append({"session": opaque("session", session), "request": opaque("request", entry["request"]),
+            "thread": opaque("thread", entry.get("thread")), "state": entry["state"],
+            "requests": sorted(opaque("request", request) for request in entry["requests"]),
+            "turns": sorted(opaque("turn", turn["id"]) for turn in entry["record"].get("turns", []))})
+    return {**result, "ownerDigest": opaque("owner", owner), "stateDigest": opaque("state", state), "sessions": sessions}
 
 
 def protected_check(files, owner, state):
@@ -135,20 +222,23 @@ def runner_check(root, control, owner, state):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("api", "runner"))
+    parser.add_argument("mode", choices=("api", "runner", "api-links", "runner-links", "health"))
     args = parser.parse_args()
     signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError()))
     signal.alarm(20)
     try:
         if args.mode == "api": result = api_check()
+        elif args.mode == "api-links": result = api_links()
+        elif args.mode == "health": result = health_check()
         else:
             root, control = os.environ["RUNNER_STATE_DIR"], os.environ["CODEX_ACCESS_CONTROL_DIR"]
             if root != "/native/access-web" or control != "/control/access-web":
                 raise ValueError()
-            result = runner_check(Path(root), Path(control), os.environ["RUNNER_ACCOUNT_ID"], os.environ["RUNNER_STATE_ID"])
+            checker = runner_links if args.mode == "runner-links" else runner_check
+            result = checker(Path(root), Path(control), os.environ["RUNNER_ACCOUNT_ID"], os.environ["RUNNER_STATE_ID"])
         result["checkedAt"] = datetime.now(timezone.utc).isoformat()
         print(json.dumps(result))
-        if result.get("apiRunning", result.get("nativeRunning", 0)) or result["ambiguous"]:
+        if result.get("apiRunning", result.get("nativeRunning", 0)) or result.get("ambiguous", 0):
             raise SystemExit(2)
     except Exception:
         raise SystemExit("Chatbot read-only check failed; credentials, rows and exception details are not printed")

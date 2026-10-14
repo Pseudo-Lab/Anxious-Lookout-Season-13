@@ -161,6 +161,8 @@ they are data inputs, not an instruction for PM to write new code.
    `backupPodCount`, `referenceMetadataVerified` (the unchanged external references
    and metadata above), and later `apiReady`, `webReady`, `runnerReady`,
    `podImagesVerified`, `publicReadVerified`, `authAvailable`, `authReason`.
+   For final health also record `runnerPodDigest` from the exact captured runner
+   Pod UID using the fixed digest command below, separately from health output.
    Do not mark a check true because a command was planned. Create evidence with:
 
    ```text
@@ -169,6 +171,7 @@ they are data inputs, not an instruction for PM to write new code.
      --runner-probe /inputs/runner-check.json --observations /inputs/observations.json
      --preservation /inputs/preservation.json
      [--backups /inputs/backups.json]
+     [--links-check /inputs/links-check.json --health-check /inputs/health-check.json]
    ```
 
    It combines zero-count checks, preserves the oldest check time and binds the
@@ -178,6 +181,8 @@ they are data inputs, not an instruction for PM to write new code.
    All three timestamps are checked individually, including future clocks.
    Receipt requires exact protected-file digests/count against the unchanged
    preservation anchor and records them with protectedStateVerified=true.
+   Resume also requires dbNativeLinksVerified/authCheckVerified from the reviewed
+   readers below; observation=true cannot substitute for their receipts.
 4. Render/apply `stop-runner`; normal graceful termination, no force deletion.
    Require Deployment0 and selected runner Pod count0. No source auth is supplied.
    Render `backup-reader --baseline ...` without any release input. Verify the
@@ -256,6 +261,92 @@ they are data inputs, not an instruction for PM to write new code.
     and panel state without Send. When auth is unavailable, require clear matching
     not_configured/expired/revoked/budget/model/unavailable guidance and disabled
     send. Read-only success plus enable=true is **not** model/auth success.
+
+## Exact read-only DB/native and local health paths
+
+Keep the same private operator directory, timeout/no-TTY/stdin-exec rules and
+before/after exact Pod UID/image/ReplicaSet association checks used for probes.
+The new modes use the same reviewed common_chatbot_probe.py; they do not start
+native, install auth, call session history or change DB/PVC state.
+
+After hold and quiescence, **before stopping the old runner**, collect:
+
+```sh
+timeout 25s kubectl -n m2-hosting exec -i EXACT_HELD_API_POD -c api -- python -B - api-links < common_chatbot_probe.py > db-before.json
+timeout 25s kubectl -n codex-trial exec -i EXACT_OLD_RUNNER_POD -c runner -- python -B - runner-links < common_chatbot_probe.py > native-before.json
+```
+
+api-links requires held admission and zero running/ambiguous work. Its owner/state
+come only from the existing fixed personal owner and mounted runner mapping. The
+bounded READ ONLY/REPEATABLE READ transaction selects that owner's conversations,
+including archived rows, with session/request/native-thread and platform request/
+turn associations, state/error/version and a SHA256 of native_record. It emits
+only typed identity digests and safe metadata, never titles/questions/history,
+transport credentials or raw UUIDs. No browser session/detail GET is used: those
+routes can refresh DB/native state. A maximum10000 rows and existing statement/
+lock/connect/process timeouts bound the operation.
+
+Preserve db-before.json/native-before.json; check initial links offline with
+common_chatbot_links.py using db-before.json as both before and after. Bind that
+initial proof to the then-current.json and original preservation.json. Initial
+reconciliation failure stops maintenance before runner0. Existing unused/empty
+DB conversations may have no broker. Explicit failed unreserved requests are
+reported only for known definite errors; unknown failures are refused. Existing
+native reservations and dedup remain fully checked by the protected-state probe.
+
+After images/start, while API remains held and before supply/question, collect
+api-links on the exact **new held API Pod** into db-after.json and runner-links on
+the exact **new runner Pod** into native-after.json. Then in offline Docker with
+read-only /checks and /inputs mounts:
+
+```text
+python -B /checks/common_chatbot_links.py --before /inputs/db-before.json
+  --after /inputs/db-after.json --native /inputs/native-after.json
+  --preservation /inputs/preservation.json --current /inputs/current.json
+```
+
+Redirect to links-check.json. The comparator requires identical pre/post DB
+snapshot (excluding capture time), owner/state binding, every broker session
+backed by an owned DB row, every native-bound DB row backed by broker, matching
+thread/latest accepted request/state, matching native turn IDs and every recorded
+platform request→turn link. A later definite unreserved failed request is explicitly
+counted rather than claimed as dispatched. It also requires the native protected
+digests/reservation count match the original anchor. This proves stored binding/
+preservation, not access to or entitlement on the provider's remote history.
+
+For safe authenticated local health output, on the exact new runner Pod:
+
+```sh
+timeout 25s kubectl -n codex-trial exec -i EXACT_NEW_RUNNER_POD -c runner -- python -B - health < common_chatbot_probe.py > health-check.json
+```
+
+health reads only the already mounted /run/transport/transport-token into memory
+and sends one GET to fixed http://127.0.0.1:8080/health with the existing
+Authorization and X-Runner-State-Id headers. Proxy variables and redirects are
+disabled; request timeout2s/response10000 bytes/process20s. It verifies owner,
+state, Downward-API RUNNER_POD_UID, pinned model and non-fixture verification,
+then emits authCheckVerified/authAvailable/authReason/verification and opaque Pod
+digest. It never prints credentials, expiry/provider payload or sends a turn.
+An unavailable/not_configured result is valid distinct evidence; failure/binding
+mismatch/unknown response is unconfirmed and stops the step.
+
+Supply links-check.json and health-check.json to receipt with the flags above.
+Both proofs carry owner/state digests that receipt checks against the exact
+current approved runner env. Derive observations.runnerPodDigest from the captured
+actual runner-pod.json with:
+
+```sh
+printf 'chatbot-link-v1\0pod\0%s' "$(jq -r '.metadata.uid' runner-pod.json)" | sha256sum | cut -d' ' -f1
+```
+
+This outputs only the digest. Receipt requires it match health's Pod digest;
+retain the original Pod UID/image/owner association privately for review.
+Omit authAvailable/authReason from observations; receipt derives them from health.
+If supplied there, they must match. All added proof timestamps must be individually
+fresh within120s. links-check must match current Deployment identity/spec digest
+and original preservation anchor. resume-api/resume-old-api refuse missing proofs.
+Capture logs/Pod associations privately for independent review; a manual true field
+or an earlier preflight health response is not an operational proof.
 
 ## Auth recovery and actual acceptance
 

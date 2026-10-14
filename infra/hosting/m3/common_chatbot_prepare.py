@@ -121,6 +121,8 @@ def check_evidence(evidence, current, backup=False, ready=False):
             require(isinstance(evidence.get(key), str) and re.fullmatch(r"[a-f0-9]{64}", evidence[key]))
         require(evidence.get("dbRestoreVerified") is True and evidence.get("nativeControlArchiveVerified") is True)
     if ready:
+        require(evidence.get("dbNativeLinksVerified") is True and evidence.get("authCheckVerified") is True)
+        require(isinstance(evidence.get("runnerPodDigest"), str) and re.fullmatch(r"[a-f0-9]{64}", evidence["runnerPodDigest"]))
         for key in ("apiReady", "webReady", "runnerReady", "podImagesVerified", "ownerStateVerified", "publicReadVerified"):
             require(evidence.get(key) is True)
         require(evidence.get("authReason") in {"not_configured", "auth_expired", "auth_revoked", "budget_exhausted", "provider_rate_limited", "model_unavailable", "policy_refused", "unavailable", None})
@@ -137,7 +139,7 @@ def validate_protected(value):
     require(all(isinstance(item, str) and re.fullmatch(r"[a-f0-9]{64}", item) for item in value.values()))
 
 
-def receipt(current, api_probe, runner_probe, observations, backups=None, preservation=None):
+def receipt(current, api_probe, runner_probe, observations, backups=None, preservation=None, links_check=None, health_check=None):
     require(api_probe["admissionHeld"] is True and api_probe["schemaReady"] is True and runner_probe["ownerStateVerified"] is True)
     times = [datetime.fromisoformat(value["checkedAt"].replace("Z", "+00:00")) for value in (api_probe, runner_probe, observations)]
     now = datetime.now(timezone.utc)
@@ -148,12 +150,34 @@ def receipt(current, api_probe, runner_probe, observations, backups=None, preser
     require(runner_probe["protectedState"] == preservation["protectedState"])
     require(type(runner_probe["lifetimeReservations"]) is int and runner_probe["lifetimeReservations"] == preservation["lifetimeReservations"])
     allowed = {"checkedAt", "apiHoldObserved", "referenceMetadataVerified", "runnerPodCount", "backupPodCount", "apiReady", "webReady", "runnerReady",
-               "podImagesVerified", "publicReadVerified", "authReason", "authAvailable"}
+               "podImagesVerified", "publicReadVerified", "authReason", "authAvailable", "runnerPodDigest"}
     require(not (set(observations) - allowed))
     result = {**observations, "checkedAt": min(times).isoformat(), "currentDigest": identity_digest(current),
               "schemaReady": True, "ownerStateVerified": True, "apiRunning": api_probe["apiRunning"], "nativeRunning": runner_probe["nativeRunning"],
               "protectedStateVerified": True, **preservation,
               "noAmbiguousTurns": api_probe["ambiguous"] == 0 and runner_probe["ambiguous"] == 0}
+    if links_check is not None:
+        require(links_check["dbNativeLinksVerified"] is True and links_check["currentDigest"] == identity_digest(current))
+        require(links_check["protectedState"] == preservation["protectedState"]
+                and type(links_check["lifetimeReservations"]) is int and links_check["lifetimeReservations"] == preservation["lifetimeReservations"])
+        check_reader_binding(current, links_check)
+        times.append(datetime.fromisoformat(links_check["checkedAt"].replace("Z", "+00:00")))
+        result["dbNativeLinksVerified"] = True
+    if health_check is not None:
+        check_reader_binding(current, health_check)
+        require(health_check["authCheckVerified"] is True and health_check["ownerStateVerified"] is True)
+        require(type(health_check["authAvailable"]) is bool and health_check["authReason"] in {"not_configured", "auth_expired", "auth_revoked",
+            "budget_exhausted", "provider_rate_limited", "model_unavailable", "policy_refused", "unavailable", None})
+        require(health_check["authAvailable"] == (health_check["authReason"] is None))
+        require(isinstance(health_check["podDigest"], str) and re.fullmatch(r"[a-f0-9]{64}", health_check["podDigest"]))
+        require(observations.get("runnerPodDigest") == health_check["podDigest"])
+        for key in ("authAvailable", "authReason"):
+            require(key not in observations or observations[key] == health_check[key])
+            result[key] = health_check[key]
+        result.update(authCheckVerified=True, runnerPodDigest=health_check["podDigest"])
+        times.append(datetime.fromisoformat(health_check["checkedAt"].replace("Z", "+00:00")))
+    require(all(value.tzinfo is not None and 0 <= (now - value).total_seconds() <= 120 for value in times))
+    result["checkedAt"] = min(times).isoformat()
     if backups:
         require(set(backups) == {"dbBackupSha256", "nativeControlBackupSha256", "dbRestoreVerified", "nativeControlArchiveVerified", "protectedState", "lifetimeReservations"})
         require(backups["protectedState"] == preservation["protectedState"]
@@ -161,6 +185,13 @@ def receipt(current, api_probe, runner_probe, observations, backups=None, preser
         result.update(backups)
     check_evidence(result, current)
     return result
+
+
+def check_reader_binding(current, proof):
+    env = {entry["name"]: entry["value"] for entry in container(current["runner"]["spec"])["env"] if "value" in entry}
+    for kind, name in (("owner", "RUNNER_ACCOUNT_ID"), ("state", "RUNNER_STATE_ID")):
+        expected = hashlib.sha256(("chatbot-link-v1\0" + kind + "\0" + env[name]).encode()).hexdigest()
+        require(proof[kind + "Digest"] == expected)
 
 
 def patch(baseline, release, approved_source, current, action, evidence=None):
@@ -273,6 +304,7 @@ def main():
     parser.add_argument("--api-probe"); parser.add_argument("--runner-probe"); parser.add_argument("--observations"); parser.add_argument("--backups")
     parser.add_argument("--created")
     parser.add_argument("--preservation")
+    parser.add_argument("--links-check"); parser.add_argument("--health-check")
     args = parser.parse_args()
     try:
         read = lambda path: json.loads(Path(path).read_text())
@@ -281,7 +313,9 @@ def main():
         elif args.action == "cleanup": result = cleanup(read(args.baseline), read(args.created), read(args.current))
         elif args.action == "receipt":
             validate_baseline(read(args.baseline))
-            result = receipt(read(args.current), read(args.api_probe), read(args.runner_probe), read(args.observations), read(args.backups) if args.backups else None, read(args.preservation) if args.preservation else None)
+            result = receipt(read(args.current), read(args.api_probe), read(args.runner_probe), read(args.observations),
+                read(args.backups) if args.backups else None, read(args.preservation) if args.preservation else None,
+                read(args.links_check) if args.links_check else None, read(args.health_check) if args.health_check else None)
         else: result = patch(read(args.baseline), read(args.release), args.approved_source_sha, read(args.current), args.action, read(args.evidence) if args.evidence else None)
         print(json.dumps(result, indent=2))  # Operator redirects full specs to private files.
     except Exception:

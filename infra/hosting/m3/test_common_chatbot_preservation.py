@@ -19,7 +19,7 @@ def state(tmp_path):
     (native / "state-binding.json").write_text(json.dumps({"version": 1, "ownerId": "synthetic-owner", "stateId": "synthetic-state"}))
     journal = ProjectionJournal.create("synthetic-owner", "synthetic-trial")
     journal.observe({"synthetic-private-credential"})
-    record = {"turns": [{"content": "Private native history"}]}
+    record = {"turns": [{"id": "synthetic-turn", "content": "Private native history"}]}
     (native / "broker.json").write_text(json.dumps({"session": {"state": "idle", "request": "already-reserved",
         "requests": {"already-reserved": "f" * 64}, "thread": "synthetic-thread", "record": record, "projectionVersion": 4,
         "projectionMac": journal.projection_mac("session", "synthetic-thread", record)}}))

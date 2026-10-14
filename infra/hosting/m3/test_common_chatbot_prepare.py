@@ -36,7 +36,9 @@ def evidence(current):
             "apiHoldObserved": True, "referenceMetadataVerified": True, "schemaReady": True, "noAmbiguousTurns": True, "apiRunning": 0, "nativeRunning": 0,
             "dbBackupSha256": "b" * 64, "nativeControlBackupSha256": "c" * 64, "dbRestoreVerified": True, "nativeControlArchiveVerified": True,
             "runnerPodCount": 0, "backupPodCount": 0, "apiReady": True, "webReady": True, "runnerReady": True,
-            "podImagesVerified": True, "ownerStateVerified": True, "publicReadVerified": True, "authReason": "not_configured", "authAvailable": False}
+            "podImagesVerified": True, "ownerStateVerified": True, "publicReadVerified": True,
+            "dbNativeLinksVerified": True, "authCheckVerified": True, "runnerPodDigest": "e"*64,
+            "authReason": "not_configured", "authAvailable": False}
 
 
 def step(bundle, current, action):
