@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { AuthProvider } from "@/components/auth/AuthProvider";
+import { ChatProvider } from "@/components/chat/ChatProvider";
+import ChatDock from "@/components/chat/ChatDock";
 import Header from "@/components/layout/Header";
 import Footer from "@/components/layout/Footer";
 import WaterRipple from "@/components/layout/WaterRipple";
@@ -47,12 +49,15 @@ export default function RootLayout({
     >
       <body className="flex min-h-full flex-col bg-background font-sans">
         <AuthProvider>
-          <Header />
-          <main className="mx-auto w-full max-w-7xl flex-1 px-6 py-10">
-            {children}
-          </main>
-          <Footer />
-          <WaterRipple />
+          <ChatProvider>
+            <Header />
+            <main className="mx-auto w-full max-w-7xl flex-1 px-6 py-10">
+              {children}
+            </main>
+            <Footer />
+            <WaterRipple />
+            <ChatDock />
+          </ChatProvider>
         </AuthProvider>
       </body>
     </html>

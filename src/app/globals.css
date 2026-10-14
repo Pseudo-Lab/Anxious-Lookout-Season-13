@@ -32,6 +32,16 @@ body {
   color: var(--foreground);
 }
 
+/* 넓은 화면에서 공통 대화창이 열려 있으면 본문이 가려지지 않게 오른쪽을 비운다(ChatDock 너비와 같게). */
+@media (min-width: 768px) {
+  html[data-chat-open="normal"] body {
+    padding-right: 26rem;
+  }
+  html[data-chat-open="wide"] body {
+    padding-right: min(48rem, 60vw);
+  }
+}
+
 /* Prose styling for MDX content */
 .prose h1 {
   margin-top: 2em;

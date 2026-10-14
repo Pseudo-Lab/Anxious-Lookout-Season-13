@@ -11,6 +11,9 @@ import {
   type MaterialSummary,
   type MessageItem,
   type AdminAccount,
+  type AcceptedScope,
+  type PageDescriptor,
+  type ToolCallItem,
   type PreviewMaterial,
   type PublicationPreview,
   type Page,
@@ -360,6 +363,16 @@ function parseCodexStatus(v: unknown): CodexStatus | null {
   return out;
 }
 
+// 표시 전용 범위 정보. 형식이 맞지 않으면 버리고 나머지 기록은 그대로 쓴다(권한 판단은 서버가 한다).
+function parseScope(v: Obj): AcceptedScope | undefined {
+  const p = v.page;
+  if (!isObj(p) || !isStr(p.kind) || !isStr(v.capability) || !Array.isArray(v.allowedTools) || !v.allowedTools.every(isStr)) return undefined;
+  const page: AcceptedScope["page"] = { kind: p.kind };
+  if (isId(p.resourceId)) page.resourceId = p.resourceId;
+  if (isStr(p.title)) page.title = p.title;
+  return { page, capability: v.capability, allowedTools: v.allowedTools };
+}
+
 function parseSessionSummary(v: unknown): SessionSummary | null {
   if (
     !isObj(v) ||
@@ -378,6 +391,8 @@ function parseSessionSummary(v: unknown): SessionSummary | null {
     if (!isObj(c) || !isId(c.documentId) || !isId(c.publicationId) || !isStr(c.title)) return null;
     out.context = { documentId: c.documentId, publicationId: c.publicationId, title: c.title };
   }
+  const scope = parseScope(v);
+  if (scope) out.scope = scope;
   return out;
 }
 
@@ -391,10 +406,15 @@ function parseSessionItem(v: unknown): SessionItem | null {
       item.status = v.status;
     }
     if (v.modelMismatch === true) item.modelMismatch = true;
+    if (v.role === "user") {
+      const scope = parseScope(v);
+      if (scope) item.scope = scope;
+    }
     return item;
   }
   if (v.type === "tool_call" && isStr(v.name) && isStr(v.status)) {
-    const tool: SessionItem = { id: v.id, type: "tool_call", name: v.name, input: v.input, output: v.output, status: v.status };
+    const tool: ToolCallItem = { id: v.id, type: "tool_call", name: v.name, input: v.input, output: v.output, status: v.status };
+    if (isObj(v.error) && isStr(v.error.code)) tool.error = { code: v.error.code };
     if (v.modelMismatch === true) tool.modelMismatch = true;
     return tool;
   }
@@ -571,8 +591,13 @@ export const getSessionItemRaw = (id: string, itemId: string) =>
 export const createSession = (input: { title: string; publicDocumentId?: string }, ctx: MutationContext) =>
   mutate("/research/sessions", "POST", input, parseSessionSummary, ctx);
 
-export const sendSessionMessage = (id: string, text: string, expectedVersion: number, ctx: MutationContext) =>
-  mutate(`/research/sessions/${enc(id)}/messages`, "POST", { text, expectedVersion }, parseSessionSummary, ctx);
+// page는 보내기를 누른 순간의 페이지. 결과 불명 재전송은 처음 body(page 포함)를 그대로 보낸다.
+// 이전 보관분처럼 page가 없으면 넣지 않는다(서버는 general로 처리).
+export const sendSessionMessage = (
+  id: string,
+  body: { text: string; expectedVersion: number; page?: PageDescriptor },
+  ctx: MutationContext
+) => mutate(`/research/sessions/${enc(id)}/messages`, "POST", body, parseSessionSummary, ctx);
 
 export const archiveSession = (id: string, expectedVersion: number, ctx: MutationContext) =>
   mutate(`/research/sessions/${enc(id)}`, "DELETE", { expectedVersion }, parseArchive, ctx);

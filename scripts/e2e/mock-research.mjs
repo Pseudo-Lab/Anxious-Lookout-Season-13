@@ -306,6 +306,10 @@ function handleMutation(owner, method, path, b, user) {
       return ok(200, { id: s.id, archived: true, version: s.version });
     }
     if (method === "POST" && m[2]) {
+      if (Object.keys(b).some((k) => !["text", "expectedVersion", "page"].includes(k))) return fail(422, "validation_error", "Unknown field");
+      const resolved = resolvePage(owner, b.page);
+      if (resolved.error) return resolved.error;
+      const scope = resolved.scope;
       if (GATED_REASONS.includes(researchMode.codex)) return fail(503, `codex_${researchMode.codex}`, "Codex is not available");
       // 계약에 없는 codex_* 503: 결과 불명으로 취급되어야 한다(서버는 아무것도 하지 않음)
       if (researchMode.codex === "unknown_code") return fail(503, "codex_upstream_timeout", "Upstream timeout");
@@ -313,8 +317,9 @@ function handleMutation(owner, method, path, b, user) {
       if (MIDTURN[researchMode.codex]) {
         const mt = MIDTURN[researchMode.codex];
         const item = mt.recorded
-          ? { id: uuid(), type: "message", role: "user", text: b.text, raw: { type: "userMessage", text: b.text } }
-          : { id: uuid(), type: "message", role: "user", text: b.text, source: "platform", status: "pending", raw: { type: "platformInput", source: "platform", text: b.text, status: "pending" } };
+          ? { id: uuid(), type: "message", role: "user", text: b.text, raw: { type: "userMessage", text: b.text }, ...scope }
+          : { id: uuid(), type: "message", role: "user", text: b.text, source: "platform", status: "pending", raw: { type: "platformInput", source: "platform", text: b.text, status: "pending" }, ...scope };
+        s.scope = scope;
         s.items.push(item);
         s.error = null;
         s.state = "running";
@@ -336,7 +341,8 @@ function handleMutation(owner, method, path, b, user) {
       if (researchMode.codex === "mismatch") {
         // 계약: 응답 모델 불일치/우회 → 해당 turn의 assistant 결과는 projection에서 제외, 남는 user/tool 항목에 modelMismatch,
         // polling codex_model_unavailable, 계정 runner는 운영자가 해제할 때까지 차단(durable)
-        const user = { id: uuid(), type: "message", role: "user", text: b.text, modelMismatch: true, raw: { type: "userMessage", text: b.text } };
+        const user = { id: uuid(), type: "message", role: "user", text: b.text, modelMismatch: true, raw: { type: "userMessage", text: b.text }, ...scope };
+        s.scope = scope;
         s.items.push(user);
         s.state = "running";
         s.version++;
@@ -361,7 +367,8 @@ function handleMutation(owner, method, path, b, user) {
         return ok(202, sessionSummary(s));
       }
       if (researchMode.codex === "reject") {
-        const item = { id: uuid(), type: "message", role: "user", text: b.text, source: "platform", status: "pending" };
+        const item = { id: uuid(), type: "message", role: "user", text: b.text, source: "platform", status: "pending", ...scope };
+        s.scope = scope;
         item.raw = { type: "platformInput", source: "platform", text: b.text, status: "pending" };
         s.items.push(item);
         s.state = "running";
@@ -382,14 +389,21 @@ function handleMutation(owner, method, path, b, user) {
       if (closed) return fail(503, `codex_${closed}`, "Codex is not available");
       if (researchMode.remaining !== null) researchMode.remaining--;
       s.error = null;
-      s.items.push({ id: uuid(), type: "message", role: "user", text: b.text, raw: { kind: "user_message", text: b.text } });
+      s.items.push({ id: uuid(), type: "message", role: "user", text: b.text, raw: { kind: "user_message", text: b.text }, ...scope });
+      s.scope = scope;
       s.state = "running";
       s.version++;
       s.updatedAt = now();
       setTimeout(() => {
-        const input = { query: b.text, limit: 5 };
-        const output = { items: [], note: "fixture" };
-        s.items.push({ id: uuid(), type: "tool_call", name: "research.search_materials", input, output, status: "completed", raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
+        // 모의 모델은 항상 research_list를 호출한다. 이 요청 범위에 없으면 서버 callback 거부(tool_not_allowed)로 투영한다.
+        const input = { type: "material", limit: 5, query: b.text };
+        if (scope.allowedTools.includes("research_list")) {
+          const output = { items: [], note: "fixture" };
+          s.items.push({ id: uuid(), type: "tool_call", name: "research_list", input, output, status: "completed", raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
+        } else {
+          const output = { error: { code: "tool_not_allowed" } };
+          s.items.push({ id: uuid(), type: "tool_call", name: "research_list", input, output, status: "rejected", error: { code: "tool_not_allowed" }, raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
+        }
         s.items.push({ id: uuid(), type: "message", role: "assistant", text: `모의 응답: **${b.text}**`, raw: { kind: "agent_message", fixture: true } });
         s.state = "idle";
         s.version++;
@@ -404,7 +418,45 @@ function handleMutation(owner, method, path, b, user) {
 function sessionSummary(s) {
   const out = { id: s.id, title: s.title, state: s.state, createdAt: s.createdAt, updatedAt: s.updatedAt, version: s.version };
   if (s.context) out.context = s.context;
+  // #9: 가장 최근 접수 요청의 범위(없으면 general/none)
+  Object.assign(out, s.scope ?? GENERAL_SCOPE);
   return out;
+}
+
+// #9 api-contracts/issue9-page-chat.md 페이지 범위. 서버가 자원을 확인해 정한다(브라우저의 도구 목록·URL을 받지 않는다).
+const READ4 = ["research_get", "research_versions", "research_version_get", "research_relations"];
+const PAGE_KINDS = {
+  general: { capability: "none", tools: [] },
+  public_document: { capability: "public_context_read", tools: ["research_page_context"], detail: true },
+  material: { capability: "material_read_update", tools: [...READ4, "research_material_update"], detail: true },
+  document: { capability: "document_read_update", tools: [...READ4, "research_document_update"], detail: true },
+  material_workspace: { capability: "material_list_save", tools: ["research_list", "research_material_save"] },
+  document_workspace: { capability: "document_list_save", tools: ["research_list", "research_document_save"] },
+};
+const GENERAL_SCOPE = { page: { kind: "general" }, capability: "none", allowedTools: [] };
+
+function resolvePage(owner, p) {
+  if (p === undefined) return { scope: GENERAL_SCOPE };
+  const bad = (message) => ({ error: fail(422, "validation_error", "Invalid request", { fields: [{ path: "body.page", message }] }) });
+  if (!p || typeof p !== "object" || Array.isArray(p)) return bad("object");
+  if (Object.keys(p).some((k) => k !== "kind" && k !== "resourceId")) return bad("unknown field");
+  const def = PAGE_KINDS[p.kind];
+  if (!def) return bad("kind");
+  if (!def.detail) {
+    if (p.resourceId !== undefined) return bad("resourceId not allowed");
+    return { scope: { page: { kind: p.kind }, capability: def.capability, allowedTools: def.tools } };
+  }
+  if (typeof p.resourceId !== "string" || !UUID_RE.test(p.resourceId)) return bad("resourceId");
+  const item = items.get(p.resourceId);
+  let title;
+  if (p.kind === "public_document") {
+    if (!item || item.type !== "document" || !item.publication) return { error: fail(404, "not_found", "Not found") };
+    title = snapshot(item).title;
+  } else {
+    if (!item || item.owner !== owner || item.type !== p.kind || item.archived) return { error: fail(404, "not_found", "Not found") };
+    title = latest(item).title;
+  }
+  return { scope: { page: { kind: p.kind, resourceId: p.resourceId, title }, capability: def.capability, allowedTools: def.tools } };
 }
 
 const retiredReleases = new Set();

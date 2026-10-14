@@ -186,6 +186,22 @@ export interface CodexStatus {
 
 export type SessionState = "idle" | "running" | "failed";
 
+// 질문을 보낸 페이지(#9 api-contracts/issue9-page-chat.md). front는 kind·resourceId만 보내고
+// 문맥·허용 도구는 서버가 자원 소유·공개 상태를 확인해 요청마다 정한다.
+export type PageKind = "general" | "public_document" | "material" | "document" | "material_workspace" | "document_workspace";
+
+export interface PageDescriptor {
+  kind: PageKind;
+  resourceId?: string;
+}
+
+// 서버가 접수한 요청의 적용 범위(표시용). 새 값이 생길 수 있으므로 kind·capability는 문자열로 받고 모르는 값은 일반 문구로 표시한다.
+export interface AcceptedScope {
+  page: { kind: string; resourceId?: string; title?: string };
+  capability: string;
+  allowedTools: string[];
+}
+
 export interface SessionSummary {
   id: string;
   title: string;
@@ -193,8 +209,10 @@ export interface SessionSummary {
   createdAt: string;
   updatedAt: string;
   version: number;
-  // 공개 글에서 시작한 질문 세션의 처음 저장 맥락(당시 공개본)
+  // 공개 글에서 시작한 질문 세션의 처음 저장 맥락(당시 공개본). 이후 질문의 문맥·권한에는 쓰이지 않는 생성 기록이다.
   context?: { documentId: string; publicationId: string; title: string };
+  // 가장 최근에 접수된 요청의 범위. 이전 기록에는 없을 수 있다.
+  scope?: AcceptedScope;
 }
 
 export interface MessageItem {
@@ -207,11 +225,23 @@ export interface MessageItem {
   status?: "pending" | "not_recorded";
   // 고정 모델 확인 실패(응답 모델 불일치·우회)로 중단된 실행의 항목. 정상 응답이 아니다.
   modelMismatch?: boolean;
+  // 사용자 메시지가 접수된 범위(서버 기록). 이전 기록에는 없을 수 있다.
+  scope?: AcceptedScope;
 }
 
-export type SessionItem =
-  | MessageItem
-  | { id: string; type: "tool_call"; name: string; input: unknown; output: unknown; status: string; modelMismatch?: boolean };
+export interface ToolCallItem {
+  id: string;
+  type: "tool_call";
+  name: string;
+  input: unknown;
+  output: unknown;
+  // rejected: 이 질문의 범위에서 허용되지 않아 서버가 거부한 호출(error.code tool_not_allowed)
+  status: string;
+  error?: { code: string };
+  modelMismatch?: boolean;
+}
+
+export type SessionItem = MessageItem | ToolCallItem;
 
 export interface SessionDetail extends SessionSummary {
   items: SessionItem[];

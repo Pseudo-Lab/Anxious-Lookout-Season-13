@@ -24,7 +24,7 @@ function StartConversation({ doc }: { doc: PublicSnapshot }) {
     <section className="space-y-3 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-stone-200/60">
       <h2 className="font-semibold text-stone-800">이 문서로 Codex와 대화하기</h2>
       <p className="text-xs text-stone-500">
-        대화는 내 개인 기록으로 저장되며 문서 작성자를 포함한 다른 사람은 볼 수 없습니다. 대화 중에 내 다른 자료도 활용할 수 있습니다.
+        대화는 내 개인 기록으로 저장되며 문서 작성자를 포함한 다른 사람은 볼 수 없습니다. 이 페이지에서 질문하면 이 공개 글과 직접 참고자료를 읽고 답합니다. 대화는 모든 페이지의 대화창에서 이어집니다.
       </p>
       {status === "authenticated" && user && !allowed ? (
         <p className="text-sm text-stone-600">

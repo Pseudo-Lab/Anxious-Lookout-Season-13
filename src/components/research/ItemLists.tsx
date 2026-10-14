@@ -7,6 +7,7 @@ import { usePagedList } from "@/lib/research/usePagedList";
 import { CONTENT_KIND_LABELS } from "@/lib/research/types";
 import { formatDateTime, hostOf } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
+import { useChat } from "@/components/chat/ChatProvider";
 import Notice from "@/components/research/Notice";
 
 function ListFrame({
@@ -130,7 +131,9 @@ export function DocumentList() {
 
 export const SESSION_STATE_LABELS = { idle: "대기", running: "진행 중", failed: "실패" } as const;
 
+// 대화는 공통 대화창에서 연다. 링크 주소는 기존 대화 링크(새 탭·복사)와 호환되게 유지한다.
 export function SessionList({ action }: { action?: ReactNode }) {
+  const { openSession } = useChat();
   const list = usePagedList("sessions", (cursor) => listSessions(cursor));
   return (
     <section className="space-y-3">
@@ -146,7 +149,15 @@ export function SessionList({ action }: { action?: ReactNode }) {
       >
         {list.items.map((s) => (
           <li key={s.id}>
-            <Link href={`/research/session/?id=${encodeURIComponent(s.id)}`} className="block px-5 py-4 hover:bg-stone-50">
+            <Link
+              href={`/research/session/?id=${encodeURIComponent(s.id)}`}
+              onClick={(e) => {
+                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                e.preventDefault();
+                openSession(s.id);
+              }}
+              className="block px-5 py-4 hover:bg-stone-50"
+            >
               <p className="font-medium text-stone-900">{s.title || "(제목 없음)"}</p>
               <p className="mt-1 text-xs text-stone-500">
                 {SESSION_STATE_LABELS[s.state]} · 최근 {formatDateTime(s.updatedAt)}

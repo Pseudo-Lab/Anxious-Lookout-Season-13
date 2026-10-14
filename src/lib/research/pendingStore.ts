@@ -7,7 +7,8 @@
 // 이전 세대에서 시작한 요청의 쓰기는 무시한다(writeRequest). 401 재인증은 세대를 바꾸지 않아 보관이 유지된다.
 // 늦은 응답은 같은 페이지(JS 실행 환경)에서만 오므로 세대는 메모리에 두고, 로그아웃 뒤 저장소는 완전히 비운다.
 
-const PREFIX = "research:pending:";
+// 명시적 로그아웃 때 이 접두어의 항목을 모두 지운다. 계정별 대화창 상태·작성 중 입력(chatState)도 같은 접두어를 쓴다.
+export const PREFIX = "research:pending:";
 let generation = 0;
 
 export interface StoredRequest<T = unknown> {

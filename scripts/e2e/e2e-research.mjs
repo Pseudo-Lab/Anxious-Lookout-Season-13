@@ -23,6 +23,10 @@ const setMock = (q) => fetch(`${ORIGIN}/__mock/set?${q}`).then((r) => r.json());
 const counts = () => fetch(`${ORIGIN}/__mock/counts`).then((r) => r.json());
 const mockCalls = () => fetch(`${ORIGIN}/__mock/calls`).then((r) => r.json());
 
+// 결과 미확인 전송 보관분만(대화창 상태 chat-ui·작성 중 입력 chat-draft 제외)
+const pendingSends = () =>
+  page.evaluate(() => JSON.stringify(Object.fromEntries(Object.entries(sessionStorage).filter(([k]) => k.includes(":session-send:")))));
+
 const browser = await chromium.launch();
 const consoleErrors = [];
 const externalHosts = new Set();
@@ -423,8 +427,16 @@ await setMock("codex=unavailable");
 await page.reload();
 await main.getByLabel("새 대화 제목").fill("세션 1");
 await main.getByRole("button", { name: "새 대화" }).click();
-await page.waitForURL(/\/research\/session\/\?id=/);
-const sessionUrl = page.url();
+// 새 대화는 페이지를 옮기지 않고 공통 대화창에서 열린다. 기존 대화 링크는 그 대화를 대화창에 여는 호환 진입점이다.
+const chat = page.locator("#chat-panel");
+await chat.getByLabel("메시지").waitFor();
+check("R9. new session opens in chat panel without navigation", page.url().includes("tab=sessions") && (await chat.getByRole("heading", { name: "세션 1" }).count()) === 1, page.url());
+const chatUi = () =>
+  page.evaluate(() => {
+    const k = Object.keys(sessionStorage).find((key) => key.endsWith(":chat-ui"));
+    return k ? JSON.parse(sessionStorage.getItem(k)) : null;
+  });
+const sessionUrl = U(`/research/session/?id=${(await chatUi()).sessionId}`);
 // 서버가 접수 불가로 보고한 동안은 보내기를 잠그고 입력은 그대로 둔다. 운영자 재연결 뒤 '상태 다시 확인'으로 풀린다(새로고침 불필요).
 {
   const posts = [];
@@ -432,43 +444,46 @@ const sessionUrl = page.url();
     posts.push(route.request().method());
     return route.continue();
   });
-  await main.getByLabel("메시지").fill("질문 하나");
-  check("R9. send locked while codex unavailable", (await appears(main.getByText("보내기가 잠겨 있습니다"))) && (await main.getByRole("button", { name: "보내기" }).isDisabled()));
-  await main.locator("form").evaluate((f) => f.requestSubmit());
+  await chat.getByLabel("메시지").fill("질문 하나");
+  check("R9. send locked while codex unavailable", (await appears(chat.getByText("보내기가 잠겨 있습니다"))) && (await chat.getByRole("button", { name: "보내기" }).isDisabled()));
+  await chat.locator("form").evaluate((f) => f.requestSubmit());
   await page.waitForTimeout(300);
   check("R9. locked composer sends nothing", posts.length === 0, String(posts.length));
-  check("R9. message input preserved while locked", (await main.getByLabel("메시지").inputValue()) === "질문 하나");
+  check("R9. message input preserved while locked", (await chat.getByLabel("메시지").inputValue()) === "질문 하나");
   await page.unroute("**/api/research/sessions/*/messages");
 }
 await setMock("codex=fixture");
-await main.getByRole("button", { name: "상태 다시 확인" }).click();
-check("R9. recheck unlocks without reload", await appears(main.getByText("테스트용 모의 Codex")));
-check("R9. input still there after unlock", (await main.getByLabel("메시지").inputValue()) === "질문 하나");
-await main.getByRole("button", { name: "보내기" }).click();
-check("R9. running state shown", await appears(main.getByText("Codex가 응답하는 중입니다.")));
+await chat.getByRole("button", { name: "상태 다시 확인" }).click();
+check("R9. recheck unlocks without reload", await appears(chat.getByText("테스트용 모의 Codex")));
+check("R9. input still there after unlock", (await chat.getByLabel("메시지").inputValue()) === "질문 하나");
+await chat.getByRole("button", { name: "보내기" }).click();
+check("R9. running state shown", await appears(chat.getByText("Codex가 응답하는 중입니다.")));
 await page.reload(); // 진행 중 재접속
-check("R9. reply after reconnect (polling)", await appears(main.getByText("모의 응답:"), 15000));
-await main.getByRole("button", { name: /research\.search_materials/ }).click();
-check("R9. tool input shown inert", await appears(main.locator("pre", { hasText: '"query": "질문 하나"' })));
-await main.getByRole("button", { name: "저장된 원본 기록 보기" }).click();
-check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: '"kind": "function_call"' })));
+check("R9. reply after reconnect (polling)", await appears(chat.getByText("모의 응답:"), 15000));
+// 대화 목록 탭은 general(도구 없음): 모의 모델의 research_list 호출은 서버 거부로 표시된다.
+check("R9. user message shows accepted scope (general)", await appears(chat.locator("li.bg-indigo-50", { hasText: "질문 하나" }).getByText("보낸 범위: 일반 질문")));
+check("R9. out-of-scope tool call shown as rejected", await appears(chat.getByText("허용되지 않는 도구라 서버가 실행하지 않았습니다").first()));
+await chat.getByRole("button", { name: /research_list/ }).first().click();
+check("R9. tool input shown inert", await appears(chat.locator("pre", { hasText: '"query": "질문 하나"' })));
+await chat.getByRole("button", { name: "저장된 원본 기록 보기" }).click();
+check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: '"kind": "function_call"' })));
 
 // R9b. runner 명확 거절: 202 후 failed/codex_rejected, 입력은 '미기록 입력'으로 보존(모델 이력·성공으로 표시 안 함)
 {
   await setMock("codex=reject");
-  await main.getByLabel("메시지").fill("거절 질문");
-  await main.getByRole("button", { name: "보내기" }).click();
-  check("R9b. failed codex_rejected shown", await appears(main.getByText("Codex가 이 요청을 받지 않았습니다")));
-  const rejected = main.locator("li.bg-indigo-50", { hasText: "거절 질문" });
+  await chat.getByLabel("메시지").fill("거절 질문");
+  await chat.getByRole("button", { name: "보내기" }).click();
+  check("R9b. failed codex_rejected shown", await appears(chat.getByText("Codex가 이 요청을 받지 않았습니다")));
+  const rejected = chat.locator("li.bg-indigo-50", { hasText: "거절 질문" });
   check("R9b. platform input labeled 미기록", await appears(rejected.getByText("미기록 입력")));
   check("R9b. not presented as Codex record", await appears(rejected.getByText("Codex 대화 기록에 반영되지 않은 입력입니다")));
   await rejected.getByRole("button", { name: "보존된 입력 기록" }).click();
   check("R9b. raw shows platformInput, not Codex original", await appears(rejected.locator("pre", { hasText: '"type": "platformInput"' })) && (await rejected.getByText("Codex 원본 아님").count()) === 1);
   await setMock("codex=fixture");
-  await main.getByLabel("메시지").fill("거절 후 새 질문");
-  await main.getByRole("button", { name: "보내기" }).click();
-  check("R9b. new explicit message after failure works", await appears(main.getByText("모의 응답: 거절 후 새 질문"), 15000));
-  check("R9b. rejected input still preserved after new turn", (await main.locator("li.bg-indigo-50", { hasText: "거절 질문" }).count()) === 1);
+  await chat.getByLabel("메시지").fill("거절 후 새 질문");
+  await chat.getByRole("button", { name: "보내기" }).click();
+  check("R9b. new explicit message after failure works", await appears(chat.getByText("모의 응답: 거절 후 새 질문"), 15000));
+  check("R9b. rejected input still preserved after new turn", (await chat.locator("li.bg-indigo-50", { hasText: "거절 질문" }).count()) === 1);
 }
 
 // R9g. #7 선접수 실패(503 codex_*)는 확정 거절: 안내 + 입력 유지 + 같은 key 재전송 대상 아님 / 접수 후 모델 불일치는 명시 실패
@@ -483,73 +498,73 @@ check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: 
   ]) {
     await setMock("codex=fixture");
     await page.reload();
-    await main.getByLabel("메시지").waitFor();
-    await main.getByText("테스트용 모의 Codex").waitFor();
+    await chat.getByLabel("메시지").waitFor();
+    await chat.getByText("테스트용 모의 Codex").waitFor();
     await setMock(`codex=${mode}`);
-    await main.getByLabel("메시지").fill(`${mode} 질문`);
-    await main.getByRole("button", { name: "보내기" }).click();
-    check(`R9g. ${mode}: specific guidance`, await appears(main.getByText(text).first()));
-    check(`R9g. ${mode}: input preserved`, (await main.getByLabel("메시지").inputValue()) === `${mode} 질문`);
+    await chat.getByLabel("메시지").fill(`${mode} 질문`);
+    await chat.getByRole("button", { name: "보내기" }).click();
+    check(`R9g. ${mode}: specific guidance`, await appears(chat.getByText(text).first()));
+    check(`R9g. ${mode}: input preserved`, (await chat.getByLabel("메시지").inputValue()) === `${mode} 질문`);
     check(
       `R9g. ${mode}: definitive (no same-key resend, nothing stored)`,
-      (await main.getByRole("button", { name: "다시 보내기" }).count()) === 0 && !(await page.evaluate(() => JSON.stringify({ ...sessionStorage }))).includes(`${mode} 질문`)
+      (await chat.getByRole("button", { name: "다시 보내기" }).count()) === 0 && !(await pendingSends()).includes(`${mode} 질문`)
     );
-    check(`R9g. ${mode}: status rechecked -> send locked`, await appears(main.getByText("보내기가 잠겨 있습니다")));
+    check(`R9g. ${mode}: status rechecked -> send locked`, await appears(chat.getByText("보내기가 잠겨 있습니다")));
   }
-  check("R9g. rate limit reason shown in status", await appears(main.getByText("Codex 제공자의 사용 한도에 걸려 지금은 사용할 수 없습니다")));
+  check("R9g. rate limit reason shown in status", await appears(chat.getByText("Codex 제공자의 사용 한도에 걸려 지금은 사용할 수 없습니다")));
   // 계약에 없는 codex_* 503은 결과 불명: 같은 key·본문 보관, "다시 보내기" 제공, 새로고침 뒤 입력 복구(리뷰 F7-1)
   {
     await setMock("codex=unknown_code");
     await page.reload();
-    await main.getByLabel("메시지").waitFor();
+    await chat.getByLabel("메시지").waitFor();
     const keys = [];
     await page.route("**/api/research/sessions/*/messages", async (route) => {
       keys.push(route.request().headers()["idempotency-key"]);
       return route.continue();
     });
-    await main.getByLabel("메시지").fill("미지 코드 질문");
-    await main.getByRole("button", { name: "보내기" }).click();
-    check("R9g. unknown codex_* 503 -> same-request retry offered", await appears(main.getByRole("button", { name: "다시 보내기" })));
+    await chat.getByLabel("메시지").fill("미지 코드 질문");
+    await chat.getByRole("button", { name: "보내기" }).click();
+    check("R9g. unknown codex_* 503 -> same-request retry offered", await appears(chat.getByRole("button", { name: "다시 보내기" })));
     await page.reload();
-    await main.getByLabel("메시지").waitFor();
-    check("R9g. unknown codex_* 503 -> input restored after reload", (await main.getByLabel("메시지").inputValue()) === "미지 코드 질문");
+    await chat.getByLabel("메시지").waitFor();
+    check("R9g. unknown codex_* 503 -> input restored after reload", (await chat.getByLabel("메시지").inputValue()) === "미지 코드 질문");
     await setMock("codex=fixture");
-    await main.getByRole("button", { name: "다시 보내기" }).click();
-    await main.getByRole("button", { name: "보내기", exact: true }).waitFor();
+    await chat.getByRole("button", { name: "다시 보내기" }).click();
+    await chat.getByRole("button", { name: "보내기", exact: true }).waitFor();
     check("R9g. retry after unknown code reused original key", keys.length === 2 && keys[0] === keys[1], JSON.stringify(keys.map((k) => k.slice(0, 8))));
     await page.unroute("**/api/research/sessions/*/messages");
-    await main.getByText("모의 응답: 미지 코드 질문").waitFor({ timeout: 15000 });
-    await main.getByLabel("메시지").and(main.locator(":enabled")).waitFor({ timeout: 15000 });
+    await chat.getByText("모의 응답: 미지 코드 질문").waitFor({ timeout: 15000 });
+    await chat.getByLabel("메시지").and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
   }
   await setMock("codex=mismatch");
   await page.reload();
-  await main.getByLabel("메시지").waitFor();
-  const answersBefore = await main.getByText("모의 응답:").count();
-  await main.getByLabel("메시지").fill("모델 불일치 질문");
-  await main.getByRole("button", { name: "보내기" }).click();
+  await chat.getByLabel("메시지").waitFor();
+  const answersBefore = await chat.getByText("모의 응답:").count();
+  await chat.getByLabel("메시지").fill("모델 불일치 질문");
+  await chat.getByRole("button", { name: "보내기" }).click();
   check(
     "R9g. model mismatch -> explicit model failure, no auto switch",
-    (await appears(main.getByText("마지막 요청이 실패했습니다"))) && (await appears(main.getByText("고정된 모델을 사용할 수 없어")))
+    (await appears(chat.getByText("마지막 요청이 실패했습니다"))) && (await appears(chat.getByText("고정된 모델을 사용할 수 없어")))
   );
-  check("R9g. raw provider text not shown", !(await main.innerText()).includes("gpt-other"));
-  const mm = main.locator("li.bg-indigo-50", { hasText: "모델 불일치 질문" });
+  check("R9g. raw provider text not shown", !(await chat.innerText()).includes("gpt-other"));
+  const mm = chat.locator("li.bg-indigo-50", { hasText: "모델 불일치 질문" });
   check("R9g. mismatched turn items badged as not a normal response", await appears(mm.getByText("정상 응답 아님")));
-  check("R9g. mismatched tool call badged", await appears(main.locator("li", { hasText: "research_document_save" }).filter({ hasText: "정상 응답 아님" })));
-  check("R9g. no assistant answer shown for mismatched turn", (await main.getByText("모의 응답:").count()) === answersBefore);
+  check("R9g. mismatched tool call badged", await appears(chat.locator("li", { hasText: "research_document_save" }).filter({ hasText: "정상 응답 아님" })));
+  check("R9g. no assistant answer shown for mismatched turn", (await chat.getByText("모의 응답:").count()) === answersBefore);
   // 차단은 계정 runner 단위로 지속: turn 실패 뒤 상태를 다시 읽어 보내기 잠금, 입력 유지, 새 대화 안내 없음
   // (서버 선접수 거절 자체는 위 model_unavailable 반복에서 확인)
-  await main.getByLabel("메시지").fill("차단 뒤 질문");
-  check("R9g. follow-up locked while runner blocked (status rechecked after failed turn)", (await appears(main.getByText("보내기가 잠겨 있습니다"))) && (await main.getByRole("button", { name: "보내기" }).isDisabled()));
-  check("R9g. follow-up input kept", (await main.getByLabel("메시지").inputValue()) === "차단 뒤 질문");
-  check("R9g. no 'start a new conversation' workaround suggested", !(await main.innerText()).includes("새 대화를 시작"));
+  await chat.getByLabel("메시지").fill("차단 뒤 질문");
+  check("R9g. follow-up locked while runner blocked (status rechecked after failed turn)", (await appears(chat.getByText("보내기가 잠겨 있습니다"))) && (await chat.getByRole("button", { name: "보내기" }).isDisabled()));
+  check("R9g. follow-up input kept", (await chat.getByLabel("메시지").inputValue()) === "차단 뒤 질문");
+  check("R9g. no 'start a new conversation' workaround suggested", !(await chat.innerText()).includes("새 대화를 시작"));
   await page.reload();
-  check("R9g. status explains operator confirmation", await appears(main.getByText("운영자가 확인한 뒤 다시 사용할 수 있습니다")));
+  check("R9g. status explains operator confirmation", await appears(chat.getByText("운영자가 확인한 뒤 다시 사용할 수 있습니다")));
   // 이전 정상 이력은 그대로(일괄 실패 처리하지 않음)
-  check("R9g. earlier normal answers kept", (await main.getByText("모의 응답:").count()) === answersBefore);
+  check("R9g. earlier normal answers kept", (await chat.getByText("모의 응답:").count()) === answersBefore);
   await setMock("codex=fixture");
   await page.reload();
-  await main.getByLabel("메시지").waitFor();
-  await main.getByLabel("메시지").fill("");
+  await chat.getByLabel("메시지").waitFor();
+  await chat.getByLabel("메시지").fill("");
 }
 
 // R9h. 접수(202) 뒤 실행 중 인증 실패(back access-only 계약): 만료 → codex_auth_expired, 외부 갱신 요구 → codex_auth_revoked.
@@ -561,36 +576,36 @@ check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: 
   ]) {
     await setMock("codex=fixture");
     await page.reload();
-    await main.getByLabel("메시지").waitFor();
-    const before = await main.locator("ol > li").count();
+    await chat.getByLabel("메시지").waitFor();
+    const before = await chat.locator("ol > li").count();
     const posts = [];
     await page.route("**/api/research/sessions/*/messages", async (route) => {
       posts.push(route.request().headers()["idempotency-key"]);
       return route.continue();
     });
     await setMock(`codex=${mode}`);
-    await main.getByLabel("메시지").fill(`${mode} 질문`);
-    await main.getByRole("button", { name: "보내기" }).click();
-    check(`R9h. ${mode}: failed turn explained`, (await appears(main.getByText("마지막 요청이 실패했습니다"))) && (await appears(main.getByText(text).first())));
-    check(`R9h. ${mode}: provider text not shown`, !(await main.innerText()).includes("acct_secret") && !(await main.innerText()).includes("token_expired"));
-    const item = main.locator("li.bg-indigo-50", { hasText: `${mode} 질문` });
+    await chat.getByLabel("메시지").fill(`${mode} 질문`);
+    await chat.getByRole("button", { name: "보내기" }).click();
+    check(`R9h. ${mode}: failed turn explained`, (await appears(chat.getByText("마지막 요청이 실패했습니다"))) && (await appears(chat.getByText(text).first())));
+    check(`R9h. ${mode}: provider text not shown`, !(await chat.innerText()).includes("acct_secret") && !(await chat.innerText()).includes("token_expired"));
+    const item = chat.locator("li.bg-indigo-50", { hasText: `${mode} 질문` });
     check(
       `R9h. ${mode}: input shown as ${recorded ? "Codex record" : "unrecorded platform input"}`,
       (await item.count()) === 1 && (await item.getByText("미기록 입력").count()) === (recorded ? 0 : 1)
     );
-    check(`R9h. ${mode}: status rechecked -> send locked`, await appears(main.getByText("보내기가 잠겨 있습니다")));
+    check(`R9h. ${mode}: status rechecked -> send locked`, await appears(chat.getByText("보내기가 잠겨 있습니다")));
     await page.waitForTimeout(500);
     check(`R9h. ${mode}: no automatic resend`, posts.length === 1, String(posts.length));
     await page.unroute("**/api/research/sessions/*/messages");
     // 운영자 재공급(같은 계정) 뒤: 상태 재확인 → 같은 대화에 새 메시지
     await setMock("codex=fixture");
-    await main.getByRole("button", { name: "상태 다시 확인" }).click();
-    await main.getByText("테스트용 모의 Codex").waitFor();
-    await main.getByLabel("메시지").fill(`${mode} 재개 질문`);
-    await main.getByRole("button", { name: "보내기" }).click();
-    check(`R9h. ${mode}: same conversation continues after resupply`, await appears(main.getByText(`모의 응답: ${mode} 재개 질문`), 15000));
-    check(`R9h. ${mode}: earlier items kept`, (await main.locator("ol > li").count()) >= before + 3);
-    await main.getByLabel("메시지").and(main.locator(":enabled")).waitFor({ timeout: 15000 });
+    await chat.getByRole("button", { name: "상태 다시 확인" }).click();
+    await chat.getByText("테스트용 모의 Codex").waitFor();
+    await chat.getByLabel("메시지").fill(`${mode} 재개 질문`);
+    await chat.getByRole("button", { name: "보내기" }).click();
+    check(`R9h. ${mode}: same conversation continues after resupply`, await appears(chat.getByText(`모의 응답: ${mode} 재개 질문`), 15000));
+    check(`R9h. ${mode}: earlier items kept`, (await chat.locator("ol > li").count()) >= before + 3);
+    await chat.getByLabel("메시지").and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
   }
 }
 
@@ -598,21 +613,21 @@ check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: 
 {
   await setMock("codex=fixture&window=10&remaining=2");
   await page.reload();
-  await main.getByLabel("메시지").waitFor();
-  check("R9w. access window end shown", await appears(main.getByText(/이용 가능 기한: .+까지/)));
-  check("R9w. remaining admissions shown", await appears(main.getByText("남은 요청 횟수: 2")));
-  await main.getByLabel("메시지").fill("창 안 질문");
-  await main.getByRole("button", { name: "보내기" }).click();
-  await main.getByText("모의 응답: 창 안 질문").waitFor({ timeout: 15000 });
-  check("R9w. remaining admissions refreshed after turn", await appears(main.getByText("남은 요청 횟수: 1")));
-  await main.getByLabel("메시지").fill("창 끝난 뒤 질문");
-  check("R9w. window end -> locked without reload", await appears(main.getByText("보내기가 잠겨 있습니다"), 15000));
-  check("R9w. expired reason shown", await appears(main.getByText("서버의 Codex 인증이 만료되어 재연결이 필요합니다")));
-  check("R9w. input kept after window end", (await main.getByLabel("메시지").inputValue()) === "창 끝난 뒤 질문");
+  await chat.getByLabel("메시지").waitFor();
+  check("R9w. access window end shown", await appears(chat.getByText(/이용 가능 기한: .+까지/)));
+  check("R9w. remaining admissions shown", await appears(chat.getByText("남은 요청 횟수: 2")));
+  await chat.getByLabel("메시지").fill("창 안 질문");
+  await chat.getByRole("button", { name: "보내기" }).click();
+  await chat.getByText("모의 응답: 창 안 질문").waitFor({ timeout: 15000 });
+  check("R9w. remaining admissions refreshed after turn", await appears(chat.getByText("남은 요청 횟수: 1")));
+  await chat.getByLabel("메시지").fill("창 끝난 뒤 질문");
+  check("R9w. window end -> locked without reload", await appears(chat.getByText("보내기가 잠겨 있습니다"), 15000));
+  check("R9w. expired reason shown", await appears(chat.getByText("서버의 Codex 인증이 만료되어 재연결이 필요합니다")));
+  check("R9w. input kept after window end", (await chat.getByLabel("메시지").inputValue()) === "창 끝난 뒤 질문");
   await setMock("codex=fixture&window=&remaining=");
-  await main.getByRole("button", { name: "상태 다시 확인" }).click();
-  await main.getByText("테스트용 모의 Codex").waitFor();
-  await main.getByLabel("메시지").fill("");
+  await chat.getByRole("button", { name: "상태 다시 확인" }).click();
+  await chat.getByText("테스트용 모의 Codex").waitFor();
+  await chat.getByLabel("메시지").fill("");
 }
 
 // R9x. 브라우저 시계가 서버보다 빠른 경우(리뷰 ACCESS-UI-R1): 기한 재확인이 일찍 '이용 가능'으로 끝나도
@@ -638,7 +653,7 @@ check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: 
   });
   await setMock("codex=fixture&window=8");
   await sk.goto(sessionUrl);
-  const sm = sk.locator("main");
+  const sm = sk.locator("#chat-panel");
   await sm.getByText(/이용 가능 기한/).waitFor();
   await sm.getByLabel("메시지").fill("시계 차이 질문");
   check("R9x. clock ahead: locked once server reports expiry", await appears(sm.getByText("보내기가 잠겨 있습니다"), 40000));
@@ -651,7 +666,7 @@ check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: 
 {
   await setMock("codex=fixture&window=4");
   await page.goto(sessionUrl);
-  await main.getByText(/이용 가능 기한/).waitFor();
+  await chat.getByText(/이용 가능 기한/).waitFor();
   let failing = true;
   let aborted = 0;
   await page.route("**/api/research/codex/status", async (route) => {
@@ -661,23 +676,23 @@ check("R9. stored raw item shown", await appears(main.locator("pre", { hasText: 
     }
     return route.continue();
   });
-  await main.getByLabel("메시지").fill("조회 실패 질문");
-  check("R9y. failed expiry recheck shown, last status kept", await appears(main.getByText("Codex 상태를 다시 확인하지 못했습니다"), 20000));
-  check("R9y. not locked from a failed read alone", !(await main.getByRole("button", { name: "보내기" }).isDisabled()));
+  await chat.getByLabel("메시지").fill("조회 실패 질문");
+  check("R9y. failed expiry recheck shown, last status kept", await appears(chat.getByText("Codex 상태를 다시 확인하지 못했습니다"), 20000));
+  check("R9y. not locked from a failed read alone", !(await chat.getByRole("button", { name: "보내기" }).isDisabled()));
   await page.waitForTimeout(8000);
   failing = false;
   check("R9y. recheck retried after failure", aborted >= 2, String(aborted));
-  check("R9y. locked after reads recover", await appears(main.getByText("보내기가 잠겨 있습니다"), 40000));
-  check("R9y. draft kept", (await main.getByLabel("메시지").inputValue()) === "조회 실패 질문");
+  check("R9y. locked after reads recover", await appears(chat.getByText("보내기가 잠겨 있습니다"), 40000));
+  check("R9y. draft kept", (await chat.getByLabel("메시지").inputValue()) === "조회 실패 질문");
   await page.unroute("**/api/research/codex/status");
   await setMock("codex=fixture&window=&remaining=");
-  await main.getByRole("button", { name: "상태 다시 확인" }).click();
-  await main.getByText("테스트용 모의 Codex").waitFor();
-  await main.getByLabel("메시지").fill("");
+  await chat.getByRole("button", { name: "상태 다시 확인" }).click();
+  await chat.getByText("테스트용 모의 Codex").waitFor();
+  await chat.getByLabel("메시지").fill("");
 }
 
 // R12. 메시지 응답 유실 → polling으로 서버 version 변경 → 같은 내용 재전송: 모델 turn 중복 없음
-const userMessages = (t) => main.locator("li.bg-indigo-50", { hasText: t });
+const userMessages = (t) => chat.locator("li.bg-indigo-50", { hasText: t });
 async function dropFirstMessagePost() {
   let dropped = false;
   await page.route("**/api/research/sessions/*/messages", async (route) => {
@@ -691,17 +706,17 @@ async function dropFirstMessagePost() {
 }
 {
   await page.goto(sessionUrl);
-  await main.getByLabel("메시지").waitFor();
+  await chat.getByLabel("메시지").waitFor();
   await dropFirstMessagePost();
-  await main.getByLabel("메시지").fill("중복 방지 질문");
-  await main.getByRole("button", { name: "보내기" }).click();
-  check("R12. lost send -> uncertain notice", await appears(main.getByText("이전 전송의 결과를 확인하지 못했습니다")));
-  check("R12. turn completed on server meanwhile", await appears(main.getByText("모의 응답: 중복 방지 질문"), 15000));
-  await main.getByRole("button", { name: "다시 보내기" }).click();
-  await main.getByRole("button", { name: "보내기", exact: true }).waitFor();
+  await chat.getByLabel("메시지").fill("중복 방지 질문");
+  await chat.getByRole("button", { name: "보내기" }).click();
+  check("R12. lost send -> uncertain notice", await appears(chat.getByText("이전 전송의 결과를 확인하지 못했습니다")));
+  check("R12. turn completed on server meanwhile", await appears(chat.getByText("모의 응답: 중복 방지 질문"), 15000));
+  await chat.getByRole("button", { name: "다시 보내기" }).click();
+  await chat.getByRole("button", { name: "보내기", exact: true }).waitFor();
   await page.waitForTimeout(3500);
   await page.reload();
-  await main.getByText("모의 응답: 중복 방지 질문").first().waitFor();
+  await chat.getByText("모의 응답: 중복 방지 질문").first().waitFor();
   check("R12. exactly one user message after retry", (await userMessages("중복 방지 질문").count()) === 1, String(await userMessages("중복 방지 질문").count()));
   const sends = (await mockCalls()).filter((c) => c.method === "POST" && c.path.endsWith("/messages")).slice(-2);
   check("R12. retry reused same Idempotency-Key", sends.length === 2 && sends[0].idempotencyKey === sends[1].idempotencyKey);
@@ -710,50 +725,55 @@ async function dropFirstMessagePost() {
 {
   // R12b. 응답 유실 후 페이지 재접속: 입력과 key가 복구되어 같은 요청으로 재전송
   await dropFirstMessagePost();
-  await main.getByLabel("메시지").fill("재접속 질문");
-  await main.getByRole("button", { name: "보내기" }).click();
-  await main.getByText("이전 전송의 결과를 확인하지 못했습니다").waitFor();
+  await chat.getByLabel("메시지").fill("재접속 질문");
+  await chat.getByRole("button", { name: "보내기" }).click();
+  await chat.getByText("이전 전송의 결과를 확인하지 못했습니다").waitFor();
   await page.unroute("**/api/research/sessions/*/messages");
   await page.reload();
-  await main.getByLabel("메시지").waitFor();
-  await appears(main.getByText("모의 응답: 재접속 질문"), 15000);
-  check("R12b. pending text restored after reload", (await main.getByLabel("메시지").inputValue()) === "재접속 질문");
-  await main.getByRole("button", { name: "다시 보내기" }).click();
-  await main.getByRole("button", { name: "보내기", exact: true }).waitFor();
+  await chat.getByLabel("메시지").waitFor();
+  await appears(chat.getByText("모의 응답: 재접속 질문"), 15000);
+  check("R12b. pending text restored after reload", (await chat.getByLabel("메시지").inputValue()) === "재접속 질문");
+  await chat.getByRole("button", { name: "다시 보내기" }).click();
+  await chat.getByRole("button", { name: "보내기", exact: true }).waitFor();
   await page.waitForTimeout(3500);
   await page.reload();
-  await main.getByText("모의 응답: 재접속 질문").first().waitFor();
+  await chat.getByText("모의 응답: 재접속 질문").first().waitFor();
   check("R12b. no duplicate turn after reconnect", (await userMessages("재접속 질문").count()) === 1, String(await userMessages("재접속 질문").count()));
-  const store = await page.evaluate(() => JSON.stringify({ ...sessionStorage }));
+  const store = await pendingSends();
   check("R12b. pending send cleared after confirmation", store === "{}", store);
 }
 
 // R12c~e. 인증 오류는 이전 전송의 미처리를 증명하지 않는다: 보관 유지 → 같은 계정 재시도는 replay
-const pendingStore = () => page.evaluate(() => JSON.stringify({ ...sessionStorage }));
+// 결과 미확인 변경 요청 보관분 전체(대화창 상태·작성 중 입력 제외). 작성 중 입력은 별도로 남으므로 섞지 않는다.
+const pendingStore = () =>
+  page.evaluate(() =>
+    JSON.stringify(Object.fromEntries(Object.entries(sessionStorage).filter(([k]) => !k.endsWith(":chat-ui") && !k.includes(":chat-draft:"))))
+  );
+const fullStore = () => page.evaluate(() => JSON.stringify({ ...sessionStorage }));
 async function makeUnconfirmedSend(text) {
   await dropFirstMessagePost();
-  await main.getByLabel("메시지").fill(text);
-  await main.getByRole("button", { name: "보내기" }).click();
-  await main.getByText("이전 전송의 결과를 확인하지 못했습니다").waitFor();
+  await chat.getByLabel("메시지").fill(text);
+  await chat.getByRole("button", { name: "보내기" }).click();
+  await chat.getByText("이전 전송의 결과를 확인하지 못했습니다").waitFor();
   await page.unroute("**/api/research/sessions/*/messages");
-  await main.getByText(`모의 응답: ${text}`).first().waitFor({ timeout: 15000 });
+  await chat.getByText(`모의 응답: ${text}`).first().waitFor({ timeout: 15000 });
 }
 async function confirmSingleTurn(label, text) {
-  await main.getByRole("button", { name: "다시 보내기" }).click();
-  await main.getByRole("button", { name: "보내기", exact: true }).waitFor();
+  await chat.getByRole("button", { name: "다시 보내기" }).click();
+  await chat.getByRole("button", { name: "보내기", exact: true }).waitFor();
   await page.waitForTimeout(3500);
   await page.reload();
-  await main.getByText(`모의 응답: ${text}`).first().waitFor();
+  await chat.getByText(`모의 응답: ${text}`).first().waitFor();
   check(`${label}: exactly one user message`, (await userMessages(text).count()) === 1, String(await userMessages(text).count()));
 }
 {
   // R12c. 재시도가 CSRF 403으로 거절돼도 보관 유지
   await makeUnconfirmedSend("CSRF 질문");
   await setMock("csrf=reject");
-  await main.getByRole("button", { name: "다시 보내기" }).click();
-  check("R12c. csrf_invalid shown", await appears(main.getByText("요청을 확인하지 못했습니다")));
+  await chat.getByRole("button", { name: "다시 보내기" }).click();
+  check("R12c. csrf_invalid shown", await appears(chat.getByText("요청을 확인하지 못했습니다")));
   check("R12c. unconfirmed send kept after 403", (await pendingStore()).includes("CSRF 질문"));
-  check("R12c. still offers same-request retry", await appears(main.getByRole("button", { name: "다시 보내기" })));
+  check("R12c. still offers same-request retry", await appears(chat.getByRole("button", { name: "다시 보내기" })));
   await setMock("csrf=normal");
   await confirmSingleTurn("R12c. retry after csrf recovery", "CSRF 질문");
 }
@@ -761,14 +781,14 @@ async function confirmSingleTurn(label, text) {
   // R12d. 재시도가 401(session 만료)이어도 보관 유지 → 같은 계정 재로그인 후 같은 key로 replay
   await makeUnconfirmedSend("만료 질문");
   await setMock("expire=1");
-  await main.getByRole("button", { name: "다시 보내기" }).click();
-  check("R12d. expired session -> login required", await appears(main.getByText("로그인이 필요합니다")));
+  await chat.getByRole("button", { name: "다시 보내기" }).click();
+  check("R12d. expired session -> login required", await appears(chat.getByText("로그인이 필요합니다")));
   check("R12d. unconfirmed send kept after 401", (await pendingStore()).includes("만료 질문"));
   await setMock("reuse=1");
   await login(page);
   await page.goto(sessionUrl);
-  await main.getByLabel("메시지").waitFor();
-  check("R12d. same account restores pending text", (await main.getByLabel("메시지").inputValue()) === "만료 질문");
+  await chat.getByLabel("메시지").waitFor();
+  check("R12d. same account restores pending text", (await chat.getByLabel("메시지").inputValue()) === "만료 질문");
   await confirmSingleTurn("R12d. retry after re-login", "만료 질문");
 }
 {
@@ -776,9 +796,187 @@ async function confirmSingleTurn(label, text) {
   await makeUnconfirmedSend("로그아웃 질문");
   await page.locator("header").getByRole("button", { name: "로그아웃", exact: true }).first().click();
   await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
-  check("R12e. logout clears unconfirmed sends", (await pendingStore()) === "{}", await pendingStore());
+  check("R12e. logout clears unconfirmed sends, drafts and chat state", (await fullStore()) === "{}", await fullStore());
   await login(page); // reuse=1: 같은 계정으로 이후 단계 계속
   await setMock("reuse=0");
+}
+
+// R22. #9 공통 대화창(모의 API): 모든 페이지 진입점, 열고 닫기·포커스, 페이지 이동 뒤 대화·입력 유지,
+//      페이지 범위 송신·표시·거부 도구, 실행 중 이동, 재전송 범위 고정, 자원 없음 404, 단일 polling, 모바일, 비로그인.
+//      실제 모델·도구·서버 권한 검증이 아니다(서버 거부는 back 검사와 실제 시험에서 따로 확인).
+{
+  await setMock("codex=fixture&window=&remaining=");
+  const dock = page.getByRole("button", { name: "Codex 대화창 열기" });
+  const header = page.locator("header");
+  for (const path of ["/", "/posts/", "/status/", "/public/", "/research/?tab=materials"]) {
+    await page.goto(U(path));
+    if (await chat.isVisible()) await chat.getByRole("button", { name: "대화창 닫기" }).click();
+    const box = (await appears(dock)) ? await dock.boundingBox() : null;
+    check(`R22. dock button on ${path} (>=44px)`, !!box && box.width >= 44 && box.height >= 44, JSON.stringify(box));
+  }
+  await dock.click();
+  await chat.getByRole("heading", { name: "Codex 대화" }).waitFor();
+  check("R22. open moves focus into panel", await page.evaluate(() => document.activeElement?.id === "chat-panel-title"));
+  check("R22. desktop panel is non-modal", (await chat.getAttribute("role")) === "complementary" && (await chat.getAttribute("aria-modal")) === null);
+  check("R22. desktop page padded so panel does not cover content", await page.evaluate(() => getComputedStyle(document.body).paddingRight === "416px"));
+  await page.keyboard.press("Escape");
+  await dock.waitFor();
+  check("R22. Esc closes and returns focus to button", await page.evaluate(() => document.activeElement?.getAttribute("aria-label") === "Codex 대화창 열기"));
+  check("R22. padding removed after close", await page.evaluate(() => getComputedStyle(document.body).paddingRight === "0px"));
+
+  // 대화 선택·입력 → 닫기 → 클라이언트 이동 → 다시 열기 / 새로고침
+  await dock.click();
+  await chat.getByRole("link", { name: /세션 1/ }).click();
+  await chat.getByLabel("메시지").waitFor();
+  check("R22. list click opens conversation in panel without navigation", page.url().includes("/research/") && !page.url().includes("/research/session/"));
+  await chat.getByLabel("메시지").fill("이동 중 초안");
+  await chat.getByRole("button", { name: "대화창 닫기" }).click();
+  await header.getByRole("link", { name: "글 목록" }).first().click();
+  await page.waitForURL(/\/posts\/$/);
+  await dock.click();
+  check("R22. draft kept across close + client navigation", (await chat.getByLabel("메시지").inputValue()) === "이동 중 초안");
+  await page.reload();
+  await chat.getByLabel("메시지").waitFor();
+  check("R22. open state and draft kept after reload", (await chat.getByLabel("메시지").inputValue()) === "이동 중 초안");
+
+  const bodies = [];
+  await page.route("**/api/research/sessions/*/messages", async (route) => {
+    bodies.push(route.request().postDataJSON());
+    return route.continue();
+  });
+  const lastTool = () => chat.locator("li", { hasText: "research_list" }).last();
+
+  // general 페이지: 도구 없음, 질문은 가능
+  check("R22. general page scope shown", await appears(chat.getByText("다음 질문 범위: 일반 질문")));
+  check("R22. memory wording: earlier conversation continues", await appears(chat.getByText("이전 대화 내용은 이 대화에 계속 이어집니다.")));
+  await chat.getByLabel("메시지").fill("일반 페이지 질문");
+  await chat.getByRole("button", { name: "보내기" }).click();
+  await chat.getByText("모의 응답: 일반 페이지 질문").waitFor({ timeout: 15000 });
+  check("R22. general page sends kind general", JSON.stringify(bodies.at(-1)?.page) === '{"kind":"general"}', JSON.stringify(bodies.at(-1)));
+  check("R22. general: draft cleared after success", (await chat.getByLabel("메시지").inputValue()) === "");
+  check("R22. general: tool call rejected", await appears(lastTool().getByText("거부됨")));
+
+  // 자료 목록(작업 공간): research_list 허용
+  await page.goto(U("/research/?tab=materials"));
+  await chat.getByLabel("메시지").waitFor();
+  check("R22. workspace scope shown", await appears(chat.getByText("다음 질문 범위: 내 자료")));
+  await chat.getByLabel("메시지").fill("자료 목록 질문");
+  await chat.getByRole("button", { name: "보내기" }).click();
+  await chat.getByText("모의 응답: 자료 목록 질문").waitFor({ timeout: 15000 });
+  check("R22. workspace sends material_workspace", JSON.stringify(bodies.at(-1)?.page) === '{"kind":"material_workspace"}', JSON.stringify(bodies.at(-1)?.page));
+  check("R22. workspace: allowed tool completed", await appears(lastTool().getByText("completed")));
+
+  // 자료 상세: 보낸 뒤 바로 다른 페이지로 이동해도 접수 범위는 그대로
+  const materialId = new URL(materialAUrl).searchParams.get("id");
+  await page.goto(materialAUrl);
+  await chat.getByLabel("메시지").waitFor();
+  check("R22. material page scope shown", await appears(chat.getByText("다음 질문 범위: 이 자료")));
+  await chat.getByLabel("메시지").fill("자료 페이지 질문");
+  await chat.getByRole("button", { name: "보내기" }).click();
+  await chat.getByText("Codex가 응답하는 중입니다.").waitFor();
+  await header.getByRole("link", { name: "홈" }).first().click();
+  await page.waitForURL(U("/"));
+  await chat.getByText("모의 응답: 자료 페이지 질문").waitFor({ timeout: 15000 });
+  check("R22. material page sends material + id", bodies.at(-1)?.page?.kind === "material" && bodies.at(-1)?.page?.resourceId === materialId, JSON.stringify(bodies.at(-1)?.page));
+  check("R22. navigation during run: sent scope stays material", await appears(chat.locator("li.bg-indigo-50", { hasText: "자료 페이지 질문" }).getByText(/보낸 범위: 이 자료/)));
+  check("R22. next scope follows current page", await appears(chat.getByText("다음 질문 범위: 일반 질문")));
+  check("R22. material scope: list tool rejected", await appears(lastTool().getByText("거부됨")));
+  await page.unroute("**/api/research/sessions/*/messages");
+
+  // 기존 대화 링크: 대화창에서 열고 입력창·polling은 하나
+  const sid = new URL(sessionUrl).searchParams.get("id");
+  await page.goto(sessionUrl);
+  await chat.getByLabel("메시지").waitFor();
+  check(
+    "R22. legacy session link opens it in panel, single composer",
+    (await page.locator('textarea[aria-label="메시지"]').count()) === 1 && (await appears(main.getByText("이 대화를 대화창에서 열었습니다")))
+  );
+  let polls = 0;
+  const onReq = (r) => {
+    if (r.method() === "GET" && new URL(r.url()).pathname.endsWith(`/research/sessions/${sid}`)) polls++;
+  };
+  page.on("request", onReq);
+  await chat.getByLabel("메시지").fill("폴링 확인 질문");
+  await chat.getByRole("button", { name: "보내기" }).click();
+  await chat.getByText("모의 응답: 폴링 확인 질문").waitFor({ timeout: 15000 });
+  page.off("request", onReq);
+  check("R22. single poller for the running conversation", polls >= 1 && polls <= 4, String(polls));
+
+  // 결과 불명 재전송: 다른 페이지로 옮겨도 처음 key·body(page 포함)를 그대로 보낸다
+  await page.goto(materialAUrl);
+  await chat.getByLabel("메시지").waitFor();
+  const sent = [];
+  let dropped = false;
+  await page.route("**/api/research/sessions/*/messages", async (route) => {
+    sent.push({ key: route.request().headers()["idempotency-key"], body: route.request().postDataJSON() });
+    if (!dropped) {
+      dropped = true;
+      await route.fetch();
+      return route.abort();
+    }
+    return route.continue();
+  });
+  await chat.getByLabel("메시지").fill("범위 고정 재전송");
+  await chat.getByRole("button", { name: "보내기" }).click();
+  await chat.getByText("이전 전송의 결과를 확인하지 못했습니다").waitFor();
+  await chat.getByText("모의 응답: 범위 고정 재전송").first().waitFor({ timeout: 15000 });
+  await header.getByRole("link", { name: "상태" }).first().click();
+  await page.waitForURL(/\/status\/$/);
+  check("R22. retry notice: original scope is used", await appears(chat.getByText("처음 보낸 범위(이 자료)로 처리됩니다", { exact: false })));
+  await chat.getByRole("button", { name: "다시 보내기" }).click();
+  await chat.getByRole("button", { name: "보내기", exact: true }).waitFor();
+  check(
+    "R22. retry after navigation reuses original key and body",
+    sent.length === 2 && sent[0].key === sent[1].key && JSON.stringify(sent[0].body) === JSON.stringify(sent[1].body) && sent[1].body.page?.kind === "material",
+    JSON.stringify(sent.map((x) => x.body.page))
+  );
+  await page.unroute("**/api/research/sessions/*/messages");
+
+  // 확인할 수 없는 자원(없음·타인·보관): 접수 전 404, general로 낮추지 않음, 입력 유지
+  await page.goto(U(`/research/material/?id=${crypto.randomUUID()}`));
+  await chat.getByLabel("메시지").waitFor();
+  await chat.getByLabel("메시지").fill("없는 자료 질문");
+  await chat.getByRole("button", { name: "보내기" }).click();
+  check("R22. unknown resource -> not found before admission", await appears(chat.getByText("메시지를 보내지 못했습니다.")));
+  check("R22. input kept after 404", (await chat.getByLabel("메시지").inputValue()) === "없는 자료 질문");
+  check("R22. 404 send not recorded as a message", (await chat.locator("li.bg-indigo-50", { hasText: "없는 자료 질문" }).count()) === 0);
+  await chat.getByLabel("메시지").fill("");
+
+  // 작은 화면: 전체 화면 dialog, 뒤 페이지 조작 불가, 44px 이상, 키보드(보이는 높이)에 맞춤
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(U("/posts/"));
+  await chat.getByLabel("메시지").waitFor();
+  check("R22. mobile panel is modal dialog", (await chat.getAttribute("role")) === "dialog" && (await chat.getAttribute("aria-modal")) === "true");
+  const pb = await chat.boundingBox();
+  check("R22. mobile panel fills viewport", !!pb && Math.round(pb.width) === 390 && Math.round(pb.height) === 844, JSON.stringify(pb));
+  check("R22. page behind is inert on mobile", await page.evaluate(() => document.querySelector("body > main")?.hasAttribute("inert") === true));
+  const small = [];
+  for (const name of ["대화창 닫기", "보내기", "← 대화 목록"]) {
+    const b = await chat.getByRole("button", { name, exact: true }).boundingBox();
+    if (!b || b.height < 44) small.push(`${name}:${b && Math.round(b.height)}`);
+  }
+  check("R22. mobile panel buttons >= 44px tall", small.length === 0, small.join(", "));
+  await page.setViewportSize({ width: 390, height: 500 });
+  await page.waitForTimeout(300);
+  const shrunk = await chat.boundingBox();
+  check("R22. panel follows visible height (keyboard)", !!shrunk && Math.round(shrunk.height) === 500, JSON.stringify(shrunk));
+  check("R22. composer reachable in shrunk panel", await chat.getByLabel("메시지").isVisible());
+  await page.setViewportSize({ width: 390, height: 844 });
+  await chat.getByRole("button", { name: "대화창 닫기" }).click();
+  check("R22. inert removed after close", await page.evaluate(() => !document.querySelector("body > main")?.hasAttribute("inert")));
+  await page.setViewportSize({ width: 1280, height: 800 });
+
+  // 비로그인: 버튼은 보이고 대화는 로그인 안내
+  const anon = await newPage();
+  await anon.page.goto(U("/posts/"));
+  const anonDock = anon.page.getByRole("button", { name: "Codex 대화창 열기" });
+  check("R22. dock shown to logged-out visitors", await appears(anonDock));
+  await anonDock.click();
+  check(
+    "R22. logged-out panel asks to log in, no composer",
+    (await appears(anon.page.locator("#chat-panel").getByText("로그인이 필요합니다"))) && (await anon.page.locator("#chat-panel textarea").count()) === 0
+  );
+  await anon.context.close();
 }
 
 // R13. 좁은 화면: 가로 스크롤 없이 표시
@@ -798,6 +996,9 @@ await page.setViewportSize({ width: 1280, height: 800 });
 
 // R14. 같은 브라우저에서 다른 계정으로 바뀌면 이전 계정의 개인 화면·미저장 입력을 버린다(리뷰 blocker)
 {
+  // 대화창에 A의 대화와 작성 중 입력을 열어 둔 채로 바꾼다.
+  await page.goto(sessionUrl);
+  await chat.getByLabel("메시지").fill("A의 대화창 초안");
   await page.goto(docUrl);
   await main.getByRole("button", { name: "내용 수정" }).click();
   await main.getByLabel("본문").fill("A의 미저장 초안");
@@ -810,6 +1011,12 @@ await page.setViewportSize({ width: 1280, height: 800 });
   check("R14. switched account sees not found", await appears(main.getByText("항목을 찾을 수 없습니다")));
   check("R14. previous account draft discarded", (await main.locator("textarea").count()) === 0 && !(await main.innerText()).includes("A의 미저장 초안"));
   check("R14. previous account title not shown", (await main.getByRole("heading", { name: "문서 D", exact: true }).count()) === 0);
+  const panelText = (await chat.count()) ? await chat.innerText() : "";
+  check(
+    "R14. chat panel drops previous account conversation and draft",
+    !panelText.includes("세션 1") && !panelText.includes("A의 대화창 초안") && (await page.locator('textarea[aria-label="메시지"]').count()) === 0,
+    panelText.slice(0, 120)
+  );
 }
 
 // R15. 일반 생성 요청: 응답 유실 → CSRF 403 → 정상 재시도, 같은 key·1건 생성(리뷰 major)
@@ -996,6 +1203,11 @@ let docEUrl;
   } else {
     check("R20. public fixture available", false, "no public document");
   }
+  await c.page.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  check(
+    "R20. commenter chat panel shows restriction, no composer",
+    (await appears(c.page.locator("#chat-panel").getByText("Codex 질문은 관리자가 승인한 편집자·관리자만"))) && (await c.page.locator("#chat-panel textarea").count()) === 0
+  );
   await c.context.close();
   await setMock("nextLogin=approved");
 }
@@ -1058,7 +1270,7 @@ let docEUrl;
   await other.page.goto(materialAUrl);
   check("R10. foreign material -> not found", await appears(om.getByText("항목을 찾을 수 없습니다")));
   await other.page.goto(sessionUrl);
-  check("R10. foreign session -> not found", await appears(om.getByText("항목을 찾을 수 없습니다")));
+  check("R10. foreign session -> not found", await appears(other.page.locator("#chat-panel").getByText("항목을 찾을 수 없습니다")));
   await other.page.goto(U("/research/"));
   check("R10. other user's list empty", await appears(om.getByText("아직 저장한 자료가 없습니다")));
   await other.context.close();
@@ -1072,8 +1284,18 @@ let docEUrl;
   );
   check("R11. mutations carry Origin/CSRF/Idempotency-Key", uiMutations.length > 0 && bad.length === 0, `${uiMutations.length} calls, bad=${JSON.stringify(bad.slice(0, 2))}`);
 }
-const ls = await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }));
-check("R11. nothing stored in local/sessionStorage", ls === "{}", ls);
+{
+  // 남아도 되는 것은 계정별 대화창 상태(열림·선택 대화)뿐이다. 인증 정보·CSRF nonce는 저장하지 않는다.
+  const stored = await page.evaluate(() => ({ local: { ...localStorage }, session: { ...sessionStorage } }));
+  const keys = Object.keys(stored.session);
+  const only = keys.every((k) => /^research:pending:[0-9a-f-]{36}:chat-ui$/.test(k));
+  const text = JSON.stringify(stored);
+  check(
+    "R11. only per-account chat UI state in storage (no token/CSRF)",
+    Object.keys(stored.local).length === 0 && only && !/csrf|token|cookie/i.test(text),
+    text
+  );
+}
 
 check("console has no errors", consoleErrors.length === 0, consoleErrors.join(" | "));
 check("no external image/tracker requests", ![...externalHosts].some((h) => h.includes("tracker") || h.includes("example.com")), [...externalHosts].join(", "));
