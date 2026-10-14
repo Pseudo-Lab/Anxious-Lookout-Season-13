@@ -212,10 +212,20 @@ function Composer({
   }));
   // 작성 중 입력은 대화창을 닫거나 다른 대화로 옮겨도 남도록 계정·대화별로 보관한다.
   const [text, setTextState] = useState(() => pending?.text ?? loadDraft(accountId, session.id));
+  // 늦게 끝난 전송이 그 뒤에 쓴 입력을 지우지 않도록, 지금 화면에 있는지와 최신 입력을 따로 둔다.
+  const latestText = useRef(text);
+  const mounted = useRef(false);
   const setText = (value: string) => {
     setTextState(value);
+    latestText.current = value;
     saveDraft(accountId, session.id, value);
   };
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const [failure, setFailure] = useState<FetchFailure | null>(null);
   const [busy, setBusy] = useState(false);
   const running = session.state === "running";
@@ -251,7 +261,13 @@ function Composer({
       setPending(null);
     }
     if (res.ok) {
-      setText("");
+      // 보낸 내용 그대로인 입력만 비운다. 응답을 기다리는 동안 새로 쓴 입력, 화면을 떠난 뒤 다른 입력창이
+      // 저장한 초안, 로그아웃 이후(보관소 세대 변경)의 보관소는 건드리지 않는다.
+      if (mounted.current) {
+        if (latestText.current.trim() === request.text) setText("");
+      } else if (storeGeneration() === guard.generation && loadDraft(accountId, session.id).trim() === request.text) {
+        saveDraft(accountId, session.id, "");
+      }
       setFailure(null);
     } else {
       // 실패해도 입력은 남겨 둔다. 이전 기록은 서버에 보존된다.
@@ -306,7 +322,7 @@ function Composer({
 }
 
 /** 대화 하나. 공통 대화창이 그리며 상세 조회·진행 중 확인·Codex 상태 확인은 여기 한 곳에서만 한다. */
-export default function SessionView({ id, onArchived }: { id: string; onArchived: () => void }) {
+export default function SessionView({ id, onArchived }: { id: string; onArchived: (id: string) => void }) {
   const { user } = useAuth();
   const { result, refreshFailure, reload } = useLoad(`session:${id}`, () => getSession(id));
   const { run, busy } = useMutation();
@@ -371,7 +387,7 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
   async function archive() {
     if (!window.confirm("이 대화를 보관할까요? 목록에서 숨겨지지만 기록은 보존됩니다.")) return;
     const res = await run(`session:archive:${s.id}:${s.version}`, (ctx) => archiveSession(s.id, s.version, ctx));
-    if (res.ok) onArchived();
+    if (res.ok) onArchived(s.id);
     else setArchiveFailure(res.failure);
   }
 

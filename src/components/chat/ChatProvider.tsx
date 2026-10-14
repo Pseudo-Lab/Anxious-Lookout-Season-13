@@ -12,6 +12,8 @@ interface ChatContextValue extends ChatUiState {
   setOpen: (open: boolean) => void;
   /** 대화를 대화창에 열고 창을 연다. null이면 대화 목록. */
   openSession: (sessionId: string | null) => void;
+  /** 그 대화가 아직 열려 있을 때만 대화 목록으로 돌아간다(보관 완료 등 늦은 완료가 다른 대화를 닫지 않게). */
+  leaveSession: (sessionId: string) => void;
   setWide: (wide: boolean) => void;
 }
 
@@ -19,6 +21,7 @@ const ChatContext = createContext<ChatContextValue>({
   ...CLOSED_CHAT,
   setOpen: () => {},
   openSession: () => {},
+  leaveSession: () => {},
   setWide: () => {},
 });
 
@@ -49,15 +52,25 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     if (stored.accountId && stored.changed) saveChatUi(stored.accountId, stored.ui);
   }, [stored]);
 
+  // 조작 함수는 그 함수를 받은 화면의 계정에 묶는다. 계정이 바뀐 뒤 이전 계정 화면의 늦은 완료(대화 생성·보관 등)가
+  // 부르는 조작은 무시해 새 계정의 대화창 상태를 바꾸지 못하게 한다.
   const update = useCallback(
-    (fn: (s: ChatUiState) => ChatUiState) => setStored((prev) => ({ accountId: prev.accountId, ui: fn(prev.ui), changed: true })),
-    []
+    (fn: (s: ChatUiState) => ChatUiState) =>
+      setStored((prev) => (prev.accountId !== accountId ? prev : { accountId: prev.accountId, ui: fn(prev.ui), changed: true })),
+    [accountId]
   );
   const setOpen = useCallback((open: boolean) => update((s) => ({ ...s, open })), [update]);
   const openSession = useCallback((sessionId: string | null) => update((s) => ({ ...s, open: true, sessionId })), [update]);
+  const leaveSession = useCallback(
+    (sessionId: string) => update((s) => (s.sessionId === sessionId ? { ...s, sessionId: null } : s)),
+    [update]
+  );
   const setWide = useCallback((wide: boolean) => update((s) => ({ ...s, wide })), [update]);
 
-  const value = useMemo(() => ({ ...ui, setOpen, openSession, setWide }), [ui, setOpen, openSession, setWide]);
+  const value = useMemo(
+    () => ({ ...ui, setOpen, openSession, leaveSession, setWide }),
+    [ui, setOpen, openSession, leaveSession, setWide]
+  );
   return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;
 }
 

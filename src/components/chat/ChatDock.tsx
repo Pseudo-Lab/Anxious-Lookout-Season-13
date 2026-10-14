@@ -47,6 +47,12 @@ function useVisibleHeight(active: boolean) {
 
 const PANEL_ID = "chat-panel";
 
+const FOCUSABLE = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function focusables(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.getClientRects().length > 0);
+}
+
 /** 모든 페이지 우하단의 대화 버튼과 대화창. */
 export default function ChatDock() {
   const { status, user } = useAuth();
@@ -54,6 +60,7 @@ export default function ChatDock() {
   const isMobile = useIsMobile();
   const buttonRef = useRef<HTMLButtonElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
   // 한 번 연 뒤에는 닫아도 대화창을 그대로 두어(숨김) 진행 중 대화·입력·확인 상태가 이어지게 한다.
   // 계정이 바뀌면 내리고, 그 계정에서 열 때 새로 그린다(닫힌 채로 다른 계정의 조회를 하지 않게).
   const accountKey = user?.accountId ?? status;
@@ -91,6 +98,40 @@ export default function ChatDock() {
     };
   }, [chat.open, chat.wide, isMobile]);
 
+  // 작은 화면의 모달 대화창: Tab/Shift+Tab을 대화창 안에서 순환하고, 포커스가 밖(body 등)으로 나갔어도
+  // Tab은 대화창으로 되돌리고 Escape는 닫는다(문서 단위로 받는다).
+  const { setOpen } = chat;
+  useEffect(() => {
+    if (!chat.open || !isMobile) return;
+    const onKey = (e: KeyboardEvent) => {
+      const panel = panelRef.current;
+      if (!panel) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setOpen(false);
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const items = focusables(panel);
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (!active || !panel.contains(active)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      } else if (e.shiftKey && (active === first || active === headingRef.current)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [chat.open, isMobile, setOpen]);
+
   if (!API_ENABLED) return null;
 
   return (
@@ -117,6 +158,7 @@ export default function ChatDock() {
       {mounted && (
         <section
           id={PANEL_ID}
+          ref={panelRef}
           hidden={!chat.open}
           role={isMobile ? "dialog" : "complementary"}
           aria-modal={isMobile ? true : undefined}

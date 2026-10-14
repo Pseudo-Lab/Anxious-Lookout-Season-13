@@ -1262,6 +1262,121 @@ let docEUrl;
   await setMock("as=&nextLogin=approved");
 }
 
+// R23. 리뷰(2789cab) 반례 회귀: 늦게 끝난 전송이 새 초안을 지우지 않음 / 계정 전환 뒤 이전 계정의 늦은 생성 완료가
+//      새 계정 대화창 상태를 바꾸지 않음 / 모바일 모달의 Tab 순환과 포커스가 밖에 있어도 Escape 닫기
+{
+  // 앞 단계의 계정 상태와 무관하게, 승인된 편집자 계정의 새 browser context에서 확인한다.
+  await setMock("nextLogin=approved&reuse=0&as=");
+  const r = await newPage();
+  await login(r.page);
+  const rp = r.page;
+  const rm = rp.locator("main");
+  const rc = rp.locator("#chat-panel");
+  const rapi = apiClient(rp);
+  await setMock("codex=fixture&window=&remaining=");
+  // R23a. 전송 성공 응답 보류 → 목록으로 나갔다 같은 대화 재진입 → 실행 종료 뒤 새 초안 → 이전 응답 전달 → 재진입해도 새 초안 유지
+  const created = await rapi.send("POST", "/research/sessions", { title: "지연 응답 대화" });
+  await rp.goto(U(`/research/session/?id=${created.body.id}`));
+  await rc.getByLabel("메시지").waitFor();
+  let releaseSend;
+  const sendGate = new Promise((r) => (releaseSend = r));
+  await rp.route("**/api/research/sessions/*/messages", async (route) => {
+    const res = await route.fetch();
+    await sendGate;
+    return route.fulfill({ response: res }).catch(() => {});
+  });
+  await rc.getByLabel("메시지").fill("지연 성공 질문");
+  await rc.getByRole("button", { name: "보내기" }).click();
+  await rc.getByRole("button", { name: "← 대화 목록" }).click();
+  await rc.getByRole("link", { name: /지연 응답 대화/ }).click();
+  await rc.getByText("모의 응답: 지연 성공 질문").waitFor({ timeout: 15000 });
+  await rc.getByLabel("메시지").and(rc.locator(":enabled")).waitFor({ timeout: 15000 });
+  await rc.getByLabel("메시지").fill("새로 쓴 초안");
+  releaseSend();
+  await rp.waitForTimeout(800);
+  await rp.unroute("**/api/research/sessions/*/messages");
+  await rc.getByRole("button", { name: "← 대화 목록" }).click();
+  await rc.getByRole("link", { name: /지연 응답 대화/ }).click();
+  await rc.getByLabel("메시지").waitFor();
+  check("R23a. late success of a left composer keeps the newer draft", (await rc.getByLabel("메시지").inputValue()) === "새로 쓴 초안", await rc.getByLabel("메시지").inputValue());
+  await rc.getByLabel("메시지").fill("");
+
+  // R23b. 계정 X의 대화 생성 201 보류 → 같은 탭이 계정 Y로 바뀜 → X 응답 전달: Y의 대화창 선택·화면은 그대로
+  const before = (await rapi.get("/auth/me")).user.accountId;
+  await rp.goto(U("/research/?tab=sessions"));
+  // 대화창은 마지막 대화를 기억하므로 목록으로 돌린 뒤 닫는다(다시 열면 새 대화 폼이 보이게).
+  await rc.getByRole("button", { name: "← 대화 목록" }).click();
+  await rc.getByRole("button", { name: "대화창 닫기" }).click();
+  let releaseCreate;
+  const createGate = new Promise((r) => (releaseCreate = r));
+  let held = false;
+  let createdStatus = 0;
+  await rp.route("**/api/research/sessions", async (route) => {
+    if (route.request().method() === "POST" && !held) {
+      held = true;
+      const res = await route.fetch();
+      createdStatus = res.status();
+      await createGate;
+      return route.fulfill({ response: res }).catch(() => {});
+    }
+    return route.continue();
+  });
+  await rm.getByLabel("새 대화 제목").fill("지연 생성 대화");
+  await rm.getByRole("button", { name: "새 대화" }).click();
+  const tab = await r.context.newPage();
+  await tab.goto(U("/api/auth/github/start"));
+  await tab.waitForURL(U("/"));
+  await tab.close();
+  // 이 탭에서 이전 계정 CSRF로 보낸 요청이 403 → me 재조회로 새 계정이 된다(새로고침 없이).
+  await rp.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  await rc.getByLabel("새 대화 제목").fill("전환 유도");
+  await rc.getByRole("button", { name: "새 대화" }).click();
+  // 새 계정의 대화창 상태는 닫힘에서 시작하므로, 전환이 화면에 반영되면 대화창이 내려간다.
+  await rc.waitFor({ state: "hidden", timeout: 10000 });
+  const after = (await rapi.get("/auth/me")).user.accountId;
+  check("R23b. setup: same tab switched to another account", !!after && after !== before);
+  await rp.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  await rc.getByLabel("새 대화 제목").waitFor();
+  releaseCreate();
+  await rp.waitForTimeout(1000);
+  await rp.unroute("**/api/research/sessions");
+  const ui = await rp.evaluate((acc) => JSON.parse(sessionStorage.getItem(`research:pending:${acc}:chat-ui`) ?? "null"), after);
+  check("R23b. setup: previous account create completed (201)", createdStatus === 201, String(createdStatus));
+  check(
+    "R23b. late create of previous account does not select it in new account's panel",
+    (ui === null || ui.sessionId === null) && (await rc.getByText("항목을 찾을 수 없습니다").count()) === 0 && (await rc.getByRole("heading", { name: "지연 생성 대화" }).count()) === 0,
+    JSON.stringify(ui)
+  );
+
+  // R23c. 모바일 모달: Tab/Shift+Tab은 대화창 안에서만, 포커스가 밖으로 나가도 Escape로 닫고 버튼으로 복귀
+  await rp.setViewportSize({ width: 390, height: 844 });
+  await rp.goto(U("/posts/"));
+  // 저장된 열림 상태는 로그인 확인 뒤에 반영되므로 화면이 자리 잡은 뒤에 연다.
+  await rp.waitForLoadState("networkidle");
+  await rp.waitForTimeout(500);
+  if (!(await rc.isVisible())) await rp.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  await rc.getByRole("heading", { name: "Codex 대화" }).waitFor();
+  const inside = () => rp.evaluate(() => !!document.activeElement?.closest("#chat-panel"));
+  let escaped = 0;
+  for (let i = 0; i < 25; i++) {
+    await rp.keyboard.press("Tab");
+    if (!(await inside())) escaped++;
+  }
+  for (let i = 0; i < 25; i++) {
+    await rp.keyboard.press("Shift+Tab");
+    if (!(await inside())) escaped++;
+  }
+  check("R23c. mobile Tab/Shift+Tab cycle stays inside panel", escaped === 0, `escaped ${escaped}`);
+  await rp.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : undefined));
+  await rp.keyboard.press("Tab");
+  check("R23c. Tab from outside returns focus into panel", await inside());
+  await rp.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : undefined));
+  await rp.keyboard.press("Escape");
+  check("R23c. Escape closes with focus outside panel", await appears(rp.getByRole("button", { name: "Codex 대화창 열기" })));
+  check("R23c. focus returns to dock button", await rp.evaluate(() => document.activeElement?.getAttribute("aria-label") === "Codex 대화창 열기"));
+  await r.context.close();
+}
+
 // R10. 다른 사용자: 타인 ID는 404로 숨김
 {
   const other = await newPage();

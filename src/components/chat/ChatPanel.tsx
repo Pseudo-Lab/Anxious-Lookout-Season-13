@@ -39,7 +39,7 @@ function PanelContent() {
         >
           ← 대화 목록
         </button>
-        <SessionView key={chat.sessionId} id={chat.sessionId} onArchived={() => chat.openSession(null)} />
+        <SessionView key={chat.sessionId} id={chat.sessionId} onArchived={chat.leaveSession} />
       </div>
     );
   }
