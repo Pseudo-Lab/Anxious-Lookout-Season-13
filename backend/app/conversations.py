@@ -173,7 +173,9 @@ def display_native_item(item):
             result.append({"id": identity, "type": "tool_call", "name": item.get("tool", ""),
                            "input": item.get("arguments"), "output": item.get("contentItems", item.get("result")),
                            "status": item.get("status", "unknown")})
-            for part in item.get("contentItems", []):
+            # Native calls begin without a result, serialized as explicit null;
+            # interrupted/old history can retain that state permanently.
+            for part in item.get("contentItems") or []:
                 if isinstance(part, dict) and isinstance(part.get("text"), str):
                     try:
                         output = json.loads(part["text"])

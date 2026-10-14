@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import text
 
 from app.migrate import migrate
+from app.conversations import display_native_item
 from tests.test_conversations import create_session, FixtureRunner
 from tests.test_research import create, identity, headers, material
 from tests.test_policy_publication import connect, publish
@@ -36,6 +37,64 @@ class HeldRunner:
 def callback(client, session, runner, name, arguments, **overrides):
     return client.post("/api/internal/research/tools", json={"sessionId": session["id"], "requestId": runner.last["requestId"],
                        "name": name, "arguments": arguments, **overrides}, headers={"Authorization": "Bearer " + runner.last["toolToken"]})
+
+
+@pytest.mark.parametrize("state", ["running", "failed", "legacy"])
+def test_nullable_tool_history_remains_readable_with_no_fabricated_result(client, admin, state):
+    owner, auth = identity(client, admin)
+    session = create_session(client, auth)
+    root = "/api/research/sessions/" + session["id"]
+    tool = {"id": "nullable-tool", "type": "dynamicToolCall", "tool": "research_get", "arguments": {},
+            "status": "inProgress" if state == "running" else "failed", "contentItems": None,
+            "success": None, "durationMs": None}
+    record = {"turns": [{"id": "held-turn", "items": [
+        {"id": "user", "type": "userMessage", "content": [{"type": "text", "text": "Original old question"}]}, tool,
+        {"id": "answer", "type": "agentMessage", "text": "Preserved answer"}]}]}
+    if state == "legacy":
+        # Before page scopes existed, a failed native result could already be null.
+        with admin.begin() as db:
+            db.execute(text("UPDATE research.conversations SET state='failed',native_record=CAST(:record AS jsonb) WHERE id=:id"),
+                       {"id": session["id"], "record": json.dumps(record)})
+    else:
+        runner = HeldRunner(client, owner)
+        assert client.post(root + "/messages", json={"text": "Current question", "expectedVersion": 1}, headers=headers(auth)).status_code == 202
+        runner.state, runner.record = state, record
+    detail = client.get(root)
+    assert detail.status_code == 200, detail.text
+    items = detail.json()["items"]
+    projected = next(item for item in items if item["type"] == "tool_call")
+    assert projected["status"] == tool["status"] and projected["output"] is None and "error" not in projected
+    assert items[0]["text"] == ("Original old question" if state == "legacy" else "Current question")
+    assert any(item.get("text") == "Preserved answer" for item in items)
+    raw = client.get(root + "/items/nullable-tool")
+    assert raw.status_code == 200 and raw.json()["raw"] == tool
+    with admin.connect() as db:
+        saved = db.execute(text("SELECT native_record FROM research.conversations WHERE id=:id"), {"id": session["id"]}).scalar_one()
+    assert saved["turns"][0]["items"][1] == tool
+
+
+def test_rejected_result_and_later_nullable_result_keep_separate_statuses():
+    rejected = {"id": "denied", "type": "dynamicToolCall", "tool": "research_archive", "status": "failed",
+                "contentItems": [{"type": "inputText", "text": json.dumps({"error": {"code": "tool_not_allowed"}})}]}
+    nullable = {"id": "pending", "type": "dynamicToolCall", "tool": "research_get", "status": "inProgress", "contentItems": None}
+    assert display_native_item(rejected)[0]["status"] == "rejected"
+    assert display_native_item(rejected)[0]["error"] == {"code": "tool_not_allowed"}
+    assert display_native_item(nullable)[0]["status"] == "inProgress"
+    assert display_native_item(nullable)[0]["output"] is None
+
+
+@pytest.mark.parametrize("fields,status,expected", [
+    ({}, "inProgress", "inProgress"),
+    ({"contentItems": None}, "failed", "failed"),
+    ({"contentItems": []}, "failed", "failed"),
+    ({"contentItems": [{"type": "inputText", "text": '{"content":"saved"}'}]}, "completed", "completed"),
+    ({"contentItems": [{"type": "inputText", "text": '{"error":{"code":"tool_not_allowed"}}'}]}, "failed", "rejected"),
+])
+def test_native_tool_result_shapes_preserve_output_and_only_label_scope_rejection(fields, status, expected):
+    item = {"id": "call", "type": "dynamicToolCall", "tool": "research_get", "status": status, **fields}
+    projected = display_native_item(item)[0]
+    assert projected["status"] == expected and projected["output"] == fields.get("contentItems")
+    assert projected.get("error") == ({"code": "tool_not_allowed"} if expected == "rejected" else None)
 
 
 @pytest.mark.parametrize("page", [{"kind": "unknown"}, {"kind": "material"}, {"kind": "document", "resourceId": "bad"},
