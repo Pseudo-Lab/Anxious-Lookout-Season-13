@@ -1,9 +1,8 @@
 "use client";
 
 import type { FetchResult } from "@/lib/api/client";
-import { getCodexStatus } from "@/lib/research/api";
-import { useLoad } from "@/lib/research/hooks";
 import type { CodexStatus } from "@/lib/research/types";
+import { useCodexRunner, useCodexStatus } from "@/components/research/CodexStatusProvider";
 import { formatDateTime } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
@@ -21,9 +20,54 @@ const UNAVAILABLE_REASONS: Record<string, string> = {
   unavailable: "Codex에 일시적으로 연결할 수 없습니다.",
 };
 
-/** Codex 연결 상태 조회. 같은 화면의 안내와 전송 잠금이 한 결과를 함께 쓴다. */
-export function useCodexStatus() {
-  return useLoad("codex-status", getCodexStatus);
+export { useCodexStatus };
+
+// #10 실행 환경 상태(api-contracts/issue10-user-runners-interface-v1.md). 완료 시점은 약속하지 않는다.
+type RunnerAction = "prepare" | "retry" | "resume";
+interface RunnerState {
+  title: string;
+  body: string;
+  action?: RunnerAction;
+  progress?: boolean;
+}
+const RUNNER_STATES: Record<string, RunnerState> = {
+  not_prepared: { title: "대화 환경이 아직 준비되지 않았습니다", body: "‘대화 준비’를 누르면 내 환경을 준비합니다.", action: "prepare" },
+  provisioning: { title: "환경 활성화 중", body: "질문할 수 있도록 환경을 준비하고 있습니다.", progress: true },
+  capacity_wait: {
+    title: "사용 대기 중",
+    body: "지금은 이용자가 많아 환경을 켤 자리를 기다리고 있습니다. 자리가 나면 서버가 접수된 준비 요청을 이어서 처리합니다.",
+  },
+  runner_unreachable: { title: "환경 연결 확인 중", body: "환경에 잠시 연결하지 못해 상태를 다시 확인하고 있습니다.", progress: true },
+  runner_failed: { title: "환경을 준비하지 못했습니다", body: "‘다시 시도’를 누르면 다시 준비합니다.", action: "retry" },
+  idle_stopped: {
+    title: "환경이 쉬는 중",
+    body: "30분 동안 사용하지 않아 환경을 잠시 껐습니다. 대화와 자료는 그대로입니다.",
+    action: "resume",
+  },
+};
+const ACTION_LABELS: Record<RunnerAction, string> = { prepare: "대화 준비", retry: "다시 시도", resume: "환경 다시 켜기" };
+
+/** 실행 환경 상태(아는 reason)면 그 안내. */
+export function runnerState(result: FetchResult<CodexStatus> | null): RunnerState | null {
+  if (!result?.ok || result.data.available || !result.data.reason) return null;
+  return RUNNER_STATES[result.data.reason] ?? null;
+}
+
+/** 실행 환경 준비 버튼(대화 준비·다시 시도·환경 다시 켜기). 누를 때마다 새 준비 요청이다. 준비 대상 계정에만 보인다. */
+export function RunnerActionButton({ result }: { result: FetchResult<CodexStatus> | null }) {
+  const runner = useCodexRunner();
+  const action = runnerState(result)?.action;
+  if (!action || !runner.canPrepare) return null;
+  return (
+    <button
+      type="button"
+      onClick={() => void runner.prepare()}
+      disabled={runner.preparing}
+      className="font-medium underline hover:no-underline disabled:opacity-50"
+    >
+      {runner.preparing ? "요청하는 중..." : ACTION_LABELS[action]}
+    </button>
+  );
 }
 
 /** 서버가 접수할 수 없다고 확인한 상태(available:false)인지. 조회 실패는 잠그지 않는다(서버가 선접수에서 다시 거른다). */
@@ -46,6 +90,26 @@ export function CodexStatusView({ result }: { result: FetchResult<CodexStatus> |
       {s.remainingAdmissions !== undefined && <span className="block text-xs">남은 요청 횟수: {s.remainingAdmissions}</span>}
     </>
   );
+  const runner = RUNNER_STATES[s.available ? "" : (s.reason ?? "")];
+  if (runner) {
+    return (
+      <Notice tone={runner.action === "retry" ? "warn" : "info"}>
+        <span className="flex items-start gap-2">
+          {runner.progress && (
+            <span
+              aria-hidden="true"
+              className="mt-1 inline-block h-3 w-3 shrink-0 rounded-full border-2 border-current border-t-transparent motion-safe:animate-spin"
+            />
+          )}
+          <span>
+            <span className="font-semibold">{runner.title}</span> — {runner.body} 써 둔 입력과 이전 대화는 그대로이며, 질문은 자동으로 보내지
+            않습니다. <RunnerActionButton result={result} />
+            {model}
+          </span>
+        </span>
+      </Notice>
+    );
+  }
   if (!s.available) {
     const why = (s.reason && UNAVAILABLE_REASONS[s.reason]) ?? "Codex를 사용할 수 없습니다.";
     return (
@@ -80,7 +144,8 @@ export function CodexStatusView({ result }: { result: FetchResult<CodexStatus> |
   );
 }
 
-export default function CodexStatusBanner() {
-  const { result } = useCodexStatus();
+/** poll: 열린 대화창에서만 true(일시 상태를 다시 조회). 내 연구 화면 등에서는 조회 1회만. */
+export default function CodexStatusBanner({ poll = false }: { poll?: boolean }) {
+  const { result } = useCodexStatus(poll);
   return <CodexStatusView result={result} />;
 }

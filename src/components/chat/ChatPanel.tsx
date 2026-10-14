@@ -51,7 +51,7 @@ function PanelContent() {
         compact
         action={
           <div className="space-y-3">
-            <CodexStatusBanner />
+            <CodexStatusBanner poll={chat.open} />
             <NewSessionForm defaultTitle={pageTitle()} />
           </div>
         }

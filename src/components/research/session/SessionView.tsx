@@ -19,13 +19,24 @@ import { useAuth } from "@/hooks/useAuth";
 import type { AcceptedScope, PageDescriptor, SessionDetail, SessionItem, ToolCallItem } from "@/lib/research/types";
 import { describePage, kindText, sameDescriptor, unsupportedHint } from "@/lib/research/pageContext";
 import { formatDateTime, toDisplayText } from "@/lib/research/format";
-import { CodexStatusView, codexBlocked, useCodexStatus } from "@/components/research/CodexStatusBanner";
+import {
+  CodexStatusView,
+  RunnerActionButton,
+  codexBlocked,
+  runnerState,
+  useCodexStatus,
+} from "@/components/research/CodexStatusBanner";
+import { useChat } from "@/components/chat/ChatProvider";
+import type { FetchResult } from "@/lib/api/client";
+import type { CodexStatus } from "@/lib/research/types";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
 import SafeMarkdown from "@/components/research/SafeMarkdown";
 import { SESSION_STATE_LABELS } from "@/components/research/ItemLists";
 
 const POLL_MS = 2000;
+// 이만큼 실행 중이면 결과 확인 중일 수 있다는 중립 안내를 보인다(서버 timeout·실패 판정이 아니다).
+const SLOW_RUNNING_MS = 30000;
 // 접수 종료 시각 뒤에도 서버가 아직 이용 가능이라고 답할 때의 재확인 간격(시계 차이·일시 조회 실패 대비)
 const EXPIRY_RECHECK_MIN_MS = 5000;
 const EXPIRY_RECHECK_MAX_MS = 30000;
@@ -200,6 +211,7 @@ function Composer({
   accountId,
   page,
   blocked,
+  codex,
   onRecheck,
   onSent,
 }: {
@@ -209,6 +221,8 @@ function Composer({
   page: PageDescriptor;
   // 서버가 지금 접수할 수 없다고 확인한 상태. 보내기만 잠그고 입력·이전 대화는 그대로 둔다.
   blocked: boolean;
+  // 잠금 사유 안내용 상태(실행 환경 상태면 준비 버튼을 함께 보인다).
+  codex: FetchResult<CodexStatus> | null;
   onRecheck: () => void;
   onSent: (ok: boolean) => void;
 }) {
@@ -301,14 +315,21 @@ function Composer({
       <div className="mt-auto space-y-2 pt-2">
         <ScopeHint page={page} />
         {failure && <ErrorNotice failure={failure} prefix="메시지를 보내지 못했습니다." />}
-        {blocked && (
-          <Notice tone="warn">
-            지금은 Codex가 요청을 받을 수 없어 보내기가 잠겨 있습니다(위 연결 상태 참고). 입력한 내용과 이전 대화는 그대로 있습니다.{" "}
-            <button type="button" onClick={onRecheck} className="font-medium underline hover:no-underline">
-              상태 다시 확인
-            </button>
-          </Notice>
-        )}
+        {blocked &&
+          (runnerState(codex) ? (
+            // 실행 환경 상태: 보내기 버튼만 잠그고 입력은 그대로 쓸 수 있다. 준비가 끝나도 자동으로 보내지 않는다.
+            <Notice tone="info">
+              {runnerState(codex)?.title} — 환경이 켜지면 보낼 수 있습니다. 입력은 계속 쓰고 고칠 수 있으며, 자동으로 보내지 않습니다.{" "}
+              <RunnerActionButton result={codex} />
+            </Notice>
+          ) : (
+            <Notice tone="warn">
+              지금은 Codex가 요청을 받을 수 없어 보내기가 잠겨 있습니다(위 연결 상태 참고). 입력한 내용과 이전 대화는 그대로 있습니다.{" "}
+              <button type="button" onClick={onRecheck} className="font-medium underline hover:no-underline">
+                상태 다시 확인
+              </button>
+            </Notice>
+          ))}
         {pending && (
           <Notice tone="warn">
             이전 전송의 결과를 확인하지 못했습니다. 위 대화 기록에 메시지가 이미 있는지 확인하세요.{" "}
@@ -360,7 +381,9 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
   const { run, busy } = useMutation();
   const [archiveFailure, setArchiveFailure] = useState<FetchFailure | null>(null);
   const running = result?.ok === true && result.data.state === "running";
-  const codex = useCodexStatus();
+  const chat = useChat();
+  // 열린 대화창에서만 일시 상태(환경 활성화 중·사용 대기·연결 확인)를 다시 조회한다.
+  const codex = useCodexStatus(chat.open);
   const reloadCodex = codex.reload;
   const pathname = usePathname();
   const search = useSearchParams();
@@ -410,6 +433,16 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
     return () => clearTimeout(timer);
     // 일시적 조회 실패(refreshFailure)에도 마지막 기록을 유지한 채 계속 확인한다.
   }, [running, result, refreshFailure, reload]);
+
+  // 이 화면에서 실행 중을 본 지 30초가 지나면 중립 안내를 보인다. 경과 시간은 실패·유실의 근거가 아니며 재전송을 열지 않는다.
+  const [slowFor, setSlowFor] = useState<string | null>(null);
+  if (!running && slowFor !== null) setSlowFor(null);
+  useEffect(() => {
+    if (!running) return;
+    const timer = setTimeout(() => setSlowFor(id), SLOW_RUNNING_MS);
+    return () => clearTimeout(timer);
+  }, [running, id]);
+  const slow = running && slowFor === id;
 
   if (!result) return <p className="text-sm text-stone-500">불러오는 중...</p>;
   // 개인 세션 조회 실패. 공개 문서 조회와는 별개다.
@@ -473,7 +506,14 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
       {refreshFailure && (
         <ErrorNotice failure={refreshFailure} prefix="최신 대화 상태를 불러오지 못했습니다. 마지막으로 받은 기록을 표시합니다." />
       )}
-      {running && <Notice tone="info">Codex가 응답하는 중입니다. 페이지를 닫았다가 다시 열어도 이어서 확인할 수 있습니다.</Notice>}
+      {running && (
+        <Notice tone="info">
+          {slow
+            ? "응답을 기다리거나 실행 결과를 확인 중입니다. 오래 걸려도 자동으로 다시 보내지 않습니다."
+            : "Codex가 응답하는 중입니다."}{" "}
+          페이지를 닫았다가 다시 열어도 이어서 확인할 수 있습니다.
+        </Notice>
+      )}
       {s.state === "failed" && (
         <Notice tone="error">
           마지막 요청이 실패했습니다.{" "}
@@ -492,6 +532,7 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
           accountId={user.accountId}
           page={page}
           blocked={codexBlocked(codex.result)}
+          codex={codex.result}
           onRecheck={() => void reloadCodex()}
           onSent={(ok) => {
             void reload();
