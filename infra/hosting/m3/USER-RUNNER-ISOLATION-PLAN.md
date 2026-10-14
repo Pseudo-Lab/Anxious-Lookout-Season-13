@@ -96,10 +96,13 @@ kubectl --context "$RUNNER_CONTEXT" -n "$RUNNER_NS" auth can-i --list --as="syst
 kubectl --context "$RUNNER_CONTEXT" -n "$RUNNER_NS" auth can-i create pods --as="system:serviceaccount:$RUNNER_NS:$RUNNER_CONTROLLER_SA"
 kubectl --context "$RUNNER_CONTEXT" -n "$RUNNER_NS" auth can-i get "secrets/$RUNNER_TRANSPORT_SECRET" --as="system:serviceaccount:$RUNNER_NS:$RUNNER_CONTROLLER_SA"
 kubectl --context "$RUNNER_CONTEXT" -n "$RUNNER_NS" auth can-i delete pods --as="system:serviceaccount:$RUNNER_NS:$RUNNER_CONTROLLER_SA"
-kubectl --context "$RUNNER_CONTEXT" -n "$RUNNER_NS" auth can-i create pods/exec --as="system:serviceaccount:$RUNNER_NS:$RUNNER_CONTROLLER_SA"
+kubectl --context "$RUNNER_CONTEXT" -n "$RUNNER_NS" auth can-i create pods --subresource=exec --as="system:serviceaccount:$RUNNER_NS:$RUNNER_CONTROLLER_SA"
 ```
 
 Expected creator results: create Pod/named Secret GET yes; delete/exec no. Review
+the exec check as resource=pods, subresource=exec with no resource name. TYPE/NAME
+syntax selects a named resource; it does not select a subresource.
+Review
 all effective rules, including cluster grants, arbitrary Secret GET and other
 namespaces; these four samples are not a full authorization proof. Runner should
 have no workload/credential privileges. Default discovery permissions alone are
