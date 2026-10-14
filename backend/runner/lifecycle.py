@@ -36,6 +36,18 @@ def require(condition):
 
 
 @dataclass(frozen=True)
+class Completion:
+    """Stable admitted request identity and its actual durable completion time."""
+    request_id: UUID
+    completed_at: datetime
+
+    def __post_init__(self):
+        require(isinstance(self.request_id, UUID))
+        require(isinstance(self.completed_at, datetime) and self.completed_at.tzinfo is not None
+                and self.completed_at.utcoffset() is not None)
+
+
+@dataclass(frozen=True)
 class State:
     owner: UUID
     state_id: UUID
@@ -46,6 +58,7 @@ class State:
     pod_uid: UUID | None = None
     active_requests: int = 0
     ambiguous: bool = False
+    completions: tuple[Completion, ...] = ()
 
     def __post_init__(self):
         require(isinstance(self.owner, UUID) and isinstance(self.state_id, UUID))
@@ -56,6 +69,9 @@ class State:
                     (self.generation, self.revision, self.active_requests)))
         require(type(self.ambiguous) is bool)
         require(self.pod_uid is None or isinstance(self.pod_uid, UUID))
+        require(type(self.completions) is tuple and all(isinstance(item, Completion) for item in self.completions))
+        require(len({item.request_id for item in self.completions}) == len(self.completions))
+        require(all(item.completed_at <= self.last_activity for item in self.completions))
         require(self.phase != Phase.NEW or (self.generation == 0 and self.pod_uid is None))
         require(self.phase == Phase.NEW or self.generation > 0)
         if self.phase in {Phase.READY, Phase.UNREACHABLE, Phase.STOPPING}:
@@ -146,9 +162,30 @@ def observed(state, fence, *, pod_uid, ready, active_requests, ambiguous, now):
     require(isinstance(pod_uid, UUID) and (state.pod_uid is None or state.pod_uid == pod_uid))
     require(type(ready) is bool and type(ambiguous) is bool)
     require(type(active_requests) is int and active_requests >= 0)
-    activity = now if (state.active_requests or state.ambiguous) and not (active_requests or ambiguous) else state.last_activity
     return change(state, pod_uid=pod_uid, phase=Phase.READY if ready else Phase.UNREACHABLE,
-                  active_requests=active_requests, ambiguous=ambiguous, last_activity=activity)
+                  active_requests=active_requests, ambiguous=ambiguous)
+
+
+def completed_request(state, fence, *, completion, completion_verified, now):
+    """Record an independently verified completion once, not an observation.
+
+    The adapter must verify this admitted request's original durable completion,
+    identity and timestamp, and persist its receipt atomically with this state.
+    Verification flags are not proof. Do not authorize idle quiescence until pending
+    completion events have been reconciled. This event never clears busy/ambiguity;
+    those require their own current evidence.
+    """
+    fenced(state, fence)
+    now_check(state, now)
+    require(type(completion_verified) is bool and completion_verified)
+    require(isinstance(completion, Completion) and completion.completed_at <= now)
+    require(state.phase in {Phase.READY, Phase.UNREACHABLE})
+    previous = next((item for item in state.completions if item.request_id == completion.request_id), None)
+    if previous is not None:
+        require(previous == completion)  # Same ID cannot acquire a later timestamp.
+        return state
+    return change(state, completions=(*state.completions, completion),
+                  last_activity=max(state.last_activity, completion.completed_at))
 
 
 def admitted_request(state, fence, *, now):

@@ -5,8 +5,8 @@ from uuid import uuid4
 
 import pytest
 
-from runner.lifecycle import (State, Phase, Fence, Refused, entry, capacity, observed,
-                              admitted_request, idle_stop, stopped)
+from runner.lifecycle import (State, Phase, Fence, Completion, Refused, entry, capacity, observed,
+                              admitted_request, completed_request, idle_stop, stopped)
 
 START = datetime(2026, 10, 14, tzinfo=timezone.utc)
 
@@ -90,13 +90,53 @@ def test_completion_sets_idle_origin_but_repeated_reads_do_not():
     live = ready()
     busy = admitted_request(live, Fence.of(live), now=START)
     complete_at = START + timedelta(hours=1)
+    receipt = Completion(uuid4(), complete_at)
+    busy = completed_request(busy, Fence.of(busy), completion=receipt, completion_verified=True, now=complete_at)
     done = observed(busy, Fence.of(busy), pod_uid=live.pod_uid, ready=True,
                     active_requests=0, ambiguous=False, now=complete_at)
     read_at = complete_at + timedelta(minutes=29)
     read = observed(done, Fence.of(done), pod_uid=live.pod_uid, ready=True,
                     active_requests=0, ambiguous=False, now=read_at)
     assert done.last_activity == read.last_activity == complete_at
+    reread = completed_request(read, Fence.of(read), completion=receipt, completion_verified=True, now=read_at)
+    assert reread == read
     with pytest.raises(Refused): idle_stop(read, Fence.of(read), now=read_at, quiescence_verified=True)
+
+
+@pytest.mark.parametrize("active,ambiguous", [(0,True), (1,False), (1,True)])
+def test_busy_drop_or_ambiguity_resolution_without_completion_does_not_extend_idle(active, ambiguous):
+    state = replace(ready(), active_requests=active, ambiguous=ambiguous)
+    resolved = observed(state, Fence.of(state), pod_uid=state.pod_uid, ready=True,
+                        active_requests=0, ambiguous=False, now=START + timedelta(hours=1))
+    assert resolved.last_activity == START and resolved.completions == ()
+    assert idle_stop(resolved, Fence.of(resolved), now=START + timedelta(hours=1), quiescence_verified=True).work.kind == "stop-pod-only"
+
+
+def test_late_completion_uses_actual_time_and_never_overwrites_later_entry():
+    state = entry(ready(), eligible=True, replayed=False, now=START + timedelta(minutes=20)).state
+    event = Completion(uuid4(), START + timedelta(minutes=10))
+    done = completed_request(state, Fence.of(state), completion=event, completion_verified=True,
+                             now=START + timedelta(hours=1))
+    assert done.last_activity == state.last_activity
+    assert done.completions == (event,)
+    with pytest.raises(Refused):
+        completed_request(done, Fence.of(done), completion=replace(event, completed_at=START + timedelta(hours=1)),
+                          completion_verified=True, now=START + timedelta(hours=1))
+
+
+def test_completion_never_clears_other_active_or_ambiguous_requests():
+    busy = replace(ready(), active_requests=2, ambiguous=True)
+    event = Completion(uuid4(), START + timedelta(minutes=5))
+    done = completed_request(busy, Fence.of(busy), completion=event, completion_verified=True, now=event.completed_at)
+    assert done.active_requests == 2 and done.ambiguous
+    with pytest.raises(Refused): idle_stop(done, Fence.of(done), now=START + timedelta(days=1), quiescence_verified=True)
+
+
+@pytest.mark.parametrize("verified,at", [(False, START), (True, START + timedelta(seconds=1))])
+def test_unverified_or_future_completion_refused(verified, at):
+    state = ready()
+    with pytest.raises(Refused):
+        completed_request(state, Fence.of(state), completion=Completion(uuid4(), at), completion_verified=verified, now=START)
 
 
 @pytest.mark.parametrize("field,value", [("owner",uuid4()), ("state_id",uuid4()),
