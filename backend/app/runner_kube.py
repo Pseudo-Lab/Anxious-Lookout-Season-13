@@ -8,6 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 import base64
 import json
+import ipaddress
 import re
 import ssl
 import time
@@ -15,8 +16,10 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
+import httpcore
 
 from .runner_controller import Identity, Pod
+from . import runner_http_budget as budget
 from runner.lifecycle import require, Refused
 
 LABEL = 'anxious.io/'
@@ -104,6 +107,11 @@ class KubePods:
         parsed = urlsplit(endpoint)
         require(parsed.scheme == 'https' and parsed.hostname and not parsed.username and not parsed.password
                 and parsed.path in {'', '/'} and not parsed.query and not parsed.fragment)
+        if _transport is None:
+            try:
+                ipaddress.ip_address(parsed.hostname)
+            except ValueError:
+                raise Refused('A literal Kubernetes API IP with a matching TLS certificate is required') from None
         self.namespace = name(namespace)
         require(isinstance(bearer, str) and len(bearer) >= 32 and not any(ch.isspace() for ch in bearer))
         require(type(timeout) in (float, int) and 0 < timeout <= 10 and type(deadline) in (float, int) and 0 < deadline <= 30)
@@ -121,12 +129,11 @@ class KubePods:
             for other_kind, other_name, other_uid, other_volume, other_owner, other_state in refs[:i]:
                 overlap = kind == other_kind and (ref_name == other_name or uid == other_uid or (volume and volume == other_volume))
                 require(not overlap or (owner, state) == (other_owner, other_state))
-        self.deadline = deadline
+        self.deadline, self.timeout = deadline, timeout
         self.client = httpx.Client(base_url=endpoint.rstrip('/'), headers={'Authorization': 'Bearer '+bearer, 'Accept-Encoding': 'identity'},
             verify=ssl.create_default_context(cafile=ca_file), timeout=httpx.Timeout(timeout),
             follow_redirects=False, trust_env=False,
-            transport=_transport if _transport is not None else httpx.HTTPTransport(
-                verify=ssl.create_default_context(cafile=ca_file), retries=0))
+            transport=_transport if _transport is not None else budget.Transport(ssl.create_default_context(cafile=ca_file)))
 
     def close(self):
         self.client.close()
@@ -136,24 +143,29 @@ class KubePods:
         if resource_name is not None:
             path += '/' + name(resource_name)
         started = time.monotonic()
+        token = budget.begin(started + self.deadline, lambda: time.monotonic())
         try:
-            with self.client.stream(method, path, json=body) as response:
+            with self.client.stream(method, path, json=body, timeout=min(self.timeout, self.deadline)) as response:
+                require(time.monotonic() - started < self.deadline)
                 if missing and response.status_code == 404:
                     return None
                 require(response.status_code == (201 if method == 'POST' else 200))
                 require(response.headers.get('content-encoding', 'identity') == 'identity')
                 content = bytearray()
-                for chunk in response.iter_raw(chunk_size=65536):
-                    require(time.monotonic() - started <= self.deadline)
+                for chunk in response.iter_raw():
+                    require(time.monotonic() - started < self.deadline)
                     content.extend(chunk)
                     require(len(content) <= 2 * 1024 * 1024)
-                require(time.monotonic() - started <= self.deadline)
+                require(time.monotonic() - started < self.deadline)
                 value = json.loads(content)
+                require(time.monotonic() - started < self.deadline)
                 require(type(value) is dict)
                 return value
-        except (httpx.HTTPError, ValueError, TypeError, KeyError):
+        except (httpx.HTTPError, httpcore.TimeoutException, ValueError, TypeError, KeyError):
             # Do not expose response bodies, URLs, Authorization or Secret data.
             raise Refused('Kubernetes operation requires reconciliation') from None
+        finally:
+            budget.finish(token)
 
     def _metadata(self, obj, kind, resource_name, identity, uid=None, generation=False):
         require(obj.get('apiVersion') == 'v1' and obj.get('kind') == kind)

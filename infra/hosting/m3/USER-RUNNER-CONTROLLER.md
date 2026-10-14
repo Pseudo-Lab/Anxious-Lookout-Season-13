@@ -144,12 +144,20 @@ Unknown admission mutation is
 refused; the adapter never patches the Pod to make it match. Native lifecycle and
 provider readiness are never inferred from Pod phase/readiness/status.
 
-Network phases use explicit HTTP timeouts (default2s); response reading also checks
-an elapsed budget(default10s) and a 2MiB uncompressed body cap. These are defensive
-client budgets, not evidence of a hard real-time bound under DNS/OS stalls. Several
-GETs plus a POST occur while the owner transaction is held. Actual TLS, server
-admission defaults, DNS behavior, load and total pool/lock budgets require isolated
-cluster/load verification before activation; that measurement plan belongs to unit3.
+Each HTTP request has an elapsed budget (default10s). Connect, TLS, each socket
+read and each partial write receive the smaller of the remaining budget and the
+phase timeout (default2s). Incoming body chunks are checked without aggregation;
+the 2MiB uncompressed body cap and identity encoding restriction still apply.
+Real endpoints must use a literal API IP covered by the trusted certificate's IP
+SAN, avoiding unbounded hostname resolution. TLS verification is never disabled.
+Connections are not reused and there is no shared connection-pool capacity queue.
+The custom transport replaces HTTPX's private pool using pinned HTTPX0.28.1 and
+httpcore1.0.9; dependency upgrades must rerun socket and real loopback TLS tests.
+CPU parsing and OS scheduling are not preempted: this is not a hard real-time
+guarantee. Several GETs plus a POST occur while the owner transaction is held;
+the deadline applies per HTTP request, not to the whole controller transaction.
+Actual cluster TLS, admission defaults, load and total DB pool/lock budgets require
+isolated cluster/load verification before activation; that plan belongs to unit3.
 No production resource sizing or Pod resource quota is chosen by this source.
 
 ### Required deployment permissions and isolation (not installed)
