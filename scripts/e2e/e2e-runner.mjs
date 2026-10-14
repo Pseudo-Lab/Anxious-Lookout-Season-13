@@ -162,7 +162,7 @@ await step("N2", async () => {
   await chat.getByLabel("메시지").fill("준비 중에 쓴 초안");
   check("N2. draft editable while preparing", (await chat.getByLabel("메시지").inputValue()) === "준비 중에 쓴 초안");
   check("N2. only send button locked", (await sendBtn().isDisabled()) && (await chat.getByLabel("메시지").isEnabled()));
-  check("N2. composer notice: no auto send", await appears(chat.getByText(/환경이 켜지면 보낼 수 있습니다/)));
+  check("N2. composer notice: no auto send", await appears(chat.getByText(/환경 준비가 확인되면 보낼 수 있습니다/)));
   await shot("provisioning-1280");
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForTimeout(300);
@@ -294,7 +294,7 @@ await step("N6", async () => {
   // 생성 결과 확인 중에도 쓰이는 상태: 짧게 끝난다·새 환경을 만든다·복구됐다고 안내하지 않고, 준비 버튼도 없다.
   {
     const text = await chat.innerText();
-    check("N6. unreachable makes no recovery/new-environment claim", !/잠시|새 환경|복구/.test(text), text.replace(/\s+/g, " ").slice(0, 160));
+    check("N6. unreachable makes no recovery/new-environment claim", !/잠시|켜지면|새 환경|복구/.test(text), text.replace(/\s+/g, " ").slice(0, 160));
     check("N6. unreachable offers no prepare/retry button", (await chat.getByRole("button", { name: /^(대화 준비|다시 시도|환경 다시 켜기)$/ }).count()) === 0);
   }
   const r0 = await statusReads();

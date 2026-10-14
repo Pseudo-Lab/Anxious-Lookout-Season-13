@@ -320,7 +320,7 @@ function Composer({
           (runnerState(codex) ? (
             // 실행 환경 상태: 보내기 버튼만 잠그고 입력은 그대로 쓸 수 있다. 준비가 끝나도 자동으로 보내지 않는다.
             <Notice tone="info">
-              {runnerState(codex)?.title} — 환경이 켜지면 보낼 수 있습니다. 입력은 계속 쓰고 고칠 수 있으며, 자동으로 보내지 않습니다.{" "}
+              {runnerState(codex)?.title} — 환경 준비가 확인되면 보낼 수 있습니다. 입력은 계속 쓰고 고칠 수 있으며, 자동으로 보내지 않습니다.{" "}
               <RunnerActionButton result={codex} />
             </Notice>
           ) : (
