@@ -377,16 +377,19 @@ await step("E4", async () => {
   check("E4 [real]. signed-out visit sends no POST", B.net.posts.length === p0);
 });
 
-// ---------- A1. 계정 전환 중 늦은 준비 응답 [hybrid: 실제 응답 + 4초 지연] ----------
+// ---------- A1. 계정 전환 뒤 문서 재진입: 이전 계정의 늦은 준비 응답·상태가 새 계정에 남지 않음 [hybrid: 실제 응답 + 4초 지연] ----------
+// 원래 문서를 goto로 교체하므로 같은 문서 안의 account/eligibility epoch 경합(늦은 응답 폐기)은 증명하지 않는다(mock N11이 담당).
 await step("A1", async () => {
   const C = await newUser();
   const userC = await approvedAccount("C", C.page, "editor");
   await settle(C.page);
   const p0 = C.net.posts.length;
+  // 문서가 바뀌면 지연된 응답은 전달되지 못할 수 있다(그 경우를 숨기지 않고 센다).
+  const delayed = { delivered: 0, dropped: 0 };
   await C.context.route("**/api/research/codex/**", async (route) => {
     const resp = await route.fetch();
     await sleep(4000);
-    await route.fulfill({ response: resp }).catch(() => {});
+    await route.fulfill({ response: resp }).then(() => delayed.delivered++, () => delayed.dropped++);
   });
   await C.page.reload(); // 진입 POST(지연) 시작
   await sleep(500);
@@ -400,7 +403,7 @@ await step("A1", async () => {
   await C.page.goto(U("/research/?tab=sessions"));
   await sleep(6000);
   const text = await C.page.locator("body").innerText();
-  check("A1 [hybrid]. late C runner state not shown to the new account", !/환경 활성화 중|환경 연결 확인 중/.test(text), text.replace(/\s+/g, " ").slice(0, 120));
+  check("A1 [hybrid]. after re-entry, no C runner state shown to the new account", !/환경 활성화 중|환경 연결 확인 중/.test(text), `${text.replace(/\s+/g, " ").slice(0, 120)} (delayed delivered=${delayed.delivered} dropped=${delayed.dropped})`);
   check("A1 [hybrid]. new (ineligible) account sends no POST", C.net.posts.length === p0 + 1, String(C.net.posts.length - p0));
   await C.context.close();
 });
