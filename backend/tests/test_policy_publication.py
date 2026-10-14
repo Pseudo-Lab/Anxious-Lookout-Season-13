@@ -1,4 +1,5 @@
 import hashlib
+import json
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -130,13 +131,17 @@ def test_page_question_context_is_private_survives_withdrawal_and_retrieves_full
     secret, request_id = uuid.uuid4().hex + uuid.uuid4().hex, uuid.uuid4()
     login_hash = session_digest(client.cookies.get("anxious_session"), visitor_auth["Origin"])
     with admin.begin() as db:
-        db.execute(text("UPDATE research.conversations SET state='running',request_id=:req,tool_token_hash=:hash,tool_expires_at=now()+interval '1 minute',login_hash=:login WHERE id=:id"),
-                   {"id": session["id"], "req": request_id, "hash": hashlib.sha256(secret.encode()).hexdigest(), "login": login_hash})
+        # A frozen accepted public request remains readable after withdrawal;
+        # the old creation context alone never grants a new turn permission.
+        metadata = {"platformRequests": [{"requestId": str(request_id), "text": "fixture question", "scope": {
+            "page": {"kind": "public_document", "resourceId": doc["id"], "title": published["title"]}, "context": published}}]}
+        db.execute(text("UPDATE research.conversations SET state='running',request_id=:req,tool_token_hash=:hash,tool_expires_at=now()+interval '1 minute',login_hash=:login,native_record=CAST(:record AS jsonb) WHERE id=:id"),
+                   {"id": session["id"], "req": request_id, "hash": hashlib.sha256(secret.encode()).hexdigest(), "login": login_hash, "record": json.dumps(metadata)})
     body = {"sessionId": session["id"], "requestId": str(request_id), "name": "research_page_context", "arguments": {"materialId": ref["id"]}}
     result = client.post("/api/internal/research/tools", json=body, headers={"Authorization": "Bearer " + secret})
     assert result.status_code == 200 and result.json()["content"] == "Full preserved reference"
     body["arguments"] = {"materialId": str(uuid.uuid4())}
-    assert client.post("/api/internal/research/tools", json=body, headers={"Authorization": "Bearer " + secret}).status_code == 404
+    assert client.post("/api/internal/research/tools", json=body, headers={"Authorization": "Bearer " + secret}).status_code == 403
 
 
 def test_commenter_cannot_use_private_or_question_features_even_with_legacy_config(client, admin):
@@ -270,8 +275,9 @@ def test_membership_revocation_waits_for_admitted_tool_then_denies_later_calls(c
     login = session_digest(client.cookies.get("anxious_session"), target_auth["Origin"])
     with admin.begin() as db:
         version = db.execute(text("SELECT updated_at FROM auth.accounts WHERE id=:id"), {"id": target}).scalar_one().isoformat()
-        db.execute(text("UPDATE research.conversations SET state='running',request_id=:req,tool_token_hash=:hash,tool_expires_at=now()+interval '1 minute',login_hash=:login WHERE id=:id"),
-                   {"id": session["id"], "req": request_id, "hash": hashlib.sha256(secret.encode()).hexdigest(), "login": login})
+        metadata = {"platformRequests": [{"requestId": str(request_id), "text": "fixture", "scope": {"page": {"kind": "document_workspace"}}}]}
+        db.execute(text("UPDATE research.conversations SET state='running',request_id=:req,tool_token_hash=:hash,tool_expires_at=now()+interval '1 minute',login_hash=:login,native_record=CAST(:record AS jsonb) WHERE id=:id"),
+                   {"id": session["id"], "req": request_id, "hash": hashlib.sha256(secret.encode()).hexdigest(), "login": login, "record": json.dumps(metadata)})
     admitted, release = Event(), Event()
     original = Store.create_item
     def hold(store, kind, body):

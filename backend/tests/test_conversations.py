@@ -36,10 +36,11 @@ class FixtureRunner:
         with TestClient(self.app, base_url=self.app.state.settings.origin, raise_server_exceptions=False) as tool_client:
             result = tool_client.post("/api/internal/research/tools", json={"sessionId": str(identity), "requestId": body["requestId"],
                          "name": "research_document_save", "arguments": arguments}, headers={"Authorization": "Bearer " + body["toolToken"]})
-            assert result.status_code == 200, result.text
+            allowed = body.get("scope", {}).get("page", {}).get("kind") == "document_workspace"
+            assert result.status_code == (200 if allowed else 403), result.text
         turn = {"id": str(uuid.uuid4()), "items": [{"id": "user-" + body["requestId"], "type": "userMessage", "content": [{"type": "text", "text": body["text"]}]},
                 {"id": "tool-" + body["requestId"], "type": "dynamicToolCall", "tool": "research_document_save", "arguments": arguments,
-                 "contentItems": [{"type": "inputText", "text": json.dumps(result.json())}], "status": "completed"},
+                 "contentItems": [{"type": "inputText", "text": json.dumps(result.json())}], "status": "completed" if allowed else "failed"},
                 {"id": "answer-" + body["requestId"], "type": "agentMessage", "text": "Fixture only: stored the document."}]}
         record = {"ownerId": str(self.owner), "requestId": body["requestId"], "turnId": turn["id"], "state": "idle",
                   "record": {"turns": previous["record"]["turns"] + [turn]}}
@@ -108,7 +109,7 @@ def test_fixture_tools_full_history_resume_reconnect_and_retry_without_dispatch(
     row = create_session(client, auth)
     root = "/api/research/sessions/" + row["id"]
     key = str(uuid.uuid4())
-    original_body = {"text": "Save a private draft", "expectedVersion": 1}
+    original_body = {"text": "Save a private draft", "expectedVersion": 1, "page": {"kind": "document_workspace"}}
     sent = client.post(root + "/messages", json=original_body, headers=headers(auth, key))
     assert sent.status_code == 202
     detail = client.get(root).json()
@@ -129,7 +130,7 @@ def test_fixture_tools_full_history_resume_reconnect_and_retry_without_dispatch(
         assert reconnected.get(root).json()["items"] == detail["items"]
         assert reconnected.post(root + "/messages", json=original_body, headers=headers(auth, key)).status_code == 202
         assert restarted_runner.dispatches == 0
-        continued = reconnected.post(root + "/messages", json={"text": "Use my own materials next", "expectedVersion": detail["version"]}, headers=headers(auth))
+        continued = reconnected.post(root + "/messages", json={"text": "Use my own documents next", "expectedVersion": detail["version"], "page": {"kind": "document_workspace"}}, headers=headers(auth))
         assert continued.status_code == 202
         final = reconnected.get(root).json()
         assert len([item for item in final["items"] if item["type"] == "tool_call"]) == 2
@@ -150,8 +151,9 @@ def test_tool_token_binds_owner_session_turn_live_login_and_current_authority(cl
     from app.main import session_digest
     login_hash = session_digest(client.cookies.get("anxious_session"), auth["Origin"])
     with admin.begin() as db:
-        db.execute(text("UPDATE research.conversations SET state='running',request_id=:request,tool_token_hash=:token,tool_expires_at=now()+interval '1 minute',login_hash=:login WHERE id=:id"),
-                    {"id": first["id"], "request": request_id, "token": hashlib.sha256(secret.encode()).hexdigest(), "login": login_hash})
+        metadata = {"platformRequests": [{"requestId": str(request_id), "text": "fixture", "scope": {"page": {"kind": "material_workspace"}}}]}
+        db.execute(text("UPDATE research.conversations SET state='running',request_id=:request,tool_token_hash=:token,tool_expires_at=now()+interval '1 minute',login_hash=:login,native_record=CAST(:record AS jsonb) WHERE id=:id"),
+                    {"id": first["id"], "request": request_id, "token": hashlib.sha256(secret.encode()).hexdigest(), "login": login_hash, "record": json.dumps(metadata)})
     body = {"sessionId": first["id"], "requestId": str(request_id), "name": "research_list", "arguments": {"type": "material"}}
     bearer = {"Authorization": "Bearer " + secret}
     assert client.post("/api/internal/research/tools", json=body).status_code == 401

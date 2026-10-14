@@ -1,0 +1,12 @@
+# Use with compose.m3-test.yml and an explicitly built issue9 test image.
+services:
+  mock-github:
+    image: anxious-s13-back-issue9-test
+  test:
+    image: anxious-s13-back-issue9-test
+    # Existing backup/process fixtures create executable helper files in /tmp.
+    tmpfs: !override
+      - /tmp:rw,exec
+    # Legacy access-supply subprocess test resolves modules from /source.
+    volumes:
+      - ./:/source:ro

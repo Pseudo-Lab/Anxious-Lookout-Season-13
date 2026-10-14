@@ -18,6 +18,7 @@ from .research import Expected, Input, Store, ResearchError, fail, page_query, e
 from .research_models import Conversation
 from .research_tools import definitions, dispatch
 from .codex_policy import MODEL, REASONS, ERRORS, personal_origin_enabled
+from .page_scope import Page, resolve_scope, scope_summary, request_metadata, tool_allowed
 
 
 class NewConversation(Input):
@@ -27,6 +28,7 @@ class NewConversation(Input):
 
 class Message(Expected):
     text: str = Field(min_length=1, max_length=50000)
+    page: Page | None = None
 
 
 class ToolRequest(Input):
@@ -69,12 +71,21 @@ def runners_from_file():
     filename = os.getenv("CODEX_RUNNERS_FILE", "")
     if not filename:
         return {}
-    entries = json.loads(Path(filename).read_text())
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate runner configuration key")
+            result[key] = value
+        return result
+    entries = json.loads(Path(filename).read_text(), object_pairs_hook=unique_keys)
     if not isinstance(entries, dict):
         raise ValueError("Invalid runner configuration")
     result, destinations, states = {}, set(), set()
     for identity, entry in entries.items():
         owner = uuid.UUID(identity)
+        if str(owner) != identity or owner in result:
+            raise ValueError("Each account requires a canonical isolated owner identity")
         if not isinstance(entry, dict) or entry.keys() - {"url", "tokenFile", "stateId"}:
             raise ValueError("Invalid runner configuration")
         state_id = entry.get("stateId")
@@ -86,12 +97,15 @@ def runners_from_file():
             states.add(state_id)
         url = entry["url"].rstrip("/")
         parsed = urlsplit(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password or url in destinations:
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password:
+            raise ValueError("Each account requires an isolated runner URL")
+        destination = (parsed.scheme.lower(), parsed.hostname.lower(), parsed.port or (443 if parsed.scheme == "https" else 80))
+        if destination in destinations:
             raise ValueError("Each account requires an isolated runner URL")
         token = Path(entry["tokenFile"]).read_text().strip()
         if len(token) < 32 or any(r.token == token for r in result.values()):
             raise ValueError("Each runner requires a separate secret")
-        destinations.add(url)
+        destinations.add(destination)
         result[owner] = Runner(url, token, owner, state_id)
     return result
 
@@ -106,8 +120,10 @@ def owned(store, identity, lock=False):
 
 
 def summary(row):
+    metadata = request_metadata(row)
     return {"id": str(row.id), "title": row.title, "state": row.state, "version": row.version,
             "createdAt": stamp(row.created_at), "updatedAt": stamp(row.updated_at),
+            **scope_summary(metadata["scope"] if metadata else None),
             "context": {"documentId": row.context["documentId"], "publicationId": row.context["id"], "title": row.context["title"]} if row.context else None}
 
 
@@ -119,19 +135,28 @@ def display_items(row):
     result = []
     unrecorded = row.native_record.get("unrecordedInputs", [])
     turns = row.native_record.get("turns", [])
+    scopes = row.native_record.get("platformRequests", [])
+    def applied(request_id):
+        metadata = request_metadata(row, request_id)
+        return scope_summary(metadata["scope"]) if metadata else {}
     def add_unrecorded(index):
         for item in unrecorded:
             if item["beforeTurn"] == index or (index == len(turns) and item["beforeTurn"] > index):
                 result.append({"id": item["id"], "type": "message", "role": "user", "text": item["text"],
-                               "source": "platform", "status": "not_recorded"})
+                               "source": "platform", "status": "not_recorded", **applied(item["requestId"])})
     for index, turn in enumerate(turns):
         add_unrecorded(index)
+        metadata = next((entry for entry in scopes if entry.get("turnId") == turn.get("id")), None)
         for item in turn.get("items", []):
-            result.extend(display_native_item(item))
+            projected = display_native_item(item)
+            if metadata and item.get("type") == "userMessage":
+                for value in projected:
+                    value.update(text=metadata["text"], **scope_summary(metadata["scope"]))
+            result.extend(projected)
     add_unrecorded(len(turns))
     if row.pending_text:
         result.append({"id": "pending-" + str(row.request_id), "type": "message", "role": "user", "text": row.pending_text,
-                       "source": "platform", "status": "pending" if row.state == "running" else "not_recorded"})
+                       "source": "platform", "status": "pending" if row.state == "running" else "not_recorded", **applied(row.request_id)})
     return result
 
 
@@ -148,6 +173,14 @@ def display_native_item(item):
             result.append({"id": identity, "type": "tool_call", "name": item.get("tool", ""),
                            "input": item.get("arguments"), "output": item.get("contentItems", item.get("result")),
                            "status": item.get("status", "unknown")})
+            for part in item.get("contentItems", []):
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    try:
+                        output = json.loads(part["text"])
+                        if isinstance(output, dict) and output.get("error", {}).get("code") == "tool_not_allowed":
+                            result[-1].update(status="rejected", error={"code": "tool_not_allowed"})
+                    except (ValueError, AttributeError):
+                        pass
         if item.get("modelMismatch") is True:
             for projected in result:
                 projected["modelMismatch"] = True
@@ -240,7 +273,11 @@ def register_conversations(app, authorized, sessions, settings, response, write)
         if not isinstance(record, dict) or not isinstance(record.get("turns", []), list):
             fail("codex_unavailable", "Codex history is unavailable", 503)
         # Native snapshots cannot overwrite platform-retained failed inputs.
-        row.native_record = {**record, "unrecordedInputs": row.native_record.get("unrecordedInputs", [])}
+        scopes = row.native_record.get("platformRequests", [])
+        turn_id = result.get("turnId")
+        if isinstance(turn_id, str) and any(turn.get("id") == turn_id for turn in record.get("turns", [])):
+            scopes = [{**entry, "turnId": turn_id} if entry["requestId"] == str(row.request_id) and not entry.get("turnId") else entry for entry in scopes]
+        row.native_record = {**record, "unrecordedInputs": row.native_record.get("unrecordedInputs", []), "platformRequests": scopes}
         if thread_id is not None:
             row.native_record["nativeThreadId"] = thread_id  # Server-only mapping, excluded from browser summaries/items.
         if result["state"] != row.state:
@@ -266,8 +303,10 @@ def register_conversations(app, authorized, sessions, settings, response, write)
                 row = db.scalar(select(Conversation).where(Conversation.id == identity, Conversation.owner_id == owner))
                 if not row or row.state != "running" or row.request_id != request_id:
                     return
+                metadata = request_metadata(row, request_id)
                 payload = {"requestId": str(request_id), "text": row.pending_text,
-                           "tools": definitions(), "toolToken": token, "context": row.context}
+                           "tools": definitions(), "toolToken": token,
+                           "scope": metadata["scope"] if metadata else {"page": {"kind": "general"}, "context": None}}
                 if row.native_record.get("nativeThreadId") is not None:
                     payload["expectedThreadId"] = row.native_record["nativeThreadId"]
             runner = runner_for(owner)
@@ -377,6 +416,7 @@ def register_conversations(app, authorized, sessions, settings, response, write)
                 Store.expect(row, parsed.expectedVersion)
                 if row.state == "running":
                     fail("conflict", "A turn is already running", 409)
+                scope = resolve_scope(store, parsed.page)
                 if row.native_record.get("turns") and not row.native_record.get("nativeThreadId") and app.state.codex_verification != "fixture":
                     fail("codex_policy_refused", "Existing conversation binding requires reconciliation", 503)
                 runner_for(store.owner)
@@ -391,6 +431,8 @@ def register_conversations(app, authorized, sessions, settings, response, write)
                 row.tool_token_hash = hashlib.sha256(token.encode()).hexdigest()
                 row.tool_expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
                 row.pending_text, row.request_id, row.state = parsed.text, uuid.uuid4(), "running"
+                row.native_record = {**row.native_record, "platformRequests": row.native_record.get("platformRequests", []) +
+                                     [{"requestId": str(row.request_id), "text": parsed.text, "scope": scope}]}
                 row.version += 1
                 row.updated_at, row.error_code = datetime.now(timezone.utc), None
                 store.db.flush()
@@ -437,4 +479,11 @@ def register_conversations(app, authorized, sessions, settings, response, write)
                 validate_research(db.connection())
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
-            return response(dispatch(Store(db, row.owner_id), body.name, body.arguments, context=row.context))
+            metadata = request_metadata(row)
+            scope = metadata["scope"] if metadata else None
+            if not tool_allowed(scope, body.name, body.arguments):
+                fail("tool_not_allowed", "Tool is outside this request's page scope", 403)
+            store = Store(db, row.owner_id)
+            if scope["page"]["kind"] in {"material", "document"}:
+                store.owned_item(scope["page"]["resourceId"], scope["page"]["kind"], active=True)
+            return response(dispatch(store, body.name, body.arguments, context=scope.get("context")))

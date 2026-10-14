@@ -34,7 +34,7 @@ def test_offline_native_protocol_tool_roundtrip_and_process_restart(tmp_path, mo
     root = tmp_path / "account-one"
     native = Native(root, "gpt-6.1-sol", "/usr/local/bin/codex-fixture", "https://fixture.invalid/tools")
     session, request = str(uuid.uuid4()), uuid.uuid4()
-    body = Turn(requestId=request, text="Save fixture", tools=definitions(), toolToken="t" * 40)
+    body = Turn(requestId=request, text="Save fixture", tools=definitions(), toolToken="t" * 40, scope={"page": {"kind": "document_workspace"}})
     try:
         native.accept(session, body)
         first = wait_idle(native, session)
@@ -49,7 +49,7 @@ def test_offline_native_protocol_tool_roundtrip_and_process_restart(tmp_path, mo
         assert restarted.read(session)["record"] == first["record"]
         restarted.accept(session, body)
         assert len(requests) == 1
-        restarted.accept(session, Turn(requestId=uuid.uuid4(), text="Continue fixture", tools=definitions(), toolToken="u" * 40))
+        restarted.accept(session, Turn(requestId=uuid.uuid4(), text="Continue fixture", tools=definitions(), toolToken="u" * 40, scope={"page": {"kind": "document_workspace"}}))
         continued = wait_idle(restarted, session)
         assert len(continued["record"]["turns"]) == 2 and len(requests) == 2
         item = continued["record"]["turns"][0]["items"][1]
@@ -128,7 +128,7 @@ def test_native_turn_binding_waits_for_start_response_and_rejects_stale_calls(mo
     native.auth, native.blocked_reason = None, None
     native.callback_url, native.send = "https://fixture.invalid/tools", sent.append
     turn = {"thread": "same-thread", "turnId": None, "pendingTools": [], "session": str(uuid.uuid4()),
-            "request": str(uuid.uuid4()), "token": "private-current-token"}
+            "request": str(uuid.uuid4()), "token": "private-current-token", "scope": {"page": {"kind": "document_workspace"}}}
     for identity, native_turn in (("old-call", "previous-turn"), ("new-call", "current-turn")):
         native.messages.put({"id": identity, "method": "item/tool/call", "params": {"callId": identity,
                             "threadId": "same-thread", "turnId": native_turn, "tool": "research_list", "arguments": {"type": "document"}}})
@@ -157,8 +157,8 @@ def test_history_rpc_does_not_reject_admission_and_keeps_true_busy_dedup(tmp_pat
     reading, release = threading.Event(), threading.Event()
     reader_result, reader_errors = [], []
     session = str(uuid.uuid4())
-    first = Turn(requestId=uuid.uuid4(), text="first", tools=definitions(), toolToken="t" * 40)
-    second = Turn(requestId=uuid.uuid4(), text="explicit followup", tools=definitions(), toolToken="u" * 40)
+    first = Turn(requestId=uuid.uuid4(), text="first", tools=definitions(), toolToken="t" * 40, scope={"page": {"kind": "document_workspace"}})
+    second = Turn(requestId=uuid.uuid4(), text="explicit followup", tools=definitions(), toolToken="u" * 40, scope={"page": {"kind": "document_workspace"}})
     try:
         native.accept(session, first)
         assert wait_idle(native, session)["state"] == "idle"

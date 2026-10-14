@@ -42,7 +42,8 @@ def native_fixture(control, root, owner, monkeypatch, calls):
 
 
 def message(text="Synthetic explicit turn"):
-    return Turn(requestId=uuid.uuid4(), text=text, tools=[], toolToken="s" * 40)
+    return Turn(requestId=uuid.uuid4(), text=text, tools=[], toolToken="s" * 40,
+                scope={"page": {"kind": "document_workspace"}})
 
 
 def test_fixed_model_applies_to_start_resume_turn_and_rejects_override(tmp_path, monkeypatch):

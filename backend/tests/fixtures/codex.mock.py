@@ -52,6 +52,10 @@ for line in sys.stdin:
         emit({"id": identity, "result": {"thread": records[params["threadId"]]}})
     elif method == "turn/start":
         prompt = params["input"][0]["text"]
+        # Exercise the full native input/history, while fixture controls refer
+        # to the actual user question after the request scope preamble.
+        if "\nUser question:\n" in prompt:
+            prompt = prompt.split("\nUser question:\n", 1)[1]
         if prompt == "/fixture/shutdown-timeout":
             delay_exit = True
         if prompt in {"/fixture/auth-error", "/fixture/model-error", "/fixture/policy-error"}:
