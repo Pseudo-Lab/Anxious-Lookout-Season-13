@@ -1,0 +1,21 @@
+# Overlay for compose.m3-integration.yml only. Test images/disposable database.
+# No operational settings, controller, Kubernetes or provider are enabled.
+services:
+  api:
+    environment:
+      CODEX_USER_RUNNERS_ENABLE: ${RUNNER_HTTP_ENABLE:-false}
+  runner-migrate:
+    extends:
+      file: compose.m3-integration.yml
+      service: migrate
+    profiles: [ops]
+    command: [python, -B, -m, app.runner_migrate]
+  runner-phase:
+    extends:
+      file: compose.m3-integration.yml
+      service: migrate
+    profiles: [ops]
+    environment:
+      RUNNER_HTTP_FIXTURE: "true"
+    entrypoint: [python, -B, -m, tests.runner_phase_fixture]
+    command: []
