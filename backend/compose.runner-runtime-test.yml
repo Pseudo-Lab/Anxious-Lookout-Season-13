@@ -1,0 +1,38 @@
+# Disposable backend-only PostgreSQL integration; no published ports/live source.
+services:
+  db:
+    image: postgres:18.6-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c
+    environment:
+      POSTGRES_DB: runner_runtime_test
+      POSTGRES_PASSWORD: disposable-runner-admin
+    tmpfs:
+      - /var/lib/postgresql:rw
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres -d runner_runtime_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    networks: [testing]
+  test:
+    image: sha256:54b5608ca7caec4a427ae497c00ef2afd9faa38c9ed5e6c845ec35bf7a50805d
+    depends_on:
+      db: {condition: service_healthy}
+    working_dir: /source
+    entrypoint: []
+    environment:
+      APP_ENV: test
+      ADMIN_DATABASE_URL: postgresql+psycopg://postgres:disposable-runner-admin@db/runner_runtime_test
+      API_DATABASE_PASSWORD: disposable-runner-api-password
+      DATABASE_URL: postgresql+psycopg://anxious_api:disposable-runner-api-password@db/runner_runtime_test
+      PYTHONPATH: /source
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes: ["./:/source:ro"]
+    read_only: true
+    tmpfs: ["/tmp:rw,exec"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command: [python, -B, -m, pytest, -q, -p, no:cacheprovider, /source/config_tests/test_runner_registry.py]
+    networks: [testing]
+networks:
+  testing:
+    internal: true
