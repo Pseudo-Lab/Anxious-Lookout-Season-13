@@ -17,7 +17,7 @@ from .models import Account, LoginSession
 from .research import Expected, Input, Store, ResearchError, fail, page_query, encode_cursor, parse_id, stamp
 from .research_models import Conversation
 from .research_tools import definitions, dispatch
-from .codex_policy import MODEL, REASONS, ERRORS, personal_origin_enabled
+from .codex_policy import MODEL, REASONS, ERRORS, RUNNER_PREFLIGHT_ERRORS, personal_origin_enabled
 from .page_scope import Page, resolve_scope, scope_summary, request_metadata, tool_allowed
 
 
@@ -189,13 +189,15 @@ def display_native_item(item):
     return result
 
 
-def register_conversations(app, authorized, sessions, settings, response, write):
+def register_conversations(app, authorized, sessions, settings, response, write, current_session):
     prefix = settings.base_path + "/api/research"
     app.state.research_runners = runners_from_file()
     app.state.codex_verification = "unverified"
     personal = os.getenv("CODEX_PERSONAL_ACCOUNT_ID", "")
     app.state.codex_personal_owner = uuid.UUID(personal) if personal else None
     app.state.codex_personal_enabled = personal_origin_enabled(settings)
+    from .user_runners import register, preflight
+    runner_status = register(app, sessions, settings, current_session)
 
     def connection_status(owner):
         result = {"available": False, "reason": "not_configured", "verification": "unverified", "model": MODEL}
@@ -241,7 +243,11 @@ def register_conversations(app, authorized, sessions, settings, response, write)
         if store.db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() not in {"0003_sessions", "0004_publication"}:
             fail("not_ready", "Conversation schema is not ready", 503)
 
-    def runner_for(owner):
+    def runner_for(owner, store=None):
+        if app.state.user_runners_enabled:
+            if store is not None:
+                preflight(store)
+            fail("codex_runner_unreachable", "Codex transport is not ready", 503)
         runner = app.state.research_runners.get(owner)
         status = connection_status(owner)
         if not status["available"]:
@@ -250,6 +256,10 @@ def register_conversations(app, authorized, sessions, settings, response, write)
 
     def refresh(store, row):
         if row.state != "running":
+            return
+        if app.state.user_runners_enabled:
+            # Preserve accepted uncertainty until the service evidence adapter
+            # is wired; legacy static mappings cannot reconcile new runtimes.
             return
         runner = app.state.research_runners.get(store.owner)
         try:
@@ -265,11 +275,8 @@ def register_conversations(app, authorized, sessions, settings, response, write)
             if expected_thread is not None and thread_id != expected_thread:
                 raise ValueError()
         except (httpx.HTTPError, ValueError, KeyError):
-            # A short outage must not pretend to cancel a still-running paid turn.
-            if row.tool_expires_at and row.tool_expires_at <= datetime.now(timezone.utc):
-                row.state, row.error_code = "failed", "codex_unavailable"
-                row.version += 1
-                row.tool_token_hash = None
+            # Tool-token expiry is not proof of turn termination, including
+            # during feature-off recovery. Keep accepted uncertainty intact.
             return
         record = result.get("record")
         if not isinstance(record, dict) or not isinstance(record.get("turns", []), list):
@@ -319,7 +326,7 @@ def register_conversations(app, authorized, sessions, settings, response, write)
                 row = db.scalar(select(Conversation).where(Conversation.id == identity, Conversation.owner_id == owner).with_for_update())
                 if row and row.request_id == request_id and row.state == "running":
                     definite = isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {400, 401, 403, 404, 409, 413, 422, 429}
-                    safe_codes = {*ERRORS.values(), "codex_unavailable"}
+                    safe_codes = {*ERRORS.values(), *RUNNER_PREFLIGHT_ERRORS.values(), "codex_unavailable"}
                     if not submitting:
                         # No submit call was made. A local preflight failure is
                         # definitive even if its health probe had a network error.
@@ -351,6 +358,8 @@ def register_conversations(app, authorized, sessions, settings, response, write)
 
     @app.get(prefix + "/codex/status")
     def status(request: Request):
+        if app.state.user_runners_enabled:
+            return runner_status(request)
         with authorized(request) as store:
             return response(connection_status(store.owner))
 
@@ -421,7 +430,7 @@ def register_conversations(app, authorized, sessions, settings, response, write)
                 scope = resolve_scope(store, parsed.page)
                 if row.native_record.get("turns") and not row.native_record.get("nativeThreadId") and app.state.codex_verification != "fixture":
                     fail("codex_policy_refused", "Existing conversation binding requires reconciliation", 503)
-                runner_for(store.owner)
+                runner_for(store.owner, store)
                 if row.pending_text:
                     prior = {"id": "unrecorded-" + str(row.request_id), "requestId": str(row.request_id),
                              "text": row.pending_text, "beforeTurn": len(row.native_record.get("turns", [])),

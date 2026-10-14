@@ -25,6 +25,7 @@ from starlette.exceptions import HTTPException
 from .database import check_ready, database
 from .models import Account, LoginSession, OAuthTransaction
 from .settings import Settings
+from .user_runners import feature_enabled, can_prepare
 
 SESSION_COOKIE = "anxious_session"
 TRANSACTION_COOKIE = "anxious_oauth"
@@ -72,6 +73,7 @@ def create_app(settings=None):
     app.state.engine = engine
     app.state.sessions = sessions
     app.state.settings = settings
+    app.state.user_runners_enabled = feature_enabled()
     prefix = settings.base_path + "/api"
 
     @app.middleware("http")
@@ -145,6 +147,12 @@ def create_app(settings=None):
     def ready():
         try:
             check_ready(engine)
+            if app.state.user_runners_enabled:
+                from .runner_schema import validate
+                from .research_schema_contract import validate_research
+                with engine.connect() as connection:
+                    validate_research(connection)
+                    validate(connection)
         except (SQLAlchemyError, RuntimeError):
             return error("not_ready", "Service is not ready", 503)
         return JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})
@@ -243,7 +251,7 @@ def create_app(settings=None):
             if not session:
                 return error("unauthenticated", "Authentication required", 401)
             account = db.get(Account, session.account_id)
-            return JSONResponse({"user": {"accountId": str(account.id), "githubId": account.github_id, "login": account.login, "role": account.role, "isApproved": account.is_approved}, "csrfToken": session.csrf_token}, headers={"Cache-Control": "no-store"})
+            return JSONResponse({"user": {"accountId": str(account.id), "githubId": account.github_id, "login": account.login, "role": account.role, "isApproved": account.is_approved, "codexRunner": can_prepare(app, account)}, "csrfToken": session.csrf_token}, headers={"Cache-Control": "no-store"})
 
     @app.post(prefix + "/auth/logout")
     def logout(request: Request):
