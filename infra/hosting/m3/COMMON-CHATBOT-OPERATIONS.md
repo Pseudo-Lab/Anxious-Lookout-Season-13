@@ -1,5 +1,11 @@
 # Issue #9 operator package — proposed, no live execution
 
+For the later UI-only refinement with API/runner already reconnected, use the
+separate [web-only supplement](CHATBOT-WEB-ONLY.md) after its exact source/plan/
+artifact review. It preserves
+the existing instances and records distinct web/API/runner sources; it does not
+relax this three-image maintenance procedure.
+
 The package emits private JSON; it cannot call kubectl, import an image, supply
 auth, reserve/replay a turn or restore live data. PM executes only reviewed
 artifacts within existing user authorization. Final application source approval,
