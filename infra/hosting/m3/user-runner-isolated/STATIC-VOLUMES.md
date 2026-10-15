@@ -59,6 +59,44 @@ filesystem evidence; never initialize with copied real credentials or state.
 
 ## PV/PVC sequence and acceptance
 
+### SELinux labeling prerequisite (PM measured Enforcing)
+
+PM's read-only inspection found the parent /var/lib/anxious-lookout labeled
+var_lib_t while existing container storage uses container_file_t. DAC10001:10001
+and mode0700 alone do not establish container access. Keep SELinux Enforcing.
+Do not use chcon, setenforce, privileged Pods, or a blanket /var/lib rule.
+
+After creating the fresh state directory and before PV creation, PM must inspect
+existing persistent fcontext mappings for this exact path and confirm that the
+container_file_t type and semanage/restorecon utilities are available. Missing
+tools/policy or a conflicting rule means stop and report; do not silently install,
+replace a rule, or switch enforcement mode. Use the already verified canonical
+state UUID (lowercase hex/hyphens only) so it cannot inject regex metacharacters.
+
+```sh
+# PM executes only against the new, reviewed state directory on anxious-lookout.
+# All ancestor/no-symlink/collision checks and restrictive umask above still apply.
+RUNNER_FCONTEXT_RULE="$RUNNER_BASE/$RUNNER_STATE_UUID(/.*)?"
+semanage fcontext -a -t container_file_t "$RUNNER_FCONTEXT_RULE"
+restorecon -nRv -- "$RUNNER_BASE/$RUNNER_STATE_UUID"
+# Inspect dry-run output: every affected path must remain under this state root.
+restorecon -Rv -- "$RUNNER_BASE/$RUNNER_STATE_UUID"
+ls -Zd -- "$RUNNER_BASE/$RUNNER_STATE_UUID" "$RUNNER_BASE/$RUNNER_STATE_UUID/native" "$RUNNER_BASE/$RUNNER_STATE_UUID/control"
+matchpathcon -V -- "$RUNNER_BASE/$RUNNER_STATE_UUID" "$RUNNER_BASE/$RUNNER_STATE_UUID/native" "$RUNNER_BASE/$RUNNER_STATE_UUID/control"
+```
+
+The recursive relabel is restricted to this newly created state directory; never
+run it on the rehearsal base, application parent, other owner state or codex-trial.
+Record the exact persistent rule, dry-run paths, resulting labels and verification
+exit statuses privately. On partial failure leave the state unmounted and stop;
+no automatic rule deletion or recursive cleanup. A type match is necessary but not
+proof of access: after the reviewed initialization/runner stage, confirm read/write
+with the actual restricted UID and SELinux domain, and inspect relevant AVC denials
+without logging credential/file contents. MCS/category or policy mismatch requires
+review, never a broad allow rule. No host relabel was performed by backend.
+
+Reference: [persistent SELinux file-context changes](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/7/html/selinux_users_and_administrators_guide/sect-security-enhanced_linux-working_with_selinux-selinux_contexts_labeling_files).
+
 1. Apply reviewed foundation and confirm namespace UID, quota0, default deny and
    no workload grants. Confirm neither PV name nor the two claim names exists.
 2. Complete the host preparation above. Ensure empty native/control leaves; no
