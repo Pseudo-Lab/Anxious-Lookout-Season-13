@@ -9,10 +9,11 @@ can be reused because its service supply socket already exists.
 
 ## Inputs and ownership
 
-PM privately identifies the existing approved editor/admin account UUID and selected
-ChatGPT account/source. Do not commit either account, tokens, runtime bindings or
-kubeconfig. Default isolated namespace is `codex-runner-rehearsal`; its name and UID
-are inputs. A different existing isolated namespace needs the same restricted PSA,
+The user selected a NEW `codex-runner` namespace, the current operational
+CODEX_PERSONAL_ACCOUNT_ID owner, and the operator's current opc-owned0600 Codex auth
+file. PM privately resolves those inputs. Do not commit either account, tokens,
+runtime bindings or kubeconfig. Namespace name and observed UID are inputs.
+A different existing isolated namespace needs the same restricted PSA,
 `runner-default-deny` KNP and tokenless `runner-workload` SA. Do not use `m2-hosting`
 as the runner namespace. The runner SA receives no RBAC or token.
 
@@ -29,11 +30,11 @@ per-state subdirectories, not synthetic directories.
 ```json
 {
   "owner": "<existing login account UUID>",
-  "namespace": "codex-runner-rehearsal",
+  "namespace": "codex-runner",
   "namespaceUid": "<observed namespace UID>",
   "hostRoot": "/var/lib/anxious-lookout/user-runners",
   "node": "anxious-lookout",
-  "podCIDR": "10.42.0.0/16",
+  "podCIDR": "10.42.0.0/24",
   "providerAccountId": "<selected ChatGPT account id>",
   "image": "<reviewed runner image>@sha256:<digest>",
   "callback": "http://api.m2-hosting.svc.cluster.local:8080/api/internal/research/tools",
@@ -44,6 +45,42 @@ per-state subdirectories, not synthetic directories.
 ```
 
 ## One execution for owner preparation
+
+For the selected new namespace, PM first applies `00-foundation.json`: exactly
+Namespace (restricted PSA enforce/audit/warn, version v1.36), default-deny KNP and
+tokenless runner-workload SA. It contains no quota, CNP, VAP or RBAC grant. Observe
+the created namespace UID for inputs.json. The separate `05-preparer-rbac.json`
+provides an automount=false runner-preparer SA and its temporary bindings. These
+are concrete review candidates; reviewer approval of prior source is not approval
+of these new objects.
+
+The preparation credential has ONLY the REST operations actually used by
+user_runner_prepare: get this namespace, get named KNP/workload SA, create PV,
+and create PVC/Secret in codex-runner. It cannot create Pods, exec, read existing
+Secrets/PVs/PVCs, mutate/delete resources, grant RBAC or mint another token. Creation
+responses already supply their UIDs, so PV/PVC/Secret get is unnecessary. Kubernetes
+RBAC cannot restrict CREATE by resourceNames, and PVs are cluster-scoped; PV create
+is therefore the remaining broad preparation permission. Do not mount this token
+in the API/runner or use an admin kubeconfig token as the tool credential.
+
+After review of the credential definition, PM applies it and issues a bounded token
+directly to a private file (shell tracing off, never stdout/log capture):
+
+```sh
+set +x
+umask 077
+kubectl -n codex-runner create token runner-preparer --duration=10m > "$RUNNER_INPUT_DIR/kube-token"
+```
+
+Run this in the same UID0 input-preparation context as the other root-owned0600
+inputs. Verify the issuer's actual lifetime; requested duration is not a guarantee
+of the API server's returned lifetime. After preparation succeeds OR fails, PM
+removes RoleBinding codex-runner/runner-preparer and ClusterRoleBinding
+codex-runner-preparer as the reviewed credential teardown. Removing bindings revokes
+the API privileges independently of token expiry. Do not rerun failed preparation
+after reissuing a token without reconciling partial state. SA/Role/ClusterRole are
+then unused metadata and may be removed under that same reviewed teardown. This
+does not remove prepared storage or the separate runner-web runtime access.
 
 Build/import the backend image through the existing Docker release workflow. Set
 `RUNNER_TOOL_IMAGE` to its digest, `RUNNER_INPUT_DIR` to the private input directory,
@@ -78,7 +115,8 @@ the API Secret.
 ## Review candidates and activation (PM)
 
 1. Snapshot the existing API Deployment, `hosting-access-web-link-v1` CNP,
-   `runner-callback-draft` CNP, ResourceQuota and baseline API health/trial response
+   and baseline API health/trial response. Record absence of the new namespace's
+   `runner-callback-draft` CNP and ResourceQuota (or snapshot them if already present)
    to a private directory. Export live link JSON; the renderer retains its trial
    egress rules and default-deny settings. Record API and runner image digests.
 2. Run `python -B -m ops.user_runner_deployment` **inside Docker**, as UID10001,
@@ -88,12 +126,14 @@ the API Secret.
    --output /review/candidate`. It emits `resources.json` and `api-patch.json`.
 3. Request review of these concrete candidates BEFORE changing feature/max_pods,
    provider egress or performing resource deletion. Both CNPs are updates to existing
-   names: no new CNP/VAP layer. RBAC grants API SA hosting namespace read plus create
+   names: the single runner boundary is created in the NEW codex-runner namespace;
+   hosting-access-web-link-v1 is updated preserving trial. No additional CNP/VAP
+   layers are introduced. RBAC grants API SA hosting namespace read plus create
    Pods (Kubernetes cannot resourceName-scope create), get/delete only this owner's
    Pod, and get only its PVCs/Secret. It grants no exec, bind, secret mutation or runner
    permissions. The Pod itself remains automount=false and has no kube token.
-4. After the user's cleanup decision, remove the synthetic Pod and confirm zero
-   Pods in the target namespace before enabling. The quota remains named
+4. Confirm zero Pods in the new target namespace before enabling. Rehearsal cleanup
+   is a separate PM operation against the user's approved exact list. The quota is named
    `runner-bootstrap-no-pods` but changes count/pods to 1 in resources.json. A quota
    failure consumes the one create reservation; do not retry by deleting receipts.
 5. Create the private input Secret without printing its content:
@@ -170,8 +210,10 @@ not delete an already running Pod. Keep artifacts/volumes/registry for reconcili
 
 ## Existing #10 resources
 
-Re-use only namespace, default-deny KNP and tokenless workload SA. Update
-runner-callback-draft and quota in place. No synthetic Pod, PVC/PV, Secret, host
+The selected namespace is new: none of the rehearsal namespace's objects are reused.
+Create the default-deny KNP and tokenless workload SA from 00-foundation.json, then
+the single runner-callback-draft boundary and quota from the deployment candidate.
+No synthetic Pod, PVC/PV, Secret, host
 state, permit or rehearsal DB is adopted. The synthetic Pod and rehearsal DB,
 binding-less VAPs and one-shot Roles, unused runner-controller-api-draft and
 runner-resolver-draft are PM's user-approved cleanup candidates. Synthetic PV/PVC,
