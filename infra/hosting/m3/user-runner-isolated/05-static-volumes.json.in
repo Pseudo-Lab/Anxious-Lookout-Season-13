@@ -1,0 +1,26 @@
+{
+  "apiVersion": "v1", "kind": "List", "items": [
+    {
+      "apiVersion": "v1", "kind": "PersistentVolume",
+      "metadata": {"name": "${RUNNER_NATIVE_PV}", "labels": {"anxious.io/purpose": "isolated-runner-rehearsal", "anxious.io/owner": "${RUNNER_SYNTHETIC_OWNER}", "anxious.io/state": "${RUNNER_SYNTHETIC_STATE}"}},
+      "spec": {
+        "capacity": {"storage": "${RUNNER_NATIVE_SIZE}"}, "accessModes": ["ReadWriteOnce"], "volumeMode": "Filesystem",
+        "persistentVolumeReclaimPolicy": "Retain", "storageClassName": "",
+        "local": {"path": "/var/lib/anxious-lookout/runner-rehearsal/${RUNNER_SYNTHETIC_STATE}/native"},
+        "nodeAffinity": {"required": {"nodeSelectorTerms": [{"matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "In", "values": ["anxious-lookout"]}]}]}},
+        "claimRef": {"apiVersion": "v1", "kind": "PersistentVolumeClaim", "namespace": "codex-runner-rehearsal", "name": "native-synthetic"}
+      }
+    },
+    {
+      "apiVersion": "v1", "kind": "PersistentVolume",
+      "metadata": {"name": "${RUNNER_CONTROL_PV}", "labels": {"anxious.io/purpose": "isolated-runner-rehearsal", "anxious.io/owner": "${RUNNER_SYNTHETIC_OWNER}", "anxious.io/state": "${RUNNER_SYNTHETIC_STATE}"}},
+      "spec": {
+        "capacity": {"storage": "${RUNNER_CONTROL_SIZE}"}, "accessModes": ["ReadWriteOnce"], "volumeMode": "Filesystem",
+        "persistentVolumeReclaimPolicy": "Retain", "storageClassName": "",
+        "local": {"path": "/var/lib/anxious-lookout/runner-rehearsal/${RUNNER_SYNTHETIC_STATE}/control"},
+        "nodeAffinity": {"required": {"nodeSelectorTerms": [{"matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "In", "values": ["anxious-lookout"]}]}]}},
+        "claimRef": {"apiVersion": "v1", "kind": "PersistentVolumeClaim", "namespace": "codex-runner-rehearsal", "name": "control-synthetic"}
+      }
+    }
+  ]
+}
