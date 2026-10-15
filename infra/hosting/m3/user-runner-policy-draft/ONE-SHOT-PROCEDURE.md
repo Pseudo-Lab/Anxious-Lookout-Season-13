@@ -91,7 +91,7 @@ commands are supplied before these components exist.
 After exactly one persisted create, compare returned/GET Pod UID, labels, complete
 spec and PVC/Secret identities; no UID adoption on mismatch. Read /health on8080
 using the synthetic bearer and X-Runner-State-Id. Require200 plus matching ownerId,
-stateId and PodUID, available=false and verification=unverified. Wrong bearer
+stateId and `podUid`, available=false and verification=unverified. Wrong bearer
 must return401; correct bearer/wrong state must return503 policy refusal. A TCP
 handshake alone is not success. No session/turn request, provider authentication
 or ready/available:true claim is part of this test.
