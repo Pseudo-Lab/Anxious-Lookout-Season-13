@@ -8,6 +8,8 @@ from ops.runner_schema_inventory import ROOTS, inventory, references
 def test_pinned_inventory_closes_all_references_and_preserves_constraints():
     raw = Path('/schema/swagger.json').read_bytes()
     result = inventory(raw)
+    committed = Path('/inventory/pod-v1.36.4.json').read_bytes()
+    assert (json.dumps(result, indent=2, sort_keys=True) + '\n').encode() == committed
     definitions = result['definitions']
     assert set(ROOTS) <= definitions.keys()
     original = json.loads(raw)['definitions']

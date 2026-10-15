@@ -39,7 +39,10 @@ docker run --rm --network none --read-only --cap-drop ALL \
   --output /output/pod-v1.36.4.json
 ```
 
+For tests also mount the committed schema directory read-only at `/inventory`:
+`-v "$PWD/infra/hosting/m3/user-runner-policy-draft/schema:/inventory:ro"`.
 With the same source/schema mounts, `python -B -m pytest -q -p no:cacheprovider
 config_tests/test_runner_schema_inventory.py` inside the test image verifies
-reference closure, field/required/extension preservation and digest drift refusal.
+reference closure, field/required/extension preservation, digest drift refusal
+and byte-for-byte equality with the committed inventory (including formatting).
 No Kubernetes or host runtime mutation is performed.
