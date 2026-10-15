@@ -5,7 +5,8 @@ User scope/storage decisions are now recorded in
 wording below. These drafts still require complete envelope and render review.
 
 These are source drafts, not approved rendered manifests. Do not apply them to
-codex-trial or any cluster. User namespace/storage/Secret decisions remain pending.
+codex-trial or any cluster without exact render review. Namespace/storage/Secret
+decisions are recorded in the scope document; placement A is now user-approved.
 No runtime, grants, capacity, quota or provider access is enabled by this commit.
 The foundation's default deny and quota0 remain unchanged.
 
@@ -46,8 +47,10 @@ network.json.in provides three CNPs for Cilium1.20.2:
 
 - Controller: egress to kube-apiserver entity on the approved API port and to the
   runner-workload SA on TCP8080; no inbound listener allowance.
-- Runner transport/callback: inbound TCP8080 only from the controller SA in the
-  exact namespace; outbound to the approved callback namespace/SA/port.
+- Runner transport/callback: selected A permits inbound TCP8080 only from the
+  local host entity to the runner-workload SA selector; outbound to the approved
+  callback namespace/SA/port. The previous controller-SA ingress peer is replaced,
+  not retained, so nonhost controller Pods have no runner ingress grant here.
 - Resolver: runner DNS only to the reviewed resolver namespace/app identity,
   TCP/UDP53 with one exact callback DNS name. No wildcard name or provider FQDN.
 
@@ -57,7 +60,11 @@ KNP/CNP/CCNP rules. Absence here does not prove another policy cannot permit it.
 The kube-apiserver entity is used because node addresses are not ordinarily
 selected by CIDR rules. Verify the configured literal IP, actual Cilium entity
 identity, service translation and port; keep TLS IP SAN checks independent.
-Do not broaden to host/world when an expected API route fails.
+The host ingress exception is limited to the user-approved A transport test;
+do not add host/world egress when an expected API route fails. The retained
+controller-SA egress rule is inactive for the host-network diagnostic caller and
+does not constrain host traffic. B placement is deferred to Issue11. See
+[one-shot procedure](ONE-SHOT-PROCEDURE.md) for the host trust boundary and probes.
 
 This is not a complete controller/API service deployment network: DB connectivity,
 callback destination ingress and actual component placement remain unresolved.

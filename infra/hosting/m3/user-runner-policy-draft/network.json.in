@@ -17,7 +17,7 @@
       "metadata": {"name": "runner-callback-draft", "namespace": "${RUNNER_TEST_NAMESPACE}"},
       "spec": {
         "endpointSelector": {"matchLabels": {"io.cilium.k8s.policy.serviceaccount": "runner-workload"}},
-        "ingress": [{"fromEndpoints": [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "${RUNNER_TEST_NAMESPACE}", "io.cilium.k8s.policy.serviceaccount": "runner-controller"}}], "toPorts": [{"ports": [{"port": "8080", "protocol": "TCP"}]}]}],
+        "ingress": [{"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "8080", "protocol": "TCP"}]}]}],
         "egress": [{"toEndpoints": [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "${RUNNER_CALLBACK_NAMESPACE}", "io.cilium.k8s.policy.serviceaccount": "${RUNNER_CALLBACK_SERVICE_ACCOUNT}"}}], "toPorts": [{"ports": [{"port": "${RUNNER_CALLBACK_PORT}", "protocol": "TCP"}]}]}]
       }
     },

@@ -31,24 +31,47 @@ not a durable Pod identity. Unexpected defaults, schema warnings or refusals sto
 before creation. Do not auto-edit policies, normalize new fields or retry creation.
 Dry-run repeats are only observation requests, never substituted real POSTs.
 
-## Placement and identities to implement
+## Approved placement A and identities to implement
 
 Run the one-shot controller tool outside the managed namespace in a PM-operated
-isolated diagnostic container, with its dedicated runner-controller SA credential,
+isolated diagnostic container using host networking, with its dedicated runner-controller SA credential,
 exact API IP/CA and isolated disposable registry DB. This avoids admitting an
 extra controller Pod through the single-owner runner policy and quota. It does
 not imply that Cilium endpoint selectors identify an external diagnostic process.
-An external caller cannot satisfy the current CNP fromEndpoints SA selector just
+An external caller cannot satisfy a CNP fromEndpoints SA selector just
 by using an SA bearer token: Kubernetes auth identity and Cilium network identity
-are different. Final controller placement/network route must resolve this before
-transport acceptance; no broad host/world ingress exception is authorized here.
+are different. The user selected A (host-trusted transport) on 2026-10-15.
+The revised runner ingress replaces the controller-SA peer rule with host entity
+TCP8080 only. It does not authenticate an individual host process. All eligible
+local host processes are inside the network trust boundary; bearer/state checks
+remain mandatory. Provider access remains closed.
 
-Alternatively a separately reviewed controller namespace/Pod placement can provide
-the required Cilium endpoint identity. It needs an independent namespace budget,
-DB egress and caller/runner peer selectors. That placement is not silently included
-in the one-runner-Pod quota. This is an unresolved implementation choice, not two
-interchangeable execution commands. Until selected and reviewed, transport tests
-cannot start. DB must be disposable and separate from operating app data.
+Placement B (separate controller Pod/namespace) is deferred to Issue11. Do not add
+a controller Pod or its budget to Issue10. DB must be disposable and separate
+from operating app data. The retained controller-SA egress draft does not govern
+the host-network diagnostic container and does not grant runner ingress to Pod
+callers. Exact rendered policy and execution procedure still require review.
+
+Keep API-SA and synthetic transport token files in a private host directory0700,
+each file0600 owned by the diagnostic execution UID; mount only the needed files
+read-only. Never put tokens in command arguments, logs or public artifacts.
+The confidentiality premise is that other host processes cannot access these
+files; mode bits do not isolate processes with the same UID or privileged host
+operators. Restrict that UID to the trusted PM execution context. Host network
+trust is not evidence of process-level isolation or narrow caller identity.
+
+PM measured allow-localhost=policy is a prerequisite, not proof of enforcement.
+During the bounded window record node/runner endpoint identities, effective
+ingress/egress policies and policy revision before and after probes. Observe
+host→runner TCP8080 allowed; nonhost source→runner8080, host→other runner ports
+and runner→API denied. Use reviewed existing diagnostic sources or a separately
+reviewed probe procedure; do not create extra Pods or use denied exec to obtain
+evidence. Record source identity, destination, protocol/port, timestamp and Cilium
+verdict/revision for each probe. A timeout or closed listener alone is not proof
+of policy denial. A missing source/probe is an unverified case, not a pass.
+Confirm no inherited KNP/CNP/CCNP broadens the intended deny boundary. Host and
+runner API access differ: the controller authenticates to API using its SA token;
+the runner must have no permitted API route. Do not widen egress to run probes.
 
 Initialize the static native directory before creation using the existing
 runner.binding initializer in a reviewed container on node anxious-lookout,
@@ -92,7 +115,9 @@ After exactly one persisted create, compare returned/GET Pod UID, labels, comple
 spec and PVC/Secret identities; no UID adoption on mismatch. Read /health on8080
 using the synthetic bearer and X-Runner-State-Id. Require200 plus matching ownerId,
 stateId and `podUid`, available=false and verification=unverified. Wrong bearer
-must return401; correct bearer/wrong state must return503 policy refusal. A TCP
+must return401; correct bearer/wrong or missing state must return503 policy refusal.
+Record redacted HTTP status/body evidence for these cases within the same policy
+observation window, without exposing bearer or SA tokens. A TCP
 handshake alone is not success. No session/turn request, provider authentication
 or ready/available:true claim is part of this test.
 
@@ -106,6 +131,6 @@ slot release, replacement, rollback-to-old-DB or replay is part of Issue10.
 ## Acceptance blockers at this revision
 
 Complete typed CEL/gate removal review, controlled server-default observation,
-selected controller/Cilium/DB placement, image initialization and a durable one-shot
+verification of selected A controller/Cilium/DB placement, image initialization and a durable one-shot
 wrapper remain unimplemented or unverified. These are Issue10 work, not Issue11
 termination requirements. This procedure must not be reported as an executed test.
