@@ -41,6 +41,21 @@ The caller needs `ip`, `jq`, and noninteractive sudo for this read-only lookup.
 
 The script also checks fixed resolved host paths, UID/GID/mode, SELinux enforcing,
 container_file_t and matchpathcon, and the local linux/arm64 runtime image user.
+Run the wrapper as `opc` with noninteractive sudo available for `readlink`, `stat`
+and `matchpathcon`: these read-only path checks require root traversal through
+the deliberately root-owned 0700 ancestors. Do not relax ancestor permissions.
+Docker commands remain in the caller context; the rootful daemon resolves bind
+mount sources and the initializer process remains UID/GID10001. A failed sudo
+or path check stops before `docker run`.
+
+Host wrapper revisions that only change shell/docs/tests do not require rebuilding
+the runtime image. Record wrapper SHA separately from the image source SHA and
+retain the reviewed image's digest/release metadata and import/health evidence.
+For the traversal fix, PM's image source remains `4b1b72e` and imported Plan.image
+candidate remains
+`docker.io/library/anxious-s13-runner-rehearsal@sha256:bbec1f6b5933918d79ffa966fad3c0727071ca77acddb198af937887780a7ad1`;
+use the existing local image ID from that build for this Docker wrapper. Review
+the changed wrapper before execution; this does not assert live initialization.
 It mounts only those two dedicated leaves into a network-none, read-only-root,
 cap-drop ALL, no-new-privileges container as10001. No initializer Pod is created.
 SELinux MCS access is still an actual execution result: if denied, stop and retain

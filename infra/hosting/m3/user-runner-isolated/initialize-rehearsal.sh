@@ -20,10 +20,15 @@ sudo -n /usr/local/bin/k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml \
 [[ $(docker image inspect --format '{{.Os}}/{{.Architecture}} {{.Config.User}}' "$image") == 'linux/arm64 10001:10001' ]]
 root=/var/lib/anxious-lookout/runner-rehearsal/a9617ace-fa4b-4bbc-b70b-2188f0efe3e6
 for leaf in "$root/native" "$root/control"; do
-  [[ $(readlink -e "$leaf") == "$leaf" ]]
-  [[ $(stat -c '%u:%g:%a' "$leaf") == '10001:10001:700' ]]
-  [[ $(stat -c '%C' "$leaf") == *:container_file_t:* ]]
-  matchpathcon -V "$leaf"
+  # The root-owned 0700 ancestors deliberately prohibit opc traversal. Elevate
+  # only these read-only checks; Docker's daemon performs the bind mounts.
+  resolved=$(sudo -n readlink -e "$leaf")
+  [[ $resolved == "$leaf" ]]
+  ownership=$(sudo -n stat -c '%u:%g:%a' "$leaf")
+  [[ $ownership == '10001:10001:700' ]]
+  context=$(sudo -n stat -c '%C' "$leaf")
+  [[ $context == *:container_file_t:* ]]
+  sudo -n matchpathcon -V "$leaf"
 done
 docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
   --user 10001:10001 --tmpfs /tmp:rw,nosuid,nodev \

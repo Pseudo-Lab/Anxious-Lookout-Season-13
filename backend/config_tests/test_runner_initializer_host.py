@@ -54,3 +54,57 @@ docker() { printf '%s\\n' "$*" > "$TRACE"; return 97; }
     assert trace.exists() == (case == 'valid'), result.stderr.decode()
     if case == 'valid':
         assert trace.read_text().startswith('image inspect --format ')
+
+
+@pytest.mark.parametrize('failure', ['', 'readlink', 'ownership', 'context', 'matchpathcon', 'sudo'])
+@pytest.mark.parametrize('mode', ['initialize', 'verify'])
+def test_privileged_path_checks(tmp_path, failure, mode):
+    # Host identity was exercised above. Mock it here, but run the real path
+    # preconditions and assert exact sudo argv plus the unprivileged Docker call.
+    trace = tmp_path / 'trace'
+    prelude = tmp_path / 'paths.sh'
+    prelude.write_text('''
+hostname() { echo simple; }
+ip() { echo '[]'; }
+jq() { cat >/dev/null; }
+getenforce() { echo Enforcing; }
+readlink() { return 98; }
+stat() { return 98; }
+matchpathcon() { return 98; }
+sudo() {
+  [[ $1 == -n ]] || return 90
+  shift
+  if [[ $1 == /usr/local/bin/k3s ]]; then return 0; fi
+  printf '%s\\n' "$*" >> "$TRACE"
+  [[ $FAILURE != sudo ]] || return 1
+  local leaf=${!#}
+  [[ $leaf == /var/lib/anxious-lookout/runner-rehearsal/a9617ace-fa4b-4bbc-b70b-2188f0efe3e6/native || $leaf == /var/lib/anxious-lookout/runner-rehearsal/a9617ace-fa4b-4bbc-b70b-2188f0efe3e6/control ]] || return 90
+  case "$1" in
+    readlink) [[ "$*" == "readlink -e $leaf" ]] || return 90
+      echo "$leaf"; [[ $FAILURE != readlink ]];;
+    stat)
+      if [[ "$*" == "stat -c %u:%g:%a $leaf" ]]; then
+        echo '10001:10001:700'; [[ $FAILURE != ownership ]]
+      elif [[ "$*" == "stat -c %C $leaf" ]]; then
+        echo 'system_u:object_r:container_file_t:s0'; [[ $FAILURE != context ]]
+      else return 90; fi;;
+    matchpathcon) [[ "$*" == "matchpathcon -V $leaf" && $FAILURE != matchpathcon ]];;
+    *) return 90;;
+  esac
+}
+docker() {
+  if [[ $1 == image ]]; then echo 'linux/arm64 10001:10001'; return 0; fi
+  [[ $1 == run ]] || return 90
+  printf 'DOCKER %s\\n' "$*" >> "$TRACE"
+}
+''')
+    result = subprocess.run(['bash', str(SCRIPT), mode, 'sha256:' + 'a' * 64],
+                            env=dict(os.environ, BASH_ENV=str(prelude), TRACE=str(trace), FAILURE=failure),
+                            capture_output=True, timeout=5)
+    calls = trace.read_text()
+    assert (result.returncode == 0) == (not failure), result.stderr.decode()
+    assert ('DOCKER run ' in calls) == (not failure)
+    if not failure:
+        assert calls.count('matchpathcon -V ') == 2
+        assert '--user 10001:10001' in calls
+        assert '--' + mode in calls
