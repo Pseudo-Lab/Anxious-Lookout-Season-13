@@ -1,7 +1,10 @@
 # Issue10 one-shot execution and evidence contract
 
-Source/procedure review candidate. PM executes only after reviewer approval of
-this package AND the exact rendered objects/digests. Keep operating feature=false,
+Execution record updated after PM's 2026-10-15 rehearsal and reviewer acceptance.
+The observed results and later scope decisions below supersede the original VAP
+setup plan in this document; that plan is retained as historical procedure and
+must not be replayed. Further execution requires a separately reviewed scope and
+exact artifacts. Keep operating feature=false,
 max_pods=0. The dedicated tool alone uses isolated capacity1. No provider, extra
 Pod, exec/attach into runner, deletion, release, reset or replacement is included.
 
@@ -76,6 +79,10 @@ Secret's token must equal the private transport-token. Do not copy Secret JSON t
 public evidence. The code only records reference UIDs, never Secret data or DSNs.
 
 ## Exact render, digest review and bounded window
+
+Historical initial plan: the user later excluded VAP from Issue10. PM removed
+both VAP bindings before the single persisted creation. See the observed results
+below; do not reapply these VAP steps or reopen quota1 for existing-Pod recovery.
 
 1. Record namespace/PVC/PV/Secret UIDs, initialized storage evidence, imported
    image, no Pod, current quota RV and all matching KNP/CNP/CCNP/VAP/bindings.
@@ -221,8 +228,8 @@ receipt, lookup-only rerun and refusal after simulated lost DB receipt, four
 health status cases and no inference of policy denial from socket timeout.
 After adding preflight evidence snapshots, the one-shot suite reran network-none:
 35 passed, 1 dedicated-DB test skipped (DB integration already passed above).
-Shell syntax checks and RBAC JSON parsing passed. No live Kubernetes create,
-server dry-run, policy/quota change or Cilium datapath result is claimed.
+Shell syntax checks and RBAC JSON parsing passed. These local checks alone did
+not establish live Kubernetes or Cilium behavior; subsequent PM results follow.
 
 ## Existing-Pod recovery after the first observation (2026-10-15)
 
@@ -257,3 +264,51 @@ and records UIDs/digests. If any exists, stop and review it rather than overwrit
 Remove the two reentry bindings after observation (record their UIDs); keep quota0
 and do not restore the original create-grant binding. The unchanged runner SA
 still has no API grant; all these read permissions belong to runner-controller.
+
+## Observed execution and closeout — 2026-10-15
+
+PM completed the original create and the corrected reentry; reviewer accepted the
+[reentry results and host observations](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/10#issuecomment-6186405295).
+The [PM result record](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/10#issuecomment-6186364394)
+and [scope/evidence ledger](../USER-RUNNER-ISSUE10-SCOPE.md) carry the scope limits.
+This is execution evidence, not approval of the final branch SHA or PR.
+
+| Observation | Result |
+|---|---|
+| Retained Pod | `runner-d888737c483047619630b400982f8618`, UID `835babaa-6f88-4415-af20-d5908bd87b78`, Running, node anxious-lookout, IP10.42.0.6. One persisted create; no replacement. |
+| Runner image | Source4b1b72e; `docker.io/library/anxious-s13-runner-rehearsal@sha256:bbec1f6b5933918d79ffa966fad3c0727071ca77acddb198af937887780a7ad1`. |
+| Reentry diagnostic | Source284ecc5; local image ID `sha256:c2188901e4c2ba85e7063ed4b47fdc6e8c73e7cf2fa041fa27b8bb608a2ab333`, linux/arm64, image user10001:10001. Existing DB/permit/UID retained; all API requests GET, freshPermit=false, transport-only-success. |
+| HTTP06:53:43Z | Correct bearer/state200; wrong bearer401; wrong state503; missing state503. Each attempts1. Exact owner/state/Pod UID; available=false, verification=unverified, reason=not_configured. |
+| Cilium window06:53–06:55Z | Endpoint423, security identity59836, desired/realized revision21 unchanged before/after. Original raw: remote ID host→8080 allow4 SYNs (L3-L4), host→8081 deny5 SYNs (match none). Five deny events share the same source tuple and are retransmissions of one connection attempt. |
+| Quota/permissions | At06:55:10Z quota RV1540949, spec/status hard0, used1. Reentry RoleBinding UIDe876ed1c-26ce-4df0-a1b6-d9adfedad552 and ClusterRoleBinding UID0991a2de-c743-4a05-9290-e7250c26d257 withdrawn. Initial bindings also absent; remaining matching rb/crb0; controller list/create pods=no. |
+| VAP scope | User deferred enforcement/typeChecking repair to #11. Both VAP objects and three CNPs retained; VAP bindings absent. No warning-free VAP or active envelope enforcement claim. |
+| Retained evidence/resources | Pod, two Retain PVs/PVCs/backing directories, immutable transport Secret, private isolated DB and durable permit/UID markers preserved. Registry runner_unreachable/ambiguous=true/gen1/rev2 and settled ensure receipt unchanged; health does not mark native readiness or release capacity. |
+
+Raw policy rows have no individual wall-clock timestamp. Reviewer correlated the
+bounded capture window, endpoint identity/revision, IP/port and event order with
+health/probe timestamps. The probe JSON correctly remains
+`socketOutcome=not-connected, policyVerdict=unverified`; the separate original raw
+deny plus reviewer correlation establishes the host8081 policy observation. No
+socket timeout alone was counted as a denial. Nonhost→8080 and runner→API remain
+unverified/#11 because no approved traffic source existed. Host probes do not
+substitute for runner-to-runner or runner-to-API datapath tests.
+
+Shared evidence paths (relative to agent-worktree-comm):
+
+- `artifacts/pm/issue10-oneshot-b8a76eb/`: first dry-run/create/GET, DB inventory,
+  initial health uncertainty and restoration. The initial health refusal's exact
+  exception is not established; a listener-start race remains a hypothesis.
+- `artifacts/pm/issue10-reentry-284ecc5/evidence/`: preflight-01.json, get-pod.json,
+  health.json, result.json and host-other-port.json; same Pod/permit/DB recovery.
+- `artifacts/pm/issue10-reentry-284ecc5/cilium-window-reentry/`: original
+  reentry-policy-verdict.raw and endpoint before/after evidence. Hash inventories
+  are sha256.txt and cilium-window-reentry.sha256 in the parent directory.
+- `artifacts/pm/issue10-reentry-284ecc5/10-reentry.log` and `applied/`: granted
+  read-only RBAC identities, can-i evidence, binding withdrawal and quota closeout.
+- `artifacts/review/2026-10-15-issue10-results/` and
+  `artifacts/review/2026-10-15-issue10-reentry-results/`: independent raw REST,
+  digest/UID/spec, verdict and live restriction checks.
+
+Reviewer reported no remaining minor/question backlog at the documentation
+checkpoint. Code remains284ecc5; this ledger update introduces no runtime or
+cluster mutation. Final branch approval and PM PR creation are subsequent steps.
