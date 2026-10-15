@@ -58,7 +58,10 @@ def checked_values(path):
 
 def private_token(path):
     require(path.absolute() == path.resolve())
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    # Reject devices before opening; NONBLOCK also prevents a FIFO substituted
+    # after this check from waiting for a writer. The opened FD is checked below.
+    require(stat.S_ISREG(path.lstat().st_mode))
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as source:
         info = os.fstat(source.fileno())
         require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid()

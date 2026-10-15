@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 
@@ -93,9 +94,73 @@ def test_cli_never_logs_secret_on_success_or_failure(setup):
             '--secret-file', str(token), '--output', str(public), '--private-output', str(private)]
     for path in templates: args += ['--template', str(path)]
     for expected in (0, 1):
-        result = subprocess.run(args, capture_output=True, text=True)
+        result = subprocess.run(args, capture_output=True, text=True, timeout=3)
         assert result.returncode == expected
         output = result.stdout+result.stderr
         assert token.read_text() not in output
         assert base64.b64encode(token.read_bytes()).decode() not in output
         assert str(token) not in output
+
+
+@pytest.mark.parametrize('kind', ['fifo', 'socket', 'device'])
+def test_cli_rejects_special_secret_without_waiting(setup, kind):
+    templates, values, token, public, private = setup
+    token.unlink()
+    with socket.socket(socket.AF_UNIX) as endpoint:
+        if kind == 'fifo':
+            os.mkfifo(token, 0o600)  # No writer: blocking open would hang.
+        elif kind == 'socket':
+            endpoint.bind(str(token))
+            token.chmod(0o600)
+        else:
+            token = Path('/dev/null')
+        args = [sys.executable, '-B', '-m', 'ops.runner_render', '--check',
+                '--values', str(values), '--secret-file', str(token),
+                '--output', str(public), '--private-output', str(private)]
+        for path in templates:
+            args += ['--template', str(path)]
+        result = subprocess.run(args, capture_output=True, text=True, timeout=3)
+    assert result.returncode == 1
+    assert result.stdout == ''
+    assert result.stderr == 'Preparation render refused; private values and paths are not printed\n'
+    assert not public.exists() and not private.exists()
+
+
+def test_fifo_swapped_after_lstat_is_rejected(setup, monkeypatch):
+    token = setup[2]
+    original_open = os.open
+    def swap(path, flags, *args, **kwargs):
+        if path == token:
+            assert flags & os.O_NONBLOCK
+            token.unlink()
+            os.mkfifo(token, 0o600)
+        return original_open(path, flags, *args, **kwargs)
+    monkeypatch.setattr(os, 'open', swap)
+    with pytest.raises(ValueError):
+        render(*setup)
+    assert not setup[3].exists() and not setup[4].exists()
+
+
+@pytest.mark.parametrize('damage', ['short', 'long', 'hardlink', 'private-exists', 'nested'])
+def test_additional_review_rejections(setup, damage):
+    templates, values, token, public, private = setup
+    if damage in ('short', 'long'):
+        token.write_bytes(b'x' * (31 if damage == 'short' else 257))
+    elif damage == 'hardlink':
+        os.link(token, token.with_name('linked-token'))
+    elif damage == 'private-exists':
+        private.mkdir()
+        (private/'marker').write_text('preserve')
+    else:
+        private = public/'nested'
+    with pytest.raises(ValueError):
+        render(templates, values, token, public, private)
+    assert not public.exists()
+    if damage == 'private-exists':
+        assert (private/'marker').read_text() == 'preserve'
+
+
+def test_reversed_templates_keep_output_order(setup):
+    templates, values, token, public, private = setup
+    assert render(list(reversed(templates)), values, token, public, private) == 10
+    assert [row['file'][:2] for row in json.loads((public/'sha256.json').read_text())] == [f'{i:02d}' for i in range(10)]
