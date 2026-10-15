@@ -1,0 +1,10 @@
+# Extra ephemeral root-owned storage for the root preparation-tool integration test.
+# Overlay on compose.runner-runtime-test.yml, never operational mounts.
+services:
+  test:
+    user: "0:0"
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    tmpfs:
+      - /var/lib/anxious-lookout:rw
+      - /run/runner-input:rw
+      - /run/user-runner:rw,gid=10001,mode=0770

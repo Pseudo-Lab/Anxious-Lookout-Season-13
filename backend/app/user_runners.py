@@ -1,19 +1,20 @@
-"""Feature-off-compatible HTTP preparation; no controller/model dispatch here.
+"""Per-account HTTP preparation and read-only runtime health, trial compatible.
 
-Registry phase is lifecycle evidence, not provider readiness. READY still refuses
-sending until the separately reviewed Native/controller transport is connected.
+Registry phase is lifecycle evidence, not provider readiness. An explicitly loaded
+operator binding is required before controller creation or native transport.
 """
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hmac
 import os
+import httpx
 from uuid import UUID
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
-from .codex_policy import MODEL, RUNNER_PREFLIGHT_ERRORS
+from .codex_policy import MODEL, RUNNER_PREFLIGHT_ERRORS, ERRORS
 from .models import Account
 from .research import fail
 from .runner_registry import Registry
@@ -37,7 +38,21 @@ def eligible(account, policy):
 
 
 def can_prepare(app, account):
-    return bool(app.state.user_runners_enabled and eligible(account, app.state.research_policy))
+    return bool(account and selected(app, account.id) and eligible(account, app.state.research_policy))
+
+
+def selected_account():
+    value = os.getenv('CODEX_USER_RUNNER_ACCOUNT_ID', '')
+    if not value:
+        return None
+    owner = UUID(value)
+    if str(owner) != value:
+        raise ValueError('Runner account must be a canonical UUID')
+    return owner
+
+
+def selected(app, owner):
+    return bool(app.state.user_runners_enabled and owner == app.state.user_runner_account)
 
 
 def status_body(state=None, *, permitted=True, creation_reserved=False):
@@ -78,6 +93,43 @@ def registry_status(registry, owner, state=None):
     return status_body(state, creation_reserved=registry.creation_reserved(state))
 
 
+def live_status(app, owner, fallback):
+    runtime = app.state.user_runner_runtime
+    if runtime is None or fallback['reason'] != 'runner_unreachable':
+        return fallback
+    try:
+        health = runtime.runner(owner).health()
+        available = health['available'] and health.get('reason') is None
+        return {'available': available, 'reason': None if available else health.get('reason') or 'unavailable',
+                'model': MODEL, 'verification': health['verification']}
+    except Exception:
+        return fallback
+
+
+def runtime_runner(app, owner):
+    runtime = app.state.user_runner_runtime
+    if runtime is None:
+        fail('codex_runner_unreachable', 'Codex transport is not ready', 503)
+    try:
+        runner = runtime.runner(owner)
+        health = runner.health()
+        if not health['available'] or health.get('reason') is not None:
+            fail(ERRORS.get(health.get('reason'), 'codex_unavailable'), 'Codex cannot accept this request', 503)
+        return runner
+    except (ValueError, OSError, httpx.HTTPError):
+        fail('codex_runner_unreachable', 'Codex transport is not ready', 503)
+
+
+def stop_runtime(app, owner):
+    runtime = app.state.user_runner_runtime
+    if runtime is None:
+        return
+    try:
+        runtime.stop(owner)
+    except Exception:
+        fail('codex_runner_unreachable', 'Runner termination requires retry', 503)
+
+
 def register(app, sessions, settings, current_session):
     prefix = settings.base_path + '/api/research/codex'
 
@@ -92,7 +144,7 @@ def register(app, sessions, settings, current_session):
                 fail('unauthenticated', 'Authentication required', 401)
             permitted = eligible(account, app.state.research_policy)
             if mutate:
-                if not permitted or not app.state.user_runners_enabled:
+                if not permitted or not selected(app, account.id):
                     fail('forbidden', 'Runner preparation is not permitted', 403)
                 if request.headers.get('origin') != settings.origin:
                     fail('origin_not_allowed', 'Origin not allowed', 403)
@@ -107,7 +159,16 @@ def register(app, sessions, settings, current_session):
         with authenticated(request) as (db, account, permitted):
             if not permitted:
                 return response(status_body(permitted=False))
-            return response(registry_status(checked_registry(db), account.id))
+            fallback = registry_status(checked_registry(db), account.id)
+            owner = account.id
+        return response(live_status(app, owner, fallback))
+
+    @app.delete(prefix + '/runner')
+    def stop(request: Request):
+        with authenticated(request, mutate=True) as (_, account, _):
+            owner = account.id
+        stop_runtime(app, owner)
+        return response({'terminationRequested': True})
 
     @app.post(prefix + '/runner')
     def prepare(body: dict, request: Request):
@@ -126,6 +187,16 @@ def register(app, sessions, settings, current_session):
                 fail('codex_runner_unreachable', 'Runner state requires reconciliation', 503)
             # Body shares GET's parser, and contains no private runtime identities.
             code = 200 if state.pod_uid is not None else 202
-            return response(registry_status(registry, account.id, state), code)
+            fallback = registry_status(registry, account.id, state)
+            owner = account.id
+        if app.state.user_runner_runtime:
+            try:
+                app.state.user_runner_runtime.ensure(owner)
+            except Exception:
+                fail('codex_runner_unreachable', 'Runner preparation requires reconciliation', 503)
+            with sessions.begin() as db:
+                fallback = registry_status(checked_registry(db), owner)
+            fallback = live_status(app, owner, fallback)
+        return response(fallback, code)
 
     return status

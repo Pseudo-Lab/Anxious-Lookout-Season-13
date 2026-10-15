@@ -212,3 +212,41 @@ def test_new_generation_cannot_switch_retained_storage(plan, server):
     with pytest.raises(Refused):
         KubePods('https://kube.invalid', 'isolated', 'k'*40, None, [plan, changed], _transport=httpx.MockTransport(server))
     assert server.requests == []
+
+
+def test_projected_token_refresh_validates_and_updates_before_each_request(port, server, plan):
+    seen = []
+    def rotating():
+        seen.append(True)
+        return 'k'*40
+    port.bearer_provider = rotating
+    assert port.lookup(plan.identity) is None
+    assert len(seen) == 1
+    port.bearer_provider = lambda: 'invalid short'
+    before = len(server.requests)
+    with pytest.raises(Refused): port.lookup(plan.identity)
+    assert len(server.requests) == before
+
+
+def test_only_internal_callback_http_is_allowed(plan):
+    callback = 'http://api.m2-hosting.svc.cluster.local:8080/api/internal/research/tools'
+    assert replace(plan, callback=callback).callback == callback
+    for value in ('http://public.invalid:8080/api/internal/research/tools',
+                  'http://api.m2-hosting.svc.cluster.local:8080/admin',
+                  'http://api.m2-hosting.svc.cluster.local:6443/api/internal/research/tools'):
+        with pytest.raises(Refused): replace(plan, callback=value)
+
+
+def test_delete_accepts_asynchronous_api_response(plan):
+    seen = []
+    def accepted(request):
+        seen.append(json.loads(request.content))
+        return response(202, {'apiVersion': 'v1', 'kind': 'Status', 'status': 'Success'})
+    port = KubePods('https://kube.invalid', 'isolated', 'k'*40, None, [plan], _transport=httpx.MockTransport(accepted))
+    uid = str(uuid4())
+    try:
+        assert port._request('DELETE', 'pods', plan.identity.name,
+            body={'preconditions': {'uid': uid}})['status'] == 'Success'
+        assert seen == [{'preconditions': {'uid': uid}}]
+    finally:
+        port.close()

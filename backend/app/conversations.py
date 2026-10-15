@@ -196,7 +196,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
     personal = os.getenv("CODEX_PERSONAL_ACCOUNT_ID", "")
     app.state.codex_personal_owner = uuid.UUID(personal) if personal else None
     app.state.codex_personal_enabled = personal_origin_enabled(settings)
-    from .user_runners import register, preflight
+    from .user_runners import register, preflight, selected, runtime_runner
     runner_status = register(app, sessions, settings, current_session)
 
     def connection_status(owner):
@@ -244,7 +244,9 @@ def register_conversations(app, authorized, sessions, settings, response, write,
             fail("not_ready", "Conversation schema is not ready", 503)
 
     def runner_for(owner, store=None):
-        if app.state.user_runners_enabled:
+        if selected(app, owner):
+            if app.state.user_runner_runtime:
+                return runtime_runner(app, owner)
             if store is not None:
                 preflight(store)
             fail("codex_runner_unreachable", "Codex transport is not ready", 503)
@@ -257,11 +259,14 @@ def register_conversations(app, authorized, sessions, settings, response, write,
     def refresh(store, row):
         if row.state != "running":
             return
-        if app.state.user_runners_enabled:
-            # Preserve accepted uncertainty until the service evidence adapter
-            # is wired; legacy static mappings cannot reconcile new runtimes.
-            return
-        runner = app.state.research_runners.get(store.owner)
+        if selected(app, store.owner):
+            # Without the bound service transport, preserve accepted uncertainty;
+            # legacy static mappings cannot reconcile new runtimes.
+            if not app.state.user_runner_runtime:
+                return
+            runner = app.state.user_runner_runtime.runner(store.owner)
+        else:
+            runner = app.state.research_runners.get(store.owner)
         try:
             if not runner:
                 raise ValueError()
@@ -359,7 +364,11 @@ def register_conversations(app, authorized, sessions, settings, response, write,
     @app.get(prefix + "/codex/status")
     def status(request: Request):
         if app.state.user_runners_enabled:
-            return runner_status(request)
+            with sessions() as db:
+                login = current_session(db, request)
+                use_runtime = bool(login and selected(app, login.account_id))
+            if use_runtime:
+                return runner_status(request)
         with authorized(request) as store:
             return response(connection_status(store.owner))
 
