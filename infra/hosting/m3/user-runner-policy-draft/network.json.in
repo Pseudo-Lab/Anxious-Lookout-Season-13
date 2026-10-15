@@ -1,0 +1,33 @@
+{
+  "apiVersion": "v1", "kind": "List", "items": [
+    {
+      "apiVersion": "cilium.io/v2", "kind": "CiliumNetworkPolicy",
+      "metadata": {"name": "runner-controller-api-draft", "namespace": "${RUNNER_TEST_NAMESPACE}"},
+      "spec": {
+        "endpointSelector": {"matchLabels": {"io.cilium.k8s.policy.serviceaccount": "runner-controller"}},
+        "ingress": [],
+        "egress": [
+          {"toEntities": ["kube-apiserver"], "toPorts": [{"ports": [{"port": "${RUNNER_API_PORT}", "protocol": "TCP"}]}]},
+          {"toEndpoints": [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "${RUNNER_TEST_NAMESPACE}", "io.cilium.k8s.policy.serviceaccount": "runner-workload"}}], "toPorts": [{"ports": [{"port": "8080", "protocol": "TCP"}]}]}
+        ]
+      }
+    },
+    {
+      "apiVersion": "cilium.io/v2", "kind": "CiliumNetworkPolicy",
+      "metadata": {"name": "runner-callback-draft", "namespace": "${RUNNER_TEST_NAMESPACE}"},
+      "spec": {
+        "endpointSelector": {"matchLabels": {"io.cilium.k8s.policy.serviceaccount": "runner-workload"}},
+        "ingress": [{"fromEndpoints": [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "${RUNNER_TEST_NAMESPACE}", "io.cilium.k8s.policy.serviceaccount": "runner-controller"}}], "toPorts": [{"ports": [{"port": "8080", "protocol": "TCP"}]}]}],
+        "egress": [{"toEndpoints": [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "${RUNNER_CALLBACK_NAMESPACE}", "io.cilium.k8s.policy.serviceaccount": "${RUNNER_CALLBACK_SERVICE_ACCOUNT}"}}], "toPorts": [{"ports": [{"port": "${RUNNER_CALLBACK_PORT}", "protocol": "TCP"}]}]}]
+      }
+    },
+    {
+      "apiVersion": "cilium.io/v2", "kind": "CiliumNetworkPolicy",
+      "metadata": {"name": "runner-resolver-draft", "namespace": "${RUNNER_TEST_NAMESPACE}"},
+      "spec": {
+        "endpointSelector": {"matchLabels": {"io.cilium.k8s.policy.serviceaccount": "runner-workload"}},
+        "egress": [{"toEndpoints": [{"matchLabels": {"k8s:io.kubernetes.pod.namespace": "${RUNNER_DNS_NAMESPACE}", "k8s:k8s-app": "${RUNNER_DNS_APP_LABEL}"}}], "toPorts": [{"ports": [{"port": "53", "protocol": "UDP"}, {"port": "53", "protocol": "TCP"}], "rules": {"dns": [{"matchName": "${RUNNER_CALLBACK_DNS_NAME}"}]}}]}]
+      }
+    }
+  ]
+}
