@@ -22,14 +22,24 @@ clean, adopt, chown recursively, regenerate the state UUID or delete a live path
 path/host boundary matters: markers are not proof of which Kubernetes PVC was
 mounted. The future wrapper must also compare namespace/PVC/PV/Secret UIDs.
 
-After reviewing the exact image, PM runs on anxious-lookout:
+After reviewing the exact image, PM runs on Kubernetes node anxious-lookout
+(OS hostname `simple`, local InternalIP `10.0.0.107`):
 
 ```sh
 bash infra/hosting/m3/user-runner-isolated/initialize-rehearsal.sh initialize "$rehearsal_image_id"
 bash infra/hosting/m3/user-runner-isolated/initialize-rehearsal.sh verify "$rehearsal_image_id"
 ```
 
-The script checks fixed resolved host paths, UID/GID/mode, SELinux enforcing,
+Before any Docker operation, the script requires OS hostname `simple`, the local
+IPv4 address `10.0.0.107`, and a read-only Node lookup using the explicit local
+`/etc/rancher/k3s/k3s.yaml` kubeconfig through `sudo -n /usr/local/bin/k3s`.
+Node name and hostname label must be `anxious-lookout`; Node addresses must include
+InternalIP `10.0.0.107` and Hostname `simple`. Missing commands, failed lookup,
+malformed evidence or mismatches stop execution. This is the PM-observed fixed
+deployment mapping, not an assumption that Kubernetes names equal OS hostnames.
+The caller needs `ip`, `jq`, and noninteractive sudo for this read-only lookup.
+
+The script also checks fixed resolved host paths, UID/GID/mode, SELinux enforcing,
 container_file_t and matchpathcon, and the local linux/arm64 runtime image user.
 It mounts only those two dedicated leaves into a network-none, read-only-root,
 cap-drop ALL, no-new-privileges container as10001. No initializer Pod is created.
