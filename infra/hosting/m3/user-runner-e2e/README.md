@@ -46,6 +46,13 @@ per-state subdirectories, not synthetic directories.
 
 ## One execution for owner preparation
 
+**Live DB route correction:** the hosting CNP blocks host-network Docker from
+PostgreSQL, and host DNS does not resolve its service name. Before using the command
+below, follow [DB-ROUTE.md](DB-ROUTE.md) for the reviewed loopback port-forward,
+private DB URL copies, and read-only retry audit. The command below is the base
+preparation invocation; use the /route URL files and fresh output path specified
+there. Do not rerun the failed attempt merely because its output directory is empty.
+
 For the selected new namespace, PM first applies `00-foundation.json`: exactly
 Namespace (restricted PSA enforce/audit/warn, version v1.36), default-deny KNP and
 tokenless runner-workload SA. It contains no quota, CNP, VAP or RBAC grant. Observe
