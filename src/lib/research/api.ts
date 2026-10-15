@@ -11,6 +11,9 @@ import {
   type MaterialSummary,
   type MessageItem,
   type AdminAccount,
+  type AcceptedScope,
+  type PageDescriptor,
+  type ToolCallItem,
   type PreviewMaterial,
   type PublicationPreview,
   type Page,
@@ -349,9 +352,27 @@ function parseAdminAccount(v: unknown): AdminAccount | null {
 
 function parseCodexStatus(v: unknown): CodexStatus | null {
   if (!isObj(v) || typeof v.available !== "boolean") return null;
-  if (v.reason !== null && v.reason !== "not_configured" && v.reason !== "unavailable") return null;
+  if (v.reason !== null && !isStr(v.reason)) return null;
   if (v.verification !== "unverified" && v.verification !== "fixture" && v.verification !== "real") return null;
-  return { available: v.available, reason: v.reason, verification: v.verification };
+  if (v.model !== undefined && v.model !== null && !isStr(v.model)) return null;
+  const out: CodexStatus = { available: v.available, reason: v.reason, verification: v.verification };
+  if (isStr(v.model) && v.model !== "") out.model = v.model;
+  // 표시 전용 선택 필드. 형식이 맞지 않으면 버리고 나머지 상태는 그대로 쓴다(접수 판정은 available과 서버가 한다).
+  if (isStr(v.accessExpiresAt) && !Number.isNaN(Date.parse(v.accessExpiresAt))) out.accessExpiresAt = v.accessExpiresAt;
+  if (isInt(v.remainingAdmissions) && v.remainingAdmissions >= 0) out.remainingAdmissions = v.remainingAdmissions;
+  // 범위 밖·정수가 아닌 안내는 버린다(front가 정한 기본 간격을 쓴다).
+  if (isInt(v.retryAfterSeconds) && v.retryAfterSeconds >= 1 && v.retryAfterSeconds <= 60) out.retryAfterSeconds = v.retryAfterSeconds;
+  return out;
+}
+
+// 표시 전용 범위 정보. 형식이 맞지 않으면 버리고 나머지 기록은 그대로 쓴다(권한 판단은 서버가 한다).
+function parseScope(v: Obj): AcceptedScope | undefined {
+  const p = v.page;
+  if (!isObj(p) || !isStr(p.kind) || !isStr(v.capability) || !Array.isArray(v.allowedTools) || !v.allowedTools.every(isStr)) return undefined;
+  const page: AcceptedScope["page"] = { kind: p.kind };
+  if (isId(p.resourceId)) page.resourceId = p.resourceId;
+  if (isStr(p.title)) page.title = p.title;
+  return { page, capability: v.capability, allowedTools: v.allowedTools };
 }
 
 function parseSessionSummary(v: unknown): SessionSummary | null {
@@ -372,6 +393,8 @@ function parseSessionSummary(v: unknown): SessionSummary | null {
     if (!isObj(c) || !isId(c.documentId) || !isId(c.publicationId) || !isStr(c.title)) return null;
     out.context = { documentId: c.documentId, publicationId: c.publicationId, title: c.title };
   }
+  const scope = parseScope(v);
+  if (scope) out.scope = scope;
   return out;
 }
 
@@ -384,10 +407,18 @@ function parseSessionItem(v: unknown): SessionItem | null {
       item.source = "platform";
       item.status = v.status;
     }
+    if (v.modelMismatch === true) item.modelMismatch = true;
+    if (v.role === "user") {
+      const scope = parseScope(v);
+      if (scope) item.scope = scope;
+    }
     return item;
   }
   if (v.type === "tool_call" && isStr(v.name) && isStr(v.status)) {
-    return { id: v.id, type: "tool_call", name: v.name, input: v.input, output: v.output, status: v.status };
+    const tool: ToolCallItem = { id: v.id, type: "tool_call", name: v.name, input: v.input, output: v.output, status: v.status };
+    if (isObj(v.error) && isStr(v.error.code)) tool.error = { code: v.error.code };
+    if (v.modelMismatch === true) tool.modelMismatch = true;
+    return tool;
   }
   return null;
 }
@@ -551,6 +582,10 @@ export const getPublicDocument = (documentId: string) =>
 
 export const getCodexStatus = () => fetchJson(apiUrl("/research/codex/status"), parseCodexStatus);
 
+// #10 실행 환경 준비 요청. 200(준비됨)·202(준비·대기 접수) 모두 상태 조회와 같은 본문이다. 모델 질문 접수가 아니다.
+export const prepareCodexRunner = (ctx: MutationContext) =>
+  mutate("/research/codex/runner", "POST", {}, parseCodexStatus, ctx);
+
 export const listSessions = (cursor?: string | null) =>
   fetchJson(apiUrl(`/research/sessions${listQuery(cursor)}`), parsePage(parseSessionSummary));
 
@@ -562,17 +597,34 @@ export const getSessionItemRaw = (id: string, itemId: string) =>
 export const createSession = (input: { title: string; publicDocumentId?: string }, ctx: MutationContext) =>
   mutate("/research/sessions", "POST", input, parseSessionSummary, ctx);
 
-export const sendSessionMessage = (id: string, text: string, expectedVersion: number, ctx: MutationContext) =>
-  mutate(`/research/sessions/${enc(id)}/messages`, "POST", { text, expectedVersion }, parseSessionSummary, ctx);
+// page는 보내기를 누른 순간의 페이지. 결과 불명 재전송은 처음 body(page 포함)를 그대로 보낸다.
+// 이전 보관분처럼 page가 없으면 넣지 않는다(서버는 general로 처리).
+export const sendSessionMessage = (
+  id: string,
+  body: { text: string; expectedVersion: number; page?: PageDescriptor },
+  ctx: MutationContext
+) => mutate(`/research/sessions/${enc(id)}/messages`, "POST", body, parseSessionSummary, ctx);
 
 export const archiveSession = (id: string, expectedVersion: number, ctx: MutationContext) =>
   mutate(`/research/sessions/${enc(id)}`, "DELETE", { expectedVersion }, parseArchive, ctx);
 
 // ---- 오류 안내 ----
 
+const RUNNER_REFUSAL_CODES = new Set([
+  "codex_runner_not_prepared",
+  "codex_provisioning",
+  "codex_capacity_wait",
+  "codex_runner_unreachable",
+  "codex_runner_failed",
+  "codex_runner_stopped",
+]);
+
 /** 계약의 오류 코드를 사용자 안내 문구로 바꾼다. 알 수 없는 실패는 null(호출 측이 일반 문구 사용). */
 export function researchErrorMessage(failure: FetchFailure): string | null {
   if (failure.kind !== "http") return null;
+  // #10 실행 환경 거절 문구는 "보내지 않았습니다"를 확정하므로 정확한 503(접수 전 거절)이나 서버가 확정한
+  // 실패 세션의 오류(status 0으로 전달)에만 쓴다. 같은 코드의 500·502 등은 결과 불명이라 일반 안내로 둔다.
+  if (RUNNER_REFUSAL_CODES.has(failure.code ?? "") && failure.status !== 503 && failure.status !== 0) return null;
   switch (failure.code) {
     case "unauthenticated":
       return "로그인이 필요합니다. 다시 로그인해 주세요.";
@@ -597,6 +649,39 @@ export function researchErrorMessage(failure: FetchFailure): string | null {
       return "Codex에 연결할 수 없어 대화를 진행할 수 없습니다. 이전 기록은 보존됩니다.";
     case "codex_rejected":
       return "Codex가 이 요청을 받지 않았습니다. 입력은 대화에 보존되어 있으며 새 메시지로 다시 보낼 수 있습니다.";
+    case "codex_not_enabled_for_account":
+      return "이 계정에는 아직 Codex가 열려 있지 않습니다. 입력과 이전 대화는 그대로 있습니다.";
+    // 아래 codex_* 문구는 선접수 거절(503)과 접수 뒤 실행 실패(failed) 모두에 쓰인다.
+    case "codex_auth_expired":
+      return "서버의 Codex 인증이 만료되어 요청을 처리하지 못했습니다. 운영자가 다시 연결하면 이 대화에서 이어서 질문할 수 있습니다. 입력과 이전 대화는 그대로 있습니다.";
+    case "codex_auth_revoked":
+      return "서버의 Codex 인증이 더 이상 유효하지 않아 요청을 처리하지 못했습니다. 운영자가 다시 연결해야 합니다. 입력과 이전 대화는 그대로 있습니다.";
+    case "codex_model_unavailable":
+      return "고정된 모델을 사용할 수 없어 요청을 처리하지 못했습니다. 다른 모델로 자동 전환하지 않습니다. 입력과 이전 대화는 그대로 있습니다.";
+    case "codex_policy_refused":
+      return "정책에 따라 이 요청이 거부되었습니다. 입력과 이전 대화는 그대로 있습니다.";
+    case "codex_budget_exhausted":
+      return "Codex 사용 한도에 도달해 요청을 처리하지 못했습니다. 입력과 이전 대화는 그대로 있습니다.";
+    case "codex_rate_limited":
+      return "Codex 제공자의 사용 한도에 걸려 요청을 처리하지 못했습니다. 자동으로 다시 보내지 않습니다. 입력과 이전 대화는 그대로 있습니다.";
+    case "codex_failed":
+      return "Codex 요청이 실패했습니다. 자동으로 다시 실행하거나 다른 모델로 바꾸지 않습니다. 이전 대화는 그대로 있습니다.";
+    // #10 실행 환경 상태로 접수 전에 거절된 질문(초안은 남는다). 자동으로 다시 보내지 않는다.
+    case "codex_runner_not_prepared":
+      return "대화 환경이 아직 준비되지 않아 보내지 않았습니다. ‘대화 준비’를 누른 뒤 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+    case "codex_provisioning":
+      return "환경 활성화 중이라 보내지 않았습니다. 준비가 끝나면 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+    case "codex_capacity_wait":
+      return "사용 대기 중이라 보내지 않았습니다. 환경이 켜지면 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+    case "codex_runner_unreachable":
+      return "환경 연결을 확인하는 중이라 보내지 않았습니다. 연결이 확인되면 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+    case "codex_runner_failed":
+      return "환경을 준비하지 못해 보내지 않았습니다. ‘다시 시도’를 누른 뒤 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+    case "codex_runner_stopped":
+      return "환경이 쉬는 중이라 보내지 않았습니다. ‘환경 다시 켜기’를 누른 뒤 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+    // 접수 뒤 실행 중 환경이 중단된 것이 확인된 실패(접수 전 거절 아님).
+    case "codex_runner_lost":
+      return "실행 중 환경이 중단되어 이 요청을 마치지 못했습니다. 자동으로 다시 실행하지 않습니다. 이전 대화는 그대로 있습니다.";
     case "not_ready":
       return "서비스가 준비되지 않았습니다. 잠시 후 다시 시도해 주세요.";
     default:

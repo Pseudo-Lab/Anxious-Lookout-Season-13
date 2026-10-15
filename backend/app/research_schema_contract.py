@@ -11,9 +11,9 @@ def table_contract(connection, name):
     return table_contracts(connection, [name])[name]
 
 
-def table_contracts(connection, names):
+def table_contracts(connection, names, schema="research"):
     inspector = inspect(connection)
-    options = {"schema": "research", "filter_names": list(names)}
+    options = {"schema": schema, "filter_names": list(names)}
     columns = inspector.get_multi_columns(**options)
     primary = inspector.get_multi_pk_constraint(**options)
     checks = inspector.get_multi_check_constraints(**options)
@@ -22,15 +22,15 @@ def table_contracts(connection, names):
     indexes = inspector.get_multi_indexes(**options)
     return {name: {
         "columns": {column["name"]: [str(column["type"].compile(dialect=connection.dialect)), column["nullable"], column["default"]]
-                    for column in columns[("research", name)]},
-        "primary": primary[("research", name)]["constrained_columns"],
-        "checks": {value["name"]: value["sqltext"] for value in checks[("research", name)]},
+                    for column in columns[(schema, name)]},
+        "primary": primary[(schema, name)]["constrained_columns"],
+        "checks": {value["name"]: value["sqltext"] for value in checks[(schema, name)]},
         "foreign": [{key: value[key] for key in ("constrained_columns", "referred_schema", "referred_table", "referred_columns")}
-                    for value in foreign[("research", name)]],
-        "unique": {value["name"]: value["column_names"] for value in unique[("research", name)]},
+                    for value in foreign[(schema, name)]],
+        "unique": {value["name"]: value["column_names"] for value in unique[(schema, name)]},
         "indexes": {value["name"]: {"columns": value["column_names"], "unique": value["unique"],
                     "where": value.get("dialect_options", {}).get("postgresql_where")}
-                    for value in indexes[("research", name)]},
+                    for value in indexes[(schema, name)]},
     } for name in names}
 
 

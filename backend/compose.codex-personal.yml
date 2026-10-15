@@ -1,0 +1,50 @@
+# Single-runner enable overlay on compose.codex-bootstrap.yml, never on fixtures.
+# Include only AFTER platform UUID/binding, source and full-lifetime ownership review.
+services:
+  api:
+    environment:
+      CODEX_PERSONAL_ENABLE: "true"
+      CODEX_PERSONAL_ACCOUNT_ID: ${PERSONAL_PLATFORM_ACCOUNT_ID:?Set the privately verified platform UUID}
+      CODEX_RUNNERS_FILE: /run/personal-api/runners.json
+    networks: [data, web-api, github-egress, api-runner]
+  personal-runner:
+    image: ${PERSONAL_RUNNER_IMAGE:?Set the reviewed pinned0.160.1 runtime image}
+    user: "10001:10001"
+    command: [uvicorn, runner.app:create_app, --factory, --host, 0.0.0.0, --port, "8080", --workers, "1", --no-access-log, --no-proxy-headers]
+    environment:
+      APP_ENV: personal-test
+      CODEX_AUTH_MODE: personal-cache
+      CODEX_EXECUTION_SCOPE: personal-private
+      CODEX_PERSONAL_CONTROL_DIR: /run/personal-control
+      CODEX_MODEL: gpt-6.1-sol
+      RUNNER_ACCOUNT_ID: ${PERSONAL_PLATFORM_ACCOUNT_ID}
+      RUNNER_STATE_ID: ${PERSONAL_RUNNER_STATE_ID:?Set the privately verified durable state UUID}
+      RUNNER_TOKEN_FILE: /run/secrets/runner-token
+      CODEX_BIN: /usr/local/bin/codex
+      RESEARCH_TOOL_CALLBACK_URL: http://api:8080/api/internal/research/tools
+      RUNNER_STATE_DIR: /state
+    volumes:
+      - type: bind
+        source: ${PERSONAL_CONTROL_DIR:?Set the approved private control directory outside native state}
+        target: /run/personal-control
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${PERSONAL_API_INPUT_DIR}/transport-token
+        target: /run/secrets/runner-token
+        read_only: true
+        bind: {create_host_path: false}
+      - personal-native-state:/state
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [api-runner, provider-egress]
+    cpus: ${PERSONAL_RUNNER_CPUS:?Set the reviewed single-runner CPU limit}
+    mem_limit: ${PERSONAL_RUNNER_MEMORY:?Set the reviewed single-runner memory limit}
+networks:
+  api-runner: {internal: true}
+  provider-egress:
+    external: true
+    name: ${PERSONAL_PROVIDER_EGRESS_NETWORK:?Set the externally managed reviewed provider egress network}
+volumes:
+  personal-native-state:

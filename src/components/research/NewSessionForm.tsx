@@ -1,14 +1,15 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { useRouter } from "next/navigation";
 import type { FetchFailure } from "@/lib/api/client";
 import { createSession } from "@/lib/research/api";
 import { useMutation, useRestoredRequest } from "@/lib/research/hooks";
 import { LIMITS } from "@/lib/research/types";
 import ErrorNotice from "@/components/research/ErrorNotice";
+import { useChat } from "@/components/chat/ChatProvider";
 
 // 새 개인 대화 세션. publicDocumentId가 있으면 그 공개 문서를 첫 맥락으로 시작한다.
+// 만든 대화는 페이지를 옮기지 않고 공통 대화창에서 연다.
 export default function NewSessionForm({
   publicDocumentId,
   defaultTitle = "",
@@ -16,7 +17,7 @@ export default function NewSessionForm({
   publicDocumentId?: string;
   defaultTitle?: string;
 }) {
-  const router = useRouter();
+  const { openSession } = useChat();
   const scope = `create:session:${publicDocumentId ?? "-"}`;
   const restored = useRestoredRequest<{ title?: string }>(scope);
   const { run, busy } = useMutation(scope);
@@ -28,7 +29,7 @@ export default function NewSessionForm({
     const input = { title: title.trim(), ...(publicDocumentId && { publicDocumentId }) };
     const res = await run(`session:create:${JSON.stringify(input)}`, (ctx) => createSession(input, ctx), input);
     if (res.ok) {
-      router.push(`/research/session/?id=${encodeURIComponent(res.data.id)}`);
+      openSession(res.data.id);
     } else {
       setFailure(res.failure);
     }

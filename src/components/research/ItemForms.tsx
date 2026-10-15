@@ -82,7 +82,7 @@ export function MaterialForm({
   }
 
   return (
-    <form onSubmit={submit} className="space-y-4">
+    <form onSubmit={submit} className="@container space-y-4">
       <Field label="제목">
         <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={LIMITS.title} required className={inputClass} />
       </Field>
@@ -96,7 +96,7 @@ export function MaterialForm({
           className={inputClass}
         />
       </Field>
-      <div className="grid gap-4 sm:grid-cols-2">
+      <div className="grid gap-4 @lg:grid-cols-2">
         <Field label="수집 시각" hint="브라우저 시간대 기준으로 입력하며 UTC로 저장됩니다.">
           <input
             type="datetime-local"

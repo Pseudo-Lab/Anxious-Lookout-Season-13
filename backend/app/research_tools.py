@@ -62,7 +62,7 @@ class PageContext(Input):
 
 
 TOOLS = {
-    "research_page_context": (PageContext, "Read this owned session's saved public document and direct reference list; supply materialId to read one reference's complete stored content. Other private materials remain available through your own storage tools."),
+    "research_page_context": (PageContext, "Read the current request's accepted public document snapshot and direct references; supply materialId to read one reference's stored content. Follow the current request's page/tool limits."),
     "research_list": (Listing, "List your own materials or documents (type material/document)."),
     "research_get": (Lookup, "Read your own material/document/relation by type and id."),
     "research_versions": (Versions, "List immutable snapshots of your own material/document."),

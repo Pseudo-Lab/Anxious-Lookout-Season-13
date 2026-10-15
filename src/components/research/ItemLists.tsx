@@ -7,6 +7,7 @@ import { usePagedList } from "@/lib/research/usePagedList";
 import { CONTENT_KIND_LABELS } from "@/lib/research/types";
 import { formatDateTime, hostOf } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
+import { useChat } from "@/components/chat/ChatProvider";
 import Notice from "@/components/research/Notice";
 
 function ListFrame({
@@ -17,6 +18,7 @@ function ListFrame({
   emptyText,
   hasMore,
   onMore,
+  compact = false,
   children,
 }: {
   failure: Parameters<typeof ErrorNotice>[0]["failure"] | null;
@@ -26,13 +28,19 @@ function ListFrame({
   emptyText: string;
   hasMore: boolean;
   onMore: () => void;
+  /** 대화창처럼 좁은 곳: 카드 없이 구분선만 둔다. */
+  compact?: boolean;
   children: ReactNode;
 }) {
   return (
     <div className="space-y-3">
       {failure && <ErrorNotice failure={failure} prefix="목록을 불러오지 못했습니다." />}
       {!failure && loaded && empty && <Notice tone="info">{emptyText}</Notice>}
-      {!empty && <ul className="divide-y divide-stone-100 rounded-2xl bg-white shadow-sm ring-1 ring-stone-200/60">{children}</ul>}
+      {!empty && (
+        <ul className={compact ? "-mx-2 divide-y divide-stone-100" : "divide-y divide-stone-100 rounded-2xl bg-white shadow-sm ring-1 ring-stone-200/60"}>
+          {children}
+        </ul>
+      )}
       {loading && <p className="text-sm text-stone-500">불러오는 중...</p>}
       {hasMore && !loading && (
         <button onClick={onMore} className="text-sm font-medium text-indigo-600 hover:text-indigo-800">
@@ -130,7 +138,9 @@ export function DocumentList() {
 
 export const SESSION_STATE_LABELS = { idle: "대기", running: "진행 중", failed: "실패" } as const;
 
-export function SessionList({ action }: { action?: ReactNode }) {
+// 대화는 공통 대화창에서 연다. 링크 주소는 기존 대화 링크(새 탭·복사)와 호환되게 유지한다.
+export function SessionList({ action, compact = false }: { action?: ReactNode; compact?: boolean }) {
+  const { openSession } = useChat();
   const list = usePagedList("sessions", (cursor) => listSessions(cursor));
   return (
     <section className="space-y-3">
@@ -143,11 +153,20 @@ export function SessionList({ action }: { action?: ReactNode }) {
         emptyText="아직 대화가 없습니다."
         hasMore={list.nextCursor !== null}
         onMore={() => void list.loadMore()}
+        compact={compact}
       >
         {list.items.map((s) => (
           <li key={s.id}>
-            <Link href={`/research/session/?id=${encodeURIComponent(s.id)}`} className="block px-5 py-4 hover:bg-stone-50">
-              <p className="font-medium text-stone-900">{s.title || "(제목 없음)"}</p>
+            <Link
+              href={`/research/session/?id=${encodeURIComponent(s.id)}`}
+              onClick={(e) => {
+                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                e.preventDefault();
+                openSession(s.id);
+              }}
+              className={compact ? "block rounded-md px-2 py-2.5 hover:bg-stone-50" : "block px-5 py-4 hover:bg-stone-50"}
+            >
+              <p className={compact ? "text-sm font-medium text-stone-900" : "font-medium text-stone-900"}>{s.title || "(제목 없음)"}</p>
               <p className="mt-1 text-xs text-stone-500">
                 {SESSION_STATE_LABELS[s.state]} · 최근 {formatDateTime(s.updatedAt)}
               </p>

@@ -25,7 +25,7 @@ export default function Header() {
   ].filter((l) => l.show);
 
   return (
-    <header className="sticky top-0 z-50 border-b border-white/30 bg-white/60 backdrop-blur-md">
+    <header className="@container sticky top-0 z-50 border-b border-white/30 bg-white/60 backdrop-blur-md">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
         {/* Logo */}
         <Link href="/" className="flex items-center gap-2 text-xl font-bold tracking-tight text-stone-900">
@@ -35,8 +35,8 @@ export default function Header() {
           {SITE_NAME}
         </Link>
 
-        {/* Desktop nav */}
-        <div className="hidden items-center gap-6 md:flex">
+        {/* 넓은 탐색: 화면이 아니라 header 폭 기준(공통 대화창이 본문 폭을 줄여도 메뉴가 넘치지 않게) */}
+        <div className="hidden items-center gap-6 @3xl:flex">
           <nav className="flex items-center gap-5 text-sm font-medium">
             {navLinks.map((link) => (
               <Link
@@ -54,7 +54,7 @@ export default function Header() {
         {/* Mobile hamburger */}
         <button
           onClick={() => setMobileOpen(!mobileOpen)}
-          className="flex h-9 w-9 items-center justify-center rounded-lg text-stone-600 hover:bg-stone-100 md:hidden"
+          className="flex h-9 w-9 items-center justify-center rounded-lg text-stone-600 hover:bg-stone-100 @3xl:hidden"
         >
           {mobileOpen ? (
             <svg className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
@@ -70,7 +70,7 @@ export default function Header() {
 
       {/* Mobile menu */}
       {mobileOpen && (
-        <div className="border-t border-stone-100 bg-white px-6 pb-4 md:hidden">
+        <div className="border-t border-stone-100 bg-white px-6 pb-4 @3xl:hidden">
           <nav className="flex flex-col gap-1 py-2">
             {navLinks.map((link) => (
               <Link

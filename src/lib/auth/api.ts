@@ -12,6 +12,9 @@ export interface AuthUser {
   login: string;
   role: UserRole;
   isApproved: boolean;
+  // #10: 서버가 지금 이 계정의 Codex 실행 환경 진입 준비 요청을 허용하는지. 준비 상태·모델 권한이 아니다.
+  // 이전 API에는 없다(없으면 canUseResearch로 대신 판단, 있는 false는 그대로 false).
+  codexRunner?: boolean;
 }
 
 export type MeResult =
@@ -45,6 +48,8 @@ function parseMe(body: unknown): { user: AuthUser; csrfToken: string } | null {
       login: u.login,
       role: u.role as UserRole,
       isApproved: u.isApproved,
+      // 있는데 형식이 맞지 않으면 준비 요청을 보내지 않는 쪽(false)으로 둔다(없음으로 보지 않음).
+      ...(u.codexRunner !== undefined && { codexRunner: u.codexRunner === true }),
     },
     csrfToken: b.csrfToken,
   };
@@ -115,3 +120,13 @@ export const ROLE_LABELS: Record<UserRole, string> = {
   editor: "편집자",
   commenter: "일반 회원",
 };
+
+/**
+ * #10 진입 준비 요청을 보낼 계정인지(api-contracts/issue10-user-runners-interface-v1.md).
+ * 서버가 준 codexRunner를 따르고, 이전 API라 필드가 없을 때만 canUseResearch로 대신한다.
+ * 대화창·목록·메뉴·범위는 이 값이 아니라 canUseResearch와 서버 판정으로 정한다.
+ */
+export function canPrepareRunner(user: AuthUser | null | undefined): boolean {
+  if (!user) return false;
+  return user.codexRunner ?? canUseResearch(user);
+}

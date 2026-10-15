@@ -8,6 +8,9 @@
 # E2E_INSECURE_ORIGIN=1: 127.0.0.1 대신 컨테이너의 비-loopback IP로 접속한다. 공인 IP HTTP처럼
 # 브라우저가 secure context가 아닌 origin에서도 동작하는지 확인한다(isSecureContext === false 단언).
 #
+# E2E_SCRIPTS: 실행할 스크립트 목록 덮어쓰기(예: "e2e-chat-layout.mjs").
+# 화면 스크린샷은 $WORK/shots에 남는다(e2e-chat-layout.mjs).
+#
 # 저장소는 읽기 전용으로 마운트하고 빌드·실행 산출물은 임시 디렉터리($E2E_WORK)에만 만든다.
 set -eu
 
@@ -57,11 +60,11 @@ if [ "$MODE" = node ]; then
     -e NODE_ENV=production -e NEXT_TELEMETRY_DISABLED=1 -e PORT=3000 -e HOSTNAME=0.0.0.0 -e BASE_PATH="$BASE" \
     -v "$WORK/app:/app:ro" -v "$E2E_DIR:/e2e:ro" -w /app "$NODE_IMAGE" \
     sh -c 'node server.js & exec node /e2e/mock-gateway.mjs' >/dev/null
-  SCRIPTS="e2e.mjs e2e-research.mjs"
+  SCRIPTS=${E2E_SCRIPTS:-"e2e.mjs e2e-research.mjs e2e-chat-layout.mjs e2e-runner.mjs"}
 else
   docker run -d --rm --name "$NAME" --read-only --user 1000:1000 -e OUT_DIR=/out -e PREFIX="$BASE" \
     -v "$WORK/app:/out:ro" -v "$E2E_DIR:/e2e:ro" "$NODE_IMAGE" node /e2e/pages-static.mjs >/dev/null
-  SCRIPTS=e2e-pages.mjs
+  SCRIPTS=${E2E_SCRIPTS:-e2e-pages.mjs}
 fi
 trap 'docker stop "$NAME" >/dev/null 2>&1 || true' EXIT
 sleep 4
@@ -76,13 +79,18 @@ echo "== origin http://$ORIGIN_HOST:8080"
 
 # 3) 브라우저 검증
 STATUS=0
+mkdir -p "$WORK/shots"
 docker run --rm --network "container:$NAME" --ipc=host -e HOME=/tmp \
   -e ORIGIN="http://$ORIGIN_HOST:8080" -e EXPECT_INSECURE="$EXPECT_INSECURE" -e BASE_PATH="$BASE" -e EXPECT_SHA="$SHA" \
+  -e SHOTS_DIR=/shots -v "$WORK/shots:/shots" \
   -v "$E2E_DIR:/e2e:ro" "$PW_IMAGE" sh -c "
     mkdir -p /tmp/t && cd /tmp/t && npm i --silent playwright@$PW_VERSION >/dev/null 2>&1 &&
-    rc=0; for s in $SCRIPTS; do echo \"== \$s\"; cp /e2e/\$s . && node \$s || rc=1; done; exit \$rc" || STATUS=$?
+    rc=0; for s in $SCRIPTS; do echo \"== \$s\"; cp /e2e/\$s . && node \$s || rc=1; done;
+    chown -R $(id -u):$(id -g) /shots; exit \$rc" || STATUS=$?
 
 if [ "$MODE" = node ]; then
+  # 서버 로그 전체를 남긴다(진단 경로 확인용).
+  docker logs "$NAME" > "$WORK/server.log" 2>&1 || true
   echo "== server log: EACCES=$(docker logs "$NAME" 2>&1 | grep -c EACCES || true) NoFallbackError=$(docker logs "$NAME" 2>&1 | grep -c NoFallbackError || true)"
   [ "$(docker logs "$NAME" 2>&1 | grep -c EACCES || true)" = 0 ] || STATUS=1
 fi

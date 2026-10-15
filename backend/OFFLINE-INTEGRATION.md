@@ -19,7 +19,7 @@ sudo -E docker compose -p anxious-s13-front-it \
 
 Only this new empty staging directory starts writable so UID10001 can create private/ (mode0700), mapping/token files (mode0600). Setup rejects unknown/unapproved/same account IDs, a non-fixture DB name, non-test environments, model credential inputs, populated output or symlinks. Do not rerun setup or rotate tokens under running adapters. API reads the private map; each runner mounts only its own token and named state volume, on a different internal network connected only to API. No runner ports, DB/other-runner network, Docker socket, external network or model credentials are supplied. Owner markers and exclusive volume leases remain enforced.
 
-Overlay API uses the guarded test-image factory calling the unchanged production app/router and setting fixture verification. The guarded runner factory calls the actual adapter with CODEX_BIN=/usr/local/bin/codex-fixture and CODEX_MODEL=fixture-no-provider. No __mock UI route or production API fault switch is added; runtime stage excludes these factories/controls/executable.
+Overlay API uses the guarded test-image factory calling the unchanged production app/router and setting fixture verification. The guarded runner factory calls the actual adapter with CODEX_BIN=/usr/local/bin/codex-fixture and CODEX_MODEL=gpt-6.1-sol. No __mock UI route or production API fault switch is added; runtime stage excludes these factories/controls/executable.
 
 | Message text | Expected observable behavior |
 | --- | --- |

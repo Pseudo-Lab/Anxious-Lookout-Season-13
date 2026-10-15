@@ -1,0 +1,314 @@
+{
+  "admissions": {
+    "checks": {
+      "admissions_check": "completed_at IS NULL OR completed_at >= admitted_at",
+      "admissions_generation_check": "generation > 0"
+    },
+    "columns": {
+      "admitted_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        null
+      ],
+      "completed_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        true,
+        null
+      ],
+      "generation": [
+        "BIGINT",
+        false,
+        null
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "pod_uid": [
+        "UUID",
+        false,
+        null
+      ],
+      "request_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "state_id": [
+        "UUID",
+        false,
+        null
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "runner_runtime",
+        "referred_table": "registry"
+      }
+    ],
+    "indexes": {
+      "runner_pending_admissions": {
+        "columns": [
+          "owner_id"
+        ],
+        "unique": false,
+        "where": "(completed_at IS NULL)"
+      }
+    },
+    "primary": [
+      "owner_id",
+      "request_id"
+    ],
+    "unique": {}
+  },
+  "entry_receipts": {
+    "checks": {
+      "entry_receipts_generation_check": "generation > 0"
+    },
+    "columns": {
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        null
+      ],
+      "generation": [
+        "BIGINT",
+        false,
+        null
+      ],
+      "key": [
+        "UUID",
+        false,
+        null
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "runner_runtime",
+        "referred_table": "registry"
+      }
+    ],
+    "indexes": {},
+    "primary": [
+      "owner_id",
+      "key"
+    ],
+    "unique": {}
+  },
+  "outbox": {
+    "checks": {
+      "outbox_check": "kind = 'ensure'::text AND pod_uid IS NULL OR kind = 'stop-pod-only'::text AND pod_uid IS NOT NULL",
+      "outbox_generation_check": "generation > 0",
+      "outbox_kind_check": "kind = ANY (ARRAY['ensure'::text, 'stop-pod-only'::text])",
+      "outbox_revision_check": "revision > 0"
+    },
+    "columns": {
+      "generation": [
+        "BIGINT",
+        false,
+        null
+      ],
+      "kind": [
+        "TEXT",
+        false,
+        null
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "pod_uid": [
+        "UUID",
+        true,
+        null
+      ],
+      "revision": [
+        "BIGINT",
+        false,
+        null
+      ],
+      "settled": [
+        "BOOLEAN",
+        false,
+        "false"
+      ],
+      "state_id": [
+        "UUID",
+        false,
+        null
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "runner_runtime",
+        "referred_table": "registry"
+      }
+    ],
+    "indexes": {
+      "runner_pending_outbox": {
+        "columns": [
+          "owner_id",
+          "generation",
+          "revision"
+        ],
+        "unique": false,
+        "where": "(NOT settled)"
+      }
+    },
+    "primary": [
+      "owner_id",
+      "generation",
+      "revision",
+      "kind"
+    ],
+    "unique": {}
+  },
+  "registry": {
+    "checks": {
+      "registry_active_requests_check": "active_requests >= 0",
+      "registry_check": "phase = 'not_prepared'::text AND generation = 0 AND pod_uid IS NULL OR phase <> 'not_prepared'::text AND generation > 0",
+      "registry_check1": "(phase <> ALL (ARRAY['ready'::text, 'runner_unreachable'::text, 'stopping'::text])) OR pod_uid IS NOT NULL",
+      "registry_check2": "active_requests = 0 AND NOT ambiguous OR pod_uid IS NOT NULL",
+      "registry_check3": "(phase <> ALL (ARRAY['not_prepared'::text, 'idle_stopped'::text, 'stopping'::text, 'capacity_wait'::text])) OR active_requests = 0 AND NOT ambiguous",
+      "registry_check4": "(phase <> ALL (ARRAY['idle_stopped'::text, 'capacity_wait'::text])) OR pod_uid IS NULL",
+      "registry_generation_check": "generation >= 0",
+      "registry_phase_check": "phase = ANY (ARRAY['not_prepared'::text, 'provisioning'::text, 'capacity_wait'::text, 'ready'::text, 'runner_unreachable'::text, 'runner_failed'::text, 'stopping'::text, 'idle_stopped'::text])",
+      "registry_revision_check": "revision >= 0"
+    },
+    "columns": {
+      "active_requests": [
+        "BIGINT",
+        false,
+        null
+      ],
+      "ambiguous": [
+        "BOOLEAN",
+        false,
+        null
+      ],
+      "generation": [
+        "BIGINT",
+        false,
+        null
+      ],
+      "last_activity": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        null
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "phase": [
+        "TEXT",
+        false,
+        null
+      ],
+      "pod_uid": [
+        "UUID",
+        true,
+        null
+      ],
+      "revision": [
+        "BIGINT",
+        false,
+        null
+      ],
+      "state_id": [
+        "UUID",
+        false,
+        null
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_columns": [
+          "id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts"
+      }
+    ],
+    "indexes": {
+      "registry_pod_uid_key": {
+        "columns": [
+          "pod_uid"
+        ],
+        "unique": true,
+        "where": null
+      },
+      "registry_state_id_key": {
+        "columns": [
+          "state_id"
+        ],
+        "unique": true,
+        "where": null
+      }
+    },
+    "primary": [
+      "owner_id"
+    ],
+    "unique": {
+      "registry_pod_uid_key": [
+        "pod_uid"
+      ],
+      "registry_state_id_key": [
+        "state_id"
+      ]
+    }
+  },
+  "schema_version": {
+    "checks": {
+      "schema_version_singleton_check": "singleton",
+      "schema_version_version_check": "version = 1"
+    },
+    "columns": {
+      "singleton": [
+        "BOOLEAN",
+        false,
+        null
+      ],
+      "version": [
+        "INTEGER",
+        false,
+        null
+      ]
+    },
+    "foreign": [],
+    "indexes": {},
+    "primary": [
+      "singleton"
+    ],
+    "unique": {}
+  }
+}

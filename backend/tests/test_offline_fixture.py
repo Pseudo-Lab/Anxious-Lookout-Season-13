@@ -23,7 +23,7 @@ def test_fixture_requires_explicit_test_environment_and_rejects_model_inputs(mon
     monkeypatch.delenv("OPENAI_API_KEY_FILE")
     require_offline()
     monkeypatch.setenv("CODEX_BIN", "/usr/local/bin/codex")
-    monkeypatch.setenv("CODEX_MODEL", "fixture-no-provider")
+    monkeypatch.setenv("CODEX_MODEL", "gpt-6.1-sol")
     with pytest.raises(RuntimeError):
         create_runner()
 
@@ -58,7 +58,7 @@ def test_fixture_api_marks_mock_without_adding_control_routes(admin, monkeypatch
 def test_offline_runner_rejects_intake_before_native_work_and_authenticates(tmp_path, monkeypatch):
     monkeypatch.setenv("OFFLINE_RUNNER_FIXTURE", "true")
     monkeypatch.setenv("CODEX_BIN", "/usr/local/bin/codex-fixture")
-    monkeypatch.setenv("CODEX_MODEL", "fixture-no-provider")
+    monkeypatch.setenv("CODEX_MODEL", "gpt-6.1-sol")
     monkeypatch.setenv("RUNNER_ACCOUNT_ID", str(uuid.uuid4()))
     monkeypatch.setenv("RUNNER_STATE_DIR", str(tmp_path / "home"))
     monkeypatch.setenv("RESEARCH_TOOL_CALLBACK_URL", "http://never-called.invalid/tools")

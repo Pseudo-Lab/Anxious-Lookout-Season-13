@@ -173,11 +173,36 @@ export interface ArchiveResult {
 
 export interface CodexStatus {
   available: boolean;
-  reason: null | "not_configured" | "unavailable";
+  // 서버가 정한 사유 코드. 새 코드가 추가될 수 있으므로 모르는 값은 일반 "사용할 수 없음"으로 표시한다.
+  reason: string | null;
   verification: "unverified" | "fixture" | "real";
+  // 서버가 강제하는 모델(표시 전용). 연결·모델 표시만으로 실제 응답 성공을 뜻하지 않는다.
+  model?: string;
+  // 이 계정의 Codex 접수가 끝나는 시각(서버가 접근 만료보다 이르게 잡은 시험 창 끝). 표시용이며 판정은 서버가 한다.
+  accessExpiresAt?: string;
+  // 현재 시험 창에서 남은 접수 횟수.
+  remainingAdmissions?: number;
+  // #10: 일시 상태(환경 활성화 중·사용 대기·연결 확인)에서 다시 조회할 간격 안내(초, 1–60). 준비·전송 지시가 아니다.
+  retryAfterSeconds?: number;
 }
 
 export type SessionState = "idle" | "running" | "failed";
+
+// 질문을 보낸 페이지(#9 api-contracts/issue9-page-chat.md). front는 kind·resourceId만 보내고
+// 문맥·허용 도구는 서버가 자원 소유·공개 상태를 확인해 요청마다 정한다.
+export type PageKind = "general" | "public_document" | "material" | "document" | "material_workspace" | "document_workspace";
+
+export interface PageDescriptor {
+  kind: PageKind;
+  resourceId?: string;
+}
+
+// 서버가 접수한 요청의 적용 범위(표시용). 새 값이 생길 수 있으므로 kind·capability는 문자열로 받고 모르는 값은 일반 문구로 표시한다.
+export interface AcceptedScope {
+  page: { kind: string; resourceId?: string; title?: string };
+  capability: string;
+  allowedTools: string[];
+}
 
 export interface SessionSummary {
   id: string;
@@ -186,8 +211,10 @@ export interface SessionSummary {
   createdAt: string;
   updatedAt: string;
   version: number;
-  // 공개 글에서 시작한 질문 세션의 처음 저장 맥락(당시 공개본)
+  // 공개 글에서 시작한 질문 세션의 처음 저장 맥락(당시 공개본). 이후 질문의 문맥·권한에는 쓰이지 않는 생성 기록이다.
   context?: { documentId: string; publicationId: string; title: string };
+  // 가장 최근에 접수된 요청의 범위. 이전 기록에는 없을 수 있다.
+  scope?: AcceptedScope;
 }
 
 export interface MessageItem {
@@ -198,11 +225,25 @@ export interface MessageItem {
   // Codex 원본에 아직/끝내 기록되지 않은 사용자 입력(플랫폼이 보존). 모델이 본 이력이 아니다.
   source?: "platform";
   status?: "pending" | "not_recorded";
+  // 고정 모델 확인 실패(응답 모델 불일치·우회)로 중단된 실행의 항목. 정상 응답이 아니다.
+  modelMismatch?: boolean;
+  // 사용자 메시지가 접수된 범위(서버 기록). 이전 기록에는 없을 수 있다.
+  scope?: AcceptedScope;
 }
 
-export type SessionItem =
-  | MessageItem
-  | { id: string; type: "tool_call"; name: string; input: unknown; output: unknown; status: string };
+export interface ToolCallItem {
+  id: string;
+  type: "tool_call";
+  name: string;
+  input: unknown;
+  output: unknown;
+  // rejected: 이 질문의 범위에서 허용되지 않아 서버가 거부한 호출(error.code tool_not_allowed)
+  status: string;
+  error?: { code: string };
+  modelMismatch?: boolean;
+}
+
+export type SessionItem = MessageItem | ToolCallItem;
 
 export interface SessionDetail extends SessionSummary {
   items: SessionItem[];

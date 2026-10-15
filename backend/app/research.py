@@ -511,4 +511,4 @@ def register_research(app, sessions, settings, current_session, error):
     from .membership import register_membership
     register_membership(app, authorized, settings, response, write)
     from .conversations import register_conversations
-    register_conversations(app, authorized, sessions, settings, response, write)
+    register_conversations(app, authorized, sessions, settings, response, write, current_session)

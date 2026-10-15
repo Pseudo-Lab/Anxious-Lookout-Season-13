@@ -1,0 +1,11 @@
+{
+  "RUNNER_TEST_NAMESPACE": "codex-runner-rehearsal",
+  "RUNNER_SYNTHETIC_OWNER": "d888737c-4830-4761-9630-b400982f8618",
+  "RUNNER_SYNTHETIC_STATE": "a9617ace-fa4b-4bbc-b70b-2188f0efe3e6",
+  "RUNNER_NATIVE_PV": "codex-runner-rehearsal-native-a9617ace",
+  "RUNNER_CONTROL_PV": "codex-runner-rehearsal-control-a9617ace",
+  "RUNNER_NATIVE_SIZE": "1Gi",
+  "RUNNER_CONTROL_SIZE": "1Gi",
+  "RUNNER_STATIC_STORAGE_CLASS": "",
+  "RUNNER_APPROVED_ACCESS_MODE": "ReadWriteOnce"
+}

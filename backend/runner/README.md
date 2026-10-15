@@ -1,6 +1,28 @@
 # Private Codex runner prototype
 
+Current issue7 login UID/state/session package: [USER-UID-CONNECTION.md](../USER-UID-CONNECTION.md).
+Real mapping requires stateId/RUNNER_STATE_ID and an explicitly initialized fresh
+marker. Request state validation precedes native effects; Pod UID is auxiliary and
+same-conversation resume verifies its private thread. New API/runner images and
+exact operating review are required; existing deployed images are unchanged.
+
 This is an isolated per-service-account app-server broker. Source/fixture validation is separate from real provider authentication, paid turns and native resume acceptance. Deployment/resources/credential injection are not authorized by this development checkpoint.
+
+The ARM64 runner packages native0.160.1 plus the same-release code-mode host. Native
+and companion hashes and executable permission are checked before auth attachment or
+process startup; missing/modified/unexecutable bundles refuse. The pinned model uses
+code_mode_only, so real native enables its required host while retaining the existing
+shell/unified-exec/apps/plugins/browser/image/web and approval restrictions. Test CLI
+fixtures keep their previous host-disabled path. Installer pins the official companion
+archive and ELF64 AArch64 binary; no model/version fallback is introduced.
+
+`infra/hosting/m3/check_runner_companion.sh <runner-test image ID> <pinned models.json>`
+exercises actual Native construction and runner HTTP admission with a synthetic private
+grant/cache and network-none loopback mock. It verifies research tool callbacks, exact
+session/request authority, separate session threads and same-thread follow-up, wrong
+bearer/state/model refusal, deduplication, failed-turn consumption and max3 refusal.
+This is not original-source authority, live entitlement/shared lifecycle or deployment
+approval. Production images are built separately and handed to PM only after review.
 
 The optional Docker `runner` stage installs ARM64 Codex **0.160.1** with executable SHA256 `fbbaec80443919f86dd63648a0b62759cf6f1d0e09310602fde96885e0bceb3e`. A different artifact fails the build. Experimental protocol fields are version-dependent. The pinned executable's `generate-json-schema --experimental` was checked in Docker without an account/model request; `dynamicTools` needs initialize.experimentalApi and function descriptors need type=function. Upgrading the pin requires fresh schema and integration verification.
 
@@ -10,8 +32,8 @@ Protocol references: [official App Server](https://learn.chatgpt.com/docs/app-se
 
 - RUNNER_ACCOUNT_ID: one auth.accounts UUID, matching the API's operator-owned mapping.
 - RUNNER_TOKEN_FILE: separate private >=32-char secret for each runner; API mapping points to its private copy. Do not reuse between accounts.
-- CODEX_MODEL: an explicitly authorized model; there is no assumed entitlement or selected deployment model.
-- CODEX_API_KEY_FILE: optional explicitly authorized API key file, separately mounted for each account runner. It is read only by the adapter, sent through native login and never copied from an agent home or returned in JSON. The current prototype uses ephemeral native credential storage. Credential funding does not select data ownership: the server account UUID and private runner/home remain authoritative. Operator-funded project authentication is currently an investigation only; see [AUTH-FEASIBILITY.md](../AUTH-FEASIBILITY.md). No operator credential or personal ChatGPT login direction has been selected or exercised.
+- CODEX_MODEL: exactly `gpt-6.1-sol`; other values fail, with no model/API-key fallback. Start/resume/turn/config and reported response/reroute are checked. This does not prove model entitlement or unseen provider behavior.
+- CODEX_AUTH_MODE: none(default) or personal-cache(candidate). None does not consume a restored auth.json. Personal-cache requires APP_ENV=personal-test, CODEX_EXECUTION_SCOPE=personal-private and a private CODEX_PERSONAL_CONTROL_DIR. CODEX_API_KEY_FILE is rejected. See [PERSONAL-CODEX-TEST.md](../PERSONAL-CODEX-TEST.md) for actual provisioning gates, refresh responsibility, max3 durable budget and cleanup. No current host cache is discovered/shared. Real credentials/inference remain unexecuted.
 - RESEARCH_TOOL_CALLBACK_URL: fixed internal API URL, normally `http://api:8080/api/internal/research/tools`; include APP_BASE_PATH when present.
 - RUNNER_STATE_DIR: `/state`, one separate retained volume and work/home directory per account.
 

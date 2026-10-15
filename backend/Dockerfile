@@ -5,6 +5,7 @@ COPY backend/requirements.lock /tmp/requirements.lock
 RUN pip install --no-cache-dir --disable-pip-version-check -r /tmp/requirements.lock
 COPY backend/app /app/app
 COPY backend/runner /app/runner
+COPY backend/ops /app/ops
 COPY backend/db /app/db
 COPY backend/alembic /app/alembic
 COPY backend/research_alembic /app/research_alembic
@@ -34,3 +35,8 @@ RUN python /app/runner/install_codex.py \
     && chown 10001:10001 /state
 USER 10001:10001
 CMD ["uvicorn", "runner.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log", "--no-proxy-headers"]
+
+# Isolated tests of the actual pinned bundle plus existing offline protocol cases.
+FROM test AS runner-test
+COPY --from=runner --chmod=755 /usr/local/bin/codex /usr/local/bin/codex
+COPY --from=runner --chmod=755 /usr/local/bin/codex-code-mode-host /usr/local/bin/codex-code-mode-host
