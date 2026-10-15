@@ -28,7 +28,7 @@ function sid(req) {
   return m ? m[1] : null;
 }
 
-function api(req, res, path, url) {
+async function api(req, res, path, url) {
   calls.push({
     method: req.method,
     path,
@@ -94,6 +94,10 @@ function api(req, res, path, url) {
   if (path === "/auth/logout") {
     if (req.method !== "POST") return err(res, 405, "method_not_allowed", "Method not allowed", { Allow: "POST" });
     if (mode.logout === "403") return err(res, 403, "csrf_invalid", "Invalid CSRF token");
+    // #13: 실행 환경 삭제 실패면 session을 유지한 채 503.
+    if (mode.logout === "503") return err(res, 503, "codex_runner_unreachable", "Runner cleanup failed");
+    // #13: 실행 환경 삭제 요청이 이전 5초 한도보다 오래 걸리는 정상 로그아웃.
+    if (mode.logout === "slow") await new Promise((r) => setTimeout(r, 7000));
     const expectedOrigin = `http://${req.headers.host}`;
     if (req.headers.origin !== expectedOrigin) return err(res, 403, "origin_not_allowed", "Origin not allowed");
     const id = sid(req);

@@ -111,10 +111,18 @@ await header.getByRole("alert").first().waitFor();
 check("D. logout 403 shows error", (await header.getByRole("alert").first().innerText()).includes("로그아웃 실패"));
 check("D. still logged in after 403", await header.getByText("mock-user").first().isVisible());
 
-// E. 로그아웃 성공 (POST + X-CSRF-Token)
-await setMock("logout=normal");
+// D2. #13 실행 환경 삭제 실패(503) -> 로그인 유지 + 오류 표시(성공으로 처리하지 않음)
+await setMock("logout=503");
 await header.getByRole("button", { name: "로그아웃" }).first().click();
-await header.getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
+await header.getByText("codex_runner_unreachable").first().waitFor();
+check("D2. logout 503 shows error", (await header.getByRole("alert").first().innerText()).includes("로그아웃 실패"));
+check("D2. still logged in after 503", await header.getByText("mock-user").first().isVisible());
+
+// E. 로그아웃 성공 (POST + X-CSRF-Token). #13: 서버가 실행 환경 삭제 요청으로 5초 넘게 걸려도 끊지 않고 성공한다.
+await setMock("logout=slow");
+await header.getByRole("button", { name: "로그아웃" }).first().click();
+await header.getByRole("link", { name: "GitHub 로그인" }).first().waitFor({ timeout: 20000 });
+await setMock("logout=normal");
 const calls = await (await fetch(`${ORIGIN}/__mock/calls`)).json();
 const lastLogout = calls.filter((c) => c.path === "/auth/logout").at(-1);
 check("E. logout POST with X-CSRF-Token and Origin", lastLogout?.method === "POST" && !!lastLogout.csrf && lastLogout.origin === ORIGIN, JSON.stringify(lastLogout));
