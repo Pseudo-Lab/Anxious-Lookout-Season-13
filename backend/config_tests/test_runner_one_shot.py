@@ -138,9 +138,60 @@ def test_real_disposable_db_receipt_crash_and_reentry(tmp_path, monkeypatch):
         port.lookup = lambda identity: Pod(identity, UUID(observed()['metadata']['uid']))
         result = controller.reconcile(Fence.of(current))
         assert str(result.pod_uid) == observed()['metadata']['uid']
+        assert result.phase.value == 'runner_unreachable' and result.ambiguous is True
+        assert result.generation == 1 and result.revision == 2 and result.active_requests == 0
         with engine.begin() as db: one.check_db(db)
         # Invoke the actual CLI workflow function again: lookup/report only.
         secret(creds/'sa-token', 's'*40); secret(creds/'transport-token', 'x'*40)
+        # Real Port/preflight/lookup/health and real retained DB, with wire-shape
+        # PodList items (no TypeMeta). Only the network is mocked.
+        objects = resources()
+        live = observed()
+        live['spec']['nodeName'] = 'anxious-lookout'
+        live['status'] = dict(phase='Running', podIP='10.42.0.99')
+        item = deepcopy(live); item.pop('apiVersion'); item.pop('kind')
+        objects['pods']['items'] = [item]
+        objects['pods/'+one.PLAN.identity.name] = live
+        requests = []
+        def handler(req):
+            requests.append(req)
+            assert req.method == 'GET', 'reentry must not POST'
+            if req.url.path == '/health':
+                if req.headers['Authorization'] != 'Bearer '+'x'*40:
+                    status, value = 401, {'detail':'unauthorized'}
+                elif req.headers.get('X-Runner-State-Id') != one.STATE:
+                    status, value = 503, {'detail':'refused'}
+                else:
+                    status, value = 200, dict(ownerId=one.OWNER, stateId=one.STATE,
+                        podUid=live['metadata']['uid'], available=False, verification='unverified', reason='not_configured')
+            else:
+                status = 200
+                key = req.url.path
+                if key not in objects: key = key.removeprefix('/api/v1/namespaces/'+one.NAMESPACE+'/')
+                value = objects[key]
+            return httpx.Response(status, stream=httpx.ByteStream(json.dumps(value).encode()))
+        original_client = httpx.Client
+        def client_factory(*args, **kwargs):
+            kwargs['transport'] = httpx.MockTransport(handler)
+            return original_client(*args, **kwargs)
+        with monkeypatch.context() as patch:
+            patch.setattr(one.httpx, 'Client', client_factory)
+            real_evidence = directory(tmp_path/'wire-reentry-evidence')
+            one.run(permit, real_evidence, api, creds/'sa-token', creds/'transport-token',
+                    Path('/etc/ssl/certs/ca-certificates.crt'))
+            # Same Plan but a replaced UID must not be adopted on reentry.
+            live['metadata']['uid'] = str(UUID(int=99))
+            objects['pods']['items'][0]['metadata']['uid'] = live['metadata']['uid']
+            before = len(requests)
+            with pytest.raises(Refused):
+                one.run(permit, directory(tmp_path/'foreign-uid-evidence'), api, creds/'sa-token',
+                        creds/'transport-token', Path('/etc/ssl/certs/ca-certificates.crt'))
+            assert not any(req.url.path == '/health' for req in requests[before:])
+        assert [r['status'] for r in json.loads((real_evidence/'health.json').read_text())['cases']] == [200,401,503,503]
+        assert json.loads((real_evidence/'result.json').read_text())['freshPermit'] is False
+        assert requests and all(req.method == 'GET' for req in requests)
+        assert not (real_evidence/'create-response.json').exists()
+        assert 'kind' not in objects['pods']['items'][0]  # Do not mutate evidence.
         port.preflight = lambda: [observed()]
         port.close = lambda: None
         monkeypatch.setattr(one, 'Port', lambda *args, **kwargs: port)
@@ -191,11 +242,13 @@ def resources():
     objects['/api/v1/namespaces/'+one.NAMESPACE] = dict(kind='Namespace', metadata=dict(name=one.NAMESPACE,
         uid=one.NAMESPACE_UID, labels={'kubernetes.io/metadata.name':one.NAMESPACE,
         'pod-security.kubernetes.io/enforce':'restricted','pod-security.kubernetes.io/enforce-version':'v1.36'}))
-    objects['pods'] = dict(kind='PodList', items=[])
+    objects['pods'] = dict(apiVersion='v1', kind='PodList', items=[])
     return objects
 
 
-@pytest.mark.parametrize('drift', ['none', 'namespace', 'tenant', 'pvc', 'pv', 'claimref', 'path', 'secret', 'token', 'foreign-pod'])
+@pytest.mark.parametrize('drift', ['none', 'namespace', 'tenant', 'pvc', 'pv', 'claimref', 'path', 'secret', 'token', 'foreign-pod',
+                                  'listed-pod', 'list-item-kind', 'list-item-version', 'list-kind', 'list-version',
+                                  'list-item-spec', 'list-item-missinguid'])
 def test_preflight_references_and_inventory(monkeypatch, tmp_path, drift):
     objects = resources()
     if drift == 'namespace': objects['/api/v1/namespaces/'+one.NAMESPACE]['metadata']['uid'] = 'foreign'
@@ -207,6 +260,15 @@ def test_preflight_references_and_inventory(monkeypatch, tmp_path, drift):
     if drift == 'path': pv['spec']['local']['path'] = '/foreign'
     if drift == 'secret': objects['secrets/'+one.PLAN.transport.name]['metadata']['uid'] = str(UUID(int=2))
     if drift == 'foreign-pod': objects['pods']['items'] = [observed()]; objects['pods']['items'][0]['metadata']['name'] = 'other'
+    if drift in ('listed-pod', 'list-item-kind', 'list-item-version', 'list-item-spec', 'list-item-missinguid'):
+        item = observed(); item.pop('apiVersion'); item.pop('kind')
+        objects['pods']['items'] = [item]
+        if drift == 'list-item-kind': item['kind'] = 'Secret'
+        if drift == 'list-item-version': item['apiVersion'] = 'v2'
+        if drift == 'list-item-spec': item['spec']['containers'][0]['image'] = 'foreign'
+        if drift == 'list-item-missinguid': item['metadata'].pop('uid')
+    if drift == 'list-kind': objects['pods']['kind'] = 'SecretList'
+    if drift == 'list-version': objects['pods']['apiVersion'] = 'v2'
     port = object.__new__(one.Port)
     port.namespace = one.NAMESPACE
     port.evidence = tmp_path
@@ -215,8 +277,9 @@ def test_preflight_references_and_inventory(monkeypatch, tmp_path, drift):
     port._request = lambda method, resource, name=None: objects[resource+('/'+name if name else '')]
     monkeypatch.setattr(one, 'request', lambda client, method, path: objects[path])
     if drift == 'none': assert port.preflight() == []
+    elif drift == 'listed-pod': assert len(port.preflight()) == 1
     else:
-        with pytest.raises((Refused, ValueError)): port.preflight()
+        with pytest.raises((Refused, ValueError, KeyError)): port.preflight()
 
 
 def test_pod_uid_cannot_be_rebound(tmp_path):
@@ -225,7 +288,8 @@ def test_pod_uid_cannot_be_rebound(tmp_path):
     with pytest.raises(Refused): one.bind_uid(tmp_path, UUID(int=2))
 
 
-def test_health_four_auth_cases_and_no_secret_evidence(tmp_path, monkeypatch):
+@pytest.mark.parametrize('foreign_identity', [False, True])
+def test_health_four_auth_cases_and_no_secret_evidence(tmp_path, monkeypatch, foreign_identity):
     obj = observed()
     obj['spec']['nodeName'] = 'anxious-lookout'
     obj['status'] = dict(phase='Running', podIP='10.42.0.99')
@@ -239,9 +303,14 @@ def test_health_four_auth_cases_and_no_secret_evidence(tmp_path, monkeypatch):
         elif req.headers.get('X-Runner-State-Id') != one.STATE: code, body = 503, {'detail':'refused'}
         else:
             code, body = 200, dict(ownerId=one.OWNER, stateId=one.STATE, podUid=obj['metadata']['uid'], available=False, verification='unverified', reason='not_configured')
+            if foreign_identity: body['podUid'] = str(UUID(int=99))
         return httpx.Response(code, stream=httpx.ByteStream(json.dumps(body).encode()))
     client = httpx.Client(base_url='http://10.42.0.99:8080', transport=httpx.MockTransport(handler))
     monkeypatch.setattr(one.httpx, 'Client', lambda **kwargs: client)
+    if foreign_identity:
+        with pytest.raises(Refused): one.health(port, UUID(obj['metadata']['uid']))
+        assert len(calls) == 1 and calls[0].method == 'GET'
+        return
     result = one.health(port, UUID(obj['metadata']['uid']))
     assert [row['status'] for row in result['cases']] == [200, 401, 503, 503]
     assert len(calls) == 4 and all(req.method == 'GET' and req.url.path == '/health' for req in calls)
@@ -265,3 +334,63 @@ def test_host_probe_never_infers_policy_deny(tmp_path, monkeypatch, connected):
     result = json.loads((tmp_path/'probe.json').read_text())
     assert result['policyVerdict'] == 'unverified'
     assert result['socketOutcome'] == ('connected' if connected else 'not-connected')
+
+
+@pytest.mark.parametrize('failure', ['refused', 'timeout', 'exhausted', 'status', 'read-timeout'])
+def test_initial_health_retry_is_bounded_get_only(monkeypatch, failure):
+    now = [0.0]; calls = []
+    monkeypatch.setattr(one.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(one.time, 'sleep', lambda duration: now.__setitem__(0, now[0]+duration))
+    def handler(req):
+        calls.append(req)
+        if failure == 'status': return httpx.Response(503, stream=httpx.ByteStream(b'{}'))
+        if failure == 'read-timeout': raise httpx.ReadTimeout('synthetic')
+        if len(calls) <= 2 or failure == 'exhausted':
+            if failure == 'timeout': raise httpx.ConnectTimeout('synthetic')
+            raise httpx.ConnectError('synthetic')
+        return httpx.Response(200, stream=httpx.ByteStream(b'{}'))
+    with httpx.Client(base_url='http://10.42.0.99:8080', transport=httpx.MockTransport(handler)) as client:
+        if failure in ('refused', 'timeout'):
+            body, attempts = one.initial_health(client)
+            assert body == {} and attempts == 3 and now[0] == 2
+        else:
+            with pytest.raises((Refused, httpx.HTTPError)): one.initial_health(client)
+            assert len(calls) == (10 if failure == 'exhausted' else 1)
+    assert all(req.method == 'GET' and req.url.path == '/health' for req in calls)
+    assert now[0] <= 10
+
+
+def test_initial_health_aggregate_deadline(monkeypatch):
+    now = [0.0]; deadlines = []
+    monkeypatch.setattr(one.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(one.time, 'sleep', lambda duration: now.__setitem__(0, now[0]+duration))
+    def failed(client, method, path, *, deadline):
+        assert (method, path) == ('GET', '/health')
+        deadlines.append(deadline)
+        now[0] += min(2, deadline)
+        raise httpx.ConnectTimeout('synthetic')
+    monkeypatch.setattr(one, 'request', failed)
+    with pytest.raises(Refused): one.initial_health(None)
+    assert deadlines == [10, 7, 4, 1] and now[0] == 10
+
+
+def test_direct_pod_still_requires_type_meta():
+    obj = observed(); obj.pop('apiVersion'); obj.pop('kind')
+    with pytest.raises(Refused): one.exact_pod(obj, persisted=True)
+
+
+def test_reentry_rbac_is_read_only_and_separate():
+    source = Path('/workspace/infra/hosting/m3/user-runner-isolated')
+    original = json.loads((source/'30-one-shot-rbac.json').read_text())
+    reentry = json.loads((source/'31-one-shot-reentry-rbac.json').read_text())
+    assert len(reentry['items']) == 4
+    for old, new in zip(original['items'], reentry['items']):
+        assert new['metadata']['name'] == old['metadata']['name']+'-reentry'
+        if 'rules' in new:
+            for rule in new['rules']: assert set(rule['verbs']) <= {'get','list'}
+        if 'subjects' in new:
+            assert new['subjects'] == old['subjects']
+            assert new['roleRef']['name'] == old['roleRef']['name']+'-reentry'
+    assert reentry['items'][0]['rules'][0] == dict(apiGroups=[''], resources=['pods'], verbs=['list'])
+    assert reentry['items'][0]['rules'][1:] == original['items'][0]['rules'][1:]
+    assert reentry['items'][2]['rules'] == original['items'][2]['rules']

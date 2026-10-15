@@ -223,3 +223,37 @@ After adding preflight evidence snapshots, the one-shot suite reran network-none
 35 passed, 1 dedicated-DB test skipped (DB integration already passed above).
 Shell syntax checks and RBAC JSON parsing passed. No live Kubernetes create,
 server dry-run, policy/quota change or Cilium datapath result is claimed.
+
+## Existing-Pod recovery after the first observation (2026-10-15)
+
+The user subsequently deferred VAP enforcement to #11; PM removed its two
+bindings and retained the policy objects. Do not execute the earlier VAP/quota1
+setup again for recovery. Keep quota0, existing Pod, runner image, DB and permit.
+Only PM's separately reviewed temporary RBAC/token restoration is needed, followed
+by lookup/health/probe and binding withdrawal. No bootstrap, new permit, POST or
+Pod replacement. Build the updated **diagnostic** image from the reviewed fix SHA;
+the existing runner image/source remains unchanged.
+
+The reentry fix recognizes missing TypeMeta only within a verified v1 PodList.
+Explicit foreign kind/version still fails; direct GET/POST must still carry Pod
+TypeMeta. UID/spec/reference checks remain unchanged. Regression exercises real
+retained PostgreSQL + existing permit + actual Port/preflight/lookup/health with
+wire-shaped list items lacking TypeMeta, and checks all API calls are GET.
+
+Initial authenticated GET /health now permits at most10 connection attempts in
+an aggregate10s window, with up to1s spacing and each request constrained by the
+remaining budget. Only ConnectError/ConnectTimeout are retried. HTTP status,
+response parsing, read timeout and identity mismatch fail immediately. Other auth
+cases are single GETs, and evidence records attempts per case. This addresses a
+possible listener-start race; it does not prove the first refused run's exception.
+
+Use `31-one-shot-reentry-rbac.json` for this recovery window: new Role/RoleBinding
+runner-one-shot-reentry and ClusterRole/ClusterRoleBinding
+runner-rehearsal-reference-read-reentry grant only namespaced Pod list/named GET,
+named PVC/Secret GET and exact namespace/PV GET. They grant no create or mutation.
+The original create-grant binding must stay absent. PM checks the effective SA
+RBAC union, verifies the new names are absent before creating reviewed objects,
+and records UIDs/digests. If any exists, stop and review it rather than overwrite.
+Remove the two reentry bindings after observation (record their UIDs); keep quota0
+and do not restore the original create-grant binding. The unchanged runner SA
+still has no API grant; all these read permissions belong to runner-controller.

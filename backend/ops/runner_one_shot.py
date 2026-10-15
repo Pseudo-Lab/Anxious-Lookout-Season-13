@@ -153,11 +153,12 @@ def bootstrap(admin_file, password_file, directory):
         engine.dispose()
 
 
-def request(client, method, path, *, body=None, expected=200):
-    end = time.monotonic()+10
+def request(client, method, path, *, body=None, expected=200, deadline=10):
+    require(0 < deadline <= 10)
+    end = time.monotonic()+deadline
     token = budget.begin(end, time.monotonic)
     try:
-        with client.stream(method, path, json=body, timeout=2) as response:
+        with client.stream(method, path, json=body, timeout=min(2, deadline)) as response:
             require(response.status_code == expected and not response.headers.get('warning') and
                     response.headers.get('content-encoding', 'identity') == 'identity')
             raw = bytearray()
@@ -219,10 +220,16 @@ class Port(KubePods):
         secret = self._request('GET', 'secrets', PLAN.transport.name)
         require(base64.b64decode(secret['data']['token'], validate=True).decode() == self.transport_token)
         inventory = self._request('GET', 'pods')
-        require(inventory.get('kind') == 'PodList' and not inventory.get('metadata', {}).get('continue'))
+        require(inventory.get('apiVersion') == 'v1' and inventory.get('kind') == 'PodList'
+                and not inventory.get('metadata', {}).get('continue'))
         require(type(inventory.get('items')) is list and len(inventory['items']) <= 1)
         if inventory['items']:
-            exact_pod(inventory['items'][0], persisted=True)
+            # Kubernetes list items omit TypeMeta. Only infer missing fields
+            # inside this verified v1 PodList; explicit conflicting values fail.
+            item = deepcopy(inventory['items'][0])
+            item.setdefault('apiVersion', 'v1')
+            item.setdefault('kind', 'Pod')
+            exact_pod(item, persisted=True)
         self.observation_count = getattr(self, 'observation_count', 0)+1
         persist(self.evidence/f'preflight-{self.observation_count:02}.json', dict(
             time=datetime.now(timezone.utc).isoformat(), namespace=ns, references=references,
@@ -254,6 +261,22 @@ class Port(KubePods):
         return self._pod(obj, PLAN)
 
 
+def initial_health(client):
+    """Retry only connection setup for the initial authenticated GET /health."""
+    end = time.monotonic()+10
+    for attempt in range(10):
+        remaining = end-time.monotonic()
+        require(remaining > 0)
+        try:
+            return request(client, 'GET', '/health', deadline=min(10, remaining)), attempt+1
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            if attempt == 9: raise
+            remaining = end-time.monotonic()
+            require(remaining > 0)
+            time.sleep(min(1, remaining))
+    raise AssertionError('unreachable')
+
+
 def health(port, uid):
     # Bounded GET polling only, never retry POST. Every observation is UID/spec checked.
     obj = None
@@ -278,12 +301,16 @@ def health(port, uid):
             client.headers.clear()
             client.headers.update({'Authorization': 'Bearer '+bearer, 'Accept-Encoding': 'identity'})
             if state is not None: client.headers['X-Runner-State-Id'] = state
-            body = request(client, 'GET', '/health', expected=expected)
+            if label == 'correct':
+                body, attempts = initial_health(client)
+            else:
+                body, attempts = request(client, 'GET', '/health', expected=expected), 1
             if expected == 200:
                 require((body.get('ownerId'), body.get('stateId'), body.get('podUid')) == (OWNER, STATE, str(uid)))
                 require(body.get('available') is False and body.get('verification') == 'unverified' and body.get('reason') == 'not_configured')
             # Never persist arbitrary error bodies or credentials reflected by a server.
-            results.append(dict(case=label, status=expected, time=datetime.now(timezone.utc).isoformat()))
+            results.append(dict(case=label, status=expected, attempts=attempts,
+                                time=datetime.now(timezone.utc).isoformat()))
     return dict(podUid=str(uid), podIP=str(address), ownerId=OWNER, stateId=STATE,
                 available=False, verification='unverified', reason='not_configured', cases=results)
 
