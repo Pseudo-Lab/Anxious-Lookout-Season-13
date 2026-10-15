@@ -205,6 +205,10 @@ class KubePods:
         # Accept only narrowly known API defaults/scheduling metadata. Everything
         # affecting volumes, env, command, security or extra containers is exact.
         actual.pop('nodeName', None)  # API-assigned scheduling result, never a URL.
+        # Native Pod JSON omits these non-pointer bools when false. Do not
+        # normalize pointer booleans or accept true for any host namespace.
+        for key in ('hostNetwork', 'hostPID', 'hostIPC'):
+            actual.setdefault(key, False)
         for key, default in [('schedulerName', 'default-scheduler'), ('priority', 0),
                              ('preemptionPolicy', 'PreemptLowerPriority')]:
             if key in actual:

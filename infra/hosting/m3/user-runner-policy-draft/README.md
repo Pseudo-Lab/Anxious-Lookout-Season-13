@@ -1,5 +1,10 @@
 # Literal-owner admission and Cilium route drafts
 
+The [generated gate-removal proposal](GATE-REMOVAL-CANDIDATE.md) supplies typed
+CEL tests, complete field dispositions and a separate exact policy renderer.
+The original admission.json.in below stays gated; generated candidates require
+their own exact render and bounded server-observation review before use.
+
 User scope/storage decisions are now recorded in
 [Issue10 scope](../USER-RUNNER-ISSUE10-SCOPE.md), superseding pending-decision
 wording below. These drafts still require complete envelope and render review.

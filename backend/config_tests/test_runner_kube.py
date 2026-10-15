@@ -160,6 +160,16 @@ def test_narrow_server_defaults_are_accepted(port, server, plan):
     assert port.lookup(plan.identity) == original
 
 
+@pytest.mark.parametrize('field', ['hostNetwork', 'hostPID', 'hostIPC'])
+def test_native_false_host_flag_omission_only(port, server, plan, field):
+    original = port.create_once(plan.identity)
+    del server.pod['spec'][field]
+    assert port.lookup(plan.identity) == original
+    server.pod['spec'][field] = True
+    with pytest.raises(Refused):
+        port.lookup(plan.identity)
+
+
 def test_cross_owner_storage_or_token_reuse_refused(plan, server):
     foreign = replace(plan, identity=Identity(uuid4(), uuid4(), 1))
     with pytest.raises(Refused):

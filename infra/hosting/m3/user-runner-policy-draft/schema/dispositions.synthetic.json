@@ -1,0 +1,2311 @@
+[
+  {
+    "path": "object.metadata.annotations",
+    "disposition": "absent",
+    "subtree": "object"
+  },
+  {
+    "path": "object.metadata.creationTimestamp",
+    "disposition": "server-default-whitelist",
+    "expected": "server evidence only; no execution authority; CREATE wrapper rejects caller-supplied metadata"
+  },
+  {
+    "path": "object.metadata.deletionGracePeriodSeconds",
+    "disposition": "absent",
+    "subtree": "integer"
+  },
+  {
+    "path": "object.metadata.deletionTimestamp",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.apimachinery.pkg.apis.meta.v1.Time"
+  },
+  {
+    "path": "object.metadata.finalizers",
+    "disposition": "absent",
+    "subtree": "array"
+  },
+  {
+    "path": "object.metadata.generateName",
+    "disposition": "absent",
+    "subtree": "string"
+  },
+  {
+    "path": "object.metadata.generation",
+    "disposition": "server-default-whitelist",
+    "expected": "server evidence only; no execution authority; CREATE wrapper rejects caller-supplied metadata"
+  },
+  {
+    "path": "object.metadata.labels",
+    "disposition": "exact",
+    "expected": {
+      "anxious.io/owner": "d888737c-4830-4761-9630-b400982f8618",
+      "anxious.io/state": "a9617ace-fa4b-4bbc-b70b-2188f0efe3e6",
+      "anxious.io/generation": "1",
+      "anxious.io/managed": "user-runner"
+    }
+  },
+  {
+    "path": "object.metadata.managedFields",
+    "disposition": "server-default-whitelist",
+    "expected": "server evidence only; no execution authority; CREATE wrapper rejects caller-supplied metadata"
+  },
+  {
+    "path": "object.metadata.name",
+    "disposition": "exact",
+    "expected": "runner-d888737c483047619630b400982f8618"
+  },
+  {
+    "path": "object.metadata.namespace",
+    "disposition": "exact",
+    "expected": "codex-runner-rehearsal"
+  },
+  {
+    "path": "object.metadata.ownerReferences",
+    "disposition": "absent",
+    "subtree": "array"
+  },
+  {
+    "path": "object.metadata.resourceVersion",
+    "disposition": "server-default-whitelist",
+    "expected": "server evidence only; no execution authority; CREATE wrapper rejects caller-supplied metadata"
+  },
+  {
+    "path": "object.metadata.selfLink",
+    "disposition": "absent",
+    "subtree": "string"
+  },
+  {
+    "path": "object.metadata.uid",
+    "disposition": "server-default-whitelist",
+    "expected": "server evidence only; no execution authority; CREATE wrapper rejects caller-supplied metadata"
+  },
+  {
+    "path": "object.spec.activeDeadlineSeconds",
+    "disposition": "absent",
+    "subtree": "integer"
+  },
+  {
+    "path": "object.spec.affinity",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.Affinity"
+  },
+  {
+    "path": "object.spec.automountServiceAccountToken",
+    "disposition": "exact",
+    "expected": false
+  },
+  {
+    "path": "object.spec.containers",
+    "disposition": "exact",
+    "expected": "ordered cardinality 1"
+  },
+  {
+    "path": "object.spec.containers[0].args",
+    "disposition": "absent",
+    "subtree": "array"
+  },
+  {
+    "path": "object.spec.containers[0].command",
+    "disposition": "exact",
+    "expected": [
+      "uvicorn",
+      "runner.app:create_app",
+      "--factory",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "8080",
+      "--workers",
+      "1",
+      "--no-access-log",
+      "--no-proxy-headers"
+    ]
+  },
+  {
+    "path": "object.spec.containers[0].command[0]",
+    "disposition": "exact",
+    "expected": "uvicorn"
+  },
+  {
+    "path": "object.spec.containers[0].command[1]",
+    "disposition": "exact",
+    "expected": "runner.app:create_app"
+  },
+  {
+    "path": "object.spec.containers[0].command[2]",
+    "disposition": "exact",
+    "expected": "--factory"
+  },
+  {
+    "path": "object.spec.containers[0].command[3]",
+    "disposition": "exact",
+    "expected": "--host"
+  },
+  {
+    "path": "object.spec.containers[0].command[4]",
+    "disposition": "exact",
+    "expected": "0.0.0.0"
+  },
+  {
+    "path": "object.spec.containers[0].command[5]",
+    "disposition": "exact",
+    "expected": "--port"
+  },
+  {
+    "path": "object.spec.containers[0].command[6]",
+    "disposition": "exact",
+    "expected": "8080"
+  },
+  {
+    "path": "object.spec.containers[0].command[7]",
+    "disposition": "exact",
+    "expected": "--workers"
+  },
+  {
+    "path": "object.spec.containers[0].command[8]",
+    "disposition": "exact",
+    "expected": "1"
+  },
+  {
+    "path": "object.spec.containers[0].command[9]",
+    "disposition": "exact",
+    "expected": "--no-access-log"
+  },
+  {
+    "path": "object.spec.containers[0].command[10]",
+    "disposition": "exact",
+    "expected": "--no-proxy-headers"
+  },
+  {
+    "path": "object.spec.containers[0].env",
+    "disposition": "exact",
+    "expected": [
+      {
+        "name": "APP_ENV",
+        "value": "operator-service"
+      },
+      {
+        "name": "RUNNER_ACCOUNT_ID",
+        "value": "d888737c-4830-4761-9630-b400982f8618"
+      },
+      {
+        "name": "RUNNER_STATE_ID",
+        "value": "a9617ace-fa4b-4bbc-b70b-2188f0efe3e6"
+      },
+      {
+        "name": "RUNNER_STATE_DIR",
+        "value": "/state"
+      },
+      {
+        "name": "RUNNER_TOKEN_FILE",
+        "value": "/transport/token"
+      },
+      {
+        "name": "CODEX_MODEL",
+        "value": "gpt-6.1-sol"
+      },
+      {
+        "name": "CODEX_AUTH_MODE",
+        "value": "access-service"
+      },
+      {
+        "name": "CODEX_EXECUTION_SCOPE",
+        "value": "operator-access-service"
+      },
+      {
+        "name": "CODEX_ACCESS_CONTROL_DIR",
+        "value": "/control"
+      },
+      {
+        "name": "CODEX_OPERATOR_ACCOUNT_FILE",
+        "value": "/control/operator-account"
+      },
+      {
+        "name": "RESEARCH_TOOL_CALLBACK_URL",
+        "value": "https://callback.example:8443/research"
+      },
+      {
+        "name": "RUNNER_POD_UID",
+        "valueFrom": {
+          "fieldRef": {
+            "apiVersion": "v1",
+            "fieldPath": "metadata.uid"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "path": "object.spec.containers[0].env[0]",
+    "disposition": "exact",
+    "expected": {
+      "name": "APP_ENV",
+      "value": "operator-service"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].env[0].name",
+    "disposition": "exact",
+    "expected": "APP_ENV"
+  },
+  {
+    "path": "object.spec.containers[0].env[0].value",
+    "disposition": "exact",
+    "expected": "operator-service"
+  },
+  {
+    "path": "object.spec.containers[0].env[0].valueFrom",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EnvVarSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].env[1]",
+    "disposition": "exact",
+    "expected": {
+      "name": "RUNNER_ACCOUNT_ID",
+      "value": "d888737c-4830-4761-9630-b400982f8618"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].env[1].name",
+    "disposition": "exact",
+    "expected": "RUNNER_ACCOUNT_ID"
+  },
+  {
+    "path": "object.spec.containers[0].env[1].value",
+    "disposition": "exact",
+    "expected": "d888737c-4830-4761-9630-b400982f8618"
+  },
+  {
+    "path": "object.spec.containers[0].env[1].valueFrom",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EnvVarSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].env[2]",
+    "disposition": "exact",
+    "expected": {
+      "name": "RUNNER_STATE_ID",
+      "value": "a9617ace-fa4b-4bbc-b70b-2188f0efe3e6"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].env[2].name",
+    "disposition": "exact",
+    "expected": "RUNNER_STATE_ID"
+  },
+  {
+    "path": "object.spec.containers[0].env[2].value",
+    "disposition": "exact",
+    "expected": "a9617ace-fa4b-4bbc-b70b-2188f0efe3e6"
+  },
+  {
+    "path": "object.spec.containers[0].env[2].valueFrom",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EnvVarSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].env[3]",
+    "disposition": "exact",
+    "expected": {
+      "name": "RUNNER_STATE_DIR",
+      "value": "/state"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].env[3].name",
+    "disposition": "exact",
+    "expected": "RUNNER_STATE_DIR"
+  },
+  {
+    "path": "object.spec.containers[0].env[3].value",
+    "disposition": "exact",
+    "expected": "/state"
+  },
+  {
+    "path": "object.spec.containers[0].env[3].valueFrom",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EnvVarSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].env[4]",
+    "disposition": "exact",
+    "expected": {
+      "name": "RUNNER_TOKEN_FILE",
+      "value": "/transport/token"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].env[4].name",
+    "disposition": "exact",
+    "expected": "RUNNER_TOKEN_FILE"
+  },
+  {
+    "path": "object.spec.containers[0].env[4].value",
+    "disposition": "exact",
+    "expected": "/transport/token"
+  },
+  {
+    "path": "object.spec.containers[0].env[4].valueFrom",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EnvVarSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].env[5]",
+    "disposition": "exact",
+    "expected": {
+      "name": "CODEX_MODEL",
+      "value": "gpt-6.1-sol"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].env[5].name",
+    "disposition": "exact",
+    "expected": "CODEX_MODEL"
+  },
+  {
+    "path": "object.spec.containers[0].env[5].value",
+    "disposition": "exact",
+    "expected": "gpt-6.1-sol"
+  },
+  {
+    "path": "object.spec.containers[0].env[5].valueFrom",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EnvVarSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].env[6]",
+    "disposition": "exact",
+    "expected": {
+      "name": "CODEX_AUTH_MODE",
+      "value": "access-service"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].env[6].name",
+    "disposition": "exact",
+    "expected": "CODEX_AUTH_MODE"
+  },
+  {
+    "path": "object.spec.containers[0].env[6].value",
+    "disposition": "exact",
+    "expected": "access-service"
+  },
+  {
+    "path": "object.spec.containers[0].env[6].valueFrom",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EnvVarSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].env[7]",
+    "disposition": "exact",
+    "expected": {
+      "name": "CODEX_EXECUTION_SCOPE",
+      "value": "operator-access-service"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].env[7].name",
+    "disposition": "exact",
+    "expected": "CODEX_EXECUTION_SCOPE"
+  },
+  {
+    "path": "object.spec.containers[0].env[7].value",
+    "disposition": "exact",
+    "expected": "operator-access-service"
+  },
+  {
+    "path": "object.spec.containers[0].env[7].valueFrom",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EnvVarSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].env[8]",
+    "disposition": "exact",
+    "expected": {
+      "name": "CODEX_ACCESS_CONTROL_DIR",
+      "value": "/control"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].env[8].name",
+    "disposition": "exact",
+    "expected": "CODEX_ACCESS_CONTROL_DIR"
+  },
+  {
+    "path": "object.spec.containers[0].env[8].value",
+    "disposition": "exact",
+    "expected": "/control"
+  },
+  {
+    "path": "object.spec.containers[0].env[8].valueFrom",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EnvVarSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].env[9]",
+    "disposition": "exact",
+    "expected": {
+      "name": "CODEX_OPERATOR_ACCOUNT_FILE",
+      "value": "/control/operator-account"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].env[9].name",
+    "disposition": "exact",
+    "expected": "CODEX_OPERATOR_ACCOUNT_FILE"
+  },
+  {
+    "path": "object.spec.containers[0].env[9].value",
+    "disposition": "exact",
+    "expected": "/control/operator-account"
+  },
+  {
+    "path": "object.spec.containers[0].env[9].valueFrom",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EnvVarSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].env[10]",
+    "disposition": "exact",
+    "expected": {
+      "name": "RESEARCH_TOOL_CALLBACK_URL",
+      "value": "https://callback.example:8443/research"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].env[10].name",
+    "disposition": "exact",
+    "expected": "RESEARCH_TOOL_CALLBACK_URL"
+  },
+  {
+    "path": "object.spec.containers[0].env[10].value",
+    "disposition": "exact",
+    "expected": "https://callback.example:8443/research"
+  },
+  {
+    "path": "object.spec.containers[0].env[10].valueFrom",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EnvVarSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].env[11]",
+    "disposition": "exact",
+    "expected": {
+      "name": "RUNNER_POD_UID",
+      "valueFrom": {
+        "fieldRef": {
+          "apiVersion": "v1",
+          "fieldPath": "metadata.uid"
+        }
+      }
+    }
+  },
+  {
+    "path": "object.spec.containers[0].env[11].name",
+    "disposition": "exact",
+    "expected": "RUNNER_POD_UID"
+  },
+  {
+    "path": "object.spec.containers[0].env[11].value",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].env[11].valueFrom",
+    "disposition": "exact",
+    "expected": {
+      "fieldRef": {
+        "apiVersion": "v1",
+        "fieldPath": "metadata.uid"
+      }
+    }
+  },
+  {
+    "path": "object.spec.containers[0].env[11].valueFrom.configMapKeyRef",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ConfigMapKeySelector",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].env[11].valueFrom.fieldRef",
+    "disposition": "exact",
+    "expected": {
+      "apiVersion": "v1",
+      "fieldPath": "metadata.uid"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].env[11].valueFrom.fieldRef.apiVersion",
+    "disposition": "exact",
+    "expected": "v1"
+  },
+  {
+    "path": "object.spec.containers[0].env[11].valueFrom.fieldRef.fieldPath",
+    "disposition": "exact",
+    "expected": "metadata.uid"
+  },
+  {
+    "path": "object.spec.containers[0].env[11].valueFrom.fileKeyRef",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.FileKeySelector",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].env[11].valueFrom.resourceFieldRef",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ResourceFieldSelector",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].env[11].valueFrom.secretKeyRef",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.SecretKeySelector",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].envFrom",
+    "disposition": "absent",
+    "subtree": "array"
+  },
+  {
+    "path": "object.spec.containers[0].image",
+    "disposition": "exact",
+    "expected": "registry.example/runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "path": "object.spec.containers[0].imagePullPolicy",
+    "disposition": "exact",
+    "expected": "IfNotPresent"
+  },
+  {
+    "path": "object.spec.containers[0].lifecycle",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.Lifecycle"
+  },
+  {
+    "path": "object.spec.containers[0].livenessProbe",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.Probe"
+  },
+  {
+    "path": "object.spec.containers[0].name",
+    "disposition": "exact",
+    "expected": "runner"
+  },
+  {
+    "path": "object.spec.containers[0].ports",
+    "disposition": "exact",
+    "expected": [
+      {
+        "name": "runner",
+        "containerPort": 8080,
+        "protocol": "TCP"
+      }
+    ]
+  },
+  {
+    "path": "object.spec.containers[0].ports[0]",
+    "disposition": "exact",
+    "expected": {
+      "name": "runner",
+      "containerPort": 8080,
+      "protocol": "TCP"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].ports[0].containerPort",
+    "disposition": "exact",
+    "expected": 8080
+  },
+  {
+    "path": "object.spec.containers[0].ports[0].hostIP",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].ports[0].hostPort",
+    "disposition": "absent",
+    "subtree": "integer",
+    "negative": 1
+  },
+  {
+    "path": "object.spec.containers[0].ports[0].name",
+    "disposition": "exact",
+    "expected": "runner"
+  },
+  {
+    "path": "object.spec.containers[0].ports[0].protocol",
+    "disposition": "exact",
+    "expected": "TCP"
+  },
+  {
+    "path": "object.spec.containers[0].readinessProbe",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.Probe"
+  },
+  {
+    "path": "object.spec.containers[0].resizePolicy",
+    "disposition": "absent",
+    "subtree": "array"
+  },
+  {
+    "path": "object.spec.containers[0].resources",
+    "disposition": "server-default-whitelist",
+    "expected": {}
+  },
+  {
+    "path": "object.spec.containers[0].resources.claims",
+    "disposition": "absent",
+    "subtree": "array",
+    "negative": []
+  },
+  {
+    "path": "object.spec.containers[0].resources.limits",
+    "disposition": "absent",
+    "subtree": "object",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].resources.requests",
+    "disposition": "absent",
+    "subtree": "object",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].restartPolicy",
+    "disposition": "absent",
+    "subtree": "string"
+  },
+  {
+    "path": "object.spec.containers[0].restartPolicyRules",
+    "disposition": "absent",
+    "subtree": "array"
+  },
+  {
+    "path": "object.spec.containers[0].securityContext",
+    "disposition": "exact",
+    "expected": {
+      "allowPrivilegeEscalation": false,
+      "readOnlyRootFilesystem": true,
+      "capabilities": {
+        "drop": [
+          "ALL"
+        ]
+      }
+    }
+  },
+  {
+    "path": "object.spec.containers[0].securityContext.allowPrivilegeEscalation",
+    "disposition": "exact",
+    "expected": false
+  },
+  {
+    "path": "object.spec.containers[0].securityContext.appArmorProfile",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.AppArmorProfile",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].securityContext.capabilities",
+    "disposition": "exact",
+    "expected": {
+      "drop": [
+        "ALL"
+      ]
+    }
+  },
+  {
+    "path": "object.spec.containers[0].securityContext.capabilities.add",
+    "disposition": "absent",
+    "subtree": "array",
+    "negative": []
+  },
+  {
+    "path": "object.spec.containers[0].securityContext.capabilities.drop",
+    "disposition": "exact",
+    "expected": [
+      "ALL"
+    ]
+  },
+  {
+    "path": "object.spec.containers[0].securityContext.capabilities.drop[0]",
+    "disposition": "exact",
+    "expected": "ALL"
+  },
+  {
+    "path": "object.spec.containers[0].securityContext.privileged",
+    "disposition": "absent",
+    "subtree": "boolean",
+    "negative": true
+  },
+  {
+    "path": "object.spec.containers[0].securityContext.procMount",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].securityContext.readOnlyRootFilesystem",
+    "disposition": "exact",
+    "expected": true
+  },
+  {
+    "path": "object.spec.containers[0].securityContext.runAsGroup",
+    "disposition": "absent",
+    "subtree": "integer",
+    "negative": 1
+  },
+  {
+    "path": "object.spec.containers[0].securityContext.runAsNonRoot",
+    "disposition": "absent",
+    "subtree": "boolean",
+    "negative": true
+  },
+  {
+    "path": "object.spec.containers[0].securityContext.runAsUser",
+    "disposition": "absent",
+    "subtree": "integer",
+    "negative": 1
+  },
+  {
+    "path": "object.spec.containers[0].securityContext.seLinuxOptions",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.SELinuxOptions",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].securityContext.seccompProfile",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.SeccompProfile",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].securityContext.windowsOptions",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.WindowsSecurityContextOptions",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.containers[0].startupProbe",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.Probe"
+  },
+  {
+    "path": "object.spec.containers[0].stdin",
+    "disposition": "absent",
+    "subtree": "boolean"
+  },
+  {
+    "path": "object.spec.containers[0].stdinOnce",
+    "disposition": "absent",
+    "subtree": "boolean"
+  },
+  {
+    "path": "object.spec.containers[0].terminationMessagePath",
+    "disposition": "server-default-whitelist",
+    "expected": "/dev/termination-log"
+  },
+  {
+    "path": "object.spec.containers[0].terminationMessagePolicy",
+    "disposition": "server-default-whitelist",
+    "expected": "File"
+  },
+  {
+    "path": "object.spec.containers[0].tty",
+    "disposition": "absent",
+    "subtree": "boolean"
+  },
+  {
+    "path": "object.spec.containers[0].volumeDevices",
+    "disposition": "absent",
+    "subtree": "array"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts",
+    "disposition": "exact",
+    "expected": [
+      {
+        "name": "native",
+        "mountPath": "/state"
+      },
+      {
+        "name": "control",
+        "mountPath": "/control"
+      },
+      {
+        "name": "transport",
+        "mountPath": "/transport",
+        "readOnly": true
+      },
+      {
+        "name": "tmp",
+        "mountPath": "/tmp"
+      }
+    ]
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[0]",
+    "disposition": "exact",
+    "expected": {
+      "name": "native",
+      "mountPath": "/state"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[0].mountPath",
+    "disposition": "exact",
+    "expected": "/state"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[0].mountPropagation",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[0].name",
+    "disposition": "exact",
+    "expected": "native"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[0].readOnly",
+    "disposition": "absent",
+    "subtree": "boolean",
+    "negative": true
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[0].recursiveReadOnly",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[0].subPath",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[0].subPathExpr",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[1]",
+    "disposition": "exact",
+    "expected": {
+      "name": "control",
+      "mountPath": "/control"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[1].mountPath",
+    "disposition": "exact",
+    "expected": "/control"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[1].mountPropagation",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[1].name",
+    "disposition": "exact",
+    "expected": "control"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[1].readOnly",
+    "disposition": "absent",
+    "subtree": "boolean",
+    "negative": true
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[1].recursiveReadOnly",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[1].subPath",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[1].subPathExpr",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[2]",
+    "disposition": "exact",
+    "expected": {
+      "name": "transport",
+      "mountPath": "/transport",
+      "readOnly": true
+    }
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[2].mountPath",
+    "disposition": "exact",
+    "expected": "/transport"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[2].mountPropagation",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[2].name",
+    "disposition": "exact",
+    "expected": "transport"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[2].readOnly",
+    "disposition": "exact",
+    "expected": true
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[2].recursiveReadOnly",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[2].subPath",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[2].subPathExpr",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[3]",
+    "disposition": "exact",
+    "expected": {
+      "name": "tmp",
+      "mountPath": "/tmp"
+    }
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[3].mountPath",
+    "disposition": "exact",
+    "expected": "/tmp"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[3].mountPropagation",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[3].name",
+    "disposition": "exact",
+    "expected": "tmp"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[3].readOnly",
+    "disposition": "absent",
+    "subtree": "boolean",
+    "negative": true
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[3].recursiveReadOnly",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[3].subPath",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].volumeMounts[3].subPathExpr",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.containers[0].workingDir",
+    "disposition": "absent",
+    "subtree": "string"
+  },
+  {
+    "path": "object.spec.dnsConfig",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.PodDNSConfig"
+  },
+  {
+    "path": "object.spec.dnsPolicy",
+    "disposition": "exact",
+    "expected": "ClusterFirst"
+  },
+  {
+    "path": "object.spec.enableServiceLinks",
+    "disposition": "exact",
+    "expected": false
+  },
+  {
+    "path": "object.spec.ephemeralContainers",
+    "disposition": "absent",
+    "subtree": "array"
+  },
+  {
+    "path": "object.spec.hostAliases",
+    "disposition": "absent",
+    "subtree": "array"
+  },
+  {
+    "path": "object.spec.hostIPC",
+    "disposition": "exact",
+    "expected": false,
+    "serialization": "false nonpointer bool may be omitted by native JSON serialization"
+  },
+  {
+    "path": "object.spec.hostNetwork",
+    "disposition": "exact",
+    "expected": false,
+    "serialization": "false nonpointer bool may be omitted by native JSON serialization"
+  },
+  {
+    "path": "object.spec.hostPID",
+    "disposition": "exact",
+    "expected": false,
+    "serialization": "false nonpointer bool may be omitted by native JSON serialization"
+  },
+  {
+    "path": "object.spec.hostUsers",
+    "disposition": "absent",
+    "subtree": "boolean"
+  },
+  {
+    "path": "object.spec.hostname",
+    "disposition": "absent",
+    "subtree": "string"
+  },
+  {
+    "path": "object.spec.hostnameOverride",
+    "disposition": "absent",
+    "subtree": "string"
+  },
+  {
+    "path": "object.spec.imagePullSecrets",
+    "disposition": "absent",
+    "subtree": "array"
+  },
+  {
+    "path": "object.spec.initContainers",
+    "disposition": "absent",
+    "subtree": "array"
+  },
+  {
+    "path": "object.spec.nodeName",
+    "disposition": "absent",
+    "subtree": "string"
+  },
+  {
+    "path": "object.spec.nodeSelector",
+    "disposition": "absent",
+    "subtree": "object"
+  },
+  {
+    "path": "object.spec.os",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.PodOS"
+  },
+  {
+    "path": "object.spec.overhead",
+    "disposition": "absent",
+    "subtree": "object"
+  },
+  {
+    "path": "object.spec.preemptionPolicy",
+    "disposition": "server-default-whitelist",
+    "expected": "PreemptLowerPriority"
+  },
+  {
+    "path": "object.spec.priority",
+    "disposition": "server-default-whitelist",
+    "expected": 0
+  },
+  {
+    "path": "object.spec.priorityClassName",
+    "disposition": "absent",
+    "subtree": "string"
+  },
+  {
+    "path": "object.spec.readinessGates",
+    "disposition": "absent",
+    "subtree": "array"
+  },
+  {
+    "path": "object.spec.resourceClaims",
+    "disposition": "absent",
+    "subtree": "array"
+  },
+  {
+    "path": "object.spec.resources",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ResourceRequirements"
+  },
+  {
+    "path": "object.spec.restartPolicy",
+    "disposition": "exact",
+    "expected": "Never"
+  },
+  {
+    "path": "object.spec.runtimeClassName",
+    "disposition": "absent",
+    "subtree": "string"
+  },
+  {
+    "path": "object.spec.schedulerName",
+    "disposition": "server-default-whitelist",
+    "expected": "default-scheduler"
+  },
+  {
+    "path": "object.spec.schedulingGates",
+    "disposition": "absent",
+    "subtree": "array"
+  },
+  {
+    "path": "object.spec.schedulingGroup",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.PodSchedulingGroup"
+  },
+  {
+    "path": "object.spec.securityContext",
+    "disposition": "exact",
+    "expected": {
+      "runAsUser": 10001,
+      "runAsGroup": 10001,
+      "runAsNonRoot": true,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    }
+  },
+  {
+    "path": "object.spec.securityContext.appArmorProfile",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.AppArmorProfile",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.securityContext.fsGroup",
+    "disposition": "absent",
+    "subtree": "integer",
+    "negative": 1
+  },
+  {
+    "path": "object.spec.securityContext.fsGroupChangePolicy",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.securityContext.runAsGroup",
+    "disposition": "exact",
+    "expected": 10001
+  },
+  {
+    "path": "object.spec.securityContext.runAsNonRoot",
+    "disposition": "exact",
+    "expected": true
+  },
+  {
+    "path": "object.spec.securityContext.runAsUser",
+    "disposition": "exact",
+    "expected": 10001
+  },
+  {
+    "path": "object.spec.securityContext.seLinuxChangePolicy",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.securityContext.seLinuxOptions",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.SELinuxOptions",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.securityContext.seccompProfile",
+    "disposition": "exact",
+    "expected": {
+      "type": "RuntimeDefault"
+    }
+  },
+  {
+    "path": "object.spec.securityContext.seccompProfile.localhostProfile",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.securityContext.seccompProfile.type",
+    "disposition": "exact",
+    "expected": "RuntimeDefault"
+  },
+  {
+    "path": "object.spec.securityContext.supplementalGroups",
+    "disposition": "absent",
+    "subtree": "array",
+    "negative": []
+  },
+  {
+    "path": "object.spec.securityContext.supplementalGroupsPolicy",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.securityContext.sysctls",
+    "disposition": "absent",
+    "subtree": "array",
+    "negative": []
+  },
+  {
+    "path": "object.spec.securityContext.windowsOptions",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.WindowsSecurityContextOptions",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.serviceAccount",
+    "disposition": "server-default-whitelist",
+    "expected": "runner-workload"
+  },
+  {
+    "path": "object.spec.serviceAccountName",
+    "disposition": "exact",
+    "expected": "runner-workload"
+  },
+  {
+    "path": "object.spec.setHostnameAsFQDN",
+    "disposition": "absent",
+    "subtree": "boolean"
+  },
+  {
+    "path": "object.spec.shareProcessNamespace",
+    "disposition": "absent",
+    "subtree": "boolean"
+  },
+  {
+    "path": "object.spec.subdomain",
+    "disposition": "absent",
+    "subtree": "string"
+  },
+  {
+    "path": "object.spec.terminationGracePeriodSeconds",
+    "disposition": "exact",
+    "expected": 55
+  },
+  {
+    "path": "object.spec.tolerations",
+    "disposition": "server-default-whitelist",
+    "expected": [
+      {
+        "key": "node.kubernetes.io/not-ready",
+        "operator": "Exists",
+        "effect": "NoExecute",
+        "tolerationSeconds": 300
+      },
+      {
+        "key": "node.kubernetes.io/unreachable",
+        "operator": "Exists",
+        "effect": "NoExecute",
+        "tolerationSeconds": 300
+      }
+    ]
+  },
+  {
+    "path": "object.spec.tolerations[0]",
+    "disposition": "server-default-whitelist",
+    "expected": {
+      "key": "node.kubernetes.io/not-ready",
+      "operator": "Exists",
+      "effect": "NoExecute",
+      "tolerationSeconds": 300
+    }
+  },
+  {
+    "path": "object.spec.tolerations[0].effect",
+    "disposition": "server-default-whitelist",
+    "expected": "NoExecute"
+  },
+  {
+    "path": "object.spec.tolerations[0].key",
+    "disposition": "server-default-whitelist",
+    "expected": "node.kubernetes.io/not-ready"
+  },
+  {
+    "path": "object.spec.tolerations[0].operator",
+    "disposition": "server-default-whitelist",
+    "expected": "Exists"
+  },
+  {
+    "path": "object.spec.tolerations[0].tolerationSeconds",
+    "disposition": "server-default-whitelist",
+    "expected": 300
+  },
+  {
+    "path": "object.spec.tolerations[0].value",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.tolerations[1]",
+    "disposition": "server-default-whitelist",
+    "expected": {
+      "key": "node.kubernetes.io/unreachable",
+      "operator": "Exists",
+      "effect": "NoExecute",
+      "tolerationSeconds": 300
+    }
+  },
+  {
+    "path": "object.spec.tolerations[1].effect",
+    "disposition": "server-default-whitelist",
+    "expected": "NoExecute"
+  },
+  {
+    "path": "object.spec.tolerations[1].key",
+    "disposition": "server-default-whitelist",
+    "expected": "node.kubernetes.io/unreachable"
+  },
+  {
+    "path": "object.spec.tolerations[1].operator",
+    "disposition": "server-default-whitelist",
+    "expected": "Exists"
+  },
+  {
+    "path": "object.spec.tolerations[1].tolerationSeconds",
+    "disposition": "server-default-whitelist",
+    "expected": 300
+  },
+  {
+    "path": "object.spec.tolerations[1].value",
+    "disposition": "absent",
+    "subtree": "string",
+    "negative": "unexpected"
+  },
+  {
+    "path": "object.spec.topologySpreadConstraints",
+    "disposition": "absent",
+    "subtree": "array"
+  },
+  {
+    "path": "object.spec.volumes",
+    "disposition": "exact",
+    "expected": "ordered cardinality 4"
+  },
+  {
+    "path": "object.spec.volumes[0]",
+    "disposition": "exact",
+    "expected": {
+      "name": "native",
+      "persistentVolumeClaim": {
+        "claimName": "native-synthetic"
+      }
+    }
+  },
+  {
+    "path": "object.spec.volumes[0].awsElasticBlockStore",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.AWSElasticBlockStoreVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].azureDisk",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.AzureDiskVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].azureFile",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.AzureFileVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].cephfs",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.CephFSVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].cinder",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.CinderVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].configMap",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ConfigMapVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].csi",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.CSIVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].downwardAPI",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.DownwardAPIVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].emptyDir",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EmptyDirVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].ephemeral",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EphemeralVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].fc",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.FCVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].flexVolume",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.FlexVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].flocker",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.FlockerVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].gcePersistentDisk",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.GCEPersistentDiskVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].gitRepo",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.GitRepoVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].glusterfs",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.GlusterfsVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].hostPath",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.HostPathVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].image",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ImageVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].iscsi",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ISCSIVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].name",
+    "disposition": "exact",
+    "expected": "native"
+  },
+  {
+    "path": "object.spec.volumes[0].nfs",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.NFSVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].persistentVolumeClaim",
+    "disposition": "exact",
+    "expected": {
+      "claimName": "native-synthetic"
+    }
+  },
+  {
+    "path": "object.spec.volumes[0].persistentVolumeClaim.claimName",
+    "disposition": "exact",
+    "expected": "native-synthetic"
+  },
+  {
+    "path": "object.spec.volumes[0].persistentVolumeClaim.readOnly",
+    "disposition": "absent",
+    "subtree": "boolean",
+    "negative": true
+  },
+  {
+    "path": "object.spec.volumes[0].photonPersistentDisk",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.PhotonPersistentDiskVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].portworxVolume",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.PortworxVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].projected",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ProjectedVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].quobyte",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.QuobyteVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].rbd",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.RBDVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].scaleIO",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ScaleIOVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].secret",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.SecretVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].storageos",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.StorageOSVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[0].vsphereVolume",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.VsphereVirtualDiskVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1]",
+    "disposition": "exact",
+    "expected": {
+      "name": "control",
+      "persistentVolumeClaim": {
+        "claimName": "control-synthetic"
+      }
+    }
+  },
+  {
+    "path": "object.spec.volumes[1].awsElasticBlockStore",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.AWSElasticBlockStoreVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].azureDisk",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.AzureDiskVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].azureFile",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.AzureFileVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].cephfs",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.CephFSVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].cinder",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.CinderVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].configMap",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ConfigMapVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].csi",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.CSIVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].downwardAPI",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.DownwardAPIVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].emptyDir",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EmptyDirVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].ephemeral",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EphemeralVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].fc",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.FCVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].flexVolume",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.FlexVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].flocker",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.FlockerVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].gcePersistentDisk",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.GCEPersistentDiskVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].gitRepo",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.GitRepoVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].glusterfs",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.GlusterfsVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].hostPath",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.HostPathVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].image",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ImageVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].iscsi",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ISCSIVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].name",
+    "disposition": "exact",
+    "expected": "control"
+  },
+  {
+    "path": "object.spec.volumes[1].nfs",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.NFSVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].persistentVolumeClaim",
+    "disposition": "exact",
+    "expected": {
+      "claimName": "control-synthetic"
+    }
+  },
+  {
+    "path": "object.spec.volumes[1].persistentVolumeClaim.claimName",
+    "disposition": "exact",
+    "expected": "control-synthetic"
+  },
+  {
+    "path": "object.spec.volumes[1].persistentVolumeClaim.readOnly",
+    "disposition": "absent",
+    "subtree": "boolean",
+    "negative": true
+  },
+  {
+    "path": "object.spec.volumes[1].photonPersistentDisk",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.PhotonPersistentDiskVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].portworxVolume",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.PortworxVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].projected",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ProjectedVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].quobyte",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.QuobyteVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].rbd",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.RBDVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].scaleIO",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ScaleIOVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].secret",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.SecretVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].storageos",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.StorageOSVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[1].vsphereVolume",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.VsphereVirtualDiskVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2]",
+    "disposition": "exact",
+    "expected": {
+      "name": "transport",
+      "secret": {
+        "secretName": "transport-synthetic",
+        "defaultMode": 292,
+        "items": [
+          {
+            "key": "token",
+            "path": "token"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "path": "object.spec.volumes[2].awsElasticBlockStore",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.AWSElasticBlockStoreVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].azureDisk",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.AzureDiskVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].azureFile",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.AzureFileVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].cephfs",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.CephFSVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].cinder",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.CinderVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].configMap",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ConfigMapVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].csi",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.CSIVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].downwardAPI",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.DownwardAPIVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].emptyDir",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EmptyDirVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].ephemeral",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EphemeralVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].fc",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.FCVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].flexVolume",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.FlexVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].flocker",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.FlockerVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].gcePersistentDisk",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.GCEPersistentDiskVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].gitRepo",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.GitRepoVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].glusterfs",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.GlusterfsVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].hostPath",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.HostPathVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].image",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ImageVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].iscsi",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ISCSIVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].name",
+    "disposition": "exact",
+    "expected": "transport"
+  },
+  {
+    "path": "object.spec.volumes[2].nfs",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.NFSVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].persistentVolumeClaim",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.PersistentVolumeClaimVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].photonPersistentDisk",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.PhotonPersistentDiskVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].portworxVolume",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.PortworxVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].projected",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ProjectedVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].quobyte",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.QuobyteVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].rbd",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.RBDVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].scaleIO",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ScaleIOVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].secret",
+    "disposition": "exact",
+    "expected": {
+      "secretName": "transport-synthetic",
+      "defaultMode": 292,
+      "items": [
+        {
+          "key": "token",
+          "path": "token"
+        }
+      ]
+    }
+  },
+  {
+    "path": "object.spec.volumes[2].secret.defaultMode",
+    "disposition": "exact",
+    "expected": 292
+  },
+  {
+    "path": "object.spec.volumes[2].secret.items",
+    "disposition": "exact",
+    "expected": [
+      {
+        "key": "token",
+        "path": "token"
+      }
+    ]
+  },
+  {
+    "path": "object.spec.volumes[2].secret.items[0]",
+    "disposition": "exact",
+    "expected": {
+      "key": "token",
+      "path": "token"
+    }
+  },
+  {
+    "path": "object.spec.volumes[2].secret.items[0].key",
+    "disposition": "exact",
+    "expected": "token"
+  },
+  {
+    "path": "object.spec.volumes[2].secret.items[0].mode",
+    "disposition": "absent",
+    "subtree": "integer",
+    "negative": 1
+  },
+  {
+    "path": "object.spec.volumes[2].secret.items[0].path",
+    "disposition": "exact",
+    "expected": "token"
+  },
+  {
+    "path": "object.spec.volumes[2].secret.optional",
+    "disposition": "absent",
+    "subtree": "boolean",
+    "negative": true
+  },
+  {
+    "path": "object.spec.volumes[2].secret.secretName",
+    "disposition": "exact",
+    "expected": "transport-synthetic"
+  },
+  {
+    "path": "object.spec.volumes[2].storageos",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.StorageOSVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[2].vsphereVolume",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.VsphereVirtualDiskVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3]",
+    "disposition": "exact",
+    "expected": {
+      "name": "tmp",
+      "emptyDir": {
+        "medium": "Memory",
+        "sizeLimit": "64Mi"
+      }
+    }
+  },
+  {
+    "path": "object.spec.volumes[3].awsElasticBlockStore",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.AWSElasticBlockStoreVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].azureDisk",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.AzureDiskVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].azureFile",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.AzureFileVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].cephfs",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.CephFSVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].cinder",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.CinderVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].configMap",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ConfigMapVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].csi",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.CSIVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].downwardAPI",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.DownwardAPIVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].emptyDir",
+    "disposition": "exact",
+    "expected": {
+      "medium": "Memory",
+      "sizeLimit": "64Mi"
+    }
+  },
+  {
+    "path": "object.spec.volumes[3].emptyDir.medium",
+    "disposition": "exact",
+    "expected": "Memory"
+  },
+  {
+    "path": "object.spec.volumes[3].emptyDir.sizeLimit",
+    "disposition": "exact",
+    "expected": "64Mi"
+  },
+  {
+    "path": "object.spec.volumes[3].ephemeral",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.EphemeralVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].fc",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.FCVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].flexVolume",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.FlexVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].flocker",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.FlockerVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].gcePersistentDisk",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.GCEPersistentDiskVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].gitRepo",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.GitRepoVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].glusterfs",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.GlusterfsVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].hostPath",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.HostPathVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].image",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ImageVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].iscsi",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ISCSIVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].name",
+    "disposition": "exact",
+    "expected": "tmp"
+  },
+  {
+    "path": "object.spec.volumes[3].nfs",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.NFSVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].persistentVolumeClaim",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.PersistentVolumeClaimVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].photonPersistentDisk",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.PhotonPersistentDiskVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].portworxVolume",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.PortworxVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].projected",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ProjectedVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].quobyte",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.QuobyteVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].rbd",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.RBDVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].scaleIO",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.ScaleIOVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].secret",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.SecretVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].storageos",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.StorageOSVolumeSource",
+    "negative": {}
+  },
+  {
+    "path": "object.spec.volumes[3].vsphereVolume",
+    "disposition": "absent",
+    "subtree": "#/definitions/io.k8s.api.core.v1.VsphereVirtualDiskVolumeSource",
+    "negative": {}
+  }
+]

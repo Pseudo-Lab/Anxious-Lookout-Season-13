@@ -1,0 +1,8 @@
+{
+  "image": "registry.example/runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "callback": "https://callback.example:8443/research",
+  "callbackNamespace": "callback",
+  "callbackServiceAccount": "callback",
+  "callbackPort": "8443",
+  "quotaResourceVersion": "123"
+}

@@ -1,5 +1,10 @@
 # Plan to admission envelope audit — gate retained
 
+Follow-up implementation: [gate-removal candidate](GATE-REMOVAL-CANDIDATE.md)
+and [generated synthetic disposition rows](schema/dispositions.synthetic.json).
+The historical gaps below are addressed by that separately reviewed generator;
+this original draft gate remains unchanged. Synthetic evidence is not live proof.
+
 Scope: Plan.manifest and KubePods._pod at 0e143a0 versus the candidate validations
 in admission.json.in. This is a review matrix, not complete CEL implementation.
 All findings below are masked by the intentional false draft gate, which is
