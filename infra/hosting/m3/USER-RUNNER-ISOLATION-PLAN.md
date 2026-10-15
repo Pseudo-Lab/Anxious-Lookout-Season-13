@@ -27,7 +27,8 @@ Admission must match the entire isolated namespace independently of labels the
 creator supplies. Pin both enforcement configuration and authorized identity.
 Missing parameters, unavailable validator and evaluation errors must reject the
 request; policy bindings must enforce Deny, not merely Warn/Audit. Verify supported
-API/version on the actual cluster before selecting CEL policy versus webhook.
+API/version against the recorded baseline: CEL VAP v1 is now the proposed path
+(see USER-RUNNER-BASELINE-2026-10-15.md), pending concrete policy approval.
 No permissive fallback is allowed. The current adapter checks objects after the
 server response, which cannot undo execution of a maliciously mutated Pod; the
 pre-creation admission boundary is therefore mandatory.
@@ -171,8 +172,11 @@ The separately reviewable `user-runner-isolated/README.md` and three JSON templa
 provide namespace/zero-Pod bootstrap quota/default-deny/service accounts, an
 explicit static-PV claim path, and an immutable synthetic transport Secret.
 They require concrete target/storage/Secret inputs and user authorization before
-PM applies anything. Cluster baseline is still unknown; CEL versus webhook is
-unselected. No controller grants or runner workload are included.
+PM applies anything. PM has now recorded k3s1.36.4/Cilium1.20.2 baseline;
+CEL VAP v1 is the proposed admission path. Retain StorageClass provisioning is
+also under review with a separate first-consumer initialization dependency.
+See USER-RUNNER-BASELINE-2026-10-15.md. No controller grants or runner workload
+are included in these templates.
 
 Supported operator ChatGPT authentication refresh remains an unresolved prerequisite
 for provider egress design. Keep provider routes closed until that investigation

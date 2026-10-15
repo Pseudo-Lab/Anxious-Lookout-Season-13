@@ -20,11 +20,13 @@ and reject unfilled/unknown inputs. Rendered documents need a separate review.
 | Owner/state | Fresh synthetic UUIDs, not actual account identities; same labels on claims and Secret |
 | Secret input | Authorized private injection of a newly generated synthetic transport token, at least32 ASCII non-whitespace characters, base64 encoded; never ChatGPT/provider credentials |
 
-Cluster baseline remains unknown because PM's root-kubeconfig read was denied.
-Do not infer server/API/CNI capability from these templates. CEL validating policy
-and a fail-closed webhook remain candidate designs until PM supplies supported
-API/version evidence; neither path is selected or installed here. Do not bypass
-that approval or attempt alternate access to the root kubeconfig.
+PM obtained authorized read-only baseline on 2026-10-15: k3s v1.36.4, VAP v1,
+Cilium1.20.2 and Retain local-path StorageClasses. PSA v1.36 is the proposed pin.
+CEL VAP v1 is now the proposed admission path; it is not installed here.
+See ../USER-RUNNER-BASELINE-2026-10-15.md for the evidence and WFFC bootstrap
+dependency. PM owns further cluster reads; do not access root kubeconfig or
+modify the existing codex-trial namespace. Target namespace/storage choice and
+rendered resources still need approval.
 
 ## Storage scope
 
