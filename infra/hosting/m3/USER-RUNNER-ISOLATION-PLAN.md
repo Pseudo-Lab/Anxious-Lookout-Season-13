@@ -1,5 +1,9 @@
 # Isolated namespace deployment policy and evidence plan — design review
 
+Current scope: see [accepted Issue10 boundary](USER-RUNNER-ISSUE10-SCOPE.md).
+Termination/drain, release, capacity and provider follow-up are now Issue11;
+the sections below retain their design history, not Issue10 execution authority.
+
 Status: proposed design, not an installed policy bundle or an activation approval.
 This is unit3's first reviewable artifact. Apply nothing to an operating namespace.
 Keep CODEX_USER_RUNNERS_ENABLE=false and controller max_pods=0. An isolated test

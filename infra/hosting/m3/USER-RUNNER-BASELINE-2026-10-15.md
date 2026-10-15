@@ -1,5 +1,9 @@
 # Unit3 design update from PM's measured cluster baseline
 
+Scope update: [accepted Issue10 boundary](USER-RUNNER-ISSUE10-SCOPE.md) supersedes
+the undecided-scope discussion below. Static storage is selected; Issue11 work
+does not begin before the Issue10 PR.
+
 Evidence: [PM's authorized read-only baseline, 2026-10-15](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/10#issuecomment-6182026519).
 Backend reviewed that record; backend did not independently query the cluster.
 The record supersedes earlier statements that the server/API/CNI were unknown.

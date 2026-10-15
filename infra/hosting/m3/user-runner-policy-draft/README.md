@@ -1,5 +1,9 @@
 # Literal-owner admission and Cilium route drafts
 
+User scope/storage decisions are now recorded in
+[Issue10 scope](../USER-RUNNER-ISSUE10-SCOPE.md), superseding pending-decision
+wording below. These drafts still require complete envelope and render review.
+
 These are source drafts, not approved rendered manifests. Do not apply them to
 codex-trial or any cluster. User namespace/storage/Secret decisions remain pending.
 No runtime, grants, capacity, quota or provider access is enabled by this commit.
