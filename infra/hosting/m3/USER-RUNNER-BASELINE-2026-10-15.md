@@ -52,6 +52,16 @@ No final executable CEL expression bundle is claimed by this design update.
 
 ## Retain PVC path: candidate with a bootstrap dependency
 
+Decision update (PM review requirements, 2026-10-15): retain the static PV
+template; do not select dynamic PVCs for the current preparation path. The
+discussion below is deferred analysis, not an alternative execution instruction.
+PSA enforce/audit/warn versions in the foundation template are pinned to v1.36.
+
+Policy, binding and any future parameter editing privileges must be separate
+from workload/controller identities. Required negative tests include wrong
+owner/state/image/volume/creator identity, extra containers and projected tokens.
+VAP admission results never stand in for accepted-request drain or termination.
+
 The existing static template remains a valid separate option. The dynamic option
 would remove volumeName, explicitly name an approved Retain StorageClass, preserve
 Filesystem/access modes and separate native/control PVCs, then record the actual

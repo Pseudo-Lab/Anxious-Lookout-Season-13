@@ -13,7 +13,7 @@ and reject unfilled/unknown inputs. Rendered documents need a separate review.
 | Input | Evidence / approval needed |
 |---|---|
 | Target context and new namespace | User authorization for namespace creation in the identified isolated cluster; PM records context and namespace UID after creation |
-| PSA version | Actual server version and supported admission configuration; pin a supported v1.N version, not latest |
+| PSA version | Template pins v1.36 from PM's measured baseline; verify the target before rendering |
 | Storage provisioning | User authorization for provisioning method, capacity, backing system and retention; storage administrator supplies two distinct synthetic PVs with no user data |
 | Native/control PV names and class | Inspect PV UID, volume identity, claimRef, reclaim policy, mode, class and capacity; both must be dedicated to this rehearsal |
 | Requested sizes/access mode | Explicit approved values supported by both PVs; access mode alone is not a process/lease fence |
@@ -21,7 +21,7 @@ and reject unfilled/unknown inputs. Rendered documents need a separate review.
 | Secret input | Authorized private injection of a newly generated synthetic transport token, at least32 ASCII non-whitespace characters, base64 encoded; never ChatGPT/provider credentials |
 
 PM obtained authorized read-only baseline on 2026-10-15: k3s v1.36.4, VAP v1,
-Cilium1.20.2 and Retain local-path StorageClasses. PSA v1.36 is the proposed pin.
+Cilium1.20.2 and Retain local-path StorageClasses. PSA v1.36 is pinned.
 CEL VAP v1 is now the proposed admission path; it is not installed here.
 See ../USER-RUNNER-BASELINE-2026-10-15.md for the evidence and WFFC bootstrap
 dependency. PM owns further cluster reads; do not access root kubeconfig or
@@ -29,6 +29,10 @@ modify the existing codex-trial namespace. Target namespace/storage choice and
 rendered resources still need approval.
 
 ## Storage scope
+
+PM's 2026-10-15 review requirements retain the static PV path. Dynamic PVCs
+are not selected. A future proposal must separately review first-consumer
+initialization, admission/RBAC/network/quota ordering and PV UID capture.
 
 `10-static-claims.json.in` is **only the static preexisting-volume binding path**.
 It does not create PVs, choose a storage driver, use a default dynamic class, or
