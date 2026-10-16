@@ -2,7 +2,7 @@
 
 Mount the archive as /backup.tar.gz:ro. No live host k3s volumes are mounted.
 This extracts only state.db(+WAL) into container-local temporary storage.
-It checks database integrity, expected schema and policy resources, not a full
+It checks database integrity, expected schema and recovery inputs, not a full
 replacement-server boot or a PostgreSQL/tenant-volume restore.
 """
 import pathlib
@@ -42,12 +42,7 @@ with tempfile.TemporaryDirectory() as temporary, tarfile.open("/backup.tar.gz", 
     count = connection.execute("SELECT count(*) FROM kine").fetchone()[0]
     if not count:
         raise RuntimeError("restored Kine datastore is empty")
-    for policy in ("anxious-lookout-tenant-boundary", "anxious-lookout-node-protection"):
-        row = connection.execute(
-            "SELECT deleted FROM kine WHERE name LIKE ? ORDER BY id DESC LIMIT 1",
-            ("%/" + policy,),
-        ).fetchone()
-        if row is None or row[0]:
-            raise RuntimeError("expected active network policy absent in restored DB: " + policy)
-    print("PASS: SQLite integrity, nonempty Kine data, both active network policies and recovery inputs")
+    # Issue #13 retired both global guards. Policy semantics and the retained
+    # runner/trial inventory must be checked against the snapshot separately.
+    print("PASS: SQLite integrity, nonempty Kine data and recovery inputs; policy semantics not checked")
     connection.close()

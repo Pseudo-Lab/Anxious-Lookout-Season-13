@@ -11,7 +11,7 @@ EnvironmentFile=/etc/anxious-lookout/postboot.env
 ExecStart=/usr/local/sbin/anxious-k3s-postboot-check.sh
 TimeoutStartSec=600
 UMask=0077
-# Exit 2 records pending policy-event review, not a silent success.
+# Exit 2 records pending API/runner and policy-spec review, not a silent success.
 
 [Install]
 WantedBy=multi-user.target

@@ -30,7 +30,7 @@ trap 'exit 143' TERM
 install -d -m 0700 "$staging/recovery" "$staging/var/lib/rancher/k3s/server/db"
 cp -a "$script_dir" "$staging/recovery/infra-k3s"
 /usr/local/bin/k3s --version > "$staging/recovery/k3s-version.txt"
-/usr/local/bin/k3s kubectl --request-timeout=20s get ccnp -o yaml > "$staging/recovery/network-policies.yaml"
+/usr/local/bin/k3s kubectl --request-timeout=20s get ccnp,cnp,networkpolicy -A -o yaml > "$staging/recovery/network-policies.yaml"
 /usr/local/bin/k3s kubectl --request-timeout=20s get namespaces -o yaml > "$staging/recovery/namespaces.yaml"
 paths=(var/lib/rancher/k3s/server/token var/lib/rancher/k3s/server/tls
        var/lib/rancher/k3s/server/cred var/lib/rancher/k3s/server/manifests etc/rancher/k3s)

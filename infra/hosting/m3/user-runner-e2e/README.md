@@ -1,3 +1,12 @@
+# Network transition notice (2026-10-16)
+
+Issue #13 decision C supersedes the hosting-link network instructions below after
+the initial deployment. Follow `../../../k3s/DEFAULT-ALLOW.md`. Do not rerun/apply
+the complete deployment renderer's `resources.json` after C: it would recreate
+`hosting-access-web-link-v1`. Preserve the already installed codex-runner policies
+and runtime/RBAC resources. The historical preparation sequence below records the
+initial bootstrap; no new bootstrap or backend change is required for C.
+
 # Issue 13: one real login owner, one runner
 
 This is an operational candidate for PM execution. Docker tests use fake Kubernetes
