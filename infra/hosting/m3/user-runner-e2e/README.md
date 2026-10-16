@@ -13,8 +13,10 @@ This is an operational candidate for PM execution. Docker tests use fake Kuberne
 and a fake provider transport; they do not prove a live model answer. The deployment
 is k3s `m2-hosting/api`, not Docker Compose. Keep existing trial ConfigMaps, volumes,
 network rules and runner mapping. No frontend change is needed for preparation or
-logout. The backend API image needs this commit; the pinned existing runner image
-can be reused because its service supply socket already exists.
+logout. The backend API image needs this commit. Real execution requires the
+`backend/Dockerfile` runner target with its pinned Codex bundle, not the rehearsal
+image (which has no Codex binary). For the existing generation1 repair, follow
+[IMAGE-REBIND.md](IMAGE-REBIND.md); do not delete the Pod or reset its receipt.
 
 ## Inputs and ownership
 
@@ -45,7 +47,7 @@ per-state subdirectories, not synthetic directories.
   "node": "anxious-lookout",
   "podCIDR": "10.42.0.0/24",
   "providerAccountId": "<selected ChatGPT account id>",
-  "image": "<reviewed runner image>@sha256:<digest>",
+  "image": "docker.io/library/anxious-s13-chatbot-runner-039cc88@sha256:fe3900c07b6f712ebe9e27224298bac7e2f041c9e07f206fa5a09be508f1acd1",
   "callback": "http://api.m2-hosting.svc.cluster.local:8080/api/internal/research/tools",
   "api": "https://10.0.0.107:6443",
   "kubeTokenFile": "/inputs/kube-token",
