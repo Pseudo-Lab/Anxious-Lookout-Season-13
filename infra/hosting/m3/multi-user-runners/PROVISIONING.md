@@ -1,5 +1,8 @@
 # Provisioning and dynamic plans — source checkpoint, no live approval
 
+Use [CUTOVER.md](CUTOVER.md) for ordered PM execution, new artifact pins and the
+explicit stopped-binding image maintenance path. This file describes the component.
+
 The API records registry/outbox intents. A separate root host preparation worker
 (`ops.runner_provision_worker`, finite `--limit 10` batch) creates retained resources,
 publishes immutable bindings, then lets the existing Controller issue one Pod create

@@ -1,5 +1,8 @@
 # Host access-token supply — source review, no live enablement
 
+Use [CUTOVER.md](CUTOVER.md) for build/pin records, stopped binding-image transition,
+service installation order, expansion gates and rollback. No live build is implied.
+
 `ops.runner_host_supply` is a finite host worker for D1. It reads only the fixed
 `/home/opc/.codex/auth.json` source, with a trusted configured owner UID and private
 regular-file/canonical-path checks. It validates a ChatGPT access JWT, its account

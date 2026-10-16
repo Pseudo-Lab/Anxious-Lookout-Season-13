@@ -1,5 +1,9 @@
 # Termination source checkpoints — no live deployment approval
 
+Use [CUTOVER.md](CUTOVER.md) for the ordered PM procedure and new rollout artifact
+record. Its same-source API/runner/worker build supersedes the historical legacy-only
+image below; retain the old pin as provenance, not the final idle/supply artifact.
+
 The runner's private authenticated `POST /lifecycle/drain` accepts exactly stopId,
 ownerId, stateId, podUid (canonical UUID strings) and generation (positive integer).
 The caller must bind generation to the current registry and Pod UID under its owner
