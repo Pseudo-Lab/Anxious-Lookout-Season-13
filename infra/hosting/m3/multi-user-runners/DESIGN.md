@@ -1,10 +1,10 @@
 # Issue 16 backend design — decision draft, 2026-10-16
 
 Branch: task/multi-user-runners, base main26197c5. This is design/D1 impact analysis,
-not an approved deployment or finalized API. D1 authentication and D2 capacity/idle
-values remain user decisions. PM's working assumption is per-user ChatGPT login
-as the target, with an allowlist of2–3 owners and individually supplied credentials
-for initial live validation. No implementation or live mutation is included here.
+not an approved deployment or implemented API. D1 is decided: shared operator access
+token, automatically supplied by a host-side component to each owner's isolated
+runner. This supersedes the earlier per-user-login/manual-supply assumptions.
+D2 capacity/idle values remain pending. No live mutation is included here.
 
 ## Current constraints confirmed in source
 
@@ -90,43 +90,81 @@ as other owners before release/generation2. Preserve conversation owner identity
 state and files. If old evidence is insufficient, explicitly hold the reservation
 for PM reconciliation rather than declaring the migration a successful re-entry.
 
-## D1 impact: managed login is not a UI around the current supply socket
+## D1(b-auto): decided shared operator token with host-side injection
 
-Official OpenAI documentation distinguishes managed ChatGPT login from externally
-supplied chatgptAuthTokens. Managed device-code login makes Codex own persistence
-and refresh; external-token mode makes the host own token lifecycle. The documented
-app-server login type is chatgptDeviceCode, with loginId/verificationUrl/userCode
-and asynchronous completion/cancellation. See [App Server authentication](https://learn.chatgpt.com/docs/app-server).
+[User decision](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/16#issuecomment-6208116845):
+all approved editors/admins use separate owner/state/storage/Pod bindings but the
+same operator provider account, quota and cost. No device-code/login UI, managed
+auth adapter or self-service provider-auth API is included. Retain external
+chatgptAuthTokens/ServiceAccessAuth and its replay/revocation protections. No native
+or host automatic provider refresh is added; the operator maintains host login.
 
-Device login availability depends on account/workspace settings; headless CLI
-supports the device-auth flow. See [Authentication](https://learn.chatgpt.com/docs/auth).
-The pinned0.160.1 image's `codex login --help` was checked in network-disabled Docker
-and includes --device-auth. No actual login, RPC compatibility or account entitlement
-was tested. Current web documentation can differ from this pinned binary: verify its
-app-server schema and isolated flow before promising exact fields/timing in the API.
+### Components and sequence
 
-- **D1(a), target:** a separate managed-login runner auth adapter is required. Current
-  ServiceAccessAuth expects an externally supplied access snapshot and rejects native
-  auth.json; do not weaken that adapter or reuse its ledger as a managed credential
-  store. Keep managed auth in a dedicated per-owner retained credential location,
-  outside browser-accessible data and ordinary tool roots. Browser sees only a
-  session-bound device challenge/status; tokens/refresh material stay in runner.
-  Login ID is bound to app owner/state/generation/PodUID with CSRF/idempotency and
-  expiry/cancel handling. Confirm provider account binding on completion; an app
-  session or client-supplied account ID is not proof of provider identity.
-- Managed login entails native refresh and credential retention. Issue16 also says
-  provider refresh remains in #11 and tokens belong only in runner ledger: these
-  statements need D1 clarification because native managed storage is not the current
-  access-only ledger. Recommended interpretation if(a) selected: permit Codex's
-  built-in refresh and private per-user credential storage; defer custom refresh
-  orchestration to#11. This is a proposal, not assumed authorization.
-- **D1(c), initial live assumption:** keep external access-only mode and per-owner
-  expected provider-account binding; PM supplies each owner's independently selected
-  token. No operator token sharing/fallback. Owner's auth-expired/revoked state names
-  the actual credential manager. Re-entry loses in-memory access token, so manual
-  resupply is expected after new Pod creation. Stored ledger is not a token cache.
-  This phase does not satisfy self-service login acceptance if(a) is selected.
-- **D1(b):** not assumed; do not silently implement shared operator credentials.
+1. The provisioning controller writes the same operator expectedAccountId into
+   each new control binding. Keep the existing operator's binding unchanged. It
+   emits a nonsecret supply intent containing owner/state/generation/PodUID,
+   namespace UID, image/ref identities and an attempt UUID after the bound Pod is
+   Running/Ready and its supply socket is available. Kubernetes Ready alone is not
+   proof of socket/native/provider readiness. Intents derive from trusted registry
+   state, never a caller-supplied Pod name or arbitrary namespace.
+2. A separate host-side bounded injector runs as the source file's owner and reads
+   exactly `/home/opc/.codex/auth.json` via the existing private-file validation.
+   API Pod gets neither this file nor Docker/host filesystem access. A finite worker
+   invocation processes a bounded batch; a reviewed host service/timer can schedule
+   it. This is application work, not an agent inbox watcher; nothing is installed
+   during design. Docker tooling authority and namespace exec authority belong only
+   to this trusted host component, with no shell commands taken from intent payloads.
+3. Generate owner/state/snapshotId/expectedAccountId supply-inputs automatically in
+   a private directory. This JSON contains no access token. Persist the attempt ID
+   before export, so an ambiguous delivery reuses the same snapshot identity. A new
+   Pod/gen gets a fresh supply intent; do not reuse another owner's metadata.
+4. Recheck account approval, current state/gen/UID, namespace and complete expected
+   Pod/reference identity immediately before delivery. Serialize supply against
+   logout/stop and stale worker completion with the same owner fence. Export in
+   network-disabled Docker as the source UID and pipe stdout directly to the
+   runner's supply client over verified Kubernetes exec, no TTY or shell interpolation.
+   Neither envelope nor raw subprocess output goes to files, logs, queues or DB.
+5. The existing manual shell script's GET-UID followed by name-based exec has a
+   race. Automation must additionally check expected RUNNER_POD_UID inside the
+   runner client **before reading credential stdin**, plus existing owner/state
+   envelope checks. A stale target must never be treated as successful. Revalidate
+   generation/UID before publishing the receipt; preserve uncertainty rather than
+   resetting state after interrupted delivery. This relies on trusted validated
+   runner code/spec and restricted creation authority; it is not an exec API UID
+   precondition or protection against an administrator replacing trusted code.
+6. Only a bounded allowlisted receipt/status is recorded (attempt/owner/gen/UID,
+   accepted/reason/timestamp). A lost response is unknown, not success; reconcile
+   matching runner health/ledger evidence or safely repeat the same latest snapshot
+   under ServiceAccessAuth rules. No destructive ledger reset and no blind automatic
+   retry of sticky policy/model/revocation outcomes. Provider authentication and a
+   real turn remain separate from acceptance of the supply envelope.
+
+### Expiry, recovery and status
+
+Read actual JWT expiry through the existing exporter; do not assume a ten-day
+lifetime. The current exporter rejects expired/under120sec credentials. Host file
+renewal is an operator action, not this worker performing OAuth refresh. A changed
+operator source may trigger a new bounded supply attempt after account/fence checks;
+the same rejected credential is not continuously resent. Initial delivery/re-entry
+and changed-source recovery share the same guarded path. A changed provider account
+is refused until an explicit binding migration, not silently accepted for all users.
+
+Initial/re-entry supply queued or in flight projects `provisioning` with retry2sec.
+Missing/invalid source or exhausted non-auth failure projects persistent
+`not_configured`; expiry/revocation keeps `auth_expired`/`auth_revoked`. These failure
+statuses include retryAfterSeconds30 for **read-only** UI recovery polling after
+operator repair, without hiding the error or repeatedly submitting provider calls.
+Terminal policy/model blocks retain their own reasons and require intervention.
+
+Alerts use deduplicated sanitized structured host-service logs: fixed reason,
+affected owner/gen/UID/attempt and time, never token/claims/source contents/raw stderr.
+This satisfies the requested operator-log notification; no new admin dashboard API
+is introduced in this slice. Public status only exposes safe reasons/retry hints.
+Credential-manager/auth-mode fields are unnecessary since all users use operator
+credentials. In-memory access tokens disappear with the Pod; retained ledgers remain
+token-free. Automatic supply restores access on the next generation, subject to a
+valid host source. Browser login remains GitHub only.
 
 ## D2 and rollout gates
 
@@ -137,15 +175,16 @@ as peak memory. Unknown values do not authorize a capacity increase.
 
 Implementation slices after decisions: schema/eligibility + import; crash-safe
 provisioner/dynamic plans; termination evidence/re-entry/capacity/idle; selected
-credential adapter and front contract; reviewed operational rollout and live matrix.
+host automatic supply and front contract; reviewed operational rollout and live matrix.
 Each slice pushes to the same task branch and uses one eventual PR.
 
 Docker tests: cross-owner refusal at all API/resource boundaries; concurrent same-owner
 preparation and different-owner capacity; create timeout/restart recovery; revoked
 membership mid-flight; old UID/generation fences; pending-work stop refusal; verified
 termination once-only consumption; idle clock boundaries; existing operator import
-and credential history preservation. D1(a) adds owner-bound login/cancel/expiry tests,
-no-token-in-HTTP/log/DB checks and wrong-account completion handling. Live: two users'
+and credential history preservation. D1(b-auto) adds stale UID before stdin, concurrent
+supply/stop, source owner/mode/change/expiry, rejected fingerprint, lost receipt and
+no-token-in-HTTP/log/DB tests. Live: two users'
 full response/logout/relogin-response flows, overflow/wakeup, idle recovery and network
 verdicts. No full acceptance from mocked tests alone.
 
