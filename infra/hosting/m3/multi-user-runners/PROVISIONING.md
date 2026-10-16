@@ -48,6 +48,63 @@ rewritten by the API or this worker. PM must present this exception at deploymen
 approval. New bounded layout is state/native/data and state/control/data; legacy
 import uses state/native and state/control.
 
+### Legacy failed operator reconciliation — execution gate
+
+The live operator registry is reported as `runner_failed` after #13. Its old
+runner has no new termination receipt. Binding import above does not make it
+eligible for entry. `Registry.enter` rejects this phase, and `Registry.stopped`
+only accepts `stopping`; neither is a recovery command for this legacy case.
+At source checkpoint 089df16 there is **no executable legacy recovery tool**.
+Do not substitute a direct SQL phase/UID reset, call an adapter with a fabricated
+`verified=True`, replay the old one-shot create permit, or manufacture a receipt.
+The observer slice must supply a tested recovery tool and exact pinned-image
+invocation here before PM can execute this transition. This section specifies
+its required evidence and preservation boundary, not approval to change live state.
+
+PM's read-only inventory for that operational review must contain:
+
+- Registry owner ID, state ID, generation, revision, phase, Pod UID, activity,
+  active/ambiguous fields; related admissions, entry receipts and outbox records.
+- Bound namespace name/UID, Pod name and current GET result, including UID,
+  nodeName, deletion timestamp and container IDs if present. Retain the previous
+  UID-bearing Pod/create evidence if the API object is absent.
+- Node name/UID, current Ready condition and heartbeat, node boot ID, and the
+  relation between that node and the old Pod. A replacement node with the same
+  name is not sufficient evidence.
+- Actual CRI Unix socket endpoint, runtime/version, container and sandbox
+  inventory scoped to the old Pod UID, and the host proc mount path. The proc
+  view must cover the host PID namespace and readable process cgroups; record
+  its boot ID and collection times. Do not expose a runtime socket to the API.
+- Canonical retained native/control paths and layout (legacy uncapped or bounded),
+  PV/PVC/Secret names and UIDs, state/account markers, broker mapping, and existing
+  permit/operation evidence locations. Record metadata and integrity evidence
+  privately; never copy credential values or conversation text into messages.
+
+The reviewed recovery tool must first produce a read-only report bound to this
+exact owner/state/generation/revision/Pod UID and evidence timestamps. An operator
+must reconcile unfinished admissions and uncertain conversation/native work from
+their original evidence; a dead process does not prove a request completed.
+Missing receipts cannot be replaced by ledger interpretation: `nativeAttached`
+records attachment history, not process liveness. Preserve that ledger unchanged.
+
+Before a recovery commit, fence dispatch and all creators for this owner, verify
+the exact Pod is absent, and independently establish termination through the
+trusted node CRI and host process view. Pod 404, an empty container query alone,
+or a stale snapshot is insufficient. Recheck membership and the full registry
+fence under the owner lock, and refuse changed identity, pending/uncertain work,
+incomplete process visibility, node/boot drift, or mismatched retained bindings.
+Evidence collection failures stop recovery; they never count as absence.
+
+The intended recovery result is a separately audited, transactional release into
+`idle_stopped`, clearing only the confirmed old Pod association and preserving
+owner/state identity and generation. The next authorized entry allocates the next
+generation via the normal path. Recovery must retain old entry/create receipts,
+admissions/completions, native conversation history, service ledger, transport
+bindings and storage; it must not delete/reformat data or re-run preparation.
+Any legacy inconsistency that cannot meet these conditions remains `runner_failed`
+for a separately reviewed resolution. The final tool, transition tests, safe
+repeat behavior and invocation are outstanding observer-slice release gates.
+
 ## New storage and host service
 
 Build the separate Docker `provisioner` target. The helper runs as root, with only
