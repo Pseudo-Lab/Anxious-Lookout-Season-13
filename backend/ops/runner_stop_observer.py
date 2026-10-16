@@ -10,7 +10,8 @@ import json
 from pathlib import Path
 from uuid import UUID
 from sqlalchemy import text
-from app.runner_termination_control import stop_for, accept_drain, release, drain_body, no_pending_work
+from app.runner_termination_control import stop_for, accept_drain, release, drain_body, no_pending_work, request_idle_stop
+from app.runner_limits import load_limits
 from app.runner_termination_schema import validate
 from app.conversations import Runner
 from ops.runner_one_shot import request
@@ -35,6 +36,25 @@ class Observer:
 
     def pod(self, runtime):
         return runtime.pods._request('GET','pods',runtime.plan.identity.name,missing=True)
+
+    def idle(self, owner, idle_seconds):
+        with self.pool.bound(owner) as runtime, self.engine.begin() as db:
+            runtime.namespace()
+            state = self.current(db,runtime,owner)
+            if stop_for(db,state) is not None:
+                return  # Existing cleanup continues even if native is already gone.
+            no_pending_work(db,state)
+            obj = self.pod(runtime)
+            require(obj is not None and not obj['metadata'].get('deletionTimestamp')
+                    and runtime.pods._pod(obj,runtime.plan).uid == state.pod_uid)
+            address = ipaddress.ip_address(obj['status']['podIP'])
+            require(address in runtime.network and not address.is_loopback and not address.is_link_local)
+            host = '['+str(address)+']' if address.version == 6 else str(address)
+            evidence = self.runner('http://'+host+':8080',runtime.token,owner,str(state.state_id)).call(
+                'POST','/lifecycle/idle',{'idleSeconds':idle_seconds})
+            require(evidence == {'ownerId':str(owner),'stateId':str(state.state_id),
+                                 'podUid':str(state.pod_uid),'idle':True})
+            request_idle_stop(db,owner,idle_seconds=idle_seconds,native_idle=True)
 
     def anchor(self, runtime, owner):
         with self.engine.begin() as db:
@@ -122,6 +142,7 @@ def main():
     parser.add_argument('--owner',type=UUID)
     parser.add_argument('--cursor-file')
     parser.add_argument('--limit',type=int,default=10)
+    parser.add_argument('--idle',action='store_true',help='Also record eligible idle stop intents before normal observation')
     args = parser.parse_args()
     engine = None
     try:
@@ -131,6 +152,7 @@ def main():
         require(set(config) == {'pool','host','storageRoot'})
         engine = create_engine(secret('OBSERVER_DATABASE_URL'),hide_parameters=True)
         observer = Observer(engine,Pool(engine,config['pool']),HostTermination(**config['host']),config['storageRoot'])
+        idle_seconds = load_limits().idle_seconds
         cursor = Path(args.cursor_file) if args.cursor_file else None
         after = UUID(read_private(cursor)['after']) if cursor is not None and cursor.exists() else None
         with engine.begin() as db:
@@ -138,14 +160,22 @@ def main():
             if args.owner is not None:
                 owners = [args.owner]
             else:
-                statement = text('''SELECT DISTINCT owner_id FROM runner_termination.stops
-                    WHERE completed_at IS NULL AND (CAST(:after AS uuid) IS NULL OR owner_id>CAST(:after AS uuid))
+                statement = text('''SELECT owner_id FROM (
+                    SELECT owner_id FROM runner_termination.stops WHERE completed_at IS NULL
+                    UNION SELECT owner_id FROM runner_runtime.registry WHERE :idle
+                        AND phase IN ('ready','runner_unreachable') AND pod_uid IS NOT NULL AND active_requests=0
+                        AND (NOT ambiguous OR phase='runner_unreachable')
+                        AND last_activity<=clock_timestamp()-make_interval(secs=>:seconds)
+                    ) candidates WHERE (CAST(:after AS uuid) IS NULL OR owner_id>CAST(:after AS uuid))
                     ORDER BY owner_id LIMIT :limit''')
-                owners = db.execute(statement,{'after':after,'limit':args.limit}).scalars().all()
+                params = {'after':after,'limit':args.limit,'idle':args.idle,'seconds':idle_seconds}
+                owners = db.execute(statement,params).scalars().all()
                 if not owners and after is not None:
-                    owners = db.execute(statement,{'after':None,'limit':args.limit}).scalars().all()
+                    owners = db.execute(statement,{**params,'after':None}).scalars().all()
         for owner in owners:
             try:
+                if args.idle:
+                    observer.idle(owner,idle_seconds)
                 observer.process(owner)
                 outcome = 'observed'
             except Exception:

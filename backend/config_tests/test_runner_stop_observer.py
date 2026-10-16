@@ -94,3 +94,26 @@ def test_lost_delete_response_is_retryable_without_releasing_slot(observer,admin
     monkeypatch.setattr(rt.pods,'_request',original)
     result = instance.process(owner)
     assert result.phase == Phase.STOPPED and len(deletes) == 1
+
+
+@pytest.mark.parametrize('native_idle', [True, False, 'wrong-uid'])
+def test_idle_native_evidence_precedes_intent_for_bootstrap_unreachable(observer,admin,native_idle):
+    instance,owner,rt,server,deletes,receipts,stop = observer
+    with admin.begin() as db:
+        db.execute(text('DELETE FROM runner_termination.stops WHERE owner_id=:owner'), {'owner':owner})
+        db.execute(text("UPDATE runner_runtime.registry SET last_activity=clock_timestamp()-interval '1 hour' WHERE owner_id=:owner"), {'owner':owner})
+    class Transport:
+        def __init__(self,*args): pass
+        def call(self,method,path,body):
+            assert path == '/lifecycle/idle' and body == {'idleSeconds':300}
+            return {'ownerId':str(owner),'stateId':str(rt.plan.identity.state_id),
+                    'podUid':str(uuid4()) if native_idle == 'wrong-uid' else str(stop['pod_uid']), 'idle':native_idle is True}
+    instance.runner = Transport
+    before = read(admin,owner)
+    if native_idle is True:
+        instance.idle(owner,300)
+        with admin.begin() as db: assert stop_for(db, before) is not None
+    else:
+        with pytest.raises(Refused): instance.idle(owner,300)
+        with admin.begin() as db: assert stop_for(db, before) is None
+    assert read(admin,owner) == before and deletes == []

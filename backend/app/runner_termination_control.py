@@ -50,6 +50,24 @@ def request_stop(db, owner):
 
 
 @atomic
+def request_idle_stop(db, owner, *, idle_seconds, native_idle):
+    """Recheck idle under the owner lock; only record intent, never claim death."""
+    require(type(idle_seconds) is int and idle_seconds > 0)
+    validate(db)
+    state = Registry(db)._current(owner)
+    prior = stop_for(db, state)
+    if prior is not None:
+        return prior
+    require(native_idle is True)
+    require(state.phase in {Phase.READY, Phase.UNREACHABLE} and state.pod_uid is not None
+            and state.active_requests == 0 and (not state.ambiguous or state.phase == Phase.UNREACHABLE))
+    no_pending_work(db, state)
+    now = db.execute(text('SELECT clock_timestamp()')).scalar_one()
+    require(0 <= idle_seconds <= (now-state.last_activity).total_seconds())
+    return request_stop(db, owner)
+
+
+@atomic
 def queue_entry(db, owner, key, session_hash):
     validate(db)
     require(isinstance(key,UUID) and isinstance(session_hash,str))

@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 from app.runner_registry import Registry
-from app.runner_termination_control import request_stop, queue_entry, accept_drain, release, drain_body, stop_for
+from app.runner_termination_control import request_stop, queue_entry, accept_drain, release, drain_body, stop_for, request_idle_stop
 from app.runner_termination_schema import validate
 from runner.lifecycle import Phase, Refused
 from config_tests.test_runner_registry import schema, admin, owner, t0, ready, read
@@ -188,3 +188,31 @@ def test_observer_capability_can_release_and_reenter_without_auth_mutation(admin
         with admin.begin() as db:
             db.execute(text('SET LOCAL ROLE anxious_runner_observer'))
             db.execute(text('UPDATE auth.accounts SET is_approved=false'))
+
+
+@pytest.mark.parametrize('damage', [None, 'recent', 'active', 'ambiguous', 'conversation', 'future'])
+def test_idle_rechecks_current_activity_and_only_records_intent(admin, owner, t0, damage):
+    state = ready(admin, owner, t0)
+    with admin.begin() as db:
+        db.execute(text("UPDATE runner_runtime.registry SET last_activity=clock_timestamp()-interval '10 minutes' WHERE owner_id=:owner"), {'owner':owner})
+        if damage == 'recent':
+            db.execute(text('UPDATE runner_runtime.registry SET last_activity=clock_timestamp() WHERE owner_id=:owner'), {'owner':owner})
+        if damage == 'future':
+            db.execute(text("UPDATE runner_runtime.registry SET last_activity=clock_timestamp()+interval '1 hour' WHERE owner_id=:owner"), {'owner':owner})
+        if damage == 'active':
+            db.execute(text('UPDATE runner_runtime.registry SET active_requests=1 WHERE owner_id=:owner'), {'owner':owner})
+        if damage == 'ambiguous':
+            db.execute(text('UPDATE runner_runtime.registry SET ambiguous=true WHERE owner_id=:owner'), {'owner':owner})
+        if damage == 'conversation':
+            db.execute(text("INSERT INTO research.conversations(owner_id,title,state) VALUES(:owner,'busy','running')"), {'owner':owner})
+    before = read(admin, owner)
+    with admin.begin() as db:
+        if damage:
+            with pytest.raises(Refused): request_idle_stop(db, owner, idle_seconds=300, native_idle=True)
+            assert stop_for(db, before) is None
+        else:
+            with pytest.raises(Refused): request_idle_stop(db, owner, idle_seconds=1800, native_idle=True)
+            stop = request_idle_stop(db, owner, idle_seconds=300, native_idle=True)
+            assert request_idle_stop(db, owner, idle_seconds=300, native_idle=True)['stop_id'] == stop['stop_id']
+            assert stop['pod_uid'] == state.pod_uid and stop['receipt'] is None
+    assert read(admin, owner) == before  # No claim of native quiescence or slot release.

@@ -8,6 +8,7 @@ import queue
 import re
 import subprocess
 import threading
+import time
 import uuid
 from copy import deepcopy
 from contextlib import asynccontextmanager, contextmanager
@@ -41,6 +42,11 @@ class Turn(BaseModel):
     @classmethod
     def valid_scope(cls, value):
         return Scope.model_validate(value).model_dump(mode="json", exclude_none=True) if value is not None else None
+
+
+class IdleCheck(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    idleSeconds: int = Field(strict=True, gt=0, le=999999999)
 
 
 class Drain(BaseModel):
@@ -124,6 +130,7 @@ class Native:
         self.state_lock = threading.RLock()
         self.completed = {}
         self.active_session = None
+        self.idle_since = time.monotonic()
         self.mapping_file = root / "broker.json"
         self.mapping = json.loads(self.mapping_file.read_text()) if self.mapping_file.exists() else {}
         if auth and any(entry.get("projectionVersion") != self.PROJECTION_VERSION for entry in self.mapping.values()):
@@ -491,6 +498,7 @@ class Native:
             if self.active_session is not None:
                 raise RuntimeError("Runner is busy")
             self.active_session = session
+            self.idle_since = time.monotonic()
             if self.auth:
                 try:
                     self.auth.consume(request)
@@ -607,6 +615,7 @@ class Native:
                         self.save()
                     finally:
                         self.active_session = None
+                        self.idle_since = time.monotonic()
             finally:
                 self.lock.release()
 
@@ -713,6 +722,7 @@ def create_app():
             supply = None
             app.state.native, app.state.auth_failure = None, None
             app.state.stopping = False
+            app.state.idle_since = time.monotonic()
             app.state.drain = None
             try:
                 mode = os.getenv("CODEX_AUTH_MODE", "none")
@@ -801,6 +811,21 @@ def create_app():
     @app.exception_handler(Exception)
     async def unavailable(request, exc):
         return JSONResponse({"ownerId": owner, "error": "codex_unavailable"}, status_code=503)
+
+    @app.post('/lifecycle/idle')
+    def idle_check(body: IdleCheck):
+        with lifecycle_lock:
+            native = app.state.native
+            idle = False
+            if not app.state.stopping and native is not None:
+                with native.state_lock:
+                    idle = (native.active_session is None and not native.lock.locked()
+                            and all(entry.get('state') == 'idle' for entry in native.mapping.values())
+                            and time.monotonic()-native.idle_since >= body.idleSeconds)
+            elif not app.state.stopping and app.state.auth_failure == 'not_configured':
+                idle = (not (root/'broker.json').exists() and not (root/'codex').exists()
+                        and time.monotonic()-app.state.idle_since >= body.idleSeconds)
+            return {'ownerId':owner,'stateId':state_id,'podUid':pod_uid,'idle':idle}
 
     @app.get("/health")
     def health():

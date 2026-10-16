@@ -225,3 +225,32 @@ binary only invokes inventory calls, and runtime-socket trust stays with the hos
 operator. Host namespaces and SYS_PTRACE are confined to this finite trusted tool,
 not granted to API or runner workloads. CLI --help passed with network disabled;
 the privileged report/apply invocation has **not** been run on the live host.
+
+## Idle reclamation
+
+The finite observer accepts `--idle` to include READY/UNREACHABLE owners whose last DB
+activity is at least `CODEX_USER_RUNNER_IDLE_SECONDS` old (default1800). It merges
+idle candidates and existing stop intents into the same sorted persisted cursor,
+so a repeatedly refused owner cannot starve later owners. With `--owner`, it
+rechecks that single owner instead. Run via the external reviewed systemd timer;
+no internal inbox watcher or permanent polling process is introduced.
+
+The DB candidate query is only a hint. Under the owner lock, the worker rechecks
+current phase, UID, activity time against `clock_timestamp()`, active/ambiguous
+flags, admissions and running conversations. It also calls the bound authenticated
+`POST /lifecycle/idle` and requires exact owner/state/Pod UID plus idle=true. Native
+idle duration uses a monotonic clock reset on startup, actual turn admission and
+worker completion; GET/history polling does not reset it. Active/unknown/failed
+broker work refuses native idle evidence. This extra clock prevents an old DB
+timestamp from reclaiming a just-completed turn. A restarted adapter waits the full
+interval again. A fresh dispatch or changed activity causes refusal. Bootstrap
+UNREACHABLE/ambiguous state may become a stop intent only with that current native
+evidence; ambiguity is not cleared until the regular clean drain. It records the
+ordinary durable stop intent without changing the
+registry phase, clearing ambiguity or releasing capacity. Subsequent dispatch is
+fenced by that intent, and existing native drain/receipt/UID-delete/host proof logic
+performs the actual stop and release. It does not call Registry.idle with an invented
+quiescence flag. Expired/revoked users can still be cleaned up; new entry remains
+subject to the existing membership/session/feature checks. GET does not update
+last_activity or create a re-entry intent. The previously pinned legacy image
+predates this idle option; build a newly reviewed artifact before enabling it.

@@ -114,3 +114,24 @@ def test_native_close_requires_graceful_exit_and_quiescence(failure):
     native.check_binding = binding
     assert native.close() is (failure is None)
     assert native.close() is (failure is None)
+
+
+def test_idle_evidence_uses_native_clock_and_refuses_pending_work(setup):
+    import time
+    client, body, headers, root = setup
+    native = client.app.state.native
+    native.idle_since = time.monotonic()
+    query = {'idleSeconds':300}
+    assert client.post('/lifecycle/idle',json=query,headers=headers).json()['idle'] is False
+    native.idle_since -= 301
+    for _ in range(2):
+        assert client.post('/lifecycle/idle',json=query,headers=headers).json() == {
+            'ownerId':body['ownerId'],'stateId':body['stateId'],'podUid':body['podUid'],'idle':True}
+    for state in ('running','failed','unknown'):
+        native.mapping = {'session':{'state':state}}
+        assert client.post('/lifecycle/idle',json=query,headers=headers).json()['idle'] is False
+    native.mapping = {}
+    native.active_session = 'busy'
+    assert client.post('/lifecycle/idle',json=query,headers=headers).json()['idle'] is False
+    assert client.post('/lifecycle/idle',json=query).status_code == 401
+    assert client.post('/lifecycle/idle',json={'idleSeconds':True},headers=headers).status_code == 422
