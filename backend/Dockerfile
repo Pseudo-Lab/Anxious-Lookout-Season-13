@@ -47,3 +47,11 @@ USER root
 RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs util-linux \
     && rm -rf /var/lib/apt/lists/*
 ENTRYPOINT ["python", "-B", "-m", "ops.runner_provision_worker"]
+
+# Untrusted commands run here, never alongside runner auth/control volumes.
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS shell-executor
+RUN apt-get update && apt-get install -y --no-install-recommends bash coreutils curl jq ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY backend/executor/server.py /opt/executor/server.py
+USER 20002:10001
+ENTRYPOINT ["python", "-I", "/opt/executor/server.py"]
