@@ -173,6 +173,18 @@ def display_native_item(item):
             result.append({"id": identity, "type": "tool_call", "name": item.get("tool", ""),
                            "input": item.get("arguments"), "output": item.get("contentItems", item.get("result")),
                            "status": item.get("status", "unknown")})
+            if kind == 'mcpToolCall' and item.get('server') == 'shell' and item.get('tool') == 'shell':
+                native_result = item.get('result') or {}
+                parts = native_result.get('content', []) if isinstance(native_result, dict) else []
+                for part in parts:
+                    try:
+                        output = json.loads(part.get('text', ''))
+                        if isinstance(output, dict) and output.get('status') in {'completed', 'failed', 'timed_out', 'rejected'}:
+                            result[-1].update(output=output, status=output['status'])
+                            if isinstance(output.get('error'), dict):
+                                result[-1]['error'] = output['error']
+                    except (ValueError, AttributeError):
+                        pass
             # Native calls begin without a result, serialized as explicit null;
             # interrupted/old history can retain that state permanently.
             for part in item.get("contentItems") or []:
@@ -506,6 +518,11 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                 fail("not_ready", "Research schema is not ready", 503)
             metadata = request_metadata(row)
             scope = metadata["scope"] if metadata else None
+            if body.name == 'runner_shell_authorize':
+                from .page_scope import shell_allowed
+                if body.arguments != {} or not shell_allowed(scope):
+                    fail('tool_not_allowed', 'Shell is unavailable in this request mode', 403)
+                return response({'authorized': True})
             if not tool_allowed(scope, body.name, body.arguments):
                 fail("tool_not_allowed", "Tool is unavailable in this request's research mode", 403)
             store = Store(db, row.owner_id)

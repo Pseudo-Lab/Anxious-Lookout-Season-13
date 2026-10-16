@@ -53,7 +53,7 @@ mounted; no production image build is needed. Test checks private path absence,
 workspace writes, cwd escape refusal, output truncation, busy rejection, deadline,
 escaped descendant cleanup, disconnect cancellation and command-UID peer refusal.
 
-This slice does not enable shell in the runner or publish a v2 Pod plan yet. The
-agreed next slices wire a custom dynamic shell tool (native shell remains false /
-read-only), public-mode fence, safe history projection, v2 manifest and stopped
-binding CAS upgrade. No operational success is claimed by these offline tests.
+The opt-in v2 runner integration uses a fixed stdio MCP bridge, private per-turn
+authorization broker and stopped binding CAS transition; see
+[`runner/SHELL-EXECUTOR.md`](../runner/SHELL-EXECUTOR.md). Native shell remains
+false/read-only. No operational success is claimed by these offline tests.

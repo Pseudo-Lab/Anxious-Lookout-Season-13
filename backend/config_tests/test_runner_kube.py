@@ -250,3 +250,27 @@ def test_delete_accepts_asynchronous_api_response(plan):
         assert seen == [{'preconditions': {'uid': uid}}]
     finally:
         port.close()
+
+
+def test_executor_plan_is_opt_in_and_confined(plan):
+    from app.runner_kube import ExecutorPlan
+    assert len(plan.manifest('isolated')['spec']['containers']) == 1
+    enabled = replace(plan, executor=ExecutorPlan('registry.invalid/executor@sha256:'+'b'*64))
+    spec = enabled.manifest('isolated')['spec']
+    assert spec['shareProcessNamespace'] is False
+    executor = spec['containers'][1]
+    assert executor['securityContext']['runAsUser'] == 20002
+    assert executor['resources']['limits'] == {'cpu': '500m', 'memory': '128Mi'}
+    assert executor['volumeMounts'] == [
+        {'name': 'native', 'mountPath': '/state/workspace', 'subPath': 'workspace'},
+        {'name': 'native', 'mountPath': '/run/shell-executor', 'subPath': 'shell-ipc'},
+        {'name': 'shell-tmp', 'mountPath': '/tmp'}]
+    assert {entry['name'] for entry in executor['env']} == {'SHELL_WALL_SECONDS', 'SHELL_OUTPUT_BYTES'}
+    server = Server(enabled)
+    port = KubePods('https://kube.invalid', 'isolated', 'k'*40, None, [enabled], _transport=httpx.MockTransport(server))
+    try:
+        pod = port.create_once(enabled.identity)
+        assert port.lookup(enabled.identity) == pod
+        server.pod['spec']['containers'][1]['volumeMounts'].append({'name': 'control', 'mountPath': '/control'})
+        with pytest.raises(Refused): port.lookup(enabled.identity)
+    finally: port.close()

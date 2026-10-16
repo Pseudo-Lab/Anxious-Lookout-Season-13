@@ -215,3 +215,12 @@ def test_cli_check_no_output_and_exclusive_render(values, baseline, maps, tmp_pa
     (tmp_path/'values.json').write_text('{"version":1,"version":1}')
     result = subprocess.run(args[:-2], capture_output=True)
     assert result.returncode == 1 and b'Rollout render refused' in result.stderr
+
+
+def test_executor_opt_in_flows_only_to_new_owner_preparation(values):
+    executor = {'image': 'registry.invalid/executor@sha256:'+'c'*64, 'wallSeconds': 30, 'outputBytes': 65536}
+    assert 'executor' not in rollout.inputs(rollout.checked(values))['controller']
+    values['executor'] = executor
+    assert rollout.inputs(rollout.checked(values))['controller']['executor'] == executor
+    values['executor']['image'] = 'mutable:latest'
+    with pytest.raises(ValueError): rollout.checked(values)

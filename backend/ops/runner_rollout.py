@@ -43,7 +43,13 @@ def canonical_uuid(value):
 
 
 def checked(v):
-    require(type(v) is dict and set(v) == KEYS and type(v['version']) is int and v['version'] == 1)
+    require(type(v) is dict and set(v) in (KEYS, KEYS | {'executor'}) and type(v['version']) is int and v['version'] == 1)
+    if 'executor' in v:
+        e = v['executor']
+        require(type(e) is dict and set(e) == {'image', 'wallSeconds', 'outputBytes'})
+        require(isinstance(e['image'], str) and re.fullmatch(IMAGE, e['image']))
+        require(type(e['wallSeconds']) is int and 1 <= e['wallSeconds'] <= 300)
+        require(type(e['outputBytes']) is int and 1024 <= e['outputBytes'] <= 1048576)
     for key in ('runtimeImage', 'runnerImage'):
         require(isinstance(v[key], str) and re.fullmatch(IMAGE, v[key]))
     require(re.fullmatch(r'sha256:[a-f0-9]{64}', v['provisionerImageId']))
@@ -227,7 +233,8 @@ def inputs(v):
     p = pool(v, True)
     return {'controller': {k: p[k] for k in ('api', 'namespace', 'namespaceUid', 'podCIDR', 'caFile', 'kubeTokenFile')} |
             {'hostRoot': STORAGE, 'node': v['node'], 'providerAccountId': v['providerAccountId'],
-             'image': v['runnerImage'], 'callback': 'http://api.m2-hosting.svc.cluster.local:8080/api/internal/research/tools'},
+             'image': v['runnerImage'], 'callback': 'http://api.m2-hosting.svc.cluster.local:8080/api/internal/research/tools',
+             **({'executor': deepcopy(v['executor'])} if 'executor' in v else {})},
             'observer': {'pool': p, 'storageRoot': STORAGE, 'host': {'node_name': v['node'], 'node_uid': v['nodeUid'],
                 'boot_id': v['bootId'], 'host_pid_namespace': v['hostPidNamespace'],
                 'host_cgroup_namespace': v['hostCgroupNamespace'], 'endpoint': 'unix://'+v['criSocket'],

@@ -16,7 +16,12 @@ FIELDS = {'owner', 'state', 'generation', 'image', 'native', 'control', 'transpo
 
 
 def decode(value):
-    require(type(value) is dict and set(value) == FIELDS)
+    require(type(value) is dict)
+    if set(value) == FIELDS | {'version', 'executor'}:
+        require(type(value['version']) is int and value['version'] == 2)
+        require(type(value['executor']) is dict and set(value['executor']) == {'image', 'wallSeconds', 'outputBytes'})
+    else:
+        require(set(value) == FIELDS)
     for kind in ('native', 'control', 'transport'):
         require(type(value[kind]) is dict and set(value[kind]) == (
             {'name', 'uid'} if kind == 'transport' else {'name', 'uid', 'volume'}))

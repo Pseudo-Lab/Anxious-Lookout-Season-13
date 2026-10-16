@@ -87,6 +87,11 @@ def tool_allowed(scope, name, arguments):
     return True
 
 
+def shell_allowed(scope):
+    return (isinstance(scope, dict) and isinstance(scope.get('page'), dict)
+            and scope['page'].get('kind') in POLICIES and scope['page']['kind'] != 'public_document')
+
+
 def turn_prompt(text, scope):
     """Keep page data as a small hint, never a grant or repeated tool catalog."""
     import json
