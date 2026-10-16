@@ -1,0 +1,37 @@
+{
+  "apiVersion": "cilium.io/v2",
+  "kind": "CiliumNetworkPolicy",
+  "metadata": {"name": "runner-callback-draft", "namespace": "codex-runner"},
+  "spec": {
+    "endpointSelector": {},
+    "ingress": [
+      {
+        "fromEndpoints": [{"matchLabels": {
+          "k8s:io.kubernetes.pod.namespace": "m2-hosting",
+          "k8s:app": "hosting-api"
+        }}],
+        "toPorts": [{"ports": [{"port": "8080", "protocol": "TCP"}]}]
+      },
+      {
+        "fromEntities": ["host"],
+        "toPorts": [{"ports": [{"port": "8080", "protocol": "TCP"}]}]
+      }
+    ],
+    "ingressDeny": [{"fromEndpoints": [
+      {"matchLabels": {"k8s:io.kubernetes.pod.namespace": "codex-runner"}},
+      {"matchLabels": {"k8s:io.kubernetes.pod.namespace": "codex-trial"}}
+    ]}],
+    "egress": [{"toEntities": ["all"]}],
+    "egressDeny": [
+      {"toEndpoints": [
+        {"matchLabels": {"k8s:io.kubernetes.pod.namespace": "codex-runner"}},
+        {"matchLabels": {"k8s:io.kubernetes.pod.namespace": "codex-trial"}}
+      ]},
+      {"toEntities": ["kube-apiserver"]},
+      {
+        "toEntities": ["all"],
+        "toPorts": [{"ports": [{"port": "6443", "protocol": "TCP"}]}]
+      }
+    ]
+  }
+}

@@ -1,5 +1,11 @@
 # Network transition notice (2026-10-16)
 
+After the image repair, the runner DNS/provider fix is
+[EGRESS-REPAIR.md](EGRESS-REPAIR.md), using `40-runner-network.json` to patch only
+codex-runner/runner-callback-draft. It removes L7 DNS/FQDN dependence while denying
+runner peers and Kubernetes API access. This is the explicit follow-up to C's
+earlier instruction to preserve the runner policies; KNP and trial policies remain.
+
 Issue #13 decision C supersedes the hosting-link network instructions below after
 the initial deployment. Follow `../../../k3s/DEFAULT-ALLOW.md`. Do not rerun/apply
 the complete deployment renderer's `resources.json` after C: it would recreate
