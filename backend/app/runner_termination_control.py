@@ -58,7 +58,7 @@ def queue_entry(db, owner, key, session_hash):
     state = registry._current(owner)
     require(state.phase == Phase.STOPPING or stop_for(db,state) is not None)
     login = db.execute(text('''SELECT 1 FROM auth.sessions WHERE token_hash=:session
-        AND account_id=:owner AND expires_at>now()'''),{'session':session_hash,'owner':owner}).first()
+        AND account_id=:owner AND expires_at>clock_timestamp()'''),{'session':session_hash,'owner':owner}).first()
     require(login is not None)
     # Old normal-entry keys cannot be reused to request another generation.
     prior = db.execute(text('SELECT 1 FROM runner_runtime.entry_receipts WHERE owner_id=:owner AND key=:key'),
@@ -137,7 +137,7 @@ def release(db, owner, stop_id, proof, *, allow_entry):
     if allow_entry and membership.is_approved and membership.role in {'editor','admin'}:
         for entry in entries:
             login = db.execute(text('''SELECT 1 FROM auth.sessions WHERE token_hash=:session
-                AND account_id=:owner AND expires_at>now()'''),{'session':entry['session_hash'],'owner':owner}).first()
+                AND account_id=:owner AND expires_at>clock_timestamp()'''),{'session':entry['session_hash'],'owner':owner}).first()
             if login:
                 result, _ = registry.enter(owner,entry['key'],lambda:datetime.now(timezone.utc))
                 db.execute(text('UPDATE runner_termination.entries SET consumed_at=now() WHERE owner_id=:owner AND key=:key'),

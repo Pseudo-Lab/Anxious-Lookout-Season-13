@@ -78,6 +78,29 @@ def test_mismatched_or_stale_proof_never_releases(admin,owner,t0,damage):
     assert read(admin,owner).phase == Phase.STOPPING and read(admin,owner).pod_uid == state.pod_uid
 
 
+@pytest.mark.parametrize('operation', ['queue', 'release'])
+def test_session_expiring_during_transaction_cannot_start_generation(admin, owner, t0, operation):
+    state, stop, proof = drained(admin, owner, t0)
+    token = login(admin, owner)
+    with admin.begin() as db:
+        if operation == 'release':
+            queue_entry(db, owner, uuid4(), token)
+        db.execute(text("UPDATE auth.sessions SET expires_at=clock_timestamp()+interval '0.3 seconds' WHERE token_hash=:token"),
+                   {'token': token})
+        db.execute(text('SELECT pg_sleep(0.4)'))
+        assert db.execute(text('SELECT expires_at>now() AND expires_at<clock_timestamp() FROM auth.sessions WHERE token_hash=:token'),
+                          {'token': token}).scalar_one()
+        proof['verifiedAt'] = datetime.now(timezone.utc).isoformat()
+        if operation == 'queue':
+            with pytest.raises(Refused):
+                queue_entry(db, owner, uuid4(), token)
+        result = release(db, owner, stop['stop_id'], proof, allow_entry=True)
+        assert result.phase == Phase.STOPPED and result.generation == state.generation
+        assert result.pod_uid is None
+        assert db.execute(text("SELECT count(*) FROM runner_runtime.outbox WHERE owner_id=:owner AND generation=2 AND kind='ensure'"),
+                          {'owner': owner}).scalar_one() == 0
+
+
 def test_http_stopping_post_records_session_bound_intent_and_returns_202(client,admin):
     owner, auth = identity(client,admin)
     state = ready(admin,owner,datetime.now(timezone.utc))
