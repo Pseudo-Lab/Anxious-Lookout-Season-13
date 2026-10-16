@@ -56,3 +56,15 @@ retaining drafts/proposals with existing private history.
 Legacy M3 0004-specific rehearsal/initial-deploy scripts retain their historical
 revision gates; they are not the #22 migration command. Use the explicit revision
 above for #22. Tests use a disposable Docker/PostgreSQL project, never live state.
+
+## Offline proposal fixture
+
+With the offline native protocol fixture, send
+`/fixture/document-update <document UUID> <positive expectedVersion>` as a chat
+message. It calls `research_document_update` with title `Fixture proposal` and
+content `Complete fixture proposal content`. The real API creates a pending
+proposal; document latest changes only after explicit user acceptance. Use the
+current document version, and migrate the disposable API database to 0005 first.
+Rebuild the fixture runner image after pulling this change: the executable is
+copied into the image, so mounting API source alone does not update it. This is
+an offline test command, not a real Codex/provider capability.

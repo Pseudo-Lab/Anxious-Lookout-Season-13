@@ -105,6 +105,38 @@ def test_offline_native_protocol_tool_roundtrip_and_process_restart(tmp_path, mo
         isolated.close()
 
 
+@pytest.mark.parametrize("valid", [True, False])
+def test_document_update_fixture_command(tmp_path, monkeypatch, valid):
+    calls = []
+    original = httpx.Client
+    def callback(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json={"status": "pending", "origin": "codex"})
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: original(transport=httpx.MockTransport(callback), **kwargs))
+    document = str(uuid.uuid4())
+    native = Native(tmp_path / "native", "gpt-6.1-sol", "/usr/local/bin/codex-fixture", "http://callback.invalid/tools")
+    session = str(uuid.uuid4())
+    body = Turn(requestId=uuid.uuid4(), text=f"/fixture/document-update {document} {7 if valid else 0}",
+                tools=definitions(), toolToken="t" * 40, scope={"page": {"kind": "document_workspace"}})
+    try:
+        native.accept(session, body)
+        result = wait_idle(native, session)
+        if not valid:
+            assert result["state"] == "failed" and calls == []
+            return
+        assert result["state"] == "idle" and len(calls) == 1
+        item = result["record"]["turns"][0]["items"][1]
+        assert item["tool"] == "research_document_update"
+        assert item["arguments"]["id"] == document
+        assert item["arguments"]["expectedVersion"] == 7
+        assert item["arguments"]["content"] == "Complete fixture proposal content"
+        assert "pending" in item["contentItems"][0]["text"]
+        native.accept(session, body)
+        assert len(calls) == 1
+    finally:
+        native.close()
+
+
 def test_runner_config_cannot_share_destination_or_secret(tmp_path, monkeypatch):
     from app.conversations import runners_from_file
     token = tmp_path / "token"
