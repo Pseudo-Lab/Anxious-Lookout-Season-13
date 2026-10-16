@@ -52,7 +52,13 @@ existing private `/control/access.sock`. This requires the updated runner image;
 old image compatibility must be reviewed before enabling supply. The native socket
 serializes with drain/turn admission and maintains existing service-ledger rules.
 Only the exact safe accepted receipt is recognized; stdout is never relayed and
-exec stderr is discarded. CLI output is fixed owner/stage/result metadata only.
+exec stderr is discarded. Before recording accepted or returning supplied, the
+worker rechecks the locked registry fence and pending stop, then freshly verifies
+namespace identity and the same running, non-terminating Pod UID, complete spec
+and PVC/Secret references. A missing/replaced/changed target or lookup failure
+keeps the permit unknown and never triggers redelivery. This is a current check,
+not a guarantee that Kubernetes will preserve the Pod after the check.
+CLI output is fixed owner/stage/result metadata only.
 Timeout or unrecognized receipt is an uncertain result, not permission to dispatch
 or replace the Pod. No user turn or provider paid request is created by this worker.
 

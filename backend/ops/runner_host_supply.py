@@ -16,7 +16,7 @@ from app.conversations import Runner
 from app.codex_policy import CodexFailure
 from ops.access_snapshot import selected_file, service_envelope
 from ops.runner_provision_worker import allowed
-from runner.lifecycle import Phase, require
+from runner.lifecycle import Fence, Phase, require
 from runner.auth import write_private
 
 SOURCE = '/home/opc/.codex/auth.json'
@@ -87,6 +87,16 @@ class Supply:
                 input=json.dumps(envelope).encode(),stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
                 timeout=75,check=False)
             require(result.returncode == 0 and result.stdout.strip() == b'{"accepted":true}')
+            # The DB lock cannot prevent external Kubernetes deletion/replacement.
+            # Revalidate after the receiver responds, before publishing success.
+            current = runtime.state(db,owner)
+            require(Fence.of(current) == Fence.of(state) and current.phase == state.phase
+                    and stop_for(db,current) is None)
+            runtime.namespace()
+            confirmed = runtime.pods._request('GET','pods',runtime.plan.identity.name)
+            require(not confirmed['metadata'].get('deletionTimestamp')
+                    and runtime.pods._pod(confirmed,runtime.plan).uid == state.pod_uid
+                    and confirmed['status']['phase'] == 'Running')
             write_private(attempt,{**metadata,'result':'accepted'})
             return 'supplied'
 

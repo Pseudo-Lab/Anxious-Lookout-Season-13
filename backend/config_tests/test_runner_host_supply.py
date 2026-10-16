@@ -147,3 +147,40 @@ def test_observer_db_role_can_supply_without_changing_state(supply,admin):
     before = read(admin,owner)
     assert worker.process(owner) == 'supplied'
     assert read(admin,owner) == before
+
+
+@pytest.mark.parametrize('damage', ['deleted','replaced','terminating','spec','reference','namespace','lookup-error','registry'])
+def test_post_receipt_target_drift_preserves_unknown_permit_without_redelivery(supply,admin,monkeypatch,damage):
+    from copy import deepcopy
+    from dataclasses import replace
+    worker,owner,rt,server,source,health,seen = supply
+    original_pod, original_objects = deepcopy(server.pod), deepcopy(server.objects)
+    original_namespace, original_state = rt.namespace_uid, rt.state
+    original_run = worker.run
+    before = read(admin,owner)
+    def accepted_then_changed(*args,**kwargs):
+        result = original_run(*args,**kwargs)
+        if damage == 'deleted': server.pod = None
+        if damage == 'replaced': server.pod['metadata']['uid'] = str(uuid4())
+        if damage == 'terminating': server.pod['metadata']['deletionTimestamp'] = '2026-10-16T09:00:00Z'
+        if damage == 'spec': server.pod['spec']['containers'][0]['image'] = 'unexpected-image'
+        if damage == 'reference': server.objects[rt.plan.native.name]['metadata']['uid'] = str(uuid4())
+        if damage == 'namespace': rt.namespace_uid = uuid4()
+        if damage == 'lookup-error': server.mode = 'timeout'
+        if damage == 'registry':
+            monkeypatch.setattr(rt,'state',lambda db,owner:replace(original_state(db,owner),revision=before.revision+1))
+        return result
+    worker.run = accepted_then_changed
+    with pytest.raises(Refused): worker.process(owner)
+    records = list(worker.attempt_root.glob('*.json'))
+    assert len(records) == 1
+    assert json.loads(records[0].read_bytes())['result'] == 'unknown'
+    assert read(admin,owner) == before
+    assert sum(isinstance(item,tuple) for item in seen) == 1
+    # Repairing the target does not authorize automatic reuse of an uncertain permit.
+    server.pod,server.objects,server.mode = original_pod,original_objects,'normal'
+    rt.namespace_uid = original_namespace
+    monkeypatch.setattr(rt,'state',original_state)
+    with pytest.raises(FileExistsError): worker.process(owner)
+    assert sum(isinstance(item,tuple) for item in seen) == 1
+    assert json.loads(records[0].read_bytes())['result'] == 'unknown'
