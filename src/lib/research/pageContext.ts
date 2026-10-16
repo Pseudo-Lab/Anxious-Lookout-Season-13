@@ -1,5 +1,5 @@
 // 공통 대화창의 페이지 문맥(#9 api-contracts/issue9-page-chat.md).
-// front는 보고 있는 페이지의 종류와 자원 ID만 보낸다. 실제 문맥과 허용 도구는 서버가 소유·공개 상태를 확인해 정하며,
+// front는 보고 있는 페이지의 종류와 자원 ID만 보낸다. 실제 문맥과 허용 도구는 서버가 소유·공개 상태를 확인해 정하며(#14: 소유자는 화면과 무관),
 // 여기 문구는 안내용이다(권한 근거가 아니다).
 
 import type { PageDescriptor, PageKind } from "@/lib/research/types";
@@ -10,7 +10,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const detail = (kind: PageKind, id: string | null): PageDescriptor =>
   id && UUID.test(id) ? { kind, resourceId: id.toLowerCase() } : { kind: "general" };
 
-/** 경로(basePath 제외)와 query로 페이지 종류를 정한다. 알 수 없는 경로·형식은 general(도구 없음). */
+/** 경로(basePath 제외)와 query로 페이지 종류를 정한다. 알 수 없는 경로·형식은 general(참고할 화면 없음). */
 export function describePage(pathname: string, search: URLSearchParams): PageDescriptor {
   const path = pathname.endsWith("/") ? pathname : `${pathname}/`;
   switch (path) {
@@ -42,51 +42,37 @@ export const sameDescriptor = (a?: PageDescriptor, b?: PageDescriptor) =>
 interface KindText {
   // 페이지 이름(짧게)
   label: string;
-  // 이 페이지에서 질문하면 할 수 있는 일
+  // 이 화면에서 질문하면 할 수 있는 일
   can: string;
+  // 실제 도구 경계인지(#14: 공개 글만). 그 밖의 화면은 모델에 "지금 보고 있는 것"을 알리는 참고일 뿐이다.
+  bounded: boolean;
 }
 
+// #14: 로그인 소유자의 대화는 화면과 무관하게 내 자료·문서 도구 전부를 쓴다. 권한 경계는 소유자이며 화면은 참고다.
+// 웹 검색은 소유자 모드에서만 켜진다. 명령 실행(Bash)은 #23으로 분리되어 켜져 있지 않으므로 안내하지 않는다.
+const OWNER_CAN =
+  "내 자료·문서를 찾아 읽고, 요청하면 새로 저장하거나 새 버전으로 고치고, 연결 관계와 보관도 처리합니다. 필요하면 웹을 검색하고, 찾은 내용은 출처 주소와 수집 시각을 붙여 자료로 저장합니다.";
+
 const KIND_TEXT: Record<string, KindText> = {
-  general: {
-    label: "일반 질문",
-    can: "자료·문서 도구 없이 질문에 답합니다.",
-  },
+  general: { label: "일반", can: OWNER_CAN, bounded: false },
   public_document: {
     label: "이 공개 글",
-    can: "이 공개 글과 직접 참고자료를 읽고 답합니다.",
+    can: "이 공개 글과 직접 참고자료만 읽고 답하며, 웹을 검색하거나 아무것도 저장·수정하지 않습니다.",
+    bounded: true,
   },
-  material: {
-    label: "이 자료",
-    can: "이 자료와 버전·연결 관계를 읽고, 요청하면 이 자료를 새 버전으로 수정합니다.",
-  },
-  document: {
-    label: "이 문서",
-    can: "이 문서와 버전·연결 관계를 읽고, 요청하면 이 문서를 새 버전으로 수정합니다.",
-  },
-  material_workspace: {
-    label: "내 자료",
-    can: "내 자료 목록을 보고, 요청하면 새 자료로 저장합니다.",
-  },
-  document_workspace: {
-    label: "내 문서",
-    can: "내 문서 목록을 보고, 요청하면 새 문서로 저장합니다.",
-  },
+  material: { label: "이 자료", can: OWNER_CAN, bounded: false },
+  document: { label: "이 문서", can: OWNER_CAN, bounded: false },
+  material_workspace: { label: "내 자료", can: OWNER_CAN, bounded: false },
+  document_workspace: { label: "내 문서", can: OWNER_CAN, bounded: false },
 };
 
 export function kindText(kind: string): KindText {
-  return own(KIND_TEXT, kind) ?? { label: "알 수 없는 범위", can: "서버가 정한 범위로 처리되었습니다." };
+  return own(KIND_TEXT, kind) ?? { label: "알 수 없는 화면", can: "서버가 정한 범위로 처리되었습니다.", bounded: false };
 }
 
-// 이 페이지에서 할 수 없는 일의 안내: 관계 연결·보관은 대화창에서 하지 않고 각 화면에서 직접 한다.
-export function unsupportedHint(kind: string): string {
-  switch (kind) {
-    case "general":
-    case "public_document":
-      return "내 자료·문서를 읽거나 저장하려면 내 연구에서 해당 목록이나 항목을 연 채로 질문하세요.";
-    case "material":
-    case "document":
-      return "연결 관계 추가·변경과 보관은 이 화면에서 직접 할 수 있습니다.";
-    default:
-      return "기존 항목 수정은 해당 항목을 연 채로 질문하고, 연결 관계와 보관은 각 항목 화면에서 직접 할 수 있습니다.";
-  }
+/** 범위 표시 문구. 공개 글은 실제 경계라 "범위", 나머지는 참고로 전달한 "화면"이다. */
+export function scopeLabel(kind: string, when: "next" | "sent"): string {
+  const text = kindText(kind);
+  if (text.bounded) return `${when === "next" ? "다음 질문 범위" : "보낸 범위"}: ${text.label}`;
+  return `${when === "next" ? "보고 있는 화면" : "보낸 화면"}: ${text.label}`;
 }

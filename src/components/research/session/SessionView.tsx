@@ -17,7 +17,7 @@ import { storeGeneration } from "@/lib/research/pendingStore";
 import { clearDraft, loadDraft, saveDraft } from "@/lib/research/chatState";
 import { useAuth } from "@/hooks/useAuth";
 import type { AcceptedScope, PageDescriptor, SessionDetail, SessionItem, ToolCallItem } from "@/lib/research/types";
-import { describePage, kindText, sameDescriptor, unsupportedHint } from "@/lib/research/pageContext";
+import { describePage, kindText, sameDescriptor, scopeLabel } from "@/lib/research/pageContext";
 import { own } from "@/lib/research/own";
 import { formatDateTime, toDisplayText } from "@/lib/research/format";
 import {
@@ -86,7 +86,7 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
       {item.status === "rejected" && (
         <p className="px-3 pb-2 text-xs text-amber-800">
           {item.error?.code === "tool_not_allowed"
-            ? "이 질문을 보낸 페이지의 범위에서 허용되지 않는 도구라 서버가 실행하지 않았습니다."
+            ? "이 질문을 보낸 범위(공개 글 읽기 등)에서 허용되지 않는 도구라 서버가 실행하지 않았습니다."
             : "서버가 이 도구 호출을 실행하지 않았습니다."}
           {item.error && ` (${item.error.code})`}
         </p>
@@ -131,12 +131,14 @@ function ModelMismatchNote() {
   );
 }
 
-// 서버가 접수한 질문의 범위(보낸 페이지 문맥·허용 기능). 보낸 뒤 페이지를 옮겨도 바뀌지 않는다.
+// 서버가 접수한 질문의 화면 문맥(공개 글이면 읽기 범위). 보낸 뒤 페이지를 옮겨도 바뀌지 않는다.
 function ScopeBadge({ scope }: { scope: AcceptedScope }) {
-  const text = kindText(scope.page.kind);
   return (
-    <span className="max-w-full break-words rounded bg-white/80 px-1.5 py-0.5 font-normal text-stone-500 ring-1 ring-stone-200" title={text.can}>
-      보낸 범위: {text.label}
+    <span
+      className="max-w-full break-words rounded bg-white/80 px-1.5 py-0.5 font-normal text-stone-500 ring-1 ring-stone-200"
+      title={kindText(scope.page.kind).can}
+    >
+      {scopeLabel(scope.page.kind, "sent")}
       {scope.page.title ? ` · ${scope.page.title}` : ""}
     </span>
   );
@@ -188,13 +190,13 @@ function Message({ sessionId, item }: { sessionId: string; item: Extract<Session
   );
 }
 
-// 다음 질문에 적용될 범위. 같은 대화의 이전 내용은 그대로 이어지며, 이 범위는 이번 질문에 새로 제공하는 페이지 문맥과 실행 권한이다.
-// 범위 이름은 입력창 옆(NextScope), 설명은 입력창 바로 위 본문 흐름(ScopeHint)에 둔다.
+// 다음 질문과 함께 보낼 화면 문맥. 같은 대화의 이전 내용은 그대로 이어진다. #14부터 소유자 화면은 참고일 뿐 권한을 바꾸지 않고,
+// 공개 글만 읽기 범위로 제한된다. 이름은 입력창 옆(NextScope), 설명은 입력창 바로 위 본문 흐름(ScopeHint)에 둔다.
 function NextScope({ page }: { page: PageDescriptor }) {
   const text = kindText(page.kind);
   return (
     <p className="min-w-0 flex-1 truncate text-xs text-stone-500" title={text.can} aria-live="polite">
-      <span className="font-medium text-stone-700">다음 질문 범위: {text.label}</span>
+      <span className="font-medium text-stone-700">{scopeLabel(page.kind, "next")}</span>
     </p>
   );
 }
@@ -202,7 +204,7 @@ function NextScope({ page }: { page: PageDescriptor }) {
 function ScopeHint({ page }: { page: PageDescriptor }) {
   return (
     <p className="text-xs leading-relaxed text-stone-400">
-      {kindText(page.kind).can} {unsupportedHint(page.kind)} 이전 대화 내용은 이 대화에 계속 이어집니다.
+      {kindText(page.kind).can} 이전 대화 내용은 이 대화에 계속 이어집니다.
     </p>
   );
 }
@@ -346,7 +348,7 @@ function Composer({
               </>
             )}
             {retrying && !sameDescriptor(pending.page, page) &&
-              ` 다시 보내기는 지금 페이지가 아니라 처음 보낸 범위(${kindText(pending.page?.kind ?? "general").label})로 처리됩니다.`}
+              ` 다시 보내기는 지금 페이지가 아니라 처음 보낸 화면(${kindText(pending.page?.kind ?? "general").label}) 기준으로 처리됩니다.`}
           </Notice>
         )}
       </div>

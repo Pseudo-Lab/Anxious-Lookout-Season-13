@@ -507,8 +507,6 @@ def register_conversations(app, authorized, sessions, settings, response, write,
             metadata = request_metadata(row)
             scope = metadata["scope"] if metadata else None
             if not tool_allowed(scope, body.name, body.arguments):
-                fail("tool_not_allowed", "Tool is outside this request's page scope", 403)
+                fail("tool_not_allowed", "Tool is unavailable in this request's research mode", 403)
             store = Store(db, row.owner_id)
-            if scope["page"]["kind"] in {"material", "document"}:
-                store.owned_item(scope["page"]["resourceId"], scope["page"]["kind"], active=True)
             return response(dispatch(store, body.name, body.arguments, context=scope.get("context")))

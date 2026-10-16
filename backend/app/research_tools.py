@@ -62,13 +62,13 @@ class PageContext(Input):
 
 
 TOOLS = {
-    "research_page_context": (PageContext, "Read the current request's accepted public document snapshot and direct references; supply materialId to read one reference's stored content. Follow the current request's page/tool limits."),
+    "research_page_context": (PageContext, "Public mode only: read the accepted document snapshot and its direct references; supply materialId for one reference's stored content."),
     "research_list": (Listing, "List your own materials or documents (type material/document)."),
     "research_get": (Lookup, "Read your own material/document/relation by type and id."),
     "research_versions": (Versions, "List immutable snapshots of your own material/document."),
     "research_version_get": (VersionLookup, "Read a complete immutable material/document snapshot."),
     "research_relations": (Versions, "List both endpoints and directions of your own item's relations."),
-    "research_material_save": (SaveMaterial, "Save collected web text, original source URL, collection timestamp and full/excerpt/summary type. mutationId is a UUID reused only for an identical retry."),
+    "research_material_save": (SaveMaterial, "Save web research with original sourceUrl, collectedAt and contentKind (full/excerpt/summary). Keep source citations; distinguish summaries from full text. mutationId is a UUID reused only for an identical retry."),
     "research_document_save": (SaveDocument, "Save a private Markdown document. Preserve citations in its text. mutationId is a UUID reused for identical retries."),
     "research_material_update": (EditMaterial, "Append a material snapshot using expectedVersion; preserve previous content."),
     "research_document_update": (EditDocument, "Append a document snapshot using expectedVersion; preserve previous content."),
