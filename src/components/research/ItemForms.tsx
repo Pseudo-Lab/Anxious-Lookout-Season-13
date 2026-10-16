@@ -140,7 +140,7 @@ const VIEW_LABELS: Record<EditorView, string> = { split: "나란히 보기", wri
  * 문서 본문 편집기: 원문(Markdown) 입력과 미리보기. 미리보기는 저장된 본문과 같은 SafeMarkdown 규칙으로 그린다.
  * 넓은 화면에서는 좌우, 좁은 화면에서는 위아래로 놓인다(편집기 폭 기준 container query).
  */
-export function MarkdownEditor({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+export function MarkdownEditor({ value, onChange, readOnly = false }: { value: string; onChange: (v: string) => void; readOnly?: boolean }) {
   const id = useId();
   const hintId = `${id}-hint`;
   const [view, setView] = useState<EditorView>("split");
@@ -187,8 +187,9 @@ export function MarkdownEditor({ value, onChange }: { value: string; onChange: (
           maxLength={LIMITS.content}
           rows={20}
           aria-describedby={hintId}
+          readOnly={readOnly}
           hidden={view === "preview"}
-          className={`${inputClass} h-[60vh] min-h-64 resize-y font-mono`}
+          className={`${inputClass} h-[60vh] min-h-64 resize-y font-mono read-only:bg-stone-50`}
         />
         {view !== "write" && (
           <div

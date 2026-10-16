@@ -118,27 +118,42 @@ export default function DocumentEditor({
   // 초안을 시작한 뒤 문서가 바뀌었는지(다른 저장·제안 수락·발행 등). 저장 전에 현재 버전과 비교하게 한다.
   const baseChanged = !!doc && !!startBase && (startBase.id !== doc.latestVersion.id || startBase.version !== doc.version);
 
-  async function commit() {
+  // 저장·닫기·버리기는 끝나면 편집기를 닫는다. 진행 중에 입력을 받으면 닫히면서 그 입력이 사라지므로(리뷰 F1),
+  // 시작부터 끝까지 입력과 다른 동작을 잠그고, 끝내지 못한 경우(검증·비교 필요·실패)에만 다시 연다.
+  const [finishing, setFinishing] = useState<null | "commit" | "close" | "discard">(null);
+  async function finish(kind: "commit" | "close" | "discard", action: () => Promise<boolean>) {
+    if (finishing) return;
+    setFinishing(kind);
+    let done = false;
+    try {
+      done = await action();
+    } finally {
+      if (!done) setFinishing(null);
+    }
+  }
+
+  // 반환값: 편집기를 닫는 단계까지 갔는지
+  async function commit(): Promise<boolean> {
     setFailure(null);
     setNote(null);
     if (!values.title.trim() || !values.content.trim()) {
       setNote("제목과 본문을 모두 입력해야 저장할 수 있습니다.");
-      return;
+      return false;
     }
     const flushed = await editor.flush();
     if (!flushed.ok) {
       setNote("초안을 먼저 저장하지 못해 새 버전을 만들지 않았습니다. 위 안내를 확인한 뒤 다시 시도하세요.");
-      return;
+      return false;
     }
     const d = flushed.draft;
     if (!d) {
       setNote("바뀐 내용이 없어 새 버전을 만들지 않았습니다.");
-      return;
+      return false;
     }
     if (baseChanged && !comparing) {
       setComparing(true);
       setNote("초안을 시작한 뒤 문서가 바뀌었습니다. 아래 비교를 확인한 뒤 ‘비교했고 이 내용으로 저장’을 누르세요.");
-      return;
+      return false;
     }
     const body = doc
       ? { expectedDraftRevision: d.revision, expectedVersion: doc.version, ...(baseChanged ? { resolvedBaseVersionId: doc.latestVersion.id } : {}) }
@@ -146,34 +161,44 @@ export default function DocumentEditor({
     const res = await run(`draft:commit:${d.id}:${JSON.stringify(body)}`, (ctx) => commitDraft(d.id, body, ctx));
     if (res.ok) {
       onCommitted(res.data.document);
-      return;
+      return true;
     }
     setFailure(res.failure);
     if (isReason(res.failure, "base_changed", "document_version")) {
       await onReloadDocument?.();
       setComparing(true);
     }
+    return false;
   }
 
-  async function discard() {
+  async function discard(): Promise<boolean> {
     setFailure(null);
     const flushed = await editor.flush();
     const d = flushed.draft;
     if (!d) {
       onDiscarded();
-      return;
+      return true;
     }
     const res = await run(`draft:discard:${d.id}:${d.revision}`, (ctx) => discardDraft(d.id, d.revision, ctx));
-    if (res.ok || isReason(res.failure, "draft_closed")) onDiscarded();
-    else setFailure(res.failure);
+    if (res.ok || isReason(res.failure, "draft_closed")) {
+      onDiscarded();
+      return true;
+    }
+    setFailure(res.failure);
+    return false;
   }
 
-  async function close() {
+  async function close(): Promise<boolean> {
     const flushed = await editor.flush();
-    if (flushed.ok) onClose?.();
-    else setNote("저장되지 않은 입력이 있어 닫지 않았습니다. 자동 저장 안내를 확인하세요.");
+    if (flushed.ok) {
+      onClose?.();
+      return true;
+    }
+    setNote("저장되지 않은 입력이 있어 닫지 않았습니다. 자동 저장 안내를 확인하세요.");
+    return false;
   }
 
+  const locked = finishing !== null;
   const stopped = status.kind === "stopped" ? status.failure : null;
   return (
     <div className="space-y-4">
@@ -186,10 +211,16 @@ export default function DocumentEditor({
           value={values.title}
           onChange={(e) => editor.setValues({ ...values, title: e.target.value })}
           maxLength={LIMITS.title}
-          className={inputClass}
+          readOnly={locked}
+          className={`${inputClass} read-only:bg-stone-50`}
         />
       </Field>
-      <MarkdownEditor value={values.content} onChange={(content) => editor.setValues({ ...values, content })} />
+      <MarkdownEditor value={values.content} onChange={(content) => editor.setValues({ ...values, content })} readOnly={locked} />
+      {locked && (
+        <p role="status" className="text-xs text-stone-600">
+          {finishing === "commit" ? "저장하는 중에는 입력을 고칠 수 없습니다." : finishing === "discard" ? "초안을 버리는 중입니다." : "초안을 저장하고 닫는 중입니다."}
+        </p>
+      )}
       <StatusLine status={status} onRetry={() => void editor.flush()} />
 
       {status.kind === "conflict" && (
@@ -274,21 +305,21 @@ export default function DocumentEditor({
       <div className="flex flex-wrap items-center gap-3">
         <button
           type="button"
-          onClick={() => void commit()}
-          disabled={busy || status.kind === "conflict"}
+          onClick={() => void finish("commit", commit)}
+          disabled={busy || locked || status.kind === "conflict"}
           className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
         >
-          {busy ? "저장 중..." : doc ? (baseChanged && comparing ? "비교했고 이 내용으로 저장" : "새 버전으로 저장") : "문서 저장"}
+          {finishing === "commit" ? "저장 중..." : doc ? (baseChanged && comparing ? "비교했고 이 내용으로 저장" : "새 버전으로 저장") : "문서 저장"}
         </button>
         {onClose && (
-          <button type="button" onClick={() => void close()} disabled={busy} className="rounded-lg px-4 py-2 text-sm text-stone-600 hover:bg-stone-100">
+          <button type="button" onClick={() => void finish("close", close)} disabled={busy || locked} className="rounded-lg px-4 py-2 text-sm text-stone-600 hover:bg-stone-100">
             편집 닫기(초안 보관)
           </button>
         )}
         {confirmDiscard ? (
           <span className="flex items-center gap-2 text-sm">
             <span className="text-stone-600">{doc ? "초안을 버리고 저장된 문서로 돌아갈까요?" : "이 초안을 버릴까요?"}</span>
-            <button type="button" onClick={() => void discard()} disabled={busy} className="font-medium text-red-700 underline hover:no-underline">
+            <button type="button" onClick={() => void finish("discard", discard)} disabled={busy || locked} className="font-medium text-red-700 underline hover:no-underline">
               초안 버리기
             </button>
             <button type="button" onClick={() => setConfirmDiscard(false)} className="text-stone-600 underline hover:no-underline">
@@ -296,7 +327,7 @@ export default function DocumentEditor({
             </button>
           </span>
         ) : (
-          <button type="button" onClick={() => setConfirmDiscard(true)} disabled={busy} className="ml-auto text-sm text-stone-500 hover:text-red-700">
+          <button type="button" onClick={() => setConfirmDiscard(true)} disabled={busy || locked} className="ml-auto text-sm text-stone-500 hover:text-red-700">
             초안 버리기…
           </button>
         )}

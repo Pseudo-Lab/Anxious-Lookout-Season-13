@@ -1,5 +1,7 @@
 // 두 본문의 줄 단위 비교(GitHub 스타일). 서버는 불변 원문만 주고 비교는 브라우저에서 계산한다(#22 api-contracts/issue22-writing-editor-proposal.md).
-// 본문은 최대 200,000자라 계산 시간에 상한을 두고, 넘으면 비교 결과 대신 null을 돌려준다(화면이 멈추지 않게).
+// 본문은 최대 200,000자라 줄 비교와 단어 강조 전체에 하나의 시간 예산(DIFF_TIMEOUT_MS)을 둔다.
+// 줄 비교가 예산 안에 끝나지 않으면 null(비교 불가). 단어 강조는 남은 예산·줄 길이·토큰 수 안에서만 계산하고,
+// 넘으면 그 줄부터 강조를 생략한다(줄 단위 결과는 유지). 화면 스레드를 예산 이상 막지 않게 한다.
 
 import { diffArrays, diffLines } from "diff";
 
@@ -19,8 +21,9 @@ export interface LineDiff {
   removed: number;
 }
 
-// 줄 안 단어 강조는 짧은 줄에서만 계산한다.
-const WORD_DIFF_MAX = 2000;
+// 줄 안 단어 강조는 짧은 줄에서만 계산한다(글자 수·토큰 수 상한).
+const WORD_DIFF_MAX = 1000;
+const WORD_TOKENS_MAX = 400;
 export const DIFF_TIMEOUT_MS = 1500;
 
 const splitLines = (value: string) => {
@@ -34,9 +37,16 @@ const segmenter = typeof Intl !== "undefined" && "Segmenter" in Intl ? new Intl.
 const tokens = (value: string) =>
   segmenter ? Array.from(segmenter.segment(value), (s) => s.segment) : value.split(/(\s+)/).filter(Boolean);
 
-function wordParts(before: string, after: string): [Part[], Part[]] | null {
+/** 줄 안 단어 강조. 상한을 넘거나 남은 예산 안에 끝나지 않으면 null(강조 없이 줄 단위로만 보인다). */
+function wordParts(before: string, after: string, deadline: number): [Part[], Part[]] | null {
   if (before.length > WORD_DIFF_MAX || after.length > WORD_DIFF_MAX) return null;
-  const changes = diffArrays(tokens(before), tokens(after));
+  const left = deadline - Date.now();
+  if (left <= 0) return null;
+  const a = tokens(before);
+  const b = tokens(after);
+  if (a.length > WORD_TOKENS_MAX || b.length > WORD_TOKENS_MAX) return null;
+  const changes = diffArrays(a, b, { timeout: left });
+  if (!changes) return null;
   const del: Part[] = [];
   const add: Part[] = [];
   for (const c of changes) {
@@ -49,10 +59,13 @@ function wordParts(before: string, after: string): [Part[], Part[]] | null {
 
 /** 줄 단위 비교. 시간 상한을 넘으면 null. 줄 끝 개행 차이는 무시하고 \r\n은 \n으로 본다. */
 export function lineDiff(before: string, after: string, timeout = DIFF_TIMEOUT_MS): LineDiff | null {
+  const deadline = Date.now() + timeout;
   const a = before.replace(/\r\n/g, "\n");
   const b = after.replace(/\r\n/g, "\n");
   const changes = diffLines(a.endsWith("\n") ? a : `${a}\n`, b.endsWith("\n") ? b : `${b}\n`, { timeout });
   if (!changes) return null;
+  // 예산을 다 쓰면(줄 비교에서 이미 다 쓴 경우 포함) 이후 줄은 단어 강조를 시도하지 않는다.
+  let words = Date.now() < deadline;
   const rows: Row[] = [];
   let oldNo = 1;
   let newNo = 1;
@@ -69,7 +82,11 @@ export function lineDiff(before: string, after: string, timeout = DIFF_TIMEOUT_M
       const delRows: Row[] = [];
       const addRows: Row[] = [];
       dels.forEach((text, k) => {
-        const parts = paired ? wordParts(text, adds[k]) : null;
+        let parts: [Part[], Part[]] | null = null;
+        if (paired && words) {
+          parts = wordParts(text, adds[k], deadline);
+          if (Date.now() > deadline) words = false;
+        }
         delRows.push({ kind: "del", oldNo: oldNo++, text, parts: parts?.[0] });
         if (paired) addRows.push({ kind: "add", newNo: newNo++, text: adds[k], parts: parts?.[1] });
       });

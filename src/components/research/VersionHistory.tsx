@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getVersion, listVersions } from "@/lib/research/api";
 import { useLoad } from "@/lib/research/hooks";
 import { usePagedList } from "@/lib/research/usePagedList";
@@ -84,10 +84,15 @@ export default function VersionHistory({
   const [compare, setCompare] = useState<{ before: string; after: string } | null>(null);
   const panel = useRef<HTMLDivElement>(null);
   // 목록 아래쪽에서 비교를 열면 위의 비교 영역으로 이동하고 초점을 옮긴다.
+  // 비교 영역이 그려진 뒤에 초점을 옮긴다(그리기 전에 옮기면 놓친다).
+  const [focusRequest, setFocusRequest] = useState(0);
   const openCompare = (before: string, after: string) => {
     setCompare({ before, after });
-    requestAnimationFrame(() => panel.current?.focus());
+    setFocusRequest((n) => n + 1);
   };
+  useEffect(() => {
+    if (focusRequest) panel.current?.focus();
+  }, [focusRequest]);
   const items = list.items;
   const label = (id: string) => {
     const v = items.find((x) => x.id === id);

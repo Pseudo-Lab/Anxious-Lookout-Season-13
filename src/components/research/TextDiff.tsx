@@ -1,7 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { foldContext, lineDiff, type Part, type Row } from "@/lib/research/textDiff";
+import { useMemo, useState, type ReactNode } from "react";
+import { foldContext, lineDiff, type Block, type Part, type Row } from "@/lib/research/textDiff";
+
+const ROW_LIMIT = 1000;
 
 // 본문 원문(Markdown)의 줄 단위 비교. 렌더하지 않고 텍스트로만 보인다(SafeMarkdown 규칙과 무관하게 실행되는 것이 없다).
 
@@ -44,6 +46,10 @@ function Line({ row }: { row: Row }) {
   );
 }
 
+// 펼친 상태 기준으로 그릴 줄 수(접힌 같은 줄 묶음은 버튼 하나로 센다)
+const rowCount = (blocks: Block[], opened: Set<number>) =>
+  blocks.reduce((n, b) => n + (b.kind === "fold" && !opened.has(b.id) ? 0 : b.rows.length), 0);
+
 /** 두 본문의 GitHub 스타일 비교. before가 기준(이전), after가 비교 대상(이후). */
 export default function TextDiff({
   before,
@@ -59,6 +65,8 @@ export default function TextDiff({
   const diff = useMemo(() => lineDiff(before, after), [before, after]);
   const blocks = useMemo(() => (diff ? foldContext(diff.rows) : []), [diff]);
   const [opened, setOpened] = useState<Set<number>>(new Set());
+  // 한 번에 그리는 줄 수 상한(아주 긴 본문에서 화면이 오래 멈추지 않게). 나머지는 '더 보기'로 이어서 그린다.
+  const [limit, setLimit] = useState(ROW_LIMIT);
 
   const titleChanged = beforeTitle !== undefined && afterTitle !== undefined && beforeTitle !== afterTitle;
   return (
@@ -84,25 +92,42 @@ export default function TextDiff({
             <span className="font-medium text-rose-700">−{diff.removed}줄</span>
           </p>
           <div className="overflow-hidden rounded-lg font-mono text-xs leading-5 text-stone-800 ring-1 ring-stone-200">
-            {blocks.map((b, i) =>
-              b.kind === "rows" || opened.has(b.id) ? (
-                <div key={i}>
-                  {b.rows.map((r, k) => (
-                    <Line key={k} row={r} />
-                  ))}
-                </div>
-              ) : (
-                <button
-                  key={i}
-                  type="button"
-                  onClick={() => setOpened(new Set(opened).add(b.id))}
-                  className="block w-full bg-stone-100 px-3 py-1 text-left font-sans text-xs text-indigo-700 hover:bg-stone-200"
-                >
-                  같은 줄 {b.rows.length}개 펼치기
-                </button>
-              )
-            )}
+            {(() => {
+              let shown = 0;
+              const out: ReactNode[] = [];
+              for (let i = 0; i < blocks.length && shown < limit; i++) {
+                const b = blocks[i];
+                if (b.kind === "fold" && !opened.has(b.id)) {
+                  out.push(
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setOpened(new Set(opened).add(b.id))}
+                      className="block w-full bg-stone-100 px-3 py-1 text-left font-sans text-xs text-indigo-700 hover:bg-stone-200"
+                    >
+                      같은 줄 {b.rows.length}개 펼치기
+                    </button>
+                  );
+                  continue;
+                }
+                const rows = b.rows.slice(0, limit - shown);
+                shown += rows.length;
+                out.push(
+                  <div key={i}>
+                    {rows.map((r, k) => (
+                      <Line key={k} row={r} />
+                    ))}
+                  </div>
+                );
+              }
+              return out;
+            })()}
           </div>
+          {rowCount(blocks, opened) > limit && (
+            <button type="button" onClick={() => setLimit(limit + ROW_LIMIT)} className="text-xs font-medium text-indigo-600 hover:text-indigo-800">
+              다음 {ROW_LIMIT}줄 더 보기 (남은 {rowCount(blocks, opened) - limit}줄)
+            </button>
+          )}
         </>
       )}
     </div>

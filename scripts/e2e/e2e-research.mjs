@@ -1695,6 +1695,121 @@ let docEUrl;
   await page.context().close();
 }
 
+// W4. #22 리뷰 F2: 비교 계산 전체(줄 비교 + 단어 강조)에 시간 예산이 걸리고, 아주 긴 본문도 화면을 오래 막지 않는다.
+{
+  const wctx = await newPage();
+  await login(wctx.page);
+  const page = wctx.page;
+  const main = page.locator("main");
+  const api = apiClient(page);
+  const timeCompare = async (before, after, title) => {
+    const d = await api.send("POST", "/research/documents", { title, content: before });
+    const p = await api.send("PATCH", `/research/documents/${d.body.id}`, { title, content: after, expectedVersion: d.body.version });
+    await page.goto(U(`/research/document/?id=${d.body.id}`));
+    await main.getByRole("button", { name: "버전 비교", exact: true }).waitFor();
+    const t0 = Date.now();
+    await main.getByRole("button", { name: "버전 비교", exact: true }).click();
+    const cmp = main.getByRole("region", { name: "버전 비교" });
+    await cmp.locator('[data-diff], p[role="status"]').first().waitFor({ timeout: 30000 });
+    const elapsed = Date.now() - t0;
+    // 계산이 끝난 뒤 화면이 바로 응답하는지(긴 작업이 남아 있지 않은지)
+    const t1 = Date.now();
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 0)));
+    return { status: p.status, elapsed, idle: Date.now() - t1, cmp };
+  };
+  // 리뷰 재현 입력: 1,998자 줄 10개가 전부 다른 단어(이전에는 단어 비교만으로 30초 이상)
+  const a10 = Array(10).fill("a ".repeat(999)).join("\n");
+  const z10 = Array(10).fill("z ".repeat(999)).join("\n");
+  const r1 = await timeCompare(a10, z10, "긴 줄 비교");
+  check("W4. long changed lines: compare finishes quickly", r1.status === 200 && r1.elapsed < 5000 && r1.idle < 500, JSON.stringify({ elapsed: r1.elapsed, idle: r1.idle }));
+  check("W4. long changed lines: line result kept", await appears(r1.cmp.getByText("+10줄")));
+  // 200,000자 가까운 본문이 전부 바뀐 경우: 비교하거나 비교 불가로 안내하고, 그리는 줄 수는 상한까지만
+  const line = (c, k) => `${c}${k} `.repeat(16).slice(0, 99);
+  const big1 = Array.from({ length: 1990 }, (_, k) => line("가", k)).join("\n");
+  const big2 = Array.from({ length: 1990 }, (_, k) => line("나", k)).join("\n");
+  const r2 = await timeCompare(big1, big2, "아주 긴 비교");
+  const rendered = await r2.cmp.locator("[data-diff]").count();
+  check("W4. 200k body: bounded time and rows", r2.status === 200 && r2.elapsed < 8000 && rendered <= 1000, JSON.stringify({ elapsed: r2.elapsed, idle: r2.idle, rendered, len: big1.length }));
+  // 비교는 되지만 바뀐 줄이 많으면 처음 1000줄만 그리고 나머지는 '더 보기'로 그린다.
+  const base = Array.from({ length: 50 }, (_, k) => `기존 줄 ${k}`).join("\n");
+  const grown = `${base}\n${Array.from({ length: 1500 }, (_, k) => `추가 줄 ${k}`).join("\n")}`;
+  const r3 = await timeCompare(base, grown, "많은 추가 줄");
+  const first = await r3.cmp.locator("[data-diff]").count();
+  const more = r3.cmp.getByRole("button", { name: /다음 1000줄 더 보기/ });
+  check("W4. many rows: first 1000 rendered, rest on demand", r3.elapsed < 5000 && first === 1000 && (await appears(more)), JSON.stringify({ elapsed: r3.elapsed, first }));
+  await more.click();
+  check("W4. many rows: show more renders the rest", (await r3.cmp.locator("[data-diff]").count()) > 1000 && (await appears(r3.cmp.getByText("+1500줄"))));
+  await page.context().close();
+}
+
+// W5. #22 리뷰 F1: 저장·닫기·버리기가 끝나기 전까지 입력을 잠가, 늦은 응답으로 편집기가 닫히며 새 입력을 잃지 않는다.
+{
+  const wctx = await newPage();
+  await login(wctx.page);
+  const page = wctx.page;
+  const main = page.locator("main");
+  const api = apiClient(page);
+  const doc = await api.send("POST", "/research/documents", { title: "잠금 문서", content: "처음\n" });
+  const id = doc.body.id;
+  const draftOf = async () => (await api.get(`/research/documents/${id}/draft`)).draft;
+  // 서버는 처리하고 응답만 붙잡는다.
+  const hold = async (pattern, method) => {
+    let release;
+    let seen;
+    const gate = new Promise((r) => (release = r));
+    const arrived = new Promise((r) => (seen = r));
+    await page.route(pattern, async (route) => {
+      if (route.request().method() !== method) return route.continue();
+      const response = await route.fetch();
+      seen();
+      await gate;
+      return route.fulfill({ response });
+    });
+    return { release, arrived, done: () => page.unroute(pattern) };
+  };
+  const locked = async () => !(await main.getByLabel("본문").isEditable()) && !(await main.getByLabel("제목", { exact: true }).isEditable());
+  await page.goto(U(`/research/document/?id=${id}`));
+
+  // 저장(commit) 응답 보류 중
+  await main.getByRole("button", { name: "내용 수정" }).click();
+  await main.getByLabel("본문").fill("A 입력");
+  const c = await hold("**/api/research/document-drafts/*/commit", "POST");
+  await main.getByRole("button", { name: "새 버전으로 저장" }).click();
+  await c.arrived;
+  check("W5. commit pending: inputs locked", (await locked()) && (await appears(main.getByText("저장하는 중에는 입력을 고칠 수 없습니다"))));
+  const typed = await main.getByLabel("본문").fill("B 입력", { timeout: 1500 }).then(() => true).catch(() => false);
+  check("W5. commit pending: typing refused", !typed && (await main.getByLabel("본문").inputValue()) === "A 입력");
+  c.release();
+  await main.getByRole("button", { name: "내용 수정" }).waitFor();
+  await c.done();
+  check("W5. commit result: head A, no draft", (await api.get(`/research/documents/${id}`)).content === "A 입력" && (await draftOf()) === null);
+
+  // 닫기(남은 입력 저장) 응답 보류 중
+  await main.getByRole("button", { name: "내용 수정" }).click();
+  const k = await hold("**/api/research/document-drafts", "POST");
+  await main.getByLabel("본문").fill("닫기 전 입력");
+  await main.getByRole("button", { name: "편집 닫기(초안 보관)" }).click();
+  await k.arrived;
+  check("W5. close pending: inputs locked", await locked());
+  k.release();
+  await main.getByRole("button", { name: "초안 이어서 편집" }).waitFor();
+  await k.done();
+  check("W5. close result: draft holds last input", (await draftOf())?.content === "닫기 전 입력");
+
+  // 버리기 응답 보류 중
+  await main.getByRole("button", { name: "초안 이어서 편집" }).click();
+  const x = await hold("**/api/research/document-drafts/*", "DELETE");
+  await main.getByRole("button", { name: "초안 버리기…" }).click();
+  await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+  await x.arrived;
+  check("W5. discard pending: inputs locked", await locked());
+  x.release();
+  await main.getByRole("button", { name: "내용 수정" }).waitFor();
+  await x.done();
+  check("W5. discard result: no draft, head unchanged", (await draftOf()) === null && (await api.get(`/research/documents/${id}`)).content === "A 입력");
+  await page.context().close();
+}
+
 // R10. 다른 사용자: 타인 ID는 404로 숨김
 {
   const other = await newPage();
