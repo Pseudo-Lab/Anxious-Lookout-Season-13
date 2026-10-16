@@ -109,7 +109,7 @@ def test_invalid_descriptor_is_rejected_without_admission(client, admin, page):
     assert client.get("/api/research/sessions/" + session["id"]).json()["version"] == 1
 
 
-def test_missing_general_descriptor_has_no_tools_even_with_old_creation_context(client, admin):
+def test_general_descriptor_grants_owner_tools_not_old_public_context(client, admin):
     owner, auth = identity(client, admin)
     doc = create(client, auth, "documents")
     publish(client, auth, doc)
@@ -117,14 +117,16 @@ def test_missing_general_descriptor_has_no_tools_even_with_old_creation_context(
     runner = HeldRunner(client, owner)
     reply = client.post("/api/research/sessions/" + session["id"] + "/messages", json={"text": "normal question", "expectedVersion": 1}, headers=headers(auth))
     assert reply.status_code == 202
-    assert reply.json()["page"] == {"kind": "general"} and reply.json()["allowedTools"] == [] and reply.json()["capability"] == "none"
+    from app.page_scope import OWNER_TOOLS
+    assert reply.json()["page"] == {"kind": "general"} and reply.json()["allowedTools"] == OWNER_TOOLS and reply.json()["capability"] == "owner_research"
     assert runner.last["scope"] == {"page": {"kind": "general"}, "context": None}
     assert len(runner.last["tools"]) == 13  # Stable catalog is not effective permission.
-    for name, args in [("research_list", {"type": "document"}), ("research_page_context", {}),
-                       ("research_document_save", {"mutationId": str(uuid.uuid4()), "title": "No", "content": "No"})]:
-        rejected = callback(client, session, runner, name, args)
-        assert rejected.status_code == 403 and rejected.json()["error"]["code"] == "tool_not_allowed"
-    assert len(client.get("/api/research/documents").json()["items"]) == 1
+    assert callback(client, session, runner, "research_list", {"type": "document"}).status_code == 200
+    assert callback(client, session, runner, "research_document_save", {
+        "mutationId": str(uuid.uuid4()), "title": "Draft", "content": "Draft"}).status_code == 200
+    rejected = callback(client, session, runner, "research_page_context", {})
+    assert rejected.status_code == 403 and rejected.json()["error"]["code"] == "tool_not_allowed"
+    assert len(client.get("/api/research/documents").json()["items"]) == 2
 
 
 def test_foreign_archived_wrong_type_and_missing_pages_fail_before_runner_and_key_reservation(client, admin):
@@ -156,7 +158,7 @@ def test_detail_scope_fixed_on_acceptance_reads_updates_conflicts_and_history(cl
     body = {"text": "work on this", "expectedVersion": 1, "page": page}
     key = str(uuid.uuid4())
     accepted = client.post(root + "/messages", json=body, headers=headers(auth, key))
-    assert accepted.status_code == 202 and accepted.json()["capability"] == kind + "_read_update"
+    assert accepted.status_code == 202 and accepted.json()["capability"] == "owner_research"
     assert runner.last["scope"]["context"]["version"] == 1
     changed = {**body, "page": {"kind": kind, "resourceId": other["id"]}}
     assert client.post(root + "/messages", json=changed, headers=headers(auth, key)).json()["error"]["code"] == "idempotency_conflict"
@@ -165,14 +167,14 @@ def test_detail_scope_fixed_on_acceptance_reads_updates_conflicts_and_history(cl
     assert runner.dispatches == 1
     for name in ("research_get", "research_versions", "research_relations"):
         assert callback(client, session, runner, name, {"type": kind, "id": target["id"]}).status_code == 200
-        assert callback(client, session, runner, name, {"type": kind, "id": other["id"]}).status_code == 403
-        assert callback(client, session, runner, name, {"type": "relation", "id": target["id"]}).status_code == 403
+        assert callback(client, session, runner, name, {"type": kind, "id": other["id"]}).status_code == 200
+        assert callback(client, session, runner, name, {"type": "relation", "id": target["id"]}).status_code == (404 if name == "research_get" else 422)
     version_args = {"type": kind, "id": target["id"], "versionId": other["latestVersion"]["id"]}
     assert callback(client, session, runner, "research_version_get", version_args).status_code == 404
     version_args["versionId"] = target["latestVersion"]["id"]
     assert callback(client, session, runner, "research_version_get", version_args).json()["content"] == target["content"]
     for name in ("research_archive", "research_relation_save", "research_relation_update", "research_list", "research_document_save", "research_material_save"):
-        assert callback(client, session, runner, name, {}).status_code == 403
+        assert callback(client, session, runner, name, {}).status_code == 422
     edited = material(title="UI edit") if kind == "material" else {"title": "UI edit", "content": "Concurrent UI body"}
     assert client.patch("/api/research/" + kind + "s/" + target["id"], json={**edited, "expectedVersion": 1}, headers=headers(auth)).status_code == 200
     update = {**edited, "id": target["id"], "expectedVersion": 1, "mutationId": str(uuid.uuid4())}
@@ -190,16 +192,16 @@ def test_detail_scope_fixed_on_acceptance_reads_updates_conflicts_and_history(cl
     assert detail["items"][0]["text"] == "work on this" and detail["items"][0]["page"] == accepted.json()["page"]
     assert detail["page"] == accepted.json()["page"]
     assert callback(client, session, runner, "research_get", {"type": kind, "id": target["id"]}).status_code == 404
-    # Same conversation, explicit next question changes effective permission.
+    # Same conversation, changing the page does not remove owner authority.
     runner.record = {"turns": runner.record["turns"]}
     runner.state = "running"
     next_turn = client.post(root + "/messages", json={"text": "normal followup", "expectedVersion": detail["version"], "page": {"kind": "general"}}, headers=headers(auth))
     assert next_turn.status_code == 202 and runner.last["expectedThreadId"] == "same-native-thread"
-    assert callback(client, session, runner, "research_get", {"type": kind, "id": target["id"]}).status_code == 403
+    assert callback(client, session, runner, "research_get", {"type": kind, "id": target["id"]}).status_code == 200
 
 
 @pytest.mark.parametrize("kind", ["material", "document"])
-def test_workspace_only_lists_and_creates_selected_owned_type(client, admin, kind):
+def test_workspace_allows_both_owned_types_but_never_foreign_data(client, admin, kind):
     _, other_auth = identity(client, admin)
     foreign = create(client, other_auth, kind + "s")
     owner, auth = identity(client, admin, "222222")
@@ -207,7 +209,7 @@ def test_workspace_only_lists_and_creates_selected_owned_type(client, admin, kin
     session = create_session(client, auth)
     accepted = client.post("/api/research/sessions/" + session["id"] + "/messages", json={"text": "collect", "expectedVersion": 1,
         "page": {"kind": kind + "_workspace"}}, headers=headers(auth))
-    assert accepted.status_code == 202 and accepted.json()["capability"] == kind + "_list_save"
+    assert accepted.status_code == 202 and accepted.json()["capability"] == "owner_research"
     data = material() if kind == "material" else {"title": "Tool draft", "content": "Tool body"}
     data["mutationId"] = str(uuid.uuid4())
     created = callback(client, session, runner, "research_" + kind + "_save", data)
@@ -215,8 +217,10 @@ def test_workspace_only_lists_and_creates_selected_owned_type(client, admin, kin
     listed = callback(client, session, runner, "research_list", {"type": kind}).json()["items"]
     assert [item["id"] for item in listed] == [created.json()["id"]] and foreign["id"] not in json.dumps(listed)
     for name, args in [("research_list", {"type": "document" if kind == "material" else "material"}),
-                       ("research_get", {"type": kind, "id": created.json()["id"]}), ("research_archive", {})]:
-        assert callback(client, session, runner, name, args).status_code == 403
+                       ("research_get", {"type": kind, "id": created.json()["id"]})]:
+        assert callback(client, session, runner, name, args).status_code == 200
+    assert callback(client, session, runner, "research_get", {"type": kind, "id": foreign["id"]}).status_code == 404
+    assert callback(client, session, runner, "research_archive", {}).status_code == 422
 
 
 def test_public_scope_freezes_release_refs_and_idempotent_reply_after_withdrawal(client, admin):
@@ -241,3 +245,69 @@ def test_public_scope_freezes_release_refs_and_idempotent_reply_after_withdrawal
     assert client.post(root + "/messages", json=body, headers=headers(auth, key)).json() == accepted.json() and runner.dispatches == 1
     fresh = create_session(client, auth)
     assert client.post("/api/research/sessions/" + fresh["id"] + "/messages", json=body, headers=headers(auth)).status_code == 404
+
+
+@pytest.mark.parametrize('page_kind', ['general', 'material', 'document', 'material_workspace', 'document_workspace'])
+def test_owner_workflow_on_any_page_preserves_versions_ownership_and_archive(client, admin, page_kind):
+    _, foreign_auth = identity(client, admin)
+    foreign = create(client, foreign_auth)
+    owner, auth = identity(client, admin, '222222')
+    page = {'kind': page_kind}
+    hint = None
+    if page_kind in {'material', 'document'}:
+        hint = create(client, auth, page_kind+'s')
+        page['resourceId'] = hint['id']
+    runner = HeldRunner(client, owner)
+    session = create_session(client, auth)
+    accepted = client.post('/api/research/sessions/'+session['id']+'/messages',
+        json={'text': 'Collect, revise and draft', 'expectedVersion': 1, 'page': page}, headers=headers(auth))
+    assert accepted.status_code == 202
+    assert accepted.json()['capability'] == 'owner_research'
+    assert len(accepted.json()['allowedTools']) == 12
+
+    def call(name, args, status=200):
+        response = callback(client, session, runner, name, args)
+        assert response.status_code == status, response.text
+        return response.json()
+
+    call('research_get', {'type': 'material', 'id': foreign['id']}, 404)
+    collected = {**material(), 'mutationId': str(uuid.uuid4())}
+    saved = call('research_material_save', collected)
+    assert call('research_material_save', collected) == saved
+    edited = call('research_material_update', {**material(content='Revised excerpt'), 'id': saved['id'],
+                  'expectedVersion': 1, 'mutationId': str(uuid.uuid4())})
+    call('research_material_update', {**material(), 'id': saved['id'],
+         'expectedVersion': 1, 'mutationId': str(uuid.uuid4())}, 409)
+    assert edited['version'] == 2
+    versions = call('research_versions', {'type': 'material', 'id': saved['id']})
+    assert len(versions['items']) == 2
+    old = call('research_version_get', {'type': 'material', 'id': saved['id'], 'versionId': saved['latestVersion']['id']})
+    assert old['content'] == collected['content']
+    draft = call('research_document_save', {'title': 'Draft', 'content': 'Cites [source](https://example.com/article).',
+                'mutationId': str(uuid.uuid4())})
+    relation = call('research_relation_save', {'source': {'type': 'document', 'id': draft['id']},
+        'target': {'type': 'material', 'id': saved['id']}, 'kind': 'references', 'directed': True,
+        'mutationId': str(uuid.uuid4())})
+    call('research_relation_save', {'source': {'type': 'document', 'id': draft['id']},
+        'target': {'type': 'material', 'id': foreign['id']}, 'kind': 'references', 'directed': True,
+        'mutationId': str(uuid.uuid4())}, 404)
+    revised_relation = call('research_relation_update', {'id': relation['id'], 'kind': 'references',
+        'description': 'Supports the draft', 'expectedVersion': 1, 'mutationId': str(uuid.uuid4())})
+    assert revised_relation['version'] == 2
+    assert call('research_get', {'type': 'relation', 'id': relation['id']})['id'] == relation['id']
+    assert call('research_relations', {'type': 'document', 'id': draft['id']})['items']
+    # The viewed resource is only a hint. Archiving it cannot remove permission
+    # to work on a different owned item during this same admitted turn.
+    if hint:
+        call('research_archive', {'type': page_kind, 'id': hint['id'], 'expectedVersion': 1,
+             'mutationId': str(uuid.uuid4())})
+    updated = call('research_document_update', {'id': draft['id'], 'title': 'Revised draft',
+        'content': draft['content']+' New paragraph.', 'expectedVersion': 1, 'mutationId': str(uuid.uuid4())})
+    assert '[source](https://example.com/article)' in updated['content']
+    call('research_archive', {'type': 'relation', 'id': relation['id'], 'expectedVersion': 2,
+         'mutationId': str(uuid.uuid4())})
+    archived = call('research_archive', {'type': 'material', 'id': saved['id'], 'expectedVersion': 2,
+         'mutationId': str(uuid.uuid4())})
+    assert archived['archived'] is True
+    assert len(call('research_versions', {'type': 'material', 'id': saved['id']})['items']) == 2
+    assert call('research_get', {'type': 'material', 'id': foreign['id']}, 404)

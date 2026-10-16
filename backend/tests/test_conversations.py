@@ -36,7 +36,7 @@ class FixtureRunner:
         with TestClient(self.app, base_url=self.app.state.settings.origin, raise_server_exceptions=False) as tool_client:
             result = tool_client.post("/api/internal/research/tools", json={"sessionId": str(identity), "requestId": body["requestId"],
                          "name": "research_document_save", "arguments": arguments}, headers={"Authorization": "Bearer " + body["toolToken"]})
-            allowed = body.get("scope", {}).get("page", {}).get("kind") == "document_workspace"
+            allowed = body.get("scope", {}).get("page", {}).get("kind") not in {None, "public_document"}
             assert result.status_code == (200 if allowed else 403), result.text
         turn = {"id": str(uuid.uuid4()), "items": [{"id": "user-" + body["requestId"], "type": "userMessage", "content": [{"type": "text", "text": body["text"]}]},
                 {"id": "tool-" + body["requestId"], "type": "dynamicToolCall", "tool": "research_document_save", "arguments": arguments,

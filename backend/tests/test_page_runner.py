@@ -24,7 +24,7 @@ def runner_schema(schema):
     migrate("0004_publication")
 
 
-def test_same_native_thread_changes_scope_and_rejects_without_callback(tmp_path, monkeypatch):
+def test_same_native_thread_owner_pages_then_public_and_legacy_refuse(tmp_path, monkeypatch):
     calls = []
     def callback(request):
         calls.append(json.loads(request.content))
@@ -43,22 +43,27 @@ def test_same_native_thread_changes_scope_and_rejects_without_callback(tmp_path,
         native.accept(session, second)
         denied = wait_idle(native, session)
         assert denied["threadId"] == saved["threadId"] and len(denied["record"]["turns"]) == 2
-        assert len(calls) == 1  # The invalid tool never reaches even the API.
+        assert len(calls) == 2  # General and detail pages share owner authority.
         tool = denied["record"]["turns"][-1]["items"][1]
-        assert tool["status"] == "failed" and json.loads(tool["contentItems"][0]["text"])["error"]["code"] == "tool_not_allowed"
+        assert tool["status"] == "completed"
         prompt = denied["record"]["turns"][-1]["items"][0]["content"][0]["text"]
-        assert '"allowedTools": []' in prompt and "general question" in prompt
+        assert 'allowedTools' not in prompt and "general question" in prompt and "Page hint" in prompt
         native.accept(session, second)
-        assert len(calls) == 1
+        assert len(calls) == 2
         with pytest.raises(RuntimeError):
             native.accept(session, second.model_copy(update={"scope": {"page": {"kind": "document_workspace"}}}))
         stored = json.loads((tmp_path / "native/codex/fixture-native-record.json").read_text())
         assert len(stored[saved["threadId"]]["tools"]) == 13
         trace = json.loads((tmp_path / "native/codex/fixture-model-rpc.json").read_text())
         assert [entry["method"] for entry in trace] == ["thread/start", "turn/start", "thread/resume", "turn/start"]
+        native.accept(session, Turn(requestId=uuid.uuid4(), text="public question", tools=definitions(), toolToken="p" * 40,
+                      scope={"page": {"kind": "public_document", "resourceId": str(uuid.uuid4())}}))
+        public = wait_idle(native, session)
+        assert len(calls) == 2
+        assert public["record"]["turns"][-1]["items"][1]["status"] == "failed"
         # Legacy omitted scope fails closed too, regardless of registered tools/context.
         native.accept(session, Turn(requestId=uuid.uuid4(), text="legacy caller", tools=definitions(), toolToken="z" * 40))
-        assert wait_idle(native, session)["state"] == "idle" and len(calls) == 1
+        assert wait_idle(native, session)["state"] == "idle" and len(calls) == 2
     finally:
         native.close()
 
@@ -125,16 +130,16 @@ def test_two_users_dedicated_transport_native_process_history_and_tool_owner(cli
         assert wait_idle(runner_a.app.state.native, session_a["id"])["state"] == "idle"
         continued = client.get("/api/research/sessions/" + session_a["id"]).json()
         refused = [item for item in continued["items"] if item["type"] == "tool_call"][-1]
-        assert refused["status"] == "rejected" and refused["error"]["code"] == "tool_not_allowed"
+        assert refused["status"] == "completed"
         assert [item["page"]["kind"] for item in continued["items"] if item.get("role") == "user"] == ["document_workspace", "general"]
-        assert len(callbacks) == 2 and len(client.get("/api/research/documents").json()["items"]) == 1
+        assert len(callbacks) == 3 and len(client.get("/api/research/documents").json()["items"]) == 2
         # A third, unmapped editor never borrows either runner.
         client.cookies.clear()
         _, auth_c = identity(client, admin, "333333")
         session_c = create_session(client, auth_c)
         assert client.get("/api/research/codex/status").json()["reason"] == "not_configured"
         assert client.post("/api/research/sessions/" + session_c["id"] + "/messages", json={"text": "hello", "expectedVersion": 1}, headers=headers(auth_c)).status_code == 503
-        assert len(callbacks) == 2
+        assert len(callbacks) == 3
 
 
 @pytest.mark.parametrize("damage", ["state", "secret", "url-default-port", "url-case", "owner-alias", "duplicate-key"])

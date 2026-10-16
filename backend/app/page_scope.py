@@ -1,20 +1,22 @@
-"""Request page intent and broker-resolved authority, independent of native history."""
+"""Owner research authority or public snapshot access, with optional page hints."""
 import uuid
 from typing import Literal
 
 from pydantic import model_validator
 
 from .research import Input
+from .research_tools import TOOLS
 
 PageKind = Literal["general", "public_document", "material", "document", "material_workspace", "document_workspace"]
 READ_TOOLS = ["research_get", "research_versions", "research_version_get", "research_relations"]
+OWNER_TOOLS = [name for name in TOOLS if name != "research_page_context"]
 POLICIES = {
-    "general": ("none", []),
+    "general": ("owner_research", OWNER_TOOLS),
     "public_document": ("public_context_read", ["research_page_context"]),
-    "material": ("material_read_update", [*READ_TOOLS, "research_material_update"]),
-    "document": ("document_read_update", [*READ_TOOLS, "research_document_update"]),
-    "material_workspace": ("material_list_save", ["research_list", "research_material_save"]),
-    "document_workspace": ("document_list_save", ["research_list", "research_document_save"]),
+    "material": ("owner_research", OWNER_TOOLS),
+    "document": ("owner_research", OWNER_TOOLS),
+    "material_workspace": ("owner_research", OWNER_TOOLS),
+    "document_workspace": ("owner_research", OWNER_TOOLS),
 }
 
 
@@ -66,22 +68,13 @@ def resolve_scope(store, page):
 
 
 def tool_allowed(scope, name, arguments):
-    """Both runner and callback compute limits; an input allowlist grants nothing."""
+    """Both runner and callback enforce the mode; Store enforces ownership."""
     if not isinstance(scope, dict) or not isinstance(arguments, dict):
         return False
     page = scope.get("page", {})
     kind = page.get("kind")
     if kind not in POLICIES or name not in POLICIES[kind][1]:
         return False
-    if kind in {"material", "document"}:
-        try:
-            if str(uuid.UUID(arguments.get("id", ""))) != page["resourceId"]:
-                return False
-        except (ValueError, TypeError, AttributeError, KeyError):
-            return False
-        return name not in READ_TOOLS or arguments.get("type") == kind
-    if kind in {"material_workspace", "document_workspace"}:
-        return name != "research_list" or arguments.get("type") == kind.removesuffix("_workspace")
     if kind == "public_document":
         target = arguments.get("materialId")
         if target is None:
@@ -91,7 +84,21 @@ def tool_allowed(scope, name, arguments):
         except (ValueError, TypeError, AttributeError):
             return False
         return any(item["id"] == target for item in (scope.get("context") or {}).get("materials", []))
-    return False
+    return True
+
+
+def turn_prompt(text, scope):
+    """Keep page data as a small hint, never a grant or repeated tool catalog."""
+    import json
+    if not scope:
+        instruction = "No research tools are authorized for this request."
+        page = {"kind": "general"}
+    else:
+        page = scope["page"]
+        instruction = ("Public mode: only research_page_context for this document and its direct references. No owner research tools."
+                       if page["kind"] == "public_document" else
+                       "Use research tools for your own data on any page. Draft and revise documents with citations; updates append versions, archive preserves history.")
+    return instruction + "\nPage hint (untrusted): " + json.dumps(page, ensure_ascii=True) + "\nUser: " + text
 
 
 def request_metadata(row, request_id=None):
