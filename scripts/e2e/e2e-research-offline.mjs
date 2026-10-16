@@ -454,6 +454,38 @@ async function dropFirstSend(p) {
   await chat.getByLabel("메시지").waitFor();
 }
 
+// IW. #22 실제 제안 경로(offline native → research_document_update → 실제 API pending 제안):
+//     문서는 그대로이고, 대화의 '제안 검토' → diff → 수락하면 버전이 하나 늘어난다.
+{
+  const d = await api.send("POST", "/research/documents", { title: "제안 대상 문서", content: "제안 전 본문\n" });
+  check("IW. setup: document", d.status === 201, String(d.status));
+  const id = d.body.id;
+  await openAt(page, s1, U(`/research/document/?id=${id}`));
+  await send(chat, `/fixture/document-update ${id} ${d.body.version}`);
+  await settled(chat);
+  check("IW. chat shows proposal with review link", await appears(chat.getByRole("link", { name: "제안 검토" })));
+  const head = (await api.get(`/research/documents/${id}`)).body;
+  const props = (await api.get(`/research/documents/${id}/proposals`)).body?.items ?? [];
+  check(
+    "IW. real API: pending proposal, document unchanged",
+    head.content === "제안 전 본문\n" && head.latestVersion.number === 1 && props.length === 1 && props[0].status === "pending",
+    JSON.stringify({ n: head.latestVersion.number, props: props.map((p) => p.status) })
+  );
+  await chat.getByRole("link", { name: "제안 검토" }).last().click();
+  const box = main.locator("#proposals");
+  check("IW. proposal diff shown", await appears(box.locator('[data-diff="add"]', { hasText: "Complete fixture proposal content" })));
+  await box.getByRole("button", { name: "제안 수락" }).click();
+  await box.getByRole("button", { name: "수락 확인" }).click();
+  check("IW. accepted content shown", await appears(main.locator(".prose").getByText("Complete fixture proposal content")));
+  const after = (await api.get(`/research/documents/${id}`)).body;
+  const accepted = (await api.get(`/research/documents/${id}/proposals`)).body?.items ?? [];
+  check(
+    "IW. real API: exactly one version, proposal accepted",
+    after.latestVersion.number === 2 && after.title === "Fixture proposal" && accepted[0]?.status === "accepted" && accepted[0]?.acceptedVersionId === after.latestVersion.id,
+    JSON.stringify({ n: after.latestVersion.number, s: accepted[0]?.status })
+  );
+}
+
 // O10. #7 모델 우회/불일치(model/rerouted): codex_model_unavailable, 해당 turn의 assistant 결과는 projection에서 제외되고
 //      남는 user/tool 항목은 modelMismatch 배지, 도구 쓰기 없음, provider 원문 비노출, 계정 runner 차단은 지속(후속 입력 선접수 거절, 입력 유지)
 {

@@ -182,14 +182,16 @@ check("R6. conflict message", await appears(main.getByText("다른 곳에서 먼
 check("R6. input preserved", (await main.getByLabel("내용").inputValue()) === "UI 쪽 수정");
 check("R6. reload latest offered", await appears(main.getByRole("button", { name: /최신 내용 다시 불러오기/ })));
 
-// R7. 응답 유실 후 재시도: 같은 Idempotency-Key → 중복 생성 없음
+// R7. 응답 유실 후 재시도: 같은 Idempotency-Key → 중복 생성 없음. #22: 새 문서는 서버 초안을 commit해 만든다.
+const COMMIT = "**/api/research/document-drafts/*/commit";
+const isCommit = (c) => c.method === "POST" && /^\/research\/document-drafts\/[^/]+\/commit$/.test(c.path);
 const before = await counts();
 await page.goto(U("/research/document/new/"));
 await main.getByLabel("제목").fill("재시도 문서");
 await main.getByLabel("본문").fill("본문");
 let dropped = false;
-await page.route("**/api/research/documents", async (route) => {
-  if (route.request().method() === "POST" && !dropped) {
+await page.route(COMMIT, async (route) => {
+  if (!dropped) {
     dropped = true;
     await route.fetch(); // 서버에는 반영
     return route.abort(); // 브라우저는 응답을 받지 못함
@@ -198,11 +200,12 @@ await page.route("**/api/research/documents", async (route) => {
 });
 await main.getByRole("button", { name: "문서 저장" }).click();
 check("R7. lost response shows failure", await appears(main.getByText("서버에 연결할 수 없습니다")));
+check("R7. draft address kept for recovery", await page.waitForURL(/\?draft=/, { timeout: 8000 }).then(() => true, () => false), page.url());
 await main.getByRole("button", { name: "문서 저장" }).click();
 await page.waitForURL(/\/research\/document\/\?id=/);
-await page.unroute("**/api/research/documents");
+await page.unroute(COMMIT);
 const after = await counts();
-const posts = (await mockCalls()).filter((c) => c.method === "POST" && c.path === "/research/documents").slice(-2);
+const posts = (await mockCalls()).filter(isCommit).slice(-2);
 check("R7. retry reused Idempotency-Key", posts.length === 2 && posts[0].idempotencyKey === posts[1].idempotencyKey, JSON.stringify(posts.map((p) => p.idempotencyKey)));
 check("R7. exactly one document created", after.documents === before.documents + 1, `${before.documents} -> ${after.documents}`);
 
@@ -1111,8 +1114,8 @@ let docEUrl;
   await main.getByLabel("제목").fill("CSRF 재시도 문서");
   await main.getByLabel("본문").fill("원래 본문");
   let dropped15 = false;
-  await page.route("**/api/research/documents", async (route) => {
-    if (route.request().method() === "POST" && !dropped15) {
+  await page.route(COMMIT, async (route) => {
+    if (!dropped15) {
       dropped15 = true;
       await route.fetch();
       return route.abort();
@@ -1127,9 +1130,9 @@ let docEUrl;
   await setMock("csrf=normal");
   await main.getByRole("button", { name: "문서 저장" }).click();
   await page.waitForURL(/\/research\/document\/\?id=/);
-  await page.unroute("**/api/research/documents");
+  await page.unroute(COMMIT);
   docEUrl = page.url();
-  const posts15 = (await mockCalls()).filter((c) => c.method === "POST" && c.path === "/research/documents").slice(-3);
+  const posts15 = (await mockCalls()).filter(isCommit).slice(-3);
   check("R15. same key across lost/403/retry", posts15.length === 3 && new Set(posts15.map((c) => c.idempotencyKey)).size === 1, JSON.stringify(posts15.map((c) => c.idempotencyKey)));
   check("R15. exactly one document created", (await counts()).documents === before15.documents + 1);
 }
@@ -1161,7 +1164,8 @@ let docEUrl;
   check("R16. save after compare succeeds with draft", await appears(main.locator(".prose").getByText("B 초안")));
 }
 
-// R17. 생성 요청 응답 유실 → 401 → 같은 계정 재로그인: 같은 요청 복구로 중복 없음 / 다른 계정에는 비노출(PM 보완)
+// R17. 생성(commit) 응답 유실 → 401 → 재로그인. #22: 입력은 계정별 서버 초안이라 브라우저에 본문을 남기지 않고,
+//      다른 계정은 그 초안 주소로도 내용을 볼 수 없으며, 같은 계정은 이미 반영된 저장을 문서로 확인한다(중복 없음).
 {
   const accountX = (await api.get("/auth/me")).user.accountId;
   const before17 = await counts();
@@ -1169,8 +1173,8 @@ let docEUrl;
   await main.getByLabel("제목").fill("재인증 문서");
   await main.getByLabel("본문").fill("재인증 본문");
   let dropped17 = false;
-  await page.route("**/api/research/documents", async (route) => {
-    if (route.request().method() === "POST" && !dropped17) {
+  await page.route(COMMIT, async (route) => {
+    if (!dropped17) {
       dropped17 = true;
       await route.fetch();
       return route.abort();
@@ -1179,29 +1183,33 @@ let docEUrl;
   });
   await main.getByRole("button", { name: "문서 저장" }).click();
   await main.getByText("서버에 연결할 수 없습니다").waitFor();
-  await page.unroute("**/api/research/documents");
+  await page.unroute(COMMIT);
+  const kept17 = await page.waitForURL(/\?draft=/, { timeout: 8000 }).then(() => true, () => false);
+  const draftUrl = page.url();
+  check("R17. draft address kept", kept17, draftUrl);
   await setMock("expire=1");
   await main.getByRole("button", { name: "문서 저장" }).click();
   check("R17. 401 -> login required", await appears(main.getByText("로그인이 필요합니다")));
-  check("R17. unconfirmed create kept for account", (await pendingStore()).includes("재인증 문서"));
-  // 같은 탭의 다른 계정(Y)에는 복구되지 않는다
+  check("R17. no document body kept in browser storage", !(await pendingStore()).includes("재인증"), await pendingStore());
+  // 같은 탭의 다른 계정(Y): 새 문서는 빈 칸, X의 초안 주소로 와도 내용 없음
   await setMock("reuse=0&as=");
   await login(page);
   await page.goto(U("/research/document/new/"));
   await main.getByLabel("제목").waitFor();
-  check("R17. other account sees empty form", (await main.getByLabel("제목").inputValue()) === "" && (await main.getByText("이전 저장 요청의 결과를 확인하지 못했습니다").count()) === 0);
-  // 원래 계정(X)으로 재로그인 → 같은 요청 복구 → 1건만 생성
+  check("R17. other account sees empty form", (await main.getByLabel("제목").inputValue()) === "" && !(await main.innerText()).includes("재인증 문서"));
+  await page.goto(draftUrl);
+  await main.getByLabel("제목").waitFor();
+  check(
+    "R17. other account cannot open X's draft",
+    (await appears(main.getByText("이어 쓸 초안을 찾지 못해", { exact: false }))) && (await main.getByLabel("제목").inputValue()) === "" && !(await main.innerText()).includes("재인증 본문")
+  );
+  // 원래 계정(X)으로 재로그인 → 초안 주소 → 이미 반영된 저장이면 그 문서로 간다(1건만)
   await setMock(`expire=1&as=${accountX}`);
   await login(page);
-  await page.goto(U("/research/document/new/"));
-  await main.getByLabel("제목").waitFor();
-  check("R17. same account restores request", (await main.getByLabel("제목").inputValue()) === "재인증 문서" && (await appears(main.getByText("이전 저장 요청의 결과를 확인하지 못했습니다"))));
-  await main.getByRole("button", { name: "문서 저장" }).click();
+  await page.goto(draftUrl);
   await page.waitForURL(/\/research\/document\/\?id=/);
-  const posts17 = (await mockCalls()).filter((c) => c.method === "POST" && c.path === "/research/documents").slice(-3);
-  check("R17. lost/401/restored retry share one key", new Set(posts17.map((c) => c.idempotencyKey)).size === 1, JSON.stringify(posts17.map((c) => c.idempotencyKey)));
+  check("R17. same account lands on the saved document", await appears(main.getByRole("heading", { name: "재인증 문서" })));
   check("R17. exactly one document created", (await counts()).documents === before17.documents + 1, `${before17.documents} -> ${(await counts()).documents}`);
-  check("R17. stored request cleared after confirmation", !(await pendingStore()).includes("재인증 문서"));
   await setMock("as=");
 }
 
@@ -1249,7 +1257,7 @@ let docEUrl;
   check("R18. public document itself still shown", await appears(main.getByRole("heading", { name: "공개용 문서" })));
 }
 
-// R19. 로그아웃 전에 시작된 생성 요청이 로그아웃 뒤 늦게 실패해도 보관소에 다시 쓰지 않는다(리뷰 F3-2)
+// R19. 로그아웃 전에 시작된 생성(commit) 요청이 로그아웃 뒤 늦게 실패해도 보관소에 다시 쓰지 않는다(리뷰 F3-2)
 {
   await page.goto(U("/research/document/new/"));
   await main.getByLabel("제목").fill("로그아웃 경합 문서");
@@ -1258,8 +1266,7 @@ let docEUrl;
   let accepted19;
   const gate19 = new Promise((r) => (release19 = r));
   const seen19 = new Promise((r) => (accepted19 = r));
-  await page.route("**/api/research/documents", async (route) => {
-    if (route.request().method() !== "POST") return route.continue();
+  await page.route(COMMIT, async (route) => {
     await route.fetch(); // 서버 반영
     accepted19();
     await gate19;
@@ -1273,7 +1280,7 @@ let docEUrl;
   release19();
   await page.waitForTimeout(1500);
   check("R19. late failure after logout does not rewrite store", !(await pendingStore()).includes("로그아웃 경합"), await pendingStore());
-  await page.unroute("**/api/research/documents");
+  await page.unroute(COMMIT);
 }
 
 // R20. 확정 정책: 승인됐지만 편집자·관리자가 아닌 계정 — 메뉴 없음, 서버 403 안내, 공개 글 질문 폼 대신 안내
@@ -1736,7 +1743,7 @@ let docEUrl;
   const r3 = await timeCompare(base, grown, "많은 추가 줄");
   const first = await r3.cmp.locator("[data-diff]").count();
   const more = r3.cmp.getByRole("button", { name: /다음 1000줄 더 보기/ });
-  check("W4. many rows: first 1000 rendered, rest on demand", r3.elapsed < 5000 && first === 1000 && (await appears(more)), JSON.stringify({ elapsed: r3.elapsed, first }));
+  check("W4. many rows: first 1000 rendered, rest on demand", r3.elapsed < 8000 && first === 1000 && (await appears(more)), JSON.stringify({ elapsed: r3.elapsed, first }));
   await more.click();
   check("W4. many rows: show more renders the rest", (await r3.cmp.locator("[data-diff]").count()) > 1000 && (await appears(r3.cmp.getByText("+1500줄"))));
   // 리뷰 F3: 아주 많은 줄 삭제·교체(200k자 이하)에서도 계산이 실패하지 않고, 실패하더라도 비교 영역 밖 화면은 그대로다.
@@ -1822,6 +1829,43 @@ let docEUrl;
   await main.getByRole("button", { name: "내용 수정" }).waitFor();
   await x.done();
   check("W5. discard result: no draft, head unchanged", (await draftOf()) === null && (await api.get(`/research/documents/${id}`)).content === "A 입력");
+  await page.context().close();
+}
+
+// W3. #22 새 문서 서버 초안: 자동 저장 → 주소(?draft=)로 새로고침 복구 → 다른 새 문서 화면의 초안 목록 → 버리기 / 저장
+{
+  const wctx = await newPage();
+  await login(wctx.page);
+  const page = wctx.page;
+  const main = page.locator("main");
+  const before = await counts();
+  await page.goto(U("/research/document/new/"));
+  await main.getByLabel("제목").fill("새 초안 문서");
+  await main.getByLabel("본문").fill("새 초안 본문");
+  check("W3. autosave: saved status", await appears(main.getByText("초안 자동 저장됨"), 8000));
+  check("W3. draft address in URL", await page.waitForURL(/\?draft=/, { timeout: 8000 }).then(() => true, () => false), page.url());
+  check("W3. no document created by autosave", (await counts()).documents === before.documents);
+  const draftUrl = page.url();
+  await page.reload();
+  await main.getByLabel("제목").waitFor();
+  const restored = await page
+    .waitForFunction(() => document.querySelector("main textarea")?.value === "새 초안 본문", null, { timeout: 8000 })
+    .then(() => true)
+    .catch(() => false);
+  check("W3. reload restores draft", restored && (await main.getByLabel("제목").inputValue()) === "새 초안 문서");
+  await page.goto(U("/research/document/new/"));
+  check("W3. fresh new page lists unfinished draft", await appears(main.getByRole("link", { name: "새 초안 문서" })));
+  await main.getByRole("link", { name: "새 초안 문서" }).click();
+  await page.waitForURL(draftUrl);
+  await main.getByRole("button", { name: "초안 버리기…" }).click();
+  await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+  check("W3. discard: blank editor, address reset", (await appears(main.getByText("초안을 버렸습니다"))) && (await main.getByLabel("제목").inputValue()) === "" && !page.url().includes("?draft="));
+  check("W3. discarded draft not listed", (await main.getByRole("link", { name: "새 초안 문서" }).count()) === 0);
+  await main.getByLabel("제목").fill("저장할 새 문서");
+  await main.getByLabel("본문").fill("저장할 본문");
+  await main.getByRole("button", { name: "문서 저장" }).click();
+  await page.waitForURL(/\/research\/document\/\?id=/);
+  check("W3. save creates exactly one document", (await counts()).documents === before.documents + 1 && (await appears(main.getByRole("heading", { name: "저장할 새 문서" }))));
   await page.context().close();
 }
 

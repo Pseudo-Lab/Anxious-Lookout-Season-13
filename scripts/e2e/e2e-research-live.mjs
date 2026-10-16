@@ -218,8 +218,8 @@ check("L6. save after reload succeeds", await appears(main.locator(".prose").get
   await main.getByLabel("본문").fill("본문");
   let dropped = false;
   const keys = [];
-  await page.route("**/api/research/documents", async (route) => {
-    if (route.request().method() !== "POST") return route.continue();
+  // #22: 새 문서는 서버 초안 commit으로 만든다.
+  await page.route("**/api/research/document-drafts/*/commit", async (route) => {
     keys.push(route.request().headers()["idempotency-key"]);
     if (!dropped) {
       dropped = true;
@@ -232,7 +232,7 @@ check("L6. save after reload succeeds", await appears(main.locator(".prose").get
   check("L7. lost response shows failure", await appears(main.getByText("서버에 연결할 수 없습니다")));
   await main.getByRole("button", { name: "문서 저장" }).click();
   await page.waitForURL(/\/research\/document\/\?id=/);
-  await page.unroute("**/api/research/documents");
+  await page.unroute("**/api/research/document-drafts/*/commit");
   check("L7. same key reused", keys.length === 2 && keys[0] === keys[1], JSON.stringify(keys));
   check("L7. exactly one document created", (await countDocs()) === before + 1);
 }
@@ -545,8 +545,7 @@ check("L9. session persists after reload", await appears(chatPanel.getByRole("he
   const gate = new Promise((r) => (release = r));
   const seen = new Promise((r) => (accepted = r));
   let createdStatus = 0;
-  await page.route("**/api/research/documents", async (route) => {
-    if (route.request().method() !== "POST") return route.continue();
+  await page.route("**/api/research/document-drafts/*/commit", async (route) => {
     createdStatus = (await route.fetch()).status();
     accepted();
     await gate;
@@ -554,7 +553,7 @@ check("L9. session persists after reload", await appears(chatPanel.getByRole("he
   });
   void main.getByRole("button", { name: "문서 저장" }).click();
   await seen;
-  check("L11. real create committed before logout", createdStatus === 201, String(createdStatus));
+  check("L11. real create committed before logout", createdStatus === 200, String(createdStatus));
   await page.locator("header").getByRole("button", { name: "로그아웃" }).first().click();
   await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
   const store = () => page.evaluate(() => JSON.stringify({ ...sessionStorage }));
@@ -562,7 +561,7 @@ check("L9. session persists after reload", await appears(chatPanel.getByRole("he
   release();
   await page.waitForTimeout(1500);
   check("L11. late failure after logout leaves store empty", (await store()) === "{}", await store());
-  await page.unroute("**/api/research/documents");
+  await page.unroute("**/api/research/document-drafts/*/commit");
 }
 
 // L12. 로그아웃 후 실제 API 401, 화면은 로그인 안내

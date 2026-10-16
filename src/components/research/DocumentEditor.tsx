@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { FetchFailure } from "@/lib/api/client";
-import { commitDraft, discardDraft, researchErrorMessage, type DraftInput } from "@/lib/research/api";
+import { commitDraft, discardDraft, getDocument, getDraft, researchErrorMessage, type DraftInput } from "@/lib/research/api";
 import { useMutation } from "@/lib/research/hooks";
 import { formatDateTime } from "@/lib/research/format";
 import { LIMITS, type Draft, type ResearchDocument } from "@/lib/research/types";
@@ -162,6 +162,17 @@ export default function DocumentEditor({
     if (res.ok) {
       onCommitted(res.data.document);
       return true;
+    }
+    // 앞선 저장 요청이 실제로는 반영됐는데 응답만 잃은 경우(재로그인 뒤 등): 초안이 저장 완료로 닫혀 있으면 그 문서로 간다.
+    if (isReason(res.failure, "draft_closed")) {
+      const closed = await getDraft(d.id);
+      if (closed.ok && closed.data.state === "committed" && closed.data.documentId) {
+        const saved = await getDocument(closed.data.documentId);
+        if (saved.ok) {
+          onCommitted(saved.data);
+          return true;
+        }
+      }
     }
     setFailure(res.failure);
     if (isReason(res.failure, "base_changed", "document_version")) {
