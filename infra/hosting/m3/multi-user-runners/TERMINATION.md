@@ -178,3 +178,50 @@ are recorded below after the image build. Host proc/CRI and namespace visibility
 retained real paths, database role and network access must pass PM's report run
 before any apply is considered. Tests use a real disposable PostgreSQL and real
 temporary ledger, with fake host/Kubernetes evidence, not the live environment.
+
+### Pinned legacy artifact and command (source review required before execution)
+
+Source `e5906b0af363d0513fdb648b889cc18b3f432a5c`, built
+2026-10-16T08:37:32Z, local arm64 image ID
+`sha256:35a9a0f342586f3ecdefcda5c57f622972efedfda9e36dba90a1c653d70bf323`.
+This ID refers to the local Docker artifact, not a remotely published tag. Preserve
+or transfer the image with its content identity if executing on another daemon.
+
+PM prepares `/run/issue16-recovery-inputs` (root0700) with `legacy.json`, `observer-dsn`,
+`journal.jsonl`, `kube-token`, `ca.crt`; config references these as `/private/...`.
+Prepare a separate empty root0700 `/run/issue16-recovery-report` for the report.
+Set host.proc to `/host/proc`, host.crictl to `/usr/local/bin/crictl`, and endpoint to
+`unix:///run/k3s/containerd/containerd.sock`. Private pool config uses the reviewed
+reachable API/CA and namespace UID; do not disable TLS. Supply independent trusted
+host PID/cgroup references and boot/Node identities from the current inventory.
+The recorded legacy fence is owner `ff4b718f-de46-4c10-9195-c993eff9ded9`, state
+`71c84103-a643-4cfc-a3f6-ef6079e48d50`, generation1, revision8, Pod
+`1c4552b5-bfb3-4b23-b3c3-a0cae4b72163`; reconfirm it before use.
+
+```sh
+# READ-ONLY report: no DB/retained state mutation; writes only /reports.
+docker run --rm --pull=never --user 0:0 --network host --pid=host --cgroupns=host \
+  --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH --cap-add SYS_PTRACE \
+  --security-opt no-new-privileges \
+  --mount type=bind,src=/proc,dst=/host/proc,readonly \
+  --mount type=bind,src=/run/k3s/containerd/containerd.sock,dst=/run/k3s/containerd/containerd.sock,readonly \
+  --mount type=bind,src=/usr/local/bin/crictl,dst=/usr/local/bin/crictl,readonly \
+  --mount type=bind,src=/var/lib/anxious-lookout/user-runners,dst=/var/lib/anxious-lookout/user-runners,readonly \
+  --mount type=bind,src=/run/issue16-recovery-inputs,dst=/private,readonly \
+  --mount type=bind,src=/run/issue16-recovery-report,dst=/reports \
+  -e OBSERVER_DATABASE_URL_FILE=/private/observer-dsn \
+  --entrypoint python \
+  sha256:35a9a0f342586f3ecdefcda5c57f622972efedfda9e36dba90a1c653d70bf323 \
+  -B -m ops.runner_legacy_reconcile report --inputs /private/legacy.json --report /reports/legacy.json
+```
+
+After independent review of the private report and current inputs, use the identical
+command with `report` replaced by `apply` and the `/reports` bind made `readonly`.
+Apply writes only the narrowly scoped DB audit/registry transaction; retained mounts
+stay read-only. No automatic apply follows report. Any report refusal preserves the
+state and requires inspecting the evidence boundary, never a direct SQL reset.
+The socket read-only bind does not restrict CRI methods by itself: this reviewed
+binary only invokes inventory calls, and runtime-socket trust stays with the host
+operator. Host namespaces and SYS_PTRACE are confined to this finite trusted tool,
+not granted to API or runner workloads. CLI --help passed with network disabled;
+the privileged report/apply invocation has **not** been run on the live host.
