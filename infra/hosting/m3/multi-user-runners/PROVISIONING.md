@@ -54,11 +54,12 @@ The live operator registry is reported as `runner_failed` after #13. Its old
 runner has no new termination receipt. Binding import above does not make it
 eligible for entry. `Registry.enter` rejects this phase, and `Registry.stopped`
 only accepts `stopping`; neither is a recovery command for this legacy case.
-At source checkpoint 089df16 there is **no executable legacy recovery tool**.
+`ops.runner_legacy_reconcile` now supplies the narrow zero-admission recovery tool;
+see `TERMINATION.md` for its report/apply contract and pinned execution procedure.
 Do not substitute a direct SQL phase/UID reset, call an adapter with a fabricated
 `verified=True`, replay the old one-shot create permit, or manufacture a receipt.
-The observer slice must supply a tested recovery tool and exact pinned-image
-invocation here before PM can execute this transition. This section specifies
+The tool and its exact pinned-image invocation require review before PM executes
+this transition. This section specifies
 its required evidence and preservation boundary, not approval to change live state.
 
 PM's read-only inventory for that operational review must contain:
@@ -102,8 +103,8 @@ generation via the normal path. Recovery must retain old entry/create receipts,
 admissions/completions, native conversation history, service ledger, transport
 bindings and storage; it must not delete/reformat data or re-run preparation.
 Any legacy inconsistency that cannot meet these conditions remains `runner_failed`
-for a separately reviewed resolution. The final tool, transition tests, safe
-repeat behavior and invocation are outstanding observer-slice release gates.
+for a separately reviewed resolution. Source tests cover transition and repeat
+behavior; actual retained-file audit and live host evidence remain execution gates.
 
 ## New storage and host service
 

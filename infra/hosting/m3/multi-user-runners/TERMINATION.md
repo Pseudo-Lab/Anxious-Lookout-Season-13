@@ -58,7 +58,7 @@ their own review; source tests do not establish live termination.
 PM found the old UID in this host's current-boot k3s journal and containerd log.
 The journal is volatile. Before a reviewed legacy attempt, retain a root-only
 export in a newly allocated mode0700 evidence directory; do not reboot first.
-The reviewed operator command is `journalctl -u k3s -o export --no-pager` redirected
+The operator command is `journalctl -u k3s -b -o json --no-pager` redirected
 inside that private directory to an exclusively created file (umask077, noclobber).
 Also preserve the relevant containerd log and metadata/digests privately. Never
 copy raw journal records, credentials or conversation content into message files.
@@ -118,3 +118,63 @@ Run it via a reviewed external systemd oneshot/timer; it is not an inbox watcher
 The CLI emits fixed status/owner metadata only. Native/host fakes plus disposable DB
 validate sequencing, uncertain DELETE, duplicate release, permissions and HTTP intents;
 they do not replace the live visibility/mount/crash/credential gates.
+
+## Narrow legacy zero-admission recovery
+
+`ops.runner_legacy_reconcile report|apply --inputs /private/legacy.json --report
+/reports/legacy.json` uses the same pool, host, storageRoot fields as the observer,
+plus `fence` (owner, state, generation, revision, podUid), `journal` (private JSONL
+export path), `hostname` and `expectedAccountId`. All paths must resolve to the
+same mounted paths used by the private input. Root owns configuration, journal,
+DSN and report; directories are mode0700 and files mode0600. Never publish them.
+
+The target is the imported legacy uncapped layout only. Supply the independently
+reviewed old Pod-to-host relationship, including the k3s node-name override;
+the tool validates matching journal UID/unit/boot/hostname, but cannot recover a
+historical Node-name override from today's configuration. PM must preserve that
+relationship evidence and reject mismatches before invoking either mode.
+Use fresh trusted host namespace references, Node UID and boot ID. A reboot
+invalidates this same-boot path rather than silently accepting old proof.
+
+Report holds the owner fence, requires FAILED with the exact UID/generation/revision,
+zero DB admissions (including completed ones), and no running conversations. It
+checks fresh host proof and pinned PV/PVC/namespace bindings, takes existing native
+and control file leases, and audits owner/state/account markers, an empty broker
+and a structurally valid service ledger with zero lifetime requests. Retained native
+auth.json or SQLite sidecars refuse recovery. Report never updates registry or
+retained files; it exclusively creates a private digest report for operator review.
+PM's admissions=0, pending=0 and failed/idle conversations satisfy only the DB
+preconditions. The eight generation-1 entry receipts are preserved, not admissions.
+
+Apply re-runs all checks, requires an identical approved report, repeats file and
+fresh host verification, and atomically records distinct legacy audit evidence and
+releases into idle_stopped. It never manufactures a native drain receipt. The
+owner/state/generation, ledger, broker and history remain unchanged. No Pod is
+created or deleted. Repeated apply recognizes the completed old UID even after a
+new normal entry has started a later generation, without releasing that generation.
+Any uncertainty remains FAILED. This path cannot reconcile a nonempty broker or
+any historical admission: those require separate evidence and review.
+
+Before report/apply, stop old API/controllers and any external creator for this
+owner; the DB owner lock fences current cooperating code but cannot fence an old
+binary or external kubectl. Install and validate the termination schema and observer
+role grants, import the retained binding without re-preparation, preserve the
+volatile journal, and review the explicit target fence. Use a dedicated observer DB
+login; neither API credentials nor a superuser belong in this command. The existing
+binding's runner image must separately be reviewed for the new drain/supply contract
+before enabling later generations. Recovery does not rewrite immutable bindings.
+
+The Docker image is built from a committed source archive, not the working tree:
+
+```sh
+git archive <reviewed-source-sha> | docker build -f backend/Dockerfile --target provisioner \
+  --build-arg APP_GIT_SHA=<reviewed-source-sha> --build-arg APP_BUILT_AT=<UTC-time> \
+  -t anxious-s13-back-observer16:legacy-source -
+```
+
+Use the local content-addressed image ID recorded with the review request and
+`--pull=never`; a tag is insufficient. The exact commands for that built artifact
+are recorded below after the image build. Host proc/CRI and namespace visibility,
+retained real paths, database role and network access must pass PM's report run
+before any apply is considered. Tests use a real disposable PostgreSQL and real
+temporary ledger, with fake host/Kubernetes evidence, not the live environment.
