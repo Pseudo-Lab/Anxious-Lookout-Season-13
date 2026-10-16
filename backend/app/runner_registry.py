@@ -32,6 +32,10 @@ class ReconciliationRequired(Refused):
     """Failed lifecycle evidence must be reconciled before entry."""
 
 
+class StopRequested(Refused):
+    """HTTP may record a session-bound entry intent, never dispatch this Pod."""
+
+
 class Registry:
     def __init__(self, transaction):
         self.db = transaction
@@ -106,6 +110,9 @@ class Registry:
         state = self.read(owner)
         if state is not None and state.phase == Phase.FAILED:
             raise ReconciliationRequired()
+        from .runner_termination_control import stop_for
+        if state is not None and (state.phase == Phase.STOPPING or stop_for(self.db, state) is not None):
+            raise StopRequested()
         if state is None:
             state = State(owner, uuid4(), now)
             self.db.execute(text('''INSERT INTO runner_runtime.registry

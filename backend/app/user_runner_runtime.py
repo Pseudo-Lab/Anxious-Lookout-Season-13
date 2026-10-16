@@ -74,6 +74,15 @@ class Runtime:
         No volume/Secret deletion, force delete, slot release or recreation. Failed
         DELETE is retryable against the SAME persisted UID, including after logout.
         """
+        from .runner_termination_schema import installed
+        from .runner_termination_control import request_stop
+        with self.engine.begin() as db:
+            if installed(db):
+                state = self.state(db,owner)
+                if state.phase in {Phase.FAILED,Phase.STOPPED}:
+                    return
+                request_stop(db,owner)
+                return
         self.namespace()
         with self.engine.begin() as db:
             db.execute(text("SET LOCAL lock_timeout='3s'"))
@@ -113,6 +122,9 @@ class BoundRunner:
             Registry(db)._eligible(self.owner)
             state = runtime.state(db, self.owner)
             require(state.pod_uid is not None and state.phase in {Phase.READY, Phase.UNREACHABLE})
+            if method != 'GET':
+                from .runner_termination_control import stop_for
+                require(stop_for(db,state) is None)
             obj = runtime.pods._request('GET', 'pods', runtime.plan.identity.name)
             pod = runtime.pods._pod(obj, runtime.plan)
             require(pod.uid == state.pod_uid and obj.get('status', {}).get('phase') == 'Running')

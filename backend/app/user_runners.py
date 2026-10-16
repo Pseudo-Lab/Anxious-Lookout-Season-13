@@ -17,7 +17,7 @@ from sqlalchemy import select
 from .codex_policy import MODEL, RUNNER_PREFLIGHT_ERRORS, ERRORS
 from .models import Account
 from .research import fail
-from .runner_registry import Registry, ReconciliationRequired
+from .runner_registry import Registry, ReconciliationRequired, StopRequested
 from .runner_schema import validate
 from runner.lifecycle import Phase, Refused
 
@@ -111,6 +111,9 @@ def preflight(store):
 
 def registry_status(registry, owner, state=None):
     state = registry.read(owner) if state is None else state
+    from .runner_termination_control import stop_for
+    if stop_for(registry.db, state) is not None:
+        return {**status_body(state), 'available':False, 'reason':'stopping', 'retryAfterSeconds':5}
     return status_body(state, creation_reserved=registry.creation_reserved(state))
 
 
@@ -205,17 +208,22 @@ def register(app, sessions, settings, current_session):
             except (ValueError, TypeError, AttributeError):
                 fail('validation_error', 'A UUID Idempotency-Key is required', 422)
             registry = checked_registry(db)
+            stopping = False
             try:
                 state, _ = registry.enter(account.id, key, utc_now)
+            except StopRequested:
+                from .runner_termination_control import queue_entry
+                state = queue_entry(db,account.id,key,current_session(db,request).token_hash)
+                stopping = True
             except ReconciliationRequired:
                 fail('runner_reconciliation_required', 'Runner state requires reconciliation', 409)
             except Refused:
                 fail('codex_runner_unreachable', 'Runner state requires reconciliation', 503)
             # Body shares GET's parser, and contains no private runtime identities.
-            code = 200 if state.pod_uid is not None else 202
+            code = 202 if stopping else 200 if state.pod_uid is not None else 202
             fallback = registry_status(registry, account.id, state)
             owner = account.id
-        if app.state.user_runner_runtime:
+        if app.state.user_runner_runtime and not stopping:
             try:
                 app.state.user_runner_runtime.ensure(owner)
             except Exception:

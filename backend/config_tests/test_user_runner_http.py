@@ -22,6 +22,8 @@ from config_tests.test_runner_registry import schema, admin, read, preservation_
 @pytest.fixture(scope='module', autouse=True)
 def research_schema(schema):
     auth_migrate('0004_publication')
+    from ops.runner_termination_migrate import migrate
+    migrate()
 
 
 @pytest.fixture

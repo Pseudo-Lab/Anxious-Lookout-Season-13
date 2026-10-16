@@ -1,4 +1,4 @@
-# Termination source building blocks — not an enabled observer
+# Termination source checkpoints — no live deployment approval
 
 The runner's private authenticated `POST /lifecycle/drain` accepts exactly stopId,
 ownerId, stateId, podUid (canonical UUID strings) and generation (positive integer).
@@ -49,9 +49,9 @@ regression skips if independent references were not supplied; reported validatio
 must explicitly include an invocation with them.
 
 Tests use fake Native/process/CRI/proc and real fixture adapter tests inside Docker.
-These modules are not yet wired to DB stop intents, slot release, HTTP stopping
-entry intents, or a legacy recovery CLI. They do not enable production stopping.
-The full observer and legacy recovery gates in PROVISIONING.md remain outstanding.
+The first checkpoint introduced only these modules. The subsequent DB integration
+is described below. Production deployment and the legacy recovery procedure need
+their own review; source tests do not establish live termination.
 
 ## Legacy node evidence preservation
 
@@ -69,3 +69,52 @@ local hostname, current host boot ID, and Kubernetes Node UID/name. Confirm the
 k3s node-name mapping for OS hostname `simple` to Node `anxious-lookout`; the name
 alone is insufficient. The source record is not a runner shutdown receipt and
 cannot substitute for present CRI/proc proof or DB/native uncertainty reconciliation.
+
+## DB observer integration (subsequent source checkpoint)
+
+The additive `ops.runner_termination_migrate` creates and validates the exact
+runner_termination schema. API credentials can insert only intent columns; they
+cannot insert/update node anchors, drain receipts, host proof, completed_at or
+consumed_at. Install `db/016_runner_observer_grants.sql` once and give its NOLOGIN
+capability to a separate observer login. It can read session validity and conversation
+owner/state metadata, but cannot change approval or session expiry. API startup does
+not migrate. During the reviewed cutover stop old API/controller instances before
+migrating and replacing them, so old synchronous DELETE behavior cannot race the
+new observer. The legacy stop path remains only when this schema is absent.
+
+With the schema installed, DELETE/logout records a UID-bound durable stop intent;
+it does not issue Kubernetes DELETE from the API. GET projects `stopping` immediately.
+Bound dispatch and registry entry check that intent under the owner lock. An explicit
+prepare while stopping returns 202 and persists a coalesced key tied to the originating
+app session; GET never creates intents. Logout's FK cascade removes that session's
+pending intent. Invalid/expired sessions, revoked membership and excluded/disabled
+selection never restart an owner during release. Session hashes stay in DB only.
+
+`ops.runner_stop_observer` first records the scheduled Pod's Node UID/boot attribution
+before drain. It verifies exact native receipt and no pending admissions/running
+conversations, commits stopping while retaining the UID, then issues normal deletion
+with a UID precondition. Missing DELETE responses preserve the reservation. A later
+iteration reads the retained exact receipt through the bound PV and verifies host
+termination; only then does one transaction release the slot and, if an eligible
+session intent remains, advance one generation through the existing registry/outbox.
+Repeated completion never releases a later Pod. Existing state/history/create receipts
+are retained. Errors and unknown evidence leave the stop/slot pending.
+
+Private root inputs contain exactly `pool` (the version2 pool configuration), `host`
+(HostTermination constructor fields including independent namespace references), and
+`storageRoot`. Set OBSERVER_DATABASE_URL_FILE to the observer login secret. Set the
+same feature/allowlist/singleton environment as the API for **re-entry** selection;
+cleanup remains possible when that flag is off. Kubernetes observer credentials
+need existing pool reads, named Node/PV reads and Pod DELETE, never Pod CREATE/exec.
+Expose only the retained storage roots, trusted CRI socket, reviewed crictl executable,
+private configuration and CA/service-account inputs, plus host proc, to the root image.
+The exact host invocation and image pin remain deployment-review gates.
+
+The command is a finite batch, `python -B -m ops.runner_stop_observer --inputs
+/private/observer.json --cursor-file /private/observer-cursor.json --limit 10`, or
+`--owner <UUID>` for one owner. The private persisted cursor advances even over a
+refused owner and wraps at the end so a blocked prefix cannot starve later stops.
+Run it via a reviewed external systemd oneshot/timer; it is not an inbox watcher.
+The CLI emits fixed status/owner metadata only. Native/host fakes plus disposable DB
+validate sequencing, uncertain DELETE, duplicate release, permissions and HTTP intents;
+they do not replace the live visibility/mount/crash/credential gates.
