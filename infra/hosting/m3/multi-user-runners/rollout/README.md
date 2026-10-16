@@ -31,9 +31,17 @@ bundle's git SHA/hash in the operation record.
 PM must replace providerAccountId and verify sourceUid, node/boot/namespace IDs,
 CIDR, API TLS names and canonical root-owned executable paths in the example.
 The provider account is an identifier, never an access/refresh token.
-PM verified this host's serving certificate has DNS SAN `localhost`, but no
-`127.0.0.1` IP SAN: use `https://localhost:6443` for hostApi and supply kubeconfig.
-Do not disable certificate verification to use the IP address.
+Both API endpoints must use **IP literals**: `app.runner_kube.KubePods` rejects
+DNS hostnames in real execution, including `localhost` and `kubernetes.default.svc`.
+Use `api=https://10.43.0.1:443` for the in-cluster API and
+`hostApi=https://127.0.0.1:6443` for host workers; supply kubeconfig uses the latter.
+PM corrected its earlier truncated certificate report: the serving certificate has
+IP SANs `127.0.0.1`, `10.43.0.1` and `10.0.0.107`. The
+[PM canary report](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/16#issuecomment-6214030575)
+records successful Pod creation and supply with these endpoint values, with user
+response verification still pending at that checkpoint. Do not disable TLS verification.
+The current offline renderer checks HTTPS syntax but does not enforce the runtime
+IP-literal requirement; `--check` success alone does not establish endpoint usability.
 Inventory PID/cgroup references independently on the host; do not discover them from the
 observer container. After reboot, refresh the observer boot/namespace input before
 resuming its timer; stale proof deliberately refuses. The example is not live input.
