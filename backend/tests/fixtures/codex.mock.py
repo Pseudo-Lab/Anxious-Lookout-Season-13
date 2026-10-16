@@ -54,7 +54,9 @@ for line in sys.stdin:
         prompt = params["input"][0]["text"]
         # Exercise the full native input/history, while fixture controls refer
         # to the actual user question after the request scope preamble.
-        if "\nUser question:\n" in prompt:
+        if "\nUser: " in prompt:
+            prompt = prompt.split("\nUser: ", 1)[1]
+        elif "\nUser question:\n" in prompt:
             prompt = prompt.split("\nUser question:\n", 1)[1]
         if prompt == "/fixture/shutdown-timeout":
             delay_exit = True
