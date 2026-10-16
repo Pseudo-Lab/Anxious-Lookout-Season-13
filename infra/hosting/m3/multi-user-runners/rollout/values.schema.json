@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Issue18 fixed single-node D4 rollout inputs",
+  "type": "object", "additionalProperties": false,
+  "required": ["version", "runtimeImage", "runnerImage", "provisionerImageId", "api", "hostApi", "namespaceUid", "podCIDR", "node", "nodeUid", "bootId", "hostPidNamespace", "hostCgroupNamespace", "providerAccountId", "sourceUid", "allowlist", "kubectl", "crictl", "criSocket", "maxPods", "idleSeconds", "nativeSizeGiB", "controlSizeGiB"],
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"},
+    "image": {"type": "string", "pattern": "^[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}$"},
+    "path": {"type": "string", "pattern": "^/[A-Za-z0-9_./-]+$"},
+    "size": {"type": "integer", "minimum": 1, "maximum": 999999}
+  },
+  "properties": {
+    "version": {"const": 1},
+    "runtimeImage": {"$ref": "#/$defs/image"}, "runnerImage": {"$ref": "#/$defs/image"},
+    "provisionerImageId": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "api": {"type": "string", "pattern": "^https://"}, "hostApi": {"type": "string", "pattern": "^https://"},
+    "namespaceUid": {"$ref": "#/$defs/uuid"}, "nodeUid": {"$ref": "#/$defs/uuid"}, "bootId": {"$ref": "#/$defs/uuid"},
+    "podCIDR": {"type": "string", "description": "Canonical IPv4 network; renderer checks using ipaddress."},
+    "node": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"},
+    "hostPidNamespace": {"type": "string", "pattern": "^pid:\\[[1-9][0-9]*\\]$"},
+    "hostCgroupNamespace": {"type": "string", "pattern": "^cgroup:\\[[1-9][0-9]*\\]$"},
+    "providerAccountId": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,200}$"},
+    "sourceUid": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+    "allowlist": {"oneOf": [{"type": "null"}, {"type": "array", "minItems": 1, "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/uuid"}}]},
+    "kubectl": {"$ref": "#/$defs/path"}, "crictl": {"$ref": "#/$defs/path"}, "criSocket": {"$ref": "#/$defs/path"},
+    "maxPods": {"type": "integer", "minimum": 1, "maximum": 100},
+    "idleSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+    "nativeSizeGiB": {"$ref": "#/$defs/size"}, "controlSizeGiB": {"$ref": "#/$defs/size"}
+  }
+}

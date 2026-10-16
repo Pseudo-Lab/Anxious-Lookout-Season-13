@@ -1,5 +1,9 @@
 # Issue 16 cutover — PM execution after source and operational review
 
+Use [rollout/README.md](rollout/README.md) for the #18 values schema, offline renderer,
+pool API patch, RBAC replacement, quota, worker units and shared-mount/restore setup.
+This supplies the installation artifacts referenced below; it does not execute D4.
+
 This is the ordered procedure for the approved source, not evidence of a deployment.
 PM builds/imports committed artifacts and executes operations; back does not change
 live state. A source `approved:` gate, PR creation, live authorization, operational
