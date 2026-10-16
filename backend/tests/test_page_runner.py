@@ -24,7 +24,8 @@ def runner_schema(schema):
     migrate("0004_publication")
 
 
-def test_same_native_thread_owner_pages_then_public_and_legacy_refuse(tmp_path, monkeypatch):
+def test_same_native_thread_owner_pages_then_public_and_legacy_refuse(tmp_path, monkeypatch, caplog):
+    caplog.set_level("INFO", logger="uvicorn.error")
     calls = []
     def callback(request):
         calls.append(json.loads(request.content))
@@ -56,14 +57,35 @@ def test_same_native_thread_owner_pages_then_public_and_legacy_refuse(tmp_path, 
         assert len(stored[saved["threadId"]]["tools"]) == 13
         trace = json.loads((tmp_path / "native/codex/fixture-model-rpc.json").read_text())
         assert [entry["method"] for entry in trace] == ["thread/start", "turn/start", "thread/resume", "turn/start"]
+        owner_pid = native.process.pid
+        assert native.thread_web_modes[saved["threadId"]] == "live"
         native.accept(session, Turn(requestId=uuid.uuid4(), text="public question", tools=definitions(), toolToken="p" * 40,
                       scope={"page": {"kind": "public_document", "resourceId": str(uuid.uuid4())}}))
         public = wait_idle(native, session)
+        assert native.process.pid != owner_pid and public["threadId"] == saved["threadId"]
+        assert native.thread_web_modes[saved["threadId"]] == "disabled"
+        public_pid = native.process.pid
         assert len(calls) == 2
         assert public["record"]["turns"][-1]["items"][1]["status"] == "failed"
         # Legacy omitted scope fails closed too, regardless of registered tools/context.
         native.accept(session, Turn(requestId=uuid.uuid4(), text="legacy caller", tools=definitions(), toolToken="z" * 40))
         assert wait_idle(native, session)["state"] == "idle" and len(calls) == 2
+        assert native.process.pid == public_pid
+        native.accept(session, Turn(requestId=uuid.uuid4(), text="owner again", tools=definitions(), toolToken="w" * 40,
+                      scope={"page": {"kind": "general"}}))
+        restored = wait_idle(native, session)
+        assert native.process.pid != public_pid and restored["threadId"] == saved["threadId"]
+        assert len(calls) == 3 and len(restored["record"]["turns"]) == 5
+        assert native.thread_web_modes[saved["threadId"]] == "live"
+        metrics = [json.loads(record.message.removeprefix("runner_turn_timing "))
+                   for record in caplog.records if record.message.startswith("runner_turn_timing ")]
+        assert len(metrics) == 5
+        assert {item["requestId"] for item in metrics} >= {str(first.requestId), str(second.requestId)}
+        for item in metrics:
+            assert item["state"] == "idle" and item["toolCalls"] == 1
+            assert all(item[key] >= 0 for key in ("queueMs", "threadMs", "dispatchMs", "nativeMs", "toolMs", "historyMs", "totalMs"))
+            assert item["totalMs"] >= item["nativeMs"] >= item["toolMs"]
+        assert first.toolToken not in caplog.text and "create draft" not in caplog.text
     finally:
         native.close()
 
