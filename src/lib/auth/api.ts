@@ -65,9 +65,13 @@ export async function getMe(): Promise<MeResult> {
 
 export type LogoutResult = { ok: true } | { ok: false; failure: FetchFailure };
 
+// 로그아웃은 서버가 내 실행 환경 삭제 요청(Kubernetes 호출 여러 번)까지 동기로 처리하므로 다른 요청보다 길게 기다린다
+// (api-contracts/issue13-user-runner-e2e-v1.md). 끊겨도 다시 누르면 me 재조회로 실제 로그인 상태를 따른다.
+const LOGOUT_TIMEOUT_MS = 90_000;
+
 export async function logout(csrfToken: string): Promise<LogoutResult> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
+  const timer = setTimeout(() => controller.abort(), LOGOUT_TIMEOUT_MS);
   try {
     const res = await fetch(apiUrl("/auth/logout"), {
       method: "POST",

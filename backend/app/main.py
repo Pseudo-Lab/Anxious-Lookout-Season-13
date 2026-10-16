@@ -25,7 +25,7 @@ from starlette.exceptions import HTTPException
 from .database import check_ready, database
 from .models import Account, LoginSession, OAuthTransaction
 from .settings import Settings
-from .user_runners import feature_enabled, can_prepare
+from .user_runners import feature_enabled, can_prepare, selected_account
 
 SESSION_COOKIE = "anxious_session"
 TRANSACTION_COOKIE = "anxious_oauth"
@@ -67,6 +67,8 @@ def create_app(settings=None):
         datetime.fromisoformat(built.replace("Z", "+00:00"))
         app.state.release = release
         yield
+        if app.state.user_runner_runtime:
+            app.state.user_runner_runtime.close()
         engine.dispose()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None, redirect_slashes=False)
@@ -74,6 +76,9 @@ def create_app(settings=None):
     app.state.sessions = sessions
     app.state.settings = settings
     app.state.user_runners_enabled = feature_enabled()
+    app.state.user_runner_account = selected_account()
+    from .user_runner_runtime import load
+    app.state.user_runner_runtime = load(engine, app.state.user_runner_account) if app.state.user_runners_enabled else None
     prefix = settings.base_path + "/api"
 
     @app.middleware("http")
@@ -257,11 +262,18 @@ def create_app(settings=None):
     def logout(request: Request):
         if request.headers.get("origin") != settings.origin:
             return error("origin_not_allowed", "Origin not allowed", 403)
+        owner = None
         with sessions.begin() as db:
             session = current_session(db, request)
             if session:
                 if not hmac.compare_digest(request.headers.get("x-csrf-token", ""), session.csrf_token):
                     return error("csrf_invalid", "Invalid CSRF token", 403)
+                owner = session.account_id
+                from .user_runners import selected, stop_runtime
+                if selected(app, owner):
+                    # Keep the session if cleanup fails so the user can retry.
+                    # The runtime fences dispatch before attempting deletion.
+                    stop_runtime(app, owner)
                 db.delete(session)
         response = Response(status_code=204, headers={"Cache-Control": "no-store"})
         clear_cookie(response, SESSION_COOKIE, settings.cookie_path)

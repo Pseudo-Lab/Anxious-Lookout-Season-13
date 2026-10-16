@@ -61,14 +61,13 @@ if (( ! ready )); then
   chmod 0600 /var/log/anxious-k3s-restore-failure.log
   exit 1
 fi
-docker exec "$container" kubectl --request-timeout=10s get ccnp \
-  anxious-lookout-tenant-boundary anxious-lookout-node-protection -o name
-docker exec "$container" kubectl --request-timeout=10s get namespaces \
-  kube-system platform-system tenant-validation-a tenant-validation-b -o name
+docker exec "$container" kubectl --request-timeout=10s get ccnp,cnp,networkpolicy -A -o name
+docker exec "$container" kubectl --request-timeout=10s get namespaces -o name
 restored_hash=$(docker exec "$container" kubectl --request-timeout=10s -n kube-system \
   get secret k3s-serving -o 'jsonpath={.data}' | sha256sum | cut -d ' ' -f 1)
 [[ "$live_hash" == "$restored_hash" ]] || {
   echo 'Secret data hash mismatch; investigate certificate rotation or restore mismatch' >&2; exit 1;
 }
-echo 'PASS: isolated restored API ready, policies/namespaces present, encrypted Secret data hash matches live data'
+echo 'PASS: isolated restored API ready, policies/namespaces inventoried, encrypted Secret data hash matches live data'
+echo 'Compare the inventory with the intended backup baseline; policy semantics were not verified.'
 echo 'No application PVC or replacement-host network recovery is claimed by this check.'

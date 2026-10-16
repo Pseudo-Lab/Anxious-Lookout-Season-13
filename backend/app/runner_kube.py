@@ -62,7 +62,10 @@ class Plan:
         require(self.native.uid != self.control.uid and self.native.name != self.control.name
                 and self.native.volume != self.control.volume)
         parsed = urlsplit(self.callback)
-        require(parsed.scheme == 'https' and parsed.hostname and not parsed.username and not parsed.password
+        internal = (parsed.scheme == 'http' and parsed.hostname is not None
+                    and re.fullmatch(r'[a-z0-9-]+\.[a-z0-9-]+\.svc\.cluster\.local', parsed.hostname)
+                    and parsed.port == 8080 and parsed.path == '/api/internal/research/tools')
+        require((parsed.scheme == 'https' or internal) and parsed.hostname and not parsed.username and not parsed.password
                 and not parsed.query and not parsed.fragment)
         name(self.service_account)
 
@@ -130,6 +133,7 @@ class KubePods:
                 overlap = kind == other_kind and (ref_name == other_name or uid == other_uid or (volume and volume == other_volume))
                 require(not overlap or (owner, state) == (other_owner, other_state))
         self.deadline, self.timeout = deadline, timeout
+        self.bearer_provider = None
         self.client = httpx.Client(base_url=endpoint.rstrip('/'), headers={'Authorization': 'Bearer '+bearer, 'Accept-Encoding': 'identity'},
             verify=ssl.create_default_context(cafile=ca_file), timeout=httpx.Timeout(timeout),
             follow_redirects=False, trust_env=False,
@@ -138,7 +142,16 @@ class KubePods:
     def close(self):
         self.client.close()
 
+    def refresh_bearer(self):
+        # Optional projected service-account token, rotated by kubelet. The
+        # configured trusted file is never browser input or runner workload input.
+        if self.bearer_provider is not None:
+            bearer = self.bearer_provider()
+            require(isinstance(bearer, str) and len(bearer) >= 32 and not any(c.isspace() for c in bearer))
+            self.client.headers['Authorization'] = 'Bearer '+bearer
+
     def _request(self, method, resource, resource_name=None, *, body=None, missing=False):
+        self.refresh_bearer()
         path = '/api/v1/namespaces/' + self.namespace + '/' + resource
         if resource_name is not None:
             path += '/' + name(resource_name)
@@ -149,7 +162,8 @@ class KubePods:
                 require(time.monotonic() - started < self.deadline)
                 if missing and response.status_code == 404:
                     return None
-                require(response.status_code == (201 if method == 'POST' else 200))
+                expected = {201} if method == 'POST' else {200, 202} if method == 'DELETE' else {200}
+                require(response.status_code in expected)
                 require(response.headers.get('content-encoding', 'identity') == 'identity')
                 content = bytearray()
                 for chunk in response.iter_raw():

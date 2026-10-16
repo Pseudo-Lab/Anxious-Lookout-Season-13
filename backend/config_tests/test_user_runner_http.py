@@ -44,6 +44,7 @@ def identity(client, admin, *, role='editor', approved=True, number='12345'):
         db.execute(text("INSERT INTO auth.sessions(token_hash,account_id,csrf_token,expires_at) VALUES(:token,:owner,:csrf,now()+interval '1 hour')"),
                    {'token': session_digest(token, client.app.state.settings.origin), 'owner': owner, 'csrf': csrf})
     client.cookies.set('anxious_session', token, path='/api')
+    client.app.state.user_runner_account = owner
     return owner, {'Origin': client.app.state.settings.origin, 'X-CSRF-Token': csrf}
 
 
@@ -481,3 +482,30 @@ def test_retained_create_receipt_does_not_hide_idle_stopped_status(client, admin
     snapshot = preservation_snapshot(admin)
     assert client.get('/api/research/codex/status').json()['reason'] == 'idle_stopped'
     assert preservation_snapshot(admin) == snapshot
+
+
+def test_feature_on_nonselected_account_keeps_trial_status_dispatch_and_refresh(client, admin):
+    selected_owner, _ = identity(client, admin)
+    other, auth = identity(client, admin, number='98765')
+    client.app.state.user_runner_account = selected_owner
+    runner = StaticRunner()
+    client.app.state.research_runners[other] = runner
+    client.app.state.codex_verification = 'fixture'
+    assert client.get('/api/auth/me').json()['user']['codexRunner'] is False
+    status = client.get('/api/research/codex/status').json()
+    assert status['available'] is True and status['remainingAdmissions'] == 2
+    assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == 403
+    conversation = create_conversation(client, auth)
+    path = '/api/research/sessions/' + conversation['id']
+    assert client.post(path+'/messages', json={'text': 'trial', 'expectedVersion': 1}, headers=headers(auth)).status_code == 202
+    assert runner.submits == 1
+    client.get(path)
+    assert runner.reads > 0 and read(admin, other) is None
+
+
+def test_no_selected_account_never_enables_any_account(client, admin):
+    owner, auth = identity(client, admin)
+    client.app.state.user_runner_account = None
+    assert client.get('/api/auth/me').json()['user']['codexRunner'] is False
+    assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == 403
+    assert read(admin, owner) is None
