@@ -23,11 +23,14 @@ exactly version, api, namespace, namespaceUid, podCIDR, caFile and kubeTokenFile
 Its Kubernetes token is a projected service-account token. It is mutually exclusive
 with CODEX_USER_RUNNER_CONFIG_FILE. Runtime plans come from the DB; provider tokens
 and host source paths are absent. The API Kubernetes Role for this mode needs
-namespace-scoped GET of Pods/PVCs/Secrets and DELETE of Pods, plus named namespace
+namespace-scoped GET of Pods/PVCs/Secrets, plus named namespace
 metadata GET. No create/exec/PV/root permission belongs in that API role. Controller
 needs namespace PVC/Secret/Pod create/get, named prerequisite SA/KNP reads and
 cluster PV create/get plus named namespace metadata GET. PV CREATE is inherently
 cluster-scoped trusted privilege; exact path/spec generation and review remain gates.
+Pod DELETE belongs only to the stop observer in the final pool design. The earlier
+singleton deployment granted it to the API; [rollout/README.md](rollout/README.md)
+replaces those legacy grants and provides the concrete #18 installation bundle.
 No workload service-account token or new runner-to-runner/API-server allow rule.
 
 ## Existing operator import
