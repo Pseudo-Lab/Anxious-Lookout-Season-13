@@ -129,6 +129,7 @@ def test_concurrent_tabs_coalesce_into_single_owner_runtime_and_outbox(client, a
 @pytest.mark.parametrize('role,approved', [('commenter',True),('editor',False),('admin',False)])
 def test_ineligible_status_200_and_prepare_403_never_creates_state(client, admin, role, approved):
     owner, auth = identity(client, admin, role=role, approved=approved)
+    client.app.state.user_runner_account = None
     assert client.get('/api/auth/me').json()['user']['codexRunner'] is False
     status = client.get('/api/research/codex/status')
     assert status.status_code == 200 and status.json()['reason'] == 'not_enabled_for_account'
@@ -487,7 +488,7 @@ def test_retained_create_receipt_does_not_hide_idle_stopped_status(client, admin
     assert preservation_snapshot(admin) == snapshot
 
 
-def test_feature_on_nonselected_account_keeps_trial_status_dispatch_and_refresh(client, admin):
+def test_feature_on_nonselected_account_cannot_fall_back_to_trial(client, admin):
     selected_owner, _ = identity(client, admin)
     other, auth = identity(client, admin, number='98765')
     client.app.state.user_runner_account = selected_owner
@@ -496,22 +497,65 @@ def test_feature_on_nonselected_account_keeps_trial_status_dispatch_and_refresh(
     client.app.state.codex_verification = 'fixture'
     assert client.get('/api/auth/me').json()['user']['codexRunner'] is False
     status = client.get('/api/research/codex/status').json()
-    assert status['available'] is True and status['remainingAdmissions'] == 2
+    assert status['available'] is False and status['reason'] == 'not_enabled_for_account'
     assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == 403
     conversation = create_conversation(client, auth)
     path = '/api/research/sessions/' + conversation['id']
-    assert client.post(path+'/messages', json={'text': 'trial', 'expectedVersion': 1}, headers=headers(auth)).status_code == 202
-    assert runner.submits == 1
+    reply = client.post(path+'/messages', json={'text': 'trial', 'expectedVersion': 1}, headers=headers(auth))
+    assert reply.status_code == 503 and reply.json()['error']['code'] == 'codex_not_enabled_for_account'
+    assert runner.submits == 0
     client.get(path)
-    assert runner.reads > 0 and read(admin, other) is None
+    assert runner.reads == runner.health_calls == 0 and read(admin, other) is None
 
 
-def test_no_selected_account_never_enables_any_account(client, admin):
+def test_no_selected_account_enables_dynamic_approved_accounts(client, admin):
     owner, auth = identity(client, admin)
     client.app.state.user_runner_account = None
-    assert client.get('/api/auth/me').json()['user']['codexRunner'] is False
-    assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == 403
-    assert read(admin, owner) is None
+    assert client.get('/api/auth/me').json()['user']['codexRunner'] is True
+    assert client.get('/api/research/codex/status').json()['reason'] == 'not_prepared'
+    assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == 202
+    first = read(admin, owner)
+    other, auth = identity(client, admin, role='admin', number='67890')
+    client.app.state.user_runner_account = None
+    assert client.get('/api/auth/me').json()['user']['codexRunner'] is True
+    assert client.get('/api/research/codex/status').json()['reason'] == 'not_prepared'
+    assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == 202
+    assert read(admin, other).state_id != first.state_id
+    assert read(admin, owner) == first
+
+
+@pytest.mark.parametrize('included', [True, False])
+def test_allowlist_applies_to_me_status_prepare_and_message(client, admin, included):
+    owner, auth = identity(client, admin)
+    client.app.state.user_runner_account = None
+    client.app.state.user_runner_allowlist = frozenset([owner if included else uuid4()])
+    assert client.get('/api/auth/me').json()['user']['codexRunner'] is included
+    assert client.get('/api/research/codex/status').json()['reason'] == (
+        'not_prepared' if included else 'not_enabled_for_account')
+    assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == (202 if included else 403)
+    conversation = create_conversation(client, auth)
+    before = preservation_snapshot(admin)
+    reply = client.post('/api/research/sessions/'+conversation['id']+'/messages',
+                        json={'text':'keep draft','expectedVersion':1}, headers=headers(auth))
+    assert reply.status_code == 503 and reply.json()['error']['code'] == (
+        'codex_provisioning' if included else 'codex_not_enabled_for_account')
+    assert preservation_snapshot(admin) == before
+
+
+def test_allowlist_configuration_is_canonical_and_explicit(monkeypatch):
+    from app.user_runners import selected_allowlist
+    monkeypatch.delenv('CODEX_USER_RUNNER_ACCOUNT_ID', raising=False)
+    monkeypatch.delenv('CODEX_USER_RUNNER_ALLOWLIST', raising=False)
+    assert selected_allowlist() is None
+    one, two = uuid4(), uuid4()
+    monkeypatch.setenv('CODEX_USER_RUNNER_ALLOWLIST', f'{one},{two}')
+    assert selected_allowlist() == frozenset([one, two])
+    for raw in (f'{one},{one}', str(one)+',', ' '+str(one), one.hex, 'invalid'):
+        monkeypatch.setenv('CODEX_USER_RUNNER_ALLOWLIST', raw)
+        with pytest.raises(ValueError): selected_allowlist()
+    monkeypatch.setenv('CODEX_USER_RUNNER_ALLOWLIST', str(one))
+    monkeypatch.setenv('CODEX_USER_RUNNER_ACCOUNT_ID', str(one))
+    with pytest.raises(ValueError): selected_allowlist()
 
 
 @pytest.mark.parametrize('pod', [False, True])

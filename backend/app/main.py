@@ -25,7 +25,7 @@ from starlette.exceptions import HTTPException
 from .database import check_ready, database
 from .models import Account, LoginSession, OAuthTransaction
 from .settings import Settings
-from .user_runners import feature_enabled, can_prepare, selected_account
+from .user_runners import feature_enabled, can_prepare, selected_account, selected_allowlist
 
 SESSION_COOKIE = "anxious_session"
 TRANSACTION_COOKIE = "anxious_oauth"
@@ -77,6 +77,7 @@ def create_app(settings=None):
     app.state.settings = settings
     app.state.user_runners_enabled = feature_enabled()
     app.state.user_runner_account = selected_account()
+    app.state.user_runner_allowlist = selected_allowlist()
     from .user_runner_runtime import load
     app.state.user_runner_runtime = load(engine, app.state.user_runner_account) if app.state.user_runners_enabled else None
     prefix = settings.base_path + "/api"

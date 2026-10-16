@@ -52,7 +52,28 @@ def selected_account():
 
 
 def selected(app, owner):
-    return bool(app.state.user_runners_enabled and owner == app.state.user_runner_account)
+    if not app.state.user_runners_enabled:
+        return False
+    allowlist = app.state.user_runner_allowlist
+    if allowlist is not None:
+        return owner in allowlist
+    # Preserve the deployed single-owner restriction when explicitly configured.
+    return app.state.user_runner_account is None or owner == app.state.user_runner_account
+
+
+def selected_allowlist():
+    raw = os.getenv('CODEX_USER_RUNNER_ALLOWLIST', '')
+    if not raw:
+        return None
+    if os.getenv('CODEX_USER_RUNNER_ACCOUNT_ID', ''):
+        raise ValueError('Configure either runner allowlist or single account')
+    values = raw.split(',')
+    if len(values) > 1000:
+        raise ValueError('Runner allowlist is too large')
+    owners = frozenset(UUID(value) for value in values)
+    if len(owners) != len(values) or any(str(UUID(value)) != value for value in values):
+        raise ValueError('Runner allowlist requires distinct canonical UUIDs')
+    return owners
 
 
 def status_body(state=None, *, permitted=True, creation_reserved=False):
@@ -145,7 +166,7 @@ def register(app, sessions, settings, current_session):
             account = db.scalar(select(Account).where(Account.id == login.account_id).with_for_update(read=True))
             if not current_session(db, request):
                 fail('unauthenticated', 'Authentication required', 401)
-            permitted = eligible(account, app.state.research_policy)
+            permitted = can_prepare(app, account)
             if mutate:
                 if not permitted or not selected(app, account.id):
                     fail('forbidden', 'Runner preparation is not permitted', 403)
