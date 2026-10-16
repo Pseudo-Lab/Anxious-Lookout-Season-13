@@ -15,6 +15,7 @@ from .codex_policy import MODEL, REASONS
 from .runner_controller import Controller, Identity
 from .runner_kube import KubePods, Plan, Reference
 from .runner_registry import Registry
+from .runner_limits import load_limits, RunnerLimits
 from .runner_schema import validate
 from runner.lifecycle import Fence, Phase, require
 from runner.auth import read_private
@@ -33,8 +34,8 @@ def plan_from(value):
 
 
 class Runtime:
-    def __init__(self, engine, pods, plan, transport_token, namespace_uid, pod_cidr, max_pods):
-        require(max_pods in (0, 1) and type(max_pods) is int)
+    def __init__(self, engine, pods, plan, transport_token, namespace_uid, pod_cidr, max_pods, *, idle_seconds=1800):
+        self.limits = RunnerLimits(max_pods, idle_seconds)
         require(len(transport_token) >= 32 and not any(c.isspace() for c in transport_token))
         self.engine, self.pods, self.plan = engine, pods, plan
         self.token, self.namespace_uid = transport_token, namespace_uid
@@ -139,14 +140,18 @@ class BoundRunner:
 
 def load(engine, owner):
     filename = os.getenv('CODEX_USER_RUNNER_CONFIG_FILE', '')
+    pool_filename = os.getenv('CODEX_USER_RUNNER_POOL_CONFIG_FILE', '')
+    require(not (filename and pool_filename))
+    if pool_filename:
+        from .runner_pool import load as load_pool
+        return load_pool(engine, pool_filename)
     if not filename:
         return None
     value = read_private(Path(filename))
     require(value['version'] == 1)
     plan = plan_from(value['plan'])
     require(plan.identity.owner == owner)
-    max_pods = os.getenv('CODEX_USER_RUNNER_MAX_PODS', '0')
-    require(max_pods in {'0', '1'})
+    limits = load_limits()
     # Kubelet's projected files intentionally use atomic symlinks and fsGroup.
     # This fixed mount is separate from both the private binding and runner Pod.
     def bearer_provider():
@@ -155,4 +160,5 @@ def load(engine, owner):
     token = read_private(Path(value['transportTokenFile']), json_format=False).strip()
     pods = KubePods(value['api'], value['namespace'], bearer, value['caFile'], [plan])
     pods.bearer_provider = bearer_provider
-    return Runtime(engine, pods, plan, token, UUID(value['namespaceUid']), value['podCIDR'], int(max_pods))
+    return Runtime(engine, pods, plan, token, UUID(value['namespaceUid']), value['podCIDR'],
+                   limits.max_pods, idle_seconds=limits.idle_seconds)

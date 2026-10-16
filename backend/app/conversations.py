@@ -247,6 +247,11 @@ def register_conversations(app, authorized, sessions, settings, response, write,
         if app.state.user_runners_enabled and not selected(app, owner):
             fail('codex_not_enabled_for_account', 'Runner is not enabled for this account', 503)
         if selected(app, owner):
+            if store is not None:
+                from .user_runners import registry_status, checked_registry
+                lifecycle = registry_status(checked_registry(store.db), owner)
+                if lifecycle['reason'] != 'runner_unreachable':
+                    preflight(store)
             if app.state.user_runner_runtime:
                 return runtime_runner(app, owner)
             if store is not None:

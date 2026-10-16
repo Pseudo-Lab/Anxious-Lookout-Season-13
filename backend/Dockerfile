@@ -40,3 +40,10 @@ CMD ["uvicorn", "runner.app:create_app", "--factory", "--host", "0.0.0.0", "--po
 FROM test AS runner-test
 COPY --from=runner --chmod=755 /usr/local/bin/codex /usr/local/bin/codex
 COPY --from=runner --chmod=755 /usr/local/bin/codex-code-mode-host /usr/local/bin/codex-code-mode-host
+
+# Separate trusted host preparation image. Never used for the API deployment.
+FROM runtime AS provisioner
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs util-linux \
+    && rm -rf /var/lib/apt/lists/*
+ENTRYPOINT ["python", "-B", "-m", "ops.runner_provision_worker"]

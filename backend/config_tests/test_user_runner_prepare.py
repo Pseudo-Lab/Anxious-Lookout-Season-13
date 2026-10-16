@@ -113,3 +113,31 @@ def test_nonroot_init_copies_projected_secret_into_private_tmpfs():
     assert private.stat().st_uid == 10001 and private.stat().st_mode & 0o777 == 0o700
     assert (private/'transport-token').read_text() == 't'*40
     assert (private/'transport-token').stat().st_mode & 0o777 == 0o600
+
+
+def test_controller_prepares_existing_http_intent_with_bounded_storage_hook(admin, owner, prepared, tmp_path):
+    from datetime import datetime, timezone
+    from sqlalchemy import text
+    from app.runner_registry import Registry
+    inputs, _, objects = prepared
+    other = uuid4()
+    with admin.begin() as db:
+        db.execute(text("INSERT INTO auth.accounts(id,github_id,login,role,is_approved) VALUES(:id,'54321','other','editor',true)"), {'id':other})
+        state, _ = Registry(db).enter(other, uuid4(), datetime.now(timezone.utc))
+    allocated = []
+    def bounded(path):
+        allocated.append(path)
+        path.mkdir(mode=0o700)
+        for kind in ('native','control'):
+            (path/kind).mkdir(mode=0o700)
+            (path/kind/'data').mkdir(mode=0o700)
+    output = tmp_path/'controller-output'
+    tool.prepare({**inputs,'owner':str(other)}, output, from_intent=True, storage_allocator=bounded)
+    assert read(admin, other) == state
+    config = json.loads((output/'runtime.json').read_text())
+    assert config['plan']['state'] == str(state.state_id) and config['plan']['owner'] == str(other)
+    assert len(allocated) == 1 and len(objects) == 10
+    assert all(obj['spec']['local']['path'].endswith('/data') for obj in objects[5:] if obj['kind']=='PersistentVolume')
+    with pytest.raises(FileExistsError):
+        tool.prepare({**inputs,'owner':str(other)}, output, from_intent=True, storage_allocator=bounded)
+    assert len(objects) == 10 and read(admin, other) == state

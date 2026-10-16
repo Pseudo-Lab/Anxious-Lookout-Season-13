@@ -104,7 +104,7 @@ def test_stop_requires_csrf_and_fences_future_dispatch_without_deleting_state(cl
     assert reply.status_code == 200 and reply.json()['terminationRequested'] is True
     assert read(admin, owner).state_id == rt.plan.identity.state_id
     assert client.get('/api/research/codex/status').json()['available'] is False
-    assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == 503
+    assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == 409
     assert sum(method == 'POST' for method, _ in server.requests) == 1
 
 
