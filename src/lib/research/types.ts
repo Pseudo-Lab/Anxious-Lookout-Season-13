@@ -238,6 +238,7 @@ export interface ToolCallItem {
   input: unknown;
   output: unknown;
   // rejected: 이 질문의 범위(#14부터 공개 글 읽기 등)에서 허용되지 않아 서버가 거부한 호출(error.code tool_not_allowed)
+  // #23 shell: completed | failed | timed_out | rejected (진행 중 native 값은 그대로)
   status: string;
   error?: { code: string };
   modelMismatch?: boolean;

@@ -311,3 +311,43 @@ def test_owner_workflow_on_any_page_preserves_versions_ownership_and_archive(cli
     assert archived['archived'] is True
     assert len(call('research_versions', {'type': 'material', 'id': saved['id']})['items']) == 2
     assert call('research_get', {'type': 'material', 'id': foreign['id']}, 404)
+
+
+def test_shell_authorization_is_internal_owner_only_and_checks_login(client, admin):
+    owner, auth = identity(client, admin)
+    runner = HeldRunner(client, owner)
+    session = create_session(client, auth)
+    accepted = client.post('/api/research/sessions/' + session['id'] + '/messages',
+        json={'text': 'shell', 'expectedVersion': 1}, headers=headers(auth))
+    assert accepted.status_code == 202
+    assert callback(client, session, runner, 'runner_shell_authorize', {}).status_code == 200
+    assert callback(client, session, runner, 'runner_shell_authorize', {'command': 'id'}).status_code == 403
+    assert 'runner_shell_authorize' not in [tool['name'] for tool in runner.last['tools']]
+    with admin.begin() as db:
+        db.execute(text('UPDATE auth.accounts SET is_approved=false WHERE id=:id'), {'id': owner})
+    assert callback(client, session, runner, 'runner_shell_authorize', {}).status_code == 403
+
+
+@pytest.mark.parametrize('status', ['completed', 'failed', 'timed_out', 'rejected'])
+def test_shell_mcp_projection_preserves_executor_result(status):
+    output = {'status': status, 'stdout': 'hello', 'stderr': '', 'exitCode': 0,
+              'durationMs': 3, 'truncated': False, 'wallSeconds': 30}
+    item = {'id': 'shell-one', 'type': 'mcpToolCall', 'server': 'shell', 'tool': 'shell',
+            'arguments': {'command': 'printf hello'}, 'status': 'completed',
+            'result': {'content': [{'type': 'text', 'text': json.dumps(output)}]}}
+    projected = display_native_item(item)[0]
+    assert projected['name'] == 'shell' and projected['output'] == output and projected['status'] == status
+
+
+def test_public_shell_callback_cannot_use_valid_turn_token(client, admin):
+    owner, auth = identity(client, admin)
+    doc = create(client, auth, 'documents')
+    publish(client, auth, doc)
+    runner = HeldRunner(client, owner)
+    session = create_session(client, auth)
+    reply = client.post('/api/research/sessions/' + session['id'] + '/messages',
+        json={'text': 'shell', 'expectedVersion': 1, 'page': {'kind': 'public_document', 'resourceId': doc['id']}},
+        headers=headers(auth))
+    assert reply.status_code == 202
+    refused = callback(client, session, runner, 'runner_shell_authorize', {})
+    assert refused.status_code == 403 and refused.json()['error']['code'] == 'tool_not_allowed'

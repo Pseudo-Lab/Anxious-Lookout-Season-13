@@ -195,7 +195,9 @@ def test_restore_inventory_identity_and_partial_refuse(tmp_path):
 def test_schema_keys_and_regex_match_values(values):
     import re
     schema = json.loads((TEMPLATES/'values.schema.json').read_text())
-    assert set(schema['required']) == set(schema['properties']) == set(values)
+    assert set(schema['required']) == rollout.KEYS
+    assert set(schema['properties']) == set(values) == rollout.KEYS | {'executor'}
+    assert 'executor' not in schema['required']
     for key in ('hostPidNamespace', 'hostCgroupNamespace'):
         assert re.fullmatch(schema['properties'][key]['pattern'], values[key])
 
@@ -215,3 +217,43 @@ def test_cli_check_no_output_and_exclusive_render(values, baseline, maps, tmp_pa
     (tmp_path/'values.json').write_text('{"version":1,"version":1}')
     result = subprocess.run(args[:-2], capture_output=True)
     assert result.returncode == 1 and b'Rollout render refused' in result.stderr
+
+
+def test_executor_opt_in_flows_only_to_new_owner_preparation(values):
+    executor = values.pop('executor')
+    assert 'executor' not in rollout.inputs(rollout.checked(values))['controller']
+    values['executor'] = executor
+    assert rollout.inputs(rollout.checked(values))['controller']['executor'] == executor
+    values['executor']['image'] = 'mutable:latest'
+    with pytest.raises(ValueError): rollout.checked(values)
+
+
+def test_executor_schema_limits_agree_with_renderer(values):
+    import re
+    schema = json.loads((TEMPLATES/'values.schema.json').read_text())
+    executor = schema['properties']['executor']
+    assert executor['type'] == 'object' and executor['additionalProperties'] is False
+    assert set(executor['required']) == set(executor['properties']) == set(values['executor'])
+    image = executor['properties']['image']
+    assert image == {'$ref': '#/$defs/image'}
+    pattern = schema['$defs']['image']['pattern']
+    assert re.fullmatch(pattern, values['executor']['image'])
+    for key in ('wallSeconds', 'outputBytes'):
+        bounds = executor['properties'][key]
+        assert bounds['type'] == 'integer'
+        for limit in (bounds['minimum'], bounds['maximum']):
+            candidate = deepcopy(values)
+            candidate['executor'][key] = limit
+            assert rollout.checked(candidate) == candidate
+        for invalid in (bounds['minimum'] - 1, bounds['maximum'] + 1, True, '30'):
+            candidate = deepcopy(values)
+            candidate['executor'][key] = invalid
+            with pytest.raises(ValueError): rollout.checked(candidate)
+    for key in executor['required']:
+        candidate = deepcopy(values)
+        del candidate['executor'][key]
+        with pytest.raises(ValueError): rollout.checked(candidate)
+    for invalid in (None, {**values['executor'], 'token': 'forbidden'},
+                    {**values['executor'], 'image': 'mutable:latest'}):
+        candidate = {**values, 'executor': invalid}
+        with pytest.raises(ValueError): rollout.checked(candidate)

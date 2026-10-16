@@ -870,7 +870,7 @@ async function confirmSingleTurn(label, text) {
   check("R22. general page hint shown", await appears(chat.getByText("보고 있는 화면: 일반")));
   check("R22. owner wording: no per-page tool limits", await appears(chat.getByText("연결 관계와 보관도 처리합니다", { exact: false })));
   check("R22. web search saving wording", await appears(chat.getByText("출처 주소와 수집 시각을 붙여 자료로 저장합니다", { exact: false })));
-  check("R22. no shell/Bash capability advertised (#23)", !/Bash|셸|명령(을)? 실행/.test(await chat.innerText()));
+  check("R22. shell wording without fixed limit number (#23)", await appears(chat.getByText("명령은 한 번에 하나씩 시간 상한 안에서 실행됩니다", { exact: false })) && !/30\s*초/.test(await chat.innerText()));
   check("R22. memory wording: earlier conversation continues", await appears(chat.getByText("이전 대화 내용은 이 대화에 계속 이어집니다.")));
   await chat.getByLabel("메시지").fill("일반 페이지 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
@@ -917,13 +917,51 @@ async function confirmSingleTurn(label, text) {
   await page.goto(U(`/public/document/?id=${pub22.body.id}`));
   await chat.getByLabel("메시지").waitFor();
   check("R22. public document scope shown", await appears(chat.getByText("다음 질문 범위: 이 공개 글")));
-  check("R22. public wording: read only, no web search", await appears(chat.getByText("웹을 검색하거나 아무것도 저장·수정하지 않습니다", { exact: false })));
+  check("R22. public wording: read only, no web search or shell", await appears(chat.getByText("웹 검색·명령 실행이나 저장·수정은 하지 않습니다", { exact: false })));
   await chat.getByLabel("메시지").fill("공개 글 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
   await chat.getByText("모의 응답: 공개 글 질문").waitFor({ timeout: 15000 });
   check("R22. public: sent scope badge", await appears(chat.locator("li[data-role=user]", { hasText: "공개 글 질문" }).getByText(/보낸 범위: 이 공개 글/)));
   check("R22. public: owner tool rejected", await appears(lastTool().getByText("거부됨")));
   check("R22. public: rejection wording", await appears(lastTool().getByText("허용되지 않는 도구라 서버가 실행하지 않았습니다", { exact: false })));
+
+  // R22s. #23 shell 표시(api-contracts/issue23-shell-display.md): 공개 글에서는 거부, 소유자 화면에서는 결과별 안내
+  const shellItem = (kind) => chat.locator("li", { hasText: `fixture-${kind} --run` }).last();
+  const ask = async (text) => {
+    await chat.getByLabel("메시지").fill(text);
+    await chat.getByRole("button", { name: "보내기" }).click();
+    await chat.getByText(`모의 응답: ${text}`).waitFor({ timeout: 15000 });
+  };
+  await ask("/fixture/shell-ok 공개");
+  check("R22s. public: shell shown as command run", await appears(shellItem("ok").getByText("명령 실행")));
+  check("R22s. public: shell rejected with scope wording", (await appears(shellItem("ok").getByText("거부됨"))) && (await appears(shellItem("ok").getByText("명령을 실행할 수 없어 서버가 실행하지 않았습니다", { exact: false }))));
+  await page.goto(U("/"));
+  await chat.getByLabel("메시지").waitFor();
+  await ask("/fixture/shell-ok 홈");
+  check("R22s. ok: completed label, no warning", (await appears(shellItem("ok").getByText("완료", { exact: true }))) && (await shellItem("ok").locator("p.text-amber-800").count()) === 0);
+  await shellItem("ok").getByRole("button", { name: /명령 실행/ }).click();
+  check(
+    "R22s. ok: command, cwd, exit code and stdout shown inert",
+    (await appears(shellItem("ok").locator("pre", { hasText: "fixture-ok --run" }))) &&
+      (await appears(shellItem("ok").getByText("작업 공간 notes"))) &&
+      (await appears(shellItem("ok").getByText("종료 코드 0"))) &&
+      (await appears(shellItem("ok").locator("pre", { hasText: "shell fixture output" })))
+  );
+  await ask("/fixture/shell-fail");
+  check("R22s. fail: exit code explained", (await appears(shellItem("fail").getByText("실패", { exact: true }))) && (await appears(shellItem("fail").getByText("종료 코드 2로 끝났습니다", { exact: false }))));
+  await shellItem("fail").getByRole("button", { name: /명령 실행/ }).click();
+  check("R22s. fail: stderr shown", await appears(shellItem("fail").locator("pre", { hasText: "No such file or directory" })));
+  await ask("/fixture/shell-timeout");
+  check(
+    "R22s. timeout: label, limit from result, truncation",
+    (await appears(shellItem("timeout").getByText("시간 초과", { exact: true }))) &&
+      (await appears(shellItem("timeout").getByText("시간 상한(30초)을 넘어 명령을 멈췄습니다", { exact: false }))) &&
+      (await appears(shellItem("timeout").getByText("저장 상한까지만", { exact: false })))
+  );
+  await ask("/fixture/shell-busy");
+  check("R22s. busy: rejected, one at a time", (await appears(shellItem("busy").getByText("거부됨"))) && (await appears(shellItem("busy").getByText("한 번에 하나씩", { exact: false }))));
+  await ask("/fixture/shell-cancel");
+  check("R22s. cancel: no resource-limit guess", (await appears(shellItem("cancel").getByText("중간에 취소되었습니다", { exact: false }))) && !/메모리|CPU|자원/.test(await shellItem("cancel").innerText()));
   await page.unroute("**/api/research/sessions/*/messages");
 
   // 기존 대화 링크: 대화창에서 열고 입력창·polling은 하나

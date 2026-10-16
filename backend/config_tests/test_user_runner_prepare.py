@@ -17,7 +17,7 @@ from config_tests.test_runner_kube import response
 
 
 @pytest.fixture
-def prepared(admin, owner, tmp_path, monkeypatch):
+def prepared(admin, owner, tmp_path, monkeypatch, request):
     assert os.geteuid() == 0, 'Run with compose.user-runner-e2e-test.yml overlay'
     nsuid = str(uuid4())
     root = Path('/var/lib/anxious-lookout')/uuid4().hex
@@ -48,8 +48,22 @@ def prepared(admin, owner, tmp_path, monkeypatch):
         'callback': 'http://api.m2-hosting.svc.cluster.local:8080/api/internal/research/tools',
         'api': 'https://kube.invalid', 'kubeTokenFile': str(token), 'caFile': None}
     output = tmp_path/'output'
+    if getattr(request, 'param', False):
+        value['executor'] = {'image': 'registry.invalid/executor@sha256:'+'c'*64,
+                             'wallSeconds': 30, 'outputBytes': 65536}
     tool.prepare(value, output)
     return value, output, created
+
+
+@pytest.mark.parametrize('prepared', [True], indirect=True)
+def test_new_owner_v2_is_explicit_and_preserves_private_resource_split(prepared):
+    value, output, objects = prepared
+    config = json.loads((output/'runtime.json').read_text())
+    assert config['plan']['version'] == 2 and config['plan']['executor'] == value['executor']
+    plan = plan_from(config['plan'])
+    assert plan.executor.wall_seconds == 30
+    assert len(plan.manifest('isolated')['spec']['containers']) == 2
+    assert len(objects) == 5
 
 
 def test_one_command_binds_real_owner_and_new_storage_without_pod_or_policy(admin, owner, prepared):

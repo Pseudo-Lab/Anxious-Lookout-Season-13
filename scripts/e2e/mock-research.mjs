@@ -500,6 +500,9 @@ function handleMutation(owner, method, path, b, user) {
           const output = { error: { code: "tool_not_allowed" } };
           s.items.push({ id: uuid(), type: "tool_call", name: "research_list", input, output, status: "rejected", error: { code: "tool_not_allowed" }, raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
         }
+        // #23 api-contracts/issue23-shell-display.md: /fixture/shell-{ok,fail,timeout,busy,cancel,long}이면 shell 실행 결과를 투영한다.
+        const shellCase = /\/fixture\/shell-([a-z]+)/.exec(b.text)?.[1];
+        if (shellCase) s.items.push(shellItem(shellCase, scope));
         const answer = b.text.includes("/fixture/wide-answer") ? WIDE_ANSWER : `모의 응답: **${b.text}**`;
         s.items.push({ id: uuid(), type: "message", role: "assistant", text: answer, raw: { kind: "agent_message", fixture: true } });
         s.state = "idle";
@@ -510,6 +513,38 @@ function handleMutation(owner, method, path, b, user) {
     }
   }
   return fail(404, "not_found", "Not found");
+}
+
+// 실행기 JSON 결과 모양(backend/executor/server.py). 공개 문서 모드는 shell 불가(tool_not_allowed).
+function shellItem(kind, scope) {
+  const command = kind === "long" ? `echo ${"x".repeat(200)}\nsecond line` : `fixture-${kind} --run`;
+  const input = { command, cwd: "notes" };
+  const base = { requestId: uuid(), stdout: "", stderr: "", truncated: false, durationMs: 12, wallSeconds: 30 };
+  let status, output, error;
+  if (scope.capability !== "owner_research") {
+    status = "rejected";
+    output = { status, error: { code: "tool_not_allowed" } };
+    error = { code: "tool_not_allowed" };
+  } else if (kind === "busy") {
+    status = "rejected";
+    output = { status, error: { code: "shell_busy" } };
+    error = { code: "shell_busy" };
+  } else if (kind === "fail") {
+    status = "failed";
+    output = { ...base, status, exitCode: 2, stderr: "ls: cannot access 'missing': No such file or directory\n" };
+  } else if (kind === "timeout") {
+    status = "timed_out";
+    output = { ...base, status, exitCode: null, stdout: "partial\n", truncated: true, durationMs: 30004, error: { code: "shell_timeout" } };
+  } else if (kind === "cancel") {
+    status = "failed";
+    output = { ...base, status, exitCode: null, error: { code: "shell_cancelled" } };
+  } else {
+    status = "completed";
+    output = { ...base, status, exitCode: 0, stdout: "shell fixture output\n" };
+  }
+  const item = { id: uuid(), type: "tool_call", name: "shell", input, output, status, raw: { kind: "function_call", arguments: input, result: output, fixture: true } };
+  if (error) item.error = error;
+  return item;
 }
 
 function sessionSummary(s) {

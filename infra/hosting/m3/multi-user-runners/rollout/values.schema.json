@@ -12,6 +12,15 @@
   "properties": {
     "version": {"const": 1},
     "runtimeImage": {"$ref": "#/$defs/image"}, "runnerImage": {"$ref": "#/$defs/image"},
+    "executor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["image", "wallSeconds", "outputBytes"],
+      "properties": {
+        "image": {"$ref": "#/$defs/image"},
+        "wallSeconds": {"type": "integer", "minimum": 1, "maximum": 300},
+        "outputBytes": {"type": "integer", "minimum": 1024, "maximum": 1048576}
+      }
+    },
     "provisionerImageId": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
     "api": {"type": "string", "pattern": "^https://"}, "hostApi": {"type": "string", "pattern": "^https://"},
     "namespaceUid": {"$ref": "#/$defs/uuid"}, "nodeUid": {"$ref": "#/$defs/uuid"}, "bootId": {"$ref": "#/$defs/uuid"},

@@ -26,7 +26,7 @@ from .projection import PROJECTION_VERSION
 from .binding import canonical_uuid, require_binding
 from .access import AccessAuth, SupplySocket
 from .service_access import ServiceAccessAuth
-from app.page_scope import Scope, POLICIES, tool_allowed, turn_prompt
+from app.page_scope import Scope, POLICIES, tool_allowed, turn_prompt, shell_allowed
 
 
 class Turn(BaseModel):
@@ -127,6 +127,8 @@ class Native:
             except OSError:
                 raise CodexFailure("policy_refused") from None
         self.root, self.model, self.callback_url = root, model, callback_url
+        self.shell_enabled = os.getenv('SHELL_EXECUTOR_ENABLED', 'false') == 'true'
+        self.shell_broker = None
         self.lock, self.messages, self.next_id = threading.Lock(), queue.Queue(), 1
         self.state_lock = threading.RLock()
         self.completed = {}
@@ -138,7 +140,9 @@ class Native:
             raise CodexFailure("policy_refused")  # Legacy unsafe projections need private reconciliation, never automatic trust.
         self.closing, self.closed = False, False
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        home, codex_home, work = root / "home", root / "codex", root / "workspace"
+        # Executor-writable .codex/AGENTS/config must never be loaded by the
+        # trusted native process. Shell cwd remains the separate workspace.
+        home, codex_home, work = root / "home", root / "codex", root / ("native-work" if self.shell_enabled else "workspace")
         for path in (home, codex_home, work):
             path.mkdir(exist_ok=True, mode=0o700)
         if any((path / "config.toml").exists() for path in (codex_home, work / ".codex")):
@@ -184,6 +188,19 @@ class Native:
                             'otel.trace_exporter="none"', 'otel.metrics_exporter="none"'):
                 command += ['-c', setting]
         self.command, self.environment = command, environment
+        if self.shell_enabled:
+            from .shell_broker import ShellBroker
+            wall = int(os.environ.get('SHELL_WALL_SECONDS', '30'))
+            if not 1 <= wall <= 300:
+                raise CodexFailure('policy_refused')
+            self.shell_broker = ShellBroker(root / 'shell-broker.sock', self.authorize_shell,
+                lambda value: self.auth.sanitize(value) if self.auth else value, wall=wall)
+            command += ['-c', 'mcp_servers.shell.command="/usr/local/bin/python"',
+                        '-c', 'mcp_servers.shell.args=["-I","/app/runner/shell_bridge.py"]',
+                        '-c', 'mcp_servers.shell.enabled_tools=["shell"]',
+                        '-c', 'mcp_servers.shell.tools.shell.approval_mode="approve"',
+                        '-c', 'mcp_servers.shell.tool_timeout_sec=325',
+                        '-c', 'mcp_servers.shell.enabled=false']
         self.thread_web_modes = {}
         try:
             self.launch_process()
@@ -218,6 +235,23 @@ class Native:
             raise
         except Exception:
             raise RuntimeError("Native initialization or authentication is unavailable") from None
+
+    def authorize_shell(self, turn, arguments):
+        try:
+            if (self.closing or self.blocked_reason or not turn.get('turnId')
+                    or self.active_session != turn['session'] or not shell_allowed(turn.get('scope'))
+                    or self.mapping[turn['session']].get('state') != 'running'):
+                return False
+            self.check_binding()
+            if self.auth:
+                self.auth.permitted_tool(arguments)
+            with httpx.Client(timeout=15, trust_env=False, follow_redirects=False) as client:
+                reply = client.post(self.callback_url, headers={'Authorization': 'Bearer ' + turn['token']},
+                    json={'sessionId': turn['session'], 'requestId': turn['request'],
+                          'name': 'runner_shell_authorize', 'arguments': {}})
+            return reply.is_success
+        except Exception:
+            return False
 
     def reset_thread_tools(self):
         # Pinned 0.160.1 retains loaded tool registries on thread/resume, even
@@ -580,9 +614,16 @@ class Native:
             self.check_binding()
             kind = (body.scope or {}).get("page", {}).get("kind")
             web_mode = "live" if kind in POLICIES and kind != "public_document" else "disabled"
-            if entry["thread"] in self.thread_web_modes and self.thread_web_modes[entry["thread"]] != web_mode:
+            if self.shell_enabled or (entry["thread"] in self.thread_web_modes and self.thread_web_modes[entry["thread"]] != web_mode):
                 self.reset_thread_tools()
             config = {"web_search": web_mode}
+            turn = {"thread": entry["thread"], "turnId": None, "pendingTools": [],
+                    "session": session, "request": entry["request"], "token": body.toolToken, "scope": body.scope, "timing": timing}
+            if self.shell_broker:
+                lease = self.shell_broker.activate(turn)
+                config.update({'mcp_servers.shell.enabled': shell_allowed(body.scope),
+                    'mcp_servers.shell.env.SHELL_BROKER_SOCKET': str(self.shell_broker.path),
+                    'mcp_servers.shell.env.SHELL_BRIDGE_LEASE': lease})
             if entry["thread"]:
                 result = self.rpc("thread/resume", {"threadId": entry["thread"], "model": self.model,
                                   "cwd": str(self.work), "approvalPolicy": "never", "sandbox": "read-only", "config": config})
@@ -597,8 +638,7 @@ class Native:
             entry["thread"] = result["thread"]["id"]
             self.thread_web_modes[entry["thread"]] = web_mode
             self.save()
-            turn = {"thread": entry["thread"], "turnId": None, "pendingTools": [],
-                    "session": session, "request": entry["request"], "token": body.toolToken, "scope": body.scope, "timing": timing}
+            turn['thread'] = entry['thread']
             if self.auth:
                 self.auth.secrets.add(body.toolToken)
             # Catalog stays thread-persistent; request mode is enforced by both
@@ -659,6 +699,8 @@ class Native:
                 except Exception:
                     pass
         finally:
+            if self.shell_broker:
+                self.shell_broker.revoke()
             try:
                 with self.state_lock:
                     try:
@@ -747,6 +789,8 @@ class Native:
                     except (BrokenPipeError, OSError):
                         pass
             self.closed = True
+            if self.shell_broker:
+                self.shell_broker.close()
         return self.clean_shutdown
 
 

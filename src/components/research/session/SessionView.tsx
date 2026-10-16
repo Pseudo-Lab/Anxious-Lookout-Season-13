@@ -19,6 +19,7 @@ import { useAuth } from "@/hooks/useAuth";
 import type { AcceptedScope, PageDescriptor, SessionDetail, SessionItem, ToolCallItem } from "@/lib/research/types";
 import { describePage, kindText, sameDescriptor, scopeLabel } from "@/lib/research/pageContext";
 import { own } from "@/lib/research/own";
+import { SHELL_STATUS_LABELS, SHELL_TOOL, shellNote, shellView } from "@/lib/research/shell";
 import { formatDateTime, toDisplayText } from "@/lib/research/format";
 import {
   CodexStatusView,
@@ -65,9 +66,27 @@ function RawItem({ sessionId, itemId, label = "저장된 원본 전체" }: { ses
 
 const TOOL_STATUS_LABELS: Record<string, string> = { rejected: "거부됨" };
 
+// 머리글에는 명령의 첫 줄만 짧게 보인다(전체는 펼쳐서 본다).
+const commandPreview = (command: string | null) => {
+  const line = (command ?? "").split("\n")[0];
+  return line.length > 120 ? `${line.slice(0, 120)}…` : line;
+};
+
 function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }) {
   const [open, setOpen] = useState(false);
   const [raw, setRaw] = useState(false);
+  // #23: shell은 명령 실행으로 읽기 쉽게 보인다. 서버 기록은 그대로이며 모르는 값은 일반 도구처럼 표시한다.
+  const shell = item.name === SHELL_TOOL ? shellView(item) : null;
+  const note = shell
+    ? shellNote(item.status, shell)
+    : item.status === "rejected"
+      ? item.error?.code === "tool_not_allowed"
+        ? "이 질문을 보낸 범위(공개 글 읽기 등)에서 허용되지 않는 도구라 서버가 실행하지 않았습니다."
+        : "서버가 이 도구 호출을 실행하지 않았습니다."
+      : null;
+  const code = shell ? shell.code : item.error?.code;
+  const warn = item.status === "rejected" || (shell !== null && (item.status === "failed" || item.status === "timed_out"));
+  const label = shell ? own(SHELL_STATUS_LABELS, item.status) : own(TOOL_STATUS_LABELS, item.status);
   return (
     <li className="rounded-md bg-stone-50 text-xs">
       <button
@@ -76,21 +95,18 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
         className="flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left hover:bg-stone-100"
       >
         <span className="min-w-0 break-words">
-          <span className="mr-2 text-xs text-stone-500">도구</span>
-          <span className="font-mono text-stone-800">{item.name}</span>
+          <span className="mr-2 text-xs text-stone-500">{shell ? "명령 실행" : "도구"}</span>
+          <span className="font-mono text-stone-800">{shell ? commandPreview(shell.command) || item.name : item.name}</span>
         </span>
-        <span className={`text-xs ${item.status === "rejected" ? "font-medium text-amber-700" : "text-stone-500"}`}>
-          {own(TOOL_STATUS_LABELS, item.status) ?? item.status}
-        </span>
+        <span className={`shrink-0 text-xs ${warn ? "font-medium text-amber-700" : "text-stone-500"}`}>{label ?? item.status}</span>
       </button>
-      {item.status === "rejected" && (
+      {note && (
         <p className="px-3 pb-2 text-xs text-amber-800">
-          {item.error?.code === "tool_not_allowed"
-            ? "이 질문을 보낸 범위(공개 글 읽기 등)에서 허용되지 않는 도구라 서버가 실행하지 않았습니다."
-            : "서버가 이 도구 호출을 실행하지 않았습니다."}
-          {item.error && ` (${item.error.code})`}
+          {note}
+          {code && ` (${code})`}
         </p>
       )}
+      {shell?.truncated && <p className="px-3 pb-2 text-xs text-stone-600">출력이 길어 저장 상한까지만 남았습니다.</p>}
       {item.modelMismatch && (
         <div className="px-3 pb-2">
           <ModelMismatchNote />
@@ -98,14 +114,44 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
       )}
       {open && (
         <div className="space-y-3 px-3 pb-3">
-          <div className="space-y-1">
-            <p className="text-xs font-medium text-stone-600">입력</p>
-            <Inert value={item.input} />
-          </div>
-          <div className="space-y-1">
-            <p className="text-xs font-medium text-stone-600">출력</p>
-            <Inert value={item.output} />
-          </div>
+          {shell ? (
+            <>
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-stone-600">명령 (작업 공간 {shell.cwd ?? "."})</p>
+                <Inert value={shell.command ?? item.input} />
+              </div>
+              {shell.exitCode !== null && <p className="text-xs text-stone-600">종료 코드 {shell.exitCode}</p>}
+              {shell.stdout !== null && (
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-stone-600">표준 출력</p>
+                  <Inert value={shell.stdout} />
+                </div>
+              )}
+              {shell.stderr !== null && shell.stderr !== "" && (
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-stone-600">오류 출력</p>
+                  <Inert value={shell.stderr} />
+                </div>
+              )}
+              {shell.stdout === null && (
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-stone-600">출력</p>
+                  <Inert value={item.output} />
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-stone-600">입력</p>
+                <Inert value={item.input} />
+              </div>
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-stone-600">출력</p>
+                <Inert value={item.output} />
+              </div>
+            </>
+          )}
           {raw ? (
             <RawItem sessionId={sessionId} itemId={item.id} />
           ) : (

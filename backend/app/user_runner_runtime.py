@@ -13,7 +13,7 @@ from sqlalchemy import text
 
 from .codex_policy import MODEL, REASONS
 from .runner_controller import Controller, Identity
-from .runner_kube import KubePods, Plan, Reference
+from .runner_kube import KubePods, Plan, Reference, ExecutorPlan
 from .runner_registry import Registry
 from .runner_limits import load_limits, RunnerLimits
 from .runner_schema import validate
@@ -30,7 +30,9 @@ def plan_from(value):
                 Reference(value['native']['name'], UUID(value['native']['uid']), value['native']['volume']),
                 Reference(value['control']['name'], UUID(value['control']['uid']), value['control']['volume']),
                 Reference(value['transport']['name'], UUID(value['transport']['uid'])),
-                value['callback'], value['serviceAccount'])
+                value['callback'], value['serviceAccount'],
+                ExecutorPlan(value['executor']['image'], value['executor']['wallSeconds'], value['executor']['outputBytes'])
+                if value.get('version') == 2 else None)
 
 
 class Runtime:
