@@ -248,7 +248,7 @@ await step("R1", async () => {
   check("R1 [real]. coalesced entries did not extend lastActivity", s.lastActivity === snapA.lastActivity, `${snapA.lastActivity} → ${s.lastActivity}`);
 });
 
-// ---------- T1. phase 전이: 문구·버튼·전송 잠금·polling·명시 재시도 [real] ----------
+// ---------- T1. phase 전이: 문구·버튼·전송 잠금·polling·명시 준비(#16 stopping·확인 필요 포함) [real] ----------
 async function toPhase(phase) {
   await host(`phase ${userA.accountId} ${phase}`);
   await refreshStatus(A);
@@ -285,26 +285,48 @@ await step("T1", async () => {
   check("T1 [real]. ready: never shown as connected/available",
     (await appears(A.chat.getByText("환경 연결 확인 중"))) && (await A.chat.getByText(/연결되어 있습니다/).count()) === 0 && (await sendBtnOf(A).isDisabled()));
 
-  // stopping(합성 UID): 종료 근거 전에는 idle_stopped가 아니라 runner_unreachable
+  // stopping(합성 UID, #16): 종료 근거 전에는 idle_stopped가 아니라 stopping(hint 5). 진입 POST는 저장되지 않는 거절이다.
   await toPhase("stopping");
   const gs = await apiA.get("/research/codex/status");
-  check("T1 [real]. stopping → runner_unreachable (not idle_stopped)", gs.body?.reason === "runner_unreachable", JSON.stringify(gs.body));
-  check("T1 [real]. stopping: 환경 연결 확인 중, no resume button", (await appears(A.chat.getByText("환경 연결 확인 중"))) && (await actionBtnOf(A).count()) === 0);
-
-  // runner_failed: 진입 뒤 설정. "다시 시도" → 새 key POST 1회 → provisioning
-  await toPhase("failed");
-  check("T1 [real]. failed → 환경을 준비하지 못했습니다 + 다시 시도", (await appears(A.chat.getByText("환경을 준비하지 못했습니다"))) && (await appears(A.chat.getByRole("button", { name: "다시 시도" }))));
+  check("T1 [real]. stopping → GET stopping, hint 5 (not idle_stopped)",
+    gs.status === 200 && statusShape(gs.body) && gs.body.reason === "stopping" && gs.body.retryAfterSeconds === 5, JSON.stringify(gs.body));
+  check("T1 [real]. stopping: 환경 정리 중, no action button, send locked",
+    (await appears(A.chat.getByText("환경 정리 중"))) && (await actionBtnOf(A).count()) === 0 && (await sendBtnOf(A).isDisabled()));
   g0 = A.net.gets;
+  await sleep(11000);
+  check("T1 [real]. stopping: polls with 5s hint", A.net.gets - g0 >= 1 && A.net.gets - g0 <= 3, String(A.net.gets - g0));
+  await shot(A, "stopping");
   let p0 = A.net.posts.length;
+  let n1 = A.net.responses.length;
+  await A.page.reload();
+  await A.chat.getByLabel("메시지").waitFor();
+  await waitResponses(A, n1 + 1);
+  check("T1 [real]. stopping: entry POST refused (no 2xx), still 환경 정리 중",
+    lastResponse(A)?.status >= 400 && (await appears(A.chat.getByText("환경 정리 중"))), JSON.stringify(lastResponse(A)));
+  await sleep(6000);
+  check("T1 [real]. stopping: refused POST not repeated", A.net.posts.length === p0 + 1, String(A.net.posts.length - p0));
+
+  // runner_failed(#16): 확인 필요. 버튼·자동 조회 없음, 진입 POST는 409 runner_reconciliation_required이며 근거를 바꾸지 않는다.
+  await toPhase("failed");
+  check("T1 [real]. failed → 확인이 필요합니다, no action button",
+    (await appears(A.chat.getByText("확인이 필요합니다"))) && (await actionBtnOf(A).count()) === 0);
+  g0 = A.net.gets;
+  p0 = A.net.posts.length;
   await sleep(7000);
   check("T1 [real]. failed: no automatic GET polling or POST", A.net.gets === g0 && A.net.posts.length === p0, `${A.net.gets - g0} ${A.net.posts.length - p0}`);
   await shot(A, "failed");
-  let n1 = A.net.responses.length;
-  await A.chat.getByRole("button", { name: "다시 시도" }).first().click();
+  const sf = await inspect(userA.accountId);
+  n1 = A.net.responses.length;
+  await A.page.reload();
+  await A.chat.getByLabel("메시지").waitFor();
   await waitResponses(A, n1 + 1);
-  check("T1 [real]. retry: exactly one POST with a new key", A.net.posts.length === p0 + 1 && !A.net.posts.slice(0, -1).includes(A.net.posts.at(-1)));
-  check("T1 [real]. retry → 202 provisioning → 환경 활성화 중",
-    lastResponse(A)?.status === 202 && lastResponse(A)?.body?.reason === "provisioning" && (await appears(A.chat.getByText("환경 활성화 중"))), JSON.stringify(lastResponse(A)));
+  check("T1 [real]. failed: entry POST → 409 runner_reconciliation_required",
+    lastResponse(A)?.status === 409 && lastResponse(A)?.body?.error?.code === "runner_reconciliation_required", JSON.stringify(lastResponse(A)));
+  check("T1 [real]. failed: GET result shown (확인이 필요합니다), no button", (await appears(A.chat.getByText("확인이 필요합니다"))) && (await actionBtnOf(A).count()) === 0);
+  await sleep(5000);
+  const sf2 = await inspect(userA.accountId);
+  check("T1 [real]. failed: one POST, phase/generation/receipts unchanged",
+    A.net.posts.length === p0 + 1 && sf2.phase === sf.phase && sf2.generation === sf.generation && sf2.entryReceipts === sf.entryReceipts, JSON.stringify(sf2));
 
   // idle_stopped: "환경 다시 켜기" → POST 1회 → provisioning
   await toPhase("stopped");
@@ -325,7 +347,7 @@ await step("M1", async () => {
     ["waiting", "codex_capacity_wait"],
     ["unreachable", "codex_runner_unreachable"],
     ["ready", "codex_runner_unreachable"],
-    ["stopping", "codex_runner_unreachable"],
+    ["stopping", "codex_runner_stopped"],
     ["failed", "codex_runner_failed"],
     ["stopped", "codex_runner_stopped"],
   ];
@@ -482,7 +504,7 @@ await step("F0", async () => {
   check("F0 [real]. off: no preparation POST", A.net.posts.length === p0, String(A.net.posts.length - p0));
   check("F0 [real]. off: conversation still opens", (await A.chat.getByRole("heading", { name: "준비 통합 대화" }).count()) === 1);
   const text = (await A.chat.innerText()).replace(/\s+/g, " ");
-  check("F0 [real]. off: no runner state copy", !/환경 활성화 중|환경 연결 확인 중|사용 대기 중|환경이 쉬는 중|환경을 준비하지 못했습니다/.test(text), text.slice(0, 160));
+  check("F0 [real]. off: no runner state copy", !/환경 활성화 중|환경 연결 확인 중|사용 대기 중|환경이 쉬는 중|환경 정리 중|확인이 필요합니다/.test(text), text.slice(0, 160));
   const g = await apiA.get("/research/codex/status");
   check("F0 [real]. off: legacy status (not a runner reason)", g.status === 200 && !["provisioning", "capacity_wait", "runner_unreachable", "runner_failed", "idle_stopped", "not_prepared"].includes(g.body?.reason), JSON.stringify(g.body));
   const before = await apiA.get(`/research/sessions/${sid}`);

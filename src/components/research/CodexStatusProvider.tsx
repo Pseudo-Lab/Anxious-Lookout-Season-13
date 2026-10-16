@@ -32,14 +32,28 @@ import type { CodexStatus } from "@/lib/research/types";
 // - 질문은 어떤 상태에서도 자동으로 보내지 않는다(전송은 Composer가 사용자 동작으로만).
 
 /** 다시 조회하는 일시 상태와 서버 안내가 없을 때의 기본 간격(초). */
-const TRANSIENT: Record<string, number> = { provisioning: 2, capacity_wait: 15, runner_unreachable: 5 };
+const TRANSIENT: Record<string, number> = { provisioning: 2, capacity_wait: 15, runner_unreachable: 5, stopping: 5 };
+// #16 운영자 토큰 오류(api-contracts/issue16-multi-user-runners-draft.md). 오류 안내는 그대로 두고, 서버가 안내 간격을
+// 줄 때만 읽기 전용으로 다시 조회한다(30초에서 60초로). 조회는 토큰을 공급·갱신하지 않는다. 안내가 없는 이전 응답은 종료 상태다.
+const CREDENTIAL: Record<string, number> = { not_configured: 30, auth_expired: 30, auth_revoked: 30 };
 const MAX_DELAY_S = 60;
+
+/** 운영자 토큰 오류를 다시 조회하는 중인지(서버 안내 간격이 있을 때만). */
+export function credentialWait(s: CodexStatus | null | undefined): boolean {
+  return !!s && !s.available && s.retryAfterSeconds !== undefined && own(CREDENTIAL, s.reason) !== undefined;
+}
+
+/** 다시 조회할 상태면 기본 간격(초), 아니면 undefined. 직접 가진 키만 본다(`__proto__` 등·모르는 reason 제외). */
+function pollFallback(s: CodexStatus | null): number | undefined {
+  if (!s || s.available) return undefined;
+  return own(TRANSIENT, s.reason) ?? (credentialWait(s) ? own(CREDENTIAL, s.reason) : undefined);
+}
 
 interface StatusState {
   epoch: number;
   result: FetchResult<CodexStatus> | null;
   refreshFailure: FetchFailure | null;
-  // 연속으로 연결 확인 중이거나 조회에 실패한 횟수(간격을 늘린다).
+  // 연속으로 연결 확인 중·운영자 토큰 오류이거나 조회에 실패한 횟수(간격을 늘린다).
   misses: number;
 }
 
@@ -108,8 +122,8 @@ export function CodexStatusProvider({ children }: { children: ReactNode }) {
       if (!result.ok && isUncertain(result.failure) && base.result?.ok) {
         return { ...base, refreshFailure: result.failure, misses: base.misses + 1 };
       }
-      const unreachable = result.ok && result.data.reason === "runner_unreachable";
-      return { epoch: forEpoch, result, refreshFailure: null, misses: unreachable || !result.ok ? base.misses + 1 : 0 };
+      const backoff = result.ok && (result.data.reason === "runner_unreachable" || credentialWait(result.data));
+      return { epoch: forEpoch, result, refreshFailure: null, misses: backoff || !result.ok ? base.misses + 1 : 0 };
     });
   }, []);
 
@@ -194,17 +208,18 @@ export function CodexStatusProvider({ children }: { children: ReactNode }) {
   }, [watching, epoch, reload]);
 
   // 일시 상태 다시 조회: 열린 대화창이 있고 탭이 보일 때만, 안내 간격(없으면 기본) ±15% 흔들림, 연결 문제·조회 실패는 늘려 가며 최대 60초.
+  // 운영자 토큰 오류는 첫 조회를 안내 간격대로 하고 그 뒤 늘린다.
   const visible = useSyncExternalStore(subscribeVisibility, () => document.visibilityState === "visible", () => true);
   const shown = current.result?.ok ? current.result.data : null;
-  // 직접 가진 키만 일시 상태로 본다(`__proto__` 등 상속 속성·모르는 reason은 다시 조회하지 않음).
-  const fallbackDelay = shown && !shown.available ? own(TRANSIENT, shown.reason) : undefined;
+  const fallbackDelay = pollFallback(shown);
   const transientReason = fallbackDelay !== undefined && shown ? shown.reason : null;
   const polling = watchers.pollers > 0 && visible && transientReason !== null;
   useEffect(() => {
     if (!polling || !transientReason || !shown || fallbackDelay === undefined) return;
     const hinted = shown.retryAfterSeconds ?? fallbackDelay;
     const base = Number.isFinite(hinted) && hinted >= 1 ? hinted : fallbackDelay;
-    const backoff = Math.min(MAX_DELAY_S, base * 2 ** Math.min(current.misses, 4));
+    const steps = credentialWait(shown) ? Math.max(0, current.misses - 1) : current.misses;
+    const backoff = Math.min(MAX_DELAY_S, base * 2 ** Math.min(steps, 4));
     const delay = Math.max(1, Math.min(MAX_DELAY_S, backoff)) * (0.85 + Math.random() * 0.3) * 1000;
     const timer = setTimeout(() => void reload(), delay);
     return () => clearTimeout(timer);

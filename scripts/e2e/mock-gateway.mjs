@@ -189,7 +189,8 @@ http
     if (url.pathname === "/__mock/set") {
       for (const k of ["me", "health", "nextLogin", "logout", "reuse", "as", "codexRunner"]) if (url.searchParams.has(k)) mode[k] = url.searchParams.get(k);
       // #10 실행 환경: runner=<처음 상태|"">, prepare=<동작>, readyMs=<ms>, hint=<retryAfterSeconds>, runnerAll=<모든 계정 상태|"">
-      for (const k of ["prepare", "hint"]) if (url.searchParams.has(k)) runnerMode[k] = url.searchParams.get(k);
+      // #16 credHint=0: 운영자 토큰 오류에 안내 간격을 주지 않는다(이전 응답).
+      for (const k of ["prepare", "hint", "credHint"]) if (url.searchParams.has(k)) runnerMode[k] = url.searchParams.get(k);
       if (url.searchParams.has("runner")) runnerMode.initial = url.searchParams.get("runner");
       if (url.searchParams.has("readyMs")) runnerMode.readyMs = Number(url.searchParams.get("readyMs"));
       if (url.searchParams.has("runnerAll")) setRunnerAll(url.searchParams.get("runnerAll"));

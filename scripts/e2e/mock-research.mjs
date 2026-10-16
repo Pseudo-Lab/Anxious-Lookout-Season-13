@@ -70,15 +70,19 @@ const MIDTURN = {
 //          | "capacity"(사용 대기에 머묾) | "403" | "404" | "405" | "500"
 // hint: ""면 계약 표의 안내 간격, 그 밖의 값은 그대로 retryAfterSeconds로 보낸다(범위 밖·문자열 검증용).
 // 모의 서버의 계정별 합침은 backend 중복 생성 방지의 증거가 아니다.
-export const runnerMode = { initial: "", prepare: "ok", readyMs: 2500, hint: "" };
+export const runnerMode = { initial: "", prepare: "ok", readyMs: 2500, hint: "", credHint: "1" };
 const runnerStates = new Map(); // owner -> "ready" | reason
-const RUNNER_HINT = { provisioning: 2, capacity_wait: 15, runner_unreachable: 5 };
+const RUNNER_HINT = { provisioning: 2, capacity_wait: 15, runner_unreachable: 5, stopping: 5 };
+// #16 운영자 토큰 오류 3종(사용자 환경 health)은 retryAfterSeconds 30을 함께 준다. credHint=0이면 안내 없는 이전 응답.
+const CREDENTIAL_HINT = { not_configured: 30, auth_expired: 30, auth_revoked: 30 };
 const RUNNER_PREFLIGHT = {
   not_prepared: "codex_runner_not_prepared",
   provisioning: "codex_provisioning",
   capacity_wait: "codex_capacity_wait",
   runner_unreachable: "codex_runner_unreachable",
   runner_failed: "codex_runner_failed",
+  // #16: 정리 중(stopping)도 쉬는 중과 같은 확정 미접수 코드다.
+  stopping: "codex_runner_stopped",
   idle_stopped: "codex_runner_stopped",
 };
 const runnerOf = (owner) => runnerStates.get(owner) ?? runnerMode.initial;
@@ -95,6 +99,7 @@ function runnerStatus(owner) {
     const n = Number(runnerMode.hint);
     out.retryAfterSeconds = Number.isNaN(n) ? runnerMode.hint : n;
   } else if (Object.hasOwn(RUNNER_HINT, st)) out.retryAfterSeconds = RUNNER_HINT[st];
+  else if (Object.hasOwn(CREDENTIAL_HINT, st) && runnerMode.credHint !== "0") out.retryAfterSeconds = CREDENTIAL_HINT[st];
   return out;
 }
 function prepareRunner(owner, b) {
@@ -106,7 +111,12 @@ function prepareRunner(owner, b) {
   if (m === "500") return fail(500, "internal_error", "Internal error");
   if (Object.keys(b).length) return fail(422, "validation_error", "Unknown field");
   const st = runnerOf(owner);
-  if (st === "ready") return ok(200, runnerStatus(owner));
+  // 운영자 토큰 오류는 이미 붙은 환경의 health다. 준비 요청은 새 준비를 시작하지 않고 현재 상태를 돌려준다.
+  if (st === "ready" || Object.hasOwn(CREDENTIAL_HINT, st)) return ok(200, runnerStatus(owner));
+  // #16: 불확실한 실패는 운영자 확인 전까지 새 준비를 시작하지 않는다(상태·증거 그대로).
+  if (st === "runner_failed") return fail(409, "runner_reconciliation_required", "Runner state requires reconciliation");
+  // 첫 slice: 정리 중 준비 요청은 저장하지 않고 거절한다(backend Refused → 503).
+  if (st === "stopping") return fail(503, "codex_runner_unreachable", "Runner state requires reconciliation");
   // 이미 준비 중·대기 중이면 같은 의도로 합친다(새 준비를 시작하지 않음).
   if (st === "provisioning" || st === "capacity_wait") return ok(202, runnerStatus(owner));
   const next = m === "capacity" ? "capacity_wait" : "provisioning";
@@ -393,7 +403,8 @@ function handleMutation(owner, method, path, b, user) {
       // #10: 실행 환경이 사용 가능하지 않으면 접수 전 확정 거절(예약·기록 없음)
       if (runnerMode.initial && runnerOf(owner) !== "ready") {
         const st = runnerOf(owner);
-        return fail(503, Object.hasOwn(RUNNER_PREFLIGHT, st) ? RUNNER_PREFLIGHT[st] : "codex_unavailable", "Runner is not ready");
+        const code = Object.hasOwn(RUNNER_PREFLIGHT, st) ? RUNNER_PREFLIGHT[st] : st === "auth_expired" || st === "auth_revoked" ? `codex_${st}` : "codex_unavailable";
+        return fail(503, code, "Runner is not ready");
       }
       if (GATED_REASONS.includes(researchMode.codex)) return fail(503, `codex_${researchMode.codex}`, "Codex is not available");
       // 계약에 없는 codex_* 503: 결과 불명으로 취급되어야 한다(서버는 아무것도 하지 않음)
