@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from uuid import UUID
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 
 from app.runner_bindings import Bindings, validate
 from app.runner_registry import Registry
@@ -19,7 +19,7 @@ from app.runner_controller import Controller
 from app.user_runner_runtime import clock
 from app.runner_limits import load_limits
 from app.settings import secret
-from app.user_runners import selected_account, selected_allowlist
+from app.user_runners import feature_enabled, selected_account, selected_allowlist
 from ops.user_runner_prepare import prepare
 from ops.runner_binding_import import import_binding, retained_file
 from ops.runner_storage import allocate
@@ -28,6 +28,8 @@ from runner.lifecycle import Phase, Fence, require
 
 
 def allowed(owner):
+    if not feature_enabled():
+        return False
     singleton, allowlist = selected_account(), selected_allowlist()
     return owner in allowlist if allowlist is not None else singleton is None or owner == singleton
 
@@ -43,13 +45,24 @@ class Worker:
 
     def pending(self, *, limit=10):
         require(type(limit) is int and 1 <= limit <= 100)
-        with self.engine.begin() as db:
-            validate(db)
-            return db.execute(text('''SELECT r.owner_id FROM runner_runtime.registry r
+        if not feature_enabled():
+            return []
+        singleton, allowlist = selected_account(), selected_allowlist()
+        owners = allowlist if allowlist is not None else (None if singleton is None else (singleton,))
+        query = '''SELECT r.owner_id FROM runner_runtime.registry r
                 JOIN auth.accounts a ON a.id=r.owner_id
                 WHERE r.phase IN ('provisioning','capacity_wait') AND r.pod_uid IS NULL
-                AND a.is_approved AND a.role IN ('editor','admin')
-                ORDER BY r.owner_id LIMIT :limit'''), {'limit':limit}).scalars().all()
+                AND a.is_approved AND a.role IN ('editor','admin')'''
+        params = {'limit': limit}
+        if owners is not None:
+            query += ' AND r.owner_id IN :owners'
+            params['owners'] = tuple(owners)
+        statement = text(query + ' ORDER BY r.owner_id LIMIT :limit')
+        if owners is not None:
+            statement = statement.bindparams(bindparam('owners', expanding=True))
+        with self.engine.begin() as db:
+            validate(db)
+            return db.execute(statement, params).scalars().all()
 
     def process(self, owner):
         require(isinstance(owner, UUID) and allowed(owner))
@@ -71,6 +84,7 @@ class Worker:
                 raise
 
     def _process(self, owner):
+        require(allowed(owner))
         # Read eligibility/state first. The helper rechecks and holds membership
         # and owner locks across external preparation; the private output-directory
         # permit prevents a second worker from repeating uncertain CREATEs.

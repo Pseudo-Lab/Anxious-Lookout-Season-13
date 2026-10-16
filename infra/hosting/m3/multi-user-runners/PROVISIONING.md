@@ -125,6 +125,15 @@ without owner: owner derives from the authenticated registry intent. No shell te
 or paths come from the browser. Output root is root-owned mode0700; individual
 finished binding output directories are UID10001/mode0700.
 
+Set `CODEX_USER_RUNNERS_ENABLE=true` explicitly in the worker environment, with
+the same `CODEX_USER_RUNNER_ACCOUNT_ID` or `CODEX_USER_RUNNER_ALLOWLIST` selection
+as the API. Unset/false disables pending selection and refuses direct processing,
+including already published plans; invalid flag values fail closed. Selection is
+applied before the batch LIMIT so excluded owners cannot starve allowed owners.
+Changing an API process environment does not change a running worker environment:
+disable/stop the worker service as part of a reviewed operational flag-off change.
+This finite worker does not provide a separate lookup-only reconciliation mode.
+
 For each new owner the helper allocates two 1Gi files with posix_fallocate, formats
 fresh ext4 filesystems once, mounts nodev/nosuid, then initializes empty data roots
 UID/GID10001. Existing/partial output is never overwritten or formatted again.

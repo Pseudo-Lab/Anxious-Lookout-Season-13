@@ -193,3 +193,34 @@ def test_controller_capability_can_publish_but_cannot_approve_users(admin, owner
         with admin.begin() as db:
             db.execute(text('SET LOCAL ROLE anxious_runner_controller'))
             db.execute(text('UPDATE auth.accounts SET is_approved=false WHERE id=:owner'), {'owner':owner})
+
+
+@pytest.mark.parametrize('privilege', ['INSERT', 'UPDATE', 'REFERENCES'])
+@pytest.mark.parametrize('table,column', [('bindings', 'plan'), ('resources', 'uid')])
+def test_api_column_privilege_drift_is_rejected(admin, privilege, table, column):
+    # Fixed test parameters only; the temporary grant is rolled back even on failure.
+    with admin.connect() as db:
+        transaction = db.begin()
+        try:
+            db.execute(text(f'GRANT {privilege} ({column}) ON runner_bindings.{table} TO anxious_api'))
+            db.execute(text('SET LOCAL ROLE anxious_api'))
+            with pytest.raises(Refused): validate(db)
+        finally:
+            transaction.rollback()
+
+
+def test_api_column_insert_publication_probe_is_blocked_by_validation(admin, owner, t0):
+    state, _ = enter(admin, owner, uuid4(), t0)
+    ns = uuid4()
+    with admin.connect() as db:
+        transaction = db.begin()
+        try:
+            db.execute(text('GRANT INSERT (owner_id,state_id,namespace,namespace_uid,plan) ON runner_bindings.bindings TO anxious_api'))
+            db.execute(text('GRANT INSERT (owner_id,kind,name,uid) ON runner_bindings.resources TO anxious_api'))
+            db.execute(text('SET LOCAL ROLE anxious_api'))
+            with pytest.raises(Refused):
+                validate(db)
+                Bindings(db).publish(plan_value(state), 'isolated', ns, {'native':uuid4(), 'control':uuid4()})
+            assert db.execute(text('SELECT count(*) FROM runner_bindings.bindings')).scalar_one() == 0
+        finally:
+            transaction.rollback()

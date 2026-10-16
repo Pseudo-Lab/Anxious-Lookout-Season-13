@@ -40,8 +40,10 @@ def validate(db):
                                  {'table': 'runner_bindings.'+table, 'privilege': privilege}).scalar_one()
             require(granted == (privilege == 'SELECT'))
         for column in actual[table]['columns']:
-            require(not db.execute(text("SELECT has_column_privilege('anxious_api',:table,:column,'UPDATE')"),
-                                   {'table': 'runner_bindings.'+table, 'column': column}).scalar_one())
+            for privilege in ('INSERT', 'UPDATE', 'REFERENCES'):
+                require(not db.execute(text("SELECT has_column_privilege('anxious_api',:table,:column,:privilege)"),
+                                       {'table': 'runner_bindings.'+table, 'column': column,
+                                        'privilege': privilege}).scalar_one())
     require(not db.execute(text("""SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='runner_bindings' AND (c.relkind NOT IN ('r','i') OR c.relrowsecurity OR c.relforcerowsecurity)""")).first())
     require(not db.execute(text("""SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
