@@ -194,3 +194,20 @@ max1. Never lower quota and assume extra workloads disappeared; never reset regi
 history or run destructive down migrations. Keep schema compatibility/import evidence
 and old source images. Credential rollback is mode-specific and cannot undo provider
 activity or erase changed native auth state.
+
+## Status projection checkpoint (2026-10-16)
+
+The first implementation slice exposes `stopping` with a five-second retry hint,
+refuses failed-state prepare (including receipt replay) with HTTP 409
+`runner_reconciliation_required`, and attaches a 30-second read-only polling hint
+to bound user-runner `not_configured`, `auth_expired`, and `auth_revoked` health.
+Failure refusal holds the registry owner lock and preserves receipts/generation.
+GET can reflect a concurrent reconciliation rather than the preceding POST state.
+Legacy personal/trial status responses are unchanged. No discriminator or new
+`codexRunner` field shape is introduced. UI idle copy must not hardcode 30 minutes.
+
+This checkpoint does not implement host injection, eligibility expansion, plan
+multiplexing, or durable session-bound entry intents during stopping. In particular,
+stopping POST is not yet a promise of queued re-entry. Credential polling observes
+operator repair; it does not initiate supply. Poll at 30–60 seconds only while the
+conversation/tab is visible, without overlapping requests or a fixed count cap.

@@ -222,7 +222,7 @@ def test_registry_ready_still_refuses_without_transport_and_legacy_static_bypass
 
 
 @pytest.mark.parametrize('reason,phase', [('not_prepared',None),('provisioning',Phase.PREPARING),
-    ('capacity_wait',Phase.WAITING),('runner_unreachable',Phase.UNREACHABLE),('runner_failed',Phase.FAILED),('idle_stopped',Phase.STOPPED)])
+    ('capacity_wait',Phase.WAITING),('runner_unreachable',Phase.UNREACHABLE),('runner_failed',Phase.FAILED),('idle_stopped',Phase.STOPPED),('stopping',Phase.STOPPING)])
 def test_six_preflight_codes_make_no_message_receipt_tool_or_dispatch(client, admin, reason, phase):
     owner, auth = identity(client, admin); conversation = create_conversation(client, auth)
     if phase is not None:
@@ -238,6 +238,9 @@ def test_six_preflight_codes_make_no_message_receipt_tool_or_dispatch(client, ad
                 # Isolated controlled state fixture; not actual controller evidence.
                 db.execute(text('UPDATE runner_runtime.registry SET phase=:phase WHERE owner_id=:owner'),
                            {'phase': phase.value, 'owner': owner})
+            elif phase == Phase.STOPPING:
+                db.execute(text("UPDATE runner_runtime.registry SET phase='stopping',pod_uid=:pod WHERE owner_id=:owner"),
+                           {'pod': uuid4(), 'owner': owner})
     before = preservation_snapshot(admin); key = uuid4()
     path = '/api/research/sessions/' + conversation['id'] + '/messages'
     for _ in range(2):
@@ -300,7 +303,7 @@ def test_status_phase_changes_hints_and_stopped_reprepare_retain_binding(client,
         state = Registry(db).observe(Fence.of(state), pod_uid=uuid4(), ready=True, active_requests=0,
             ambiguous=False, verified=True, now=datetime.now(timezone.utc))
         state = Registry(db).idle(Fence.of(state), now=state.last_activity + timedelta(minutes=30), verified=True)
-    assert client.get('/api/research/codex/status').json()['reason'] == 'runner_unreachable'
+    assert client.get('/api/research/codex/status').json()['reason'] == 'stopping'
     with admin.begin() as db:
         Registry(db).stopped(Fence.of(state), terminated_pod_uid=state.pod_uid, verified=True)
         # Synthetic clock alignment for the re-entry HTTP request, not a timeout inference.
@@ -509,3 +512,62 @@ def test_no_selected_account_never_enables_any_account(client, admin):
     assert client.get('/api/auth/me').json()['user']['codexRunner'] is False
     assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == 403
     assert read(admin, owner) is None
+
+
+@pytest.mark.parametrize('pod', [False, True])
+def test_failed_prepare_requires_reconciliation_and_preserves_evidence(client, admin, pod):
+    owner, auth = identity(client, admin)
+    key = uuid4()
+    client.post('/api/research/codex/runner', json={}, headers=headers(auth, key))
+    with admin.begin() as db:
+        db.execute(text("UPDATE runner_runtime.registry SET phase='runner_failed',pod_uid=:pod WHERE owner_id=:owner"),
+                   {'owner': owner, 'pod': uuid4() if pod else None})
+    before = preservation_snapshot(admin)
+    for attempt in (key, uuid4()):
+        reply = client.post('/api/research/codex/runner', json={}, headers=headers(auth, attempt))
+        assert reply.status_code == 409
+        assert reply.json()['error']['code'] == 'runner_reconciliation_required'
+        assert client.get('/api/research/codex/status').json()['reason'] == 'runner_failed'
+    assert preservation_snapshot(admin) == before
+
+
+def test_stopping_status_is_read_only_and_does_not_probe_native(client, admin):
+    owner, auth = identity(client, admin)
+    client.post('/api/research/codex/runner', json={}, headers=headers(auth))
+    with admin.begin() as db:
+        db.execute(text("UPDATE runner_runtime.registry SET phase='stopping',pod_uid=:pod WHERE owner_id=:owner"),
+                   {'owner': owner, 'pod': uuid4()})
+    class NoTransport:
+        def close(self):
+            pass
+        def runner(self, owner):
+            pytest.fail('stopping must not probe native')
+    client.app.state.user_runner_runtime = NoTransport()
+    before = preservation_snapshot(admin)
+    status = client.get('/api/research/codex/status')
+    assert status.json() == {'available': False, 'reason': 'stopping', 'retryAfterSeconds': 5,
+                             'verification': 'unverified', 'model': 'gpt-6.1-sol'}
+    assert preservation_snapshot(admin) == before
+
+
+@pytest.mark.parametrize('reason,hint', [('not_configured',30), ('auth_expired',30),
+                                       ('auth_revoked',30), ('policy_refused',None)])
+def test_bound_credential_failures_include_read_only_poll_hint(client, admin, reason, hint):
+    owner, auth = identity(client, admin)
+    client.post('/api/research/codex/runner', json={}, headers=headers(auth))
+    with admin.begin() as db:
+        db.execute(text("UPDATE runner_runtime.registry SET phase='ready',pod_uid=:pod WHERE owner_id=:owner"),
+                   {'owner': owner, 'pod': uuid4()})
+    class Health:
+        def close(self):
+            pass
+        def runner(self, account):
+            assert account == owner
+            return self
+        def health(self):
+            return {'available': False, 'reason': reason, 'verification': 'unverified'}
+    client.app.state.user_runner_runtime = Health()
+    before = preservation_snapshot(admin)
+    result = client.get('/api/research/codex/status').json()
+    assert result['reason'] == reason and result.get('retryAfterSeconds') == hint
+    assert preservation_snapshot(admin) == before

@@ -28,6 +28,10 @@ def atomic(method):
     return run
 
 
+class ReconciliationRequired(Refused):
+    """Failed lifecycle evidence must be reconciled before entry."""
+
+
 class Registry:
     def __init__(self, transaction):
         self.db = transaction
@@ -100,6 +104,8 @@ class Registry:
         now = now() if callable(now) else now
         require(isinstance(now, datetime) and now.tzinfo is not None)
         state = self.read(owner)
+        if state is not None and state.phase == Phase.FAILED:
+            raise ReconciliationRequired()
         if state is None:
             state = State(owner, uuid4(), now)
             self.db.execute(text('''INSERT INTO runner_runtime.registry

@@ -17,7 +17,7 @@ from sqlalchemy import select
 from .codex_policy import MODEL, RUNNER_PREFLIGHT_ERRORS, ERRORS
 from .models import Account
 from .research import fail
-from .runner_registry import Registry
+from .runner_registry import Registry, ReconciliationRequired
 from .runner_schema import validate
 from runner.lifecycle import Phase, Refused
 
@@ -63,11 +63,11 @@ def status_body(state=None, *, permitted=True, creation_reserved=False):
         return result
     # No trusted service transport is connected in this HTTP source chunk.
     # A ready Pod cannot establish actual authentication/model availability.
-    reason = {Phase.READY: 'runner_unreachable', Phase.STOPPING: 'runner_unreachable'}.get(state.phase, state.phase.value)
+    reason = {Phase.READY: 'runner_unreachable'}.get(state.phase, state.phase.value)
     if state.pod_uid is None and creation_reserved:
         reason = 'runner_unreachable'
     result['reason'] = reason
-    hint = {'provisioning': 2, 'capacity_wait': 15, 'runner_unreachable': 5}.get(reason)
+    hint = {'provisioning': 2, 'capacity_wait': 15, 'runner_unreachable': 5, 'stopping': 5}.get(reason)
     if hint is not None:
         result['retryAfterSeconds'] = hint
     return result
@@ -100,8 +100,11 @@ def live_status(app, owner, fallback):
     try:
         health = runtime.runner(owner).health()
         available = health['available'] and health.get('reason') is None
-        return {'available': available, 'reason': None if available else health.get('reason') or 'unavailable',
-                'model': MODEL, 'verification': health['verification']}
+        result = {'available': available, 'reason': None if available else health.get('reason') or 'unavailable',
+                  'model': MODEL, 'verification': health['verification']}
+        if result['reason'] in {'not_configured', 'auth_expired', 'auth_revoked'}:
+            result['retryAfterSeconds'] = 30
+        return result
     except Exception:
         return fallback
 
@@ -183,6 +186,8 @@ def register(app, sessions, settings, current_session):
             registry = checked_registry(db)
             try:
                 state, _ = registry.enter(account.id, key, utc_now)
+            except ReconciliationRequired:
+                fail('runner_reconciliation_required', 'Runner state requires reconciliation', 409)
             except Refused:
                 fail('codex_runner_unreachable', 'Runner state requires reconciliation', 503)
             # Body shares GET's parser, and contains no private runtime identities.
