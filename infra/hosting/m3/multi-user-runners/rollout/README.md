@@ -30,8 +30,11 @@ bundle's git SHA/hash in the operation record.
 
 PM must replace providerAccountId and verify sourceUid, node/boot/namespace IDs,
 CIDR, API TLS names and canonical root-owned executable paths in the example.
-The provider account is an identifier, never an access/refresh token. Inventory
-PID/cgroup references independently on the host; do not discover them from the
+The provider account is an identifier, never an access/refresh token.
+PM verified this host's serving certificate has DNS SAN `localhost`, but no
+`127.0.0.1` IP SAN: use `https://localhost:6443` for hostApi and supply kubeconfig.
+Do not disable certificate verification to use the IP address.
+Inventory PID/cgroup references independently on the host; do not discover them from the
 observer container. After reboot, refresh the observer boot/namespace input before
 resuming its timer; stale proof deliberately refuses. The example is not live input.
 
@@ -141,13 +144,70 @@ expiry; these host processes do not have kubelet projection or self-mint rights.
 PM's existing credential procedure owns renewal. An expired token causes refusal.
 Do not enable unattended timers without arranging renewal and alerting.
 
+For this test rollout, PM requests **24h** tokens with its existing authorized
+operator identity, not with a worker SA. Renew at the earlier of **12h** or half
+the actual granted lifetime, and before any test run extending past expiry. This
+is an operational recommendation, not an automated renewer installed by this
+bundle. The installed kubectl's `create token --help` confirms the server may grant
+a shorter or longer lifetime; record the returned `status.expirationTimestamp`,
+not an assumed now+24h. Default audience is the Kubernetes API server; no extra
+audience or broad long-lived SA Secret is needed.
+
+Example root-shell issuance/renewal, with worker timers/services stopped between
+batches and the reviewed operator kubeconfig/context selected. New temporary
+files stay inside each private root0700 role directory. Token bytes never go to
+terminal, argv, environment, Git or the operation report:
+
+```sh
+set -eu
+umask 077
+for role in controller observer supply; do
+  dir=/etc/anxious-lookout/issue16/$role
+  request=$(mktemp "$dir/.token-request.XXXXXX")
+  candidate=$(mktemp "$dir/.kube-token.XXXXXX")
+  kubectl -n codex-runner create token "runner-pool-$role" --duration=24h -o json > "$request"
+  jq -er '.status.token | select(type == "string" and length > 0)' "$request" > "$candidate"
+  jq -er '.status.expirationTimestamp' "$request" # only expiry is displayed
+  chown root:root "$candidate"
+  chmod 0600 "$candidate"
+  mv -T "$candidate" "$dir/kube-token"
+  rm -- "$request"
+done
+```
+
+On failure stop here; protect/remove only these newly created temporary files
+after inspection, never print their contents. Existing token remains intact until
+atomic replacement. Each new finite worker invocation reads the new token; supply
+kubeconfig also uses tokenFile. Resume timers only with valid tokens and monitoring.
+
 Supply kubeconfig must address the same hostApi/CA/SA as supply pool config, have
 exactly one reviewed context, verified TLS, `certificate-authority: /private/ca.crt`,
 and `tokenFile: /private/kube-token`; no exec/auth-provider plugins, impersonation,
 insecure-skip-tls-verify or embedded broad admin credentials. PM validates it.
 Only supply receives a read-only `/home/opc/.codex` bind. No role gets Docker socket.
-Use canonical standalone root-owned kubectl/crictl binaries compatible with the
-image; do not bind a symlink to k3s without its resolved target/runtime dependencies.
+Use canonical root-owned executable files compatible with the image. This host's
+`/usr/local/bin/{kubectl,crictl}` symlinks resolve to the **compressed launcher**
+`/usr/local/bin/k3s` (currently nobody-owned). Binding that launcher alone fails in
+the read-only image while extracting `/var/lib/rancher/k3s/data`; it also fails the
+worker's root-owned executable check. Do not change the live launcher to bypass it.
+
+The example instead pins the **already extracted** root-owned CLI at
+`/var/lib/rancher/k3s/data/d83b1e679e41e04bbf4c6ff76f5684f0f98b2b4bf29bb632db4a497cd8093a71/bin/k3s`.
+Set BOTH values.kubectl and values.crictl to that resolved path. The renderer binds
+it separately at `/usr/local/bin/kubectl` and `/usr/local/bin/crictl` inside the
+respective containers; basename dispatch works without extra extraction or host
+data/config mounts. PM can alternatively install identical bytes root:root0755 at
+a dedicated canonical path, recording the source/hash, and use that path for both
+values. No external download is required. Preserve the pinned binary across k3s
+upgrades/cleanup; a replacement requires repeat provenance/compatibility checks.
+
+Offline probes in the pinned provisioner (network none, read-only, all caps dropped)
+passed kubectl client v1.36.4+k3s1 and crictl v1.36.0-k3s1. crictl with explicit
+`--runtime-endpoint unix:///nonexistent-test.sock --timeout 1s info` reached that
+dummy endpoint and then failed as expected. Missing crictl.yaml emitted a warning,
+not a configuration failure. The observer already passes its explicit endpoint,
+so `/var/lib/rancher/k3s/agent/etc/crictl.yaml` is not needed. This probe did not
+connect to the live CRI socket; PM still verifies the real host invocation.
 
 ## Installation and shared mount (PM after review)
 
