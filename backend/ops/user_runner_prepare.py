@@ -40,9 +40,9 @@ def resource_names(state):
     return {'native': 'native-'+suffix, 'control': 'control-'+suffix, 'transport': 'transport-'+suffix}
 
 
-def volume(name_, namespace, path, node, labels):
+def volume(name_, namespace, path, node, labels, capacity='1Gi'):
     return {'apiVersion': 'v1', 'kind': 'PersistentVolume', 'metadata': {'name': name_, 'labels': labels},
-            'spec': {'capacity': {'storage': '1Gi'}, 'accessModes': ['ReadWriteOnce'],
+            'spec': {'capacity': {'storage': capacity}, 'accessModes': ['ReadWriteOnce'],
                      'persistentVolumeReclaimPolicy': 'Retain', 'storageClassName': '',
                      'volumeMode': 'Filesystem', 'local': {'path': str(path)},
                      'claimRef': {'namespace': namespace, 'name': name_},
@@ -52,6 +52,8 @@ def volume(name_, namespace, path, node, labels):
 
 def prepare(value, output, *, from_intent=False, storage_allocator=None):
     require(os.geteuid() == 0 and output.is_absolute() and output == output.resolve())
+    from ops.runner_storage import sizes, BYTES
+    capacities = {kind: str(size//BYTES)+'Gi' for kind, size in sizes().items()} if from_intent else dict(native='1Gi', control='1Gi')
     owner = UUID(value['owner'])
     require(str(owner) == value['owner'])
     namespace = name(value['namespace']); namespace_uid = UUID(value['namespaceUid'])
@@ -132,13 +134,13 @@ def prepare(value, output, *, from_intent=False, storage_allocator=None):
             for file in path.iterdir():
                 os.chown(file, 10001, 10001)
             os.chown(path, 10001, 10001)
-            manifest = volume(names[kind], namespace, path, value['node'], labels)
+            manifest = volume(names[kind], namespace, path, value['node'], labels, capacities[kind])
             pv = request(pods.client, 'POST', '/api/v1/persistentvolumes', body=manifest, expected=201)
             pvc = pods._request('POST', 'persistentvolumeclaims', body={
                 'apiVersion': 'v1', 'kind': 'PersistentVolumeClaim',
                 'metadata': {'name': names[kind], 'namespace': namespace, 'labels': labels},
                 'spec': {'accessModes': ['ReadWriteOnce'], 'storageClassName': '', 'volumeMode': 'Filesystem',
-                         'volumeName': names[kind], 'resources': {'requests': {'storage': '1Gi'}}}})
+                         'volumeName': names[kind], 'resources': {'requests': {'storage': capacities[kind]}}}})
             refs[kind] = {'name': names[kind], 'uid': pvc['metadata']['uid'], 'volume': pv['metadata']['name']}
         transport = secrets.token_urlsafe(48)
         obj = pods._request('POST', 'secrets', body={'apiVersion': 'v1', 'kind': 'Secret',

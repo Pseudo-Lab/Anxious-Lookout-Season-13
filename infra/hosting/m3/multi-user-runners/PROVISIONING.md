@@ -134,13 +134,27 @@ Changing an API process environment does not change a running worker environment
 disable/stop the worker service as part of a reviewed operational flag-off change.
 This finite worker does not provide a separate lookup-only reconciliation mode.
 
-For each new owner the helper allocates two 1Gi files with posix_fallocate, formats
+For each new owner the helper allocates native 5GiB and control 1GiB files by default
+with posix_fallocate, formats
 fresh ext4 filesystems once, mounts nodev/nosuid, then initializes empty data roots
 UID/GID10001. Existing/partial output is never overwritten or formatted again.
-Every new allocation requires 2Gi plus 10Gi remaining free disk headroom. Pod count
+Set `CODEX_RUNNER_NATIVE_SIZE_GIB` and `CODEX_RUNNER_CONTROL_SIZE_GIB` to positive
+whole GiB integers (defaults 5 and 1). Empty, fractional and invalid values refuse
+before allocation. PV capacity and PVC requests use these same configured sizes.
+Every new allocation requires the sum of both sizes plus 10GiB remaining free disk
+headroom (16GiB available at the defaults). Pod count
 (default3, configurable) does not cap retained owners' disk usage: stopped owners
-still occupy 2Gi. Capacity/disk refusal needs operator visibility and no deletion.
-Current measured 42Gi free is planning evidence, not a promise for later allocations.
+still occupy 6GiB at the defaults. Capacity/disk refusal needs operator visibility
+and no deletion. The measured 79GB free after Docker cleanup on 2026-10-16 is
+planning evidence, not a promise for later allocations; each allocation checks free
+space again. Existing uncapped operator import behavior remains unchanged.
+
+Keep the same size environment in preparation, binding audit, observer and restore
+processes for each bounded owner. Record the settings with its private restore
+inventory. Changing settings does not resize existing images: mismatched images
+fail verification/restore. Mixed-size inventories require invoking these tools with
+each owner's recorded settings; do not globally change settings and assume old
+images will be resized or adopted.
 
 ## Reboot and failure recovery gates
 

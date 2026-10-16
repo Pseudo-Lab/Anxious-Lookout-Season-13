@@ -10,6 +10,8 @@ from runner.lifecycle import Refused
 
 
 def setup(monkeypatch):
+    monkeypatch.delenv('CODEX_RUNNER_NATIVE_SIZE_GIB', raising=False)
+    monkeypatch.delenv('CODEX_RUNNER_CONTROL_SIZE_GIB', raising=False)
     root = Path('/var/lib/anxious-lookout')/uuid4().hex
     root.mkdir(mode=0o700)
     original = Path.read_text
@@ -25,7 +27,8 @@ def test_new_allocation_has_two_bounded_images_and_never_reformats_existing(monk
     target = setup(monkeypatch); calls=[]
     storage.allocate(target, run=lambda args,**kwargs:calls.append(args))
     assert [args[0] for args in calls] == ['mkfs.ext4','mount','mkfs.ext4','mount']
-    assert all((target/(kind+'.ext4')).stat().st_size == storage.BYTES for kind in ('native','control'))
+    assert (target/'native.ext4').stat().st_size == 5*storage.BYTES
+    assert (target/'control.ext4').stat().st_size == storage.BYTES
     assert all((target/kind/'data').is_dir() for kind in ('native','control'))
     with pytest.raises(FileExistsError): storage.allocate(target,run=lambda *a,**kw:pytest.fail('must not repeat'))
     assert len(calls)==4
@@ -44,3 +47,29 @@ def test_failed_format_keeps_permit_and_image(monkeypatch):
     with pytest.raises(OSError): storage.allocate(target,run=fail)
     assert target.exists() and (target/'native.ext4').exists()
     with pytest.raises(FileExistsError): storage.allocate(target,run=fail)
+
+
+def test_custom_sizes_and_exact_headroom_boundary(monkeypatch):
+    target = setup(monkeypatch)
+    monkeypatch.setenv('CODEX_RUNNER_NATIVE_SIZE_GIB', '7')
+    monkeypatch.setenv('CODEX_RUNNER_CONTROL_SIZE_GIB', '2')
+    monkeypatch.setattr(storage.shutil, 'disk_usage', lambda _:SimpleNamespace(free=19*storage.BYTES-1))
+    with pytest.raises(Refused): storage.allocate(target)
+    assert not target.exists()
+    monkeypatch.setattr(storage.shutil, 'disk_usage', lambda _:SimpleNamespace(free=19*storage.BYTES))
+    storage.allocate(target, run=lambda *args, **kwargs:None)
+    assert (target/'native.ext4').stat().st_size == 7*storage.BYTES
+    assert (target/'control.ext4').stat().st_size == 2*storage.BYTES
+    monkeypatch.setattr(os, 'statvfs', lambda path:SimpleNamespace(f_blocks=storage.sizes()[path.name]//4096, f_frsize=4096))
+    storage.verify(target)
+    storage.restore(target, run=lambda *args, **kwargs:pytest.fail('already mounted'))
+    monkeypatch.setenv('CODEX_RUNNER_NATIVE_SIZE_GIB', '5')
+    with pytest.raises(Refused): storage.verify(target)
+
+
+@pytest.mark.parametrize('value', ['', '0', '-1', '1.5', '01', ' 5', '1000000'])
+def test_invalid_size_refuses_before_mutation(monkeypatch, value):
+    target = setup(monkeypatch)
+    monkeypatch.setenv('CODEX_RUNNER_NATIVE_SIZE_GIB', value)
+    with pytest.raises(Refused): storage.allocate(target)
+    assert not target.exists()

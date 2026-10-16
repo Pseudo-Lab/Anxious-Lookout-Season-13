@@ -4,6 +4,7 @@ No adoption, resizing, unmount or deletion. Failed partial allocation is retaine
 for explicit reconciliation. Host mount namespace/propagation is a rollout gate.
 """
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -14,7 +15,18 @@ from runner.lifecycle import require
 BYTES = 1024 ** 3
 
 
+def sizes():
+    """Trusted operator settings, in whole GiB; never resize existing images."""
+    result = {}
+    for kind, default in [('native', '5'), ('control', '1')]:
+        value = os.environ.get('CODEX_RUNNER_'+kind.upper()+'_SIZE_GIB', default)
+        require(re.fullmatch(r'[1-9][0-9]{0,5}', value) is not None)
+        result[kind] = int(value) * BYTES
+    return result
+
+
 def allocate(storage, *, run=subprocess.run):
+    limits = sizes()
     storage = Path(storage)
     require(os.geteuid() == 0 and storage.is_absolute() and storage == storage.resolve()
             and str(storage).startswith('/var/lib/anxious-lookout/'))
@@ -25,7 +37,7 @@ def allocate(storage, *, run=subprocess.run):
                 for line in mounts))
     # Retained owners consume space even when their Pods are idle. Keep root-disk
     # headroom independent of the concurrent Pod count.
-    require(shutil.disk_usage(storage.parent).free >= 2 * BYTES + 10 * BYTES)
+    require(shutil.disk_usage(storage.parent).free >= sum(limits.values()) + 10 * BYTES)
     # This mkdir is the durable no-replay permit. Any failure keeps it in place.
     storage.mkdir(mode=0o700)
     for kind in ('native', 'control'):
@@ -34,7 +46,7 @@ def allocate(storage, *, run=subprocess.run):
         backing = storage/(kind+'.ext4')
         descriptor = os.open(backing, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
-            os.posix_fallocate(descriptor, 0, BYTES)
+            os.posix_fallocate(descriptor, 0, limits[kind])
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
@@ -56,21 +68,23 @@ def data_path(storage, kind):
 
 
 def verify(storage):
+    limits = sizes()
     storage = Path(storage)
     require(storage == storage.resolve())
     for kind in ('native', 'control'):
         target = storage/kind
         require(target == target.resolve() and os.path.ismount(target))
         info = os.statvfs(target)
-        require(0 < info.f_blocks * info.f_frsize <= BYTES)
+        require(0 < info.f_blocks * info.f_frsize <= limits[kind])
         backing = storage/(kind+'.ext4')
-        require(backing == backing.resolve() and backing.is_file() and backing.stat().st_size == BYTES
+        require(backing == backing.resolve() and backing.is_file() and backing.stat().st_size == limits[kind]
                 and backing.stat().st_uid == 0 and backing.stat().st_nlink == 1
                 and not backing.stat().st_mode & 0o077)
 
 
 def restore(storage, *, run=subprocess.run):
     """Mount existing images only; never create or format on reboot."""
+    limits = sizes()
     storage = Path(storage)
     require(os.geteuid() == 0 and storage.is_absolute() and storage == storage.resolve()
             and str(storage).startswith('/var/lib/anxious-lookout/')
@@ -81,7 +95,7 @@ def restore(storage, *, run=subprocess.run):
                 for line in mounts))
     for kind in ('native', 'control'):
         backing, target = storage/(kind+'.ext4'), storage/kind
-        require(backing == backing.resolve() and backing.is_file() and backing.stat().st_size == BYTES
+        require(backing == backing.resolve() and backing.is_file() and backing.stat().st_size == limits[kind]
                 and backing.stat().st_uid == 0 and backing.stat().st_nlink == 1
                 and not backing.stat().st_mode & 0o077 and target == target.resolve() and target.is_dir())
         if not os.path.ismount(target):

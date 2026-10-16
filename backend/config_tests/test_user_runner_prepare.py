@@ -115,11 +115,14 @@ def test_nonroot_init_copies_projected_secret_into_private_tmpfs():
     assert (private/'transport-token').stat().st_mode & 0o777 == 0o600
 
 
-def test_controller_prepares_existing_http_intent_with_bounded_storage_hook(admin, owner, prepared, tmp_path):
+@pytest.mark.parametrize('native,control', [(5,1), (7,2)])
+def test_controller_prepares_existing_http_intent_with_bounded_storage_hook(admin, owner, prepared, tmp_path, monkeypatch, native, control):
     from datetime import datetime, timezone
     from sqlalchemy import text
     from app.runner_registry import Registry
     inputs, _, objects = prepared
+    monkeypatch.setenv('CODEX_RUNNER_NATIVE_SIZE_GIB', str(native))
+    monkeypatch.setenv('CODEX_RUNNER_CONTROL_SIZE_GIB', str(control))
     other = uuid4()
     with admin.begin() as db:
         db.execute(text("INSERT INTO auth.accounts(id,github_id,login,role,is_approved) VALUES(:id,'54321','other','editor',true)"), {'id':other})
@@ -137,6 +140,8 @@ def test_controller_prepares_existing_http_intent_with_bounded_storage_hook(admi
     config = json.loads((output/'runtime.json').read_text())
     assert config['plan']['state'] == str(state.state_id) and config['plan']['owner'] == str(other)
     assert len(allocated) == 1 and len(objects) == 10
+    assert [obj['spec']['capacity']['storage'] for obj in objects[5:] if obj['kind']=='PersistentVolume'] == [f'{native}Gi', f'{control}Gi']
+    assert [obj['spec']['resources']['requests']['storage'] for obj in objects[5:] if obj['kind']=='PersistentVolumeClaim'] == [f'{native}Gi', f'{control}Gi']
     assert all(obj['spec']['local']['path'].endswith('/data') for obj in objects[5:] if obj['kind']=='PersistentVolume')
     with pytest.raises(FileExistsError):
         tool.prepare({**inputs,'owner':str(other)}, output, from_intent=True, storage_allocator=bounded)
