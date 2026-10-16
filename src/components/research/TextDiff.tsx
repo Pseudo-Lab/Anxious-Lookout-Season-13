@@ -62,7 +62,14 @@ export default function TextDiff({
   beforeTitle?: string;
   afterTitle?: string;
 }) {
-  const diff = useMemo(() => lineDiff(before, after), [before, after]);
+  // 계산이 어떤 이유로든 실패하면 비교 불가로 안내한다(비교 영역 밖 편집 화면까지 오류 화면으로 바뀌지 않게).
+  const diff = useMemo(() => {
+    try {
+      return lineDiff(before, after);
+    } catch {
+      return null;
+    }
+  }, [before, after]);
   const blocks = useMemo(() => (diff ? foldContext(diff.rows) : []), [diff]);
   const [opened, setOpened] = useState<Set<number>>(new Set());
   // 한 번에 그리는 줄 수 상한(아주 긴 본문에서 화면이 오래 멈추지 않게). 나머지는 '더 보기'로 이어서 그린다.

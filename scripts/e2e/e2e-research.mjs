@@ -1739,6 +1739,21 @@ let docEUrl;
   check("W4. many rows: first 1000 rendered, rest on demand", r3.elapsed < 5000 && first === 1000 && (await appears(more)), JSON.stringify({ elapsed: r3.elapsed, first }));
   await more.click();
   check("W4. many rows: show more renders the rest", (await r3.cmp.locator("[data-diff]").count()) > 1000 && (await appears(r3.cmp.getByText("+1500줄"))));
+  // 리뷰 F3: 아주 많은 줄 삭제·교체(200k자 이하)에서도 계산이 실패하지 않고, 실패하더라도 비교 영역 밖 화면은 그대로다.
+  const intact = async (r) =>
+    (await page.getByText("문제가 발생했습니다").count()) === 0 &&
+    (await main.getByRole("heading", { name: "버전 기록" }).isVisible()) &&
+    (await r.cmp.locator('[data-diff], p[role="status"]').count()) > 0;
+  const r4 = await timeCompare(`# Title\n${"\n".repeat(150000)}Text`, "# Title\nText", "빈 줄 대량 삭제");
+  check("W4. 150k blank lines deleted: no error screen, bounded", r4.status === 200 && (await intact(r4)) && r4.elapsed < 8000, JSON.stringify({ elapsed: r4.elapsed }));
+  const shortA = Array.from({ length: 20000 }, (_, k) => `a${k}`).join("\n");
+  const shortB = Array.from({ length: 20000 }, (_, k) => `b${k}`).join("\n");
+  const r5 = await timeCompare(shortA, shortB, "짧은 줄 대량 교체");
+  check(
+    "W4. 20k short lines replaced: no error screen, bounded rows",
+    r5.status === 200 && (await intact(r5)) && r5.elapsed < 8000 && (await r5.cmp.locator("[data-diff]").count()) <= 1000,
+    JSON.stringify({ elapsed: r5.elapsed, len: shortA.length })
+  );
   await page.context().close();
 }
 

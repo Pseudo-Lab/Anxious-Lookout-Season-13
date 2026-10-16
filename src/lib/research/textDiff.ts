@@ -91,11 +91,11 @@ export function lineDiff(before: string, after: string, timeout = DIFF_TIMEOUT_M
         if (paired) addRows.push({ kind: "add", newNo: newNo++, text: adds[k], parts: parts?.[1] });
       });
       removed += dels.length;
-      rows.push(...delRows);
+      append(rows, delRows);
       if (next?.added) {
         if (!paired) for (const text of adds) addRows.push({ kind: "add", newNo: newNo++, text });
         added += adds.length;
-        rows.push(...addRows);
+        append(rows, addRows);
         i++;
       }
     } else if (c.added) {
@@ -109,6 +109,11 @@ export function lineDiff(before: string, after: string, timeout = DIFF_TIMEOUT_M
 }
 
 export type Block = { kind: "rows"; rows: Row[] } | { kind: "fold"; id: number; rows: Row[] };
+
+// 큰 배열을 함수 인자로 펼치면(push(...rows)) 엔진 인자 개수 한도를 넘는다(리뷰 F3). 항상 하나씩 이어 붙인다.
+function append<T>(target: T[], items: readonly T[]) {
+  for (const item of items) target.push(item);
+}
 
 /** 바뀐 줄 주변 context줄만 남기고 나머지 같은 줄은 접는다. */
 export function foldContext(rows: Row[], context = 3): Block[] {
@@ -127,11 +132,11 @@ export function foldContext(rows: Row[], context = 3): Block[] {
     const head = i === 0 ? 0 : context;
     const tail = j === rows.length ? 0 : context;
     if (run.length > head + tail + 1) {
-      current.push(...run.slice(0, head));
+      append(current, run.slice(0, head));
       if (current.length) blocks.push({ kind: "rows", rows: current });
       blocks.push({ kind: "fold", id: id++, rows: run.slice(head, run.length - tail) });
       current = run.slice(run.length - tail);
-    } else current.push(...run);
+    } else append(current, run);
     i = j;
   }
   if (current.length) blocks.push({ kind: "rows", rows: current });
