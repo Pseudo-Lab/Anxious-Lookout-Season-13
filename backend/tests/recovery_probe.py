@@ -19,8 +19,10 @@ TABLES = ("auth.accounts", "auth.permission_audit", "research.items", "research.
 def signature(connection, revoked_grants=False):
     tables = TABLES
     marker = connection.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one()
-    if marker == "0004_publication":
+    if marker in {"0004_publication", "0005_writing"}:
         tables += ("research.publications", "research.publication_heads")
+    if marker == '0005_writing':
+        tables += ('research.document_drafts', 'research.document_proposals')
     def rows(name):
         values = [dict(row._mapping) for row in connection.execute(text("SELECT * FROM " + name))]
         if name == "research.conversations" and revoked_grants:
@@ -42,7 +44,7 @@ def run(mode):
             version = client.get("http://m2-api:8080/api/version").json()
             assert version["sha"] == os.environ["M2_BASELINE_SHA"]
         with source.connect() as db:
-            assert validate_research(db) in {"0003_sessions", "0004_publication"}
+            assert validate_research(db) in {"0003_sessions", "0004_publication", "0005_writing"}
             assert db.execute(text("SELECT count(*) FROM research.versions")).scalar_one() >= 3
             assert db.execute(text("SELECT count(*) FROM research.relations")).scalar_one() >= 1
             assert db.execute(text("SELECT count(*) FROM research.conversations")).scalar_one() >= 1

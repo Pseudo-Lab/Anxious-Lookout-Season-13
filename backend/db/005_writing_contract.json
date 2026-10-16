@@ -1,0 +1,292 @@
+{
+  "document_drafts": {
+    "checks": {
+      "document_drafts_base_document_version_check": "base_document_version > 0",
+      "document_drafts_check": "document_id IS NULL AND base_document_version IS NULL AND base_version_id IS NULL OR document_id IS NOT NULL AND base_document_version IS NOT NULL AND base_version_id IS NOT NULL",
+      "document_drafts_content_check": "length(content) <= 200000",
+      "document_drafts_kind_check": "kind::text = 'document'::text",
+      "document_drafts_revision_check": "revision > 0",
+      "document_drafts_state_check": "state::text = ANY (ARRAY['active'::character varying, 'committed'::character varying, 'discarded'::character varying]::text[])"
+    },
+    "columns": {
+      "base_document_version": [
+        "INTEGER",
+        true,
+        null
+      ],
+      "base_version_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "content": [
+        "TEXT",
+        false,
+        null
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "document_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "kind": [
+        "VARCHAR(16)",
+        false,
+        "'document'::character varying"
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "revision": [
+        "INTEGER",
+        false,
+        "1"
+      ],
+      "state": [
+        "VARCHAR(16)",
+        false,
+        "'active'::character varying"
+      ],
+      "title": [
+        "VARCHAR(300)",
+        false,
+        null
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "base_version_id",
+          "document_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_columns": [
+          "id",
+          "item_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "versions"
+      },
+      {
+        "constrained_columns": [
+          "document_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_columns": [
+          "id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "items"
+      },
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_columns": [
+          "id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts"
+      }
+    ],
+    "indexes": {
+      "research_active_document_draft": {
+        "columns": [
+          "owner_id",
+          "document_id"
+        ],
+        "unique": true,
+        "where": "((state)::text = 'active'::text)"
+      },
+      "research_draft_owner": {
+        "columns": [
+          "owner_id",
+          "state",
+          "updated_at",
+          "id"
+        ],
+        "unique": false,
+        "where": null
+      }
+    },
+    "primary": [
+      "id"
+    ],
+    "unique": {}
+  },
+  "document_proposals": {
+    "checks": {
+      "document_proposals_base_document_version_check": "base_document_version > 0",
+      "document_proposals_check": "(status::text = 'accepted'::text) = (accepted_version_id IS NOT NULL)",
+      "document_proposals_content_check": "length(content) >= 1 AND length(content) <= 200000",
+      "document_proposals_kind_check": "kind::text = 'document'::text",
+      "document_proposals_status_check": "status::text = ANY (ARRAY['pending'::character varying, 'accepted'::character varying, 'discarded'::character varying]::text[])",
+      "document_proposals_title_check": "length(btrim(title::text)) > 0",
+      "document_proposals_version_check": "version > 0"
+    },
+    "columns": {
+      "accepted_version_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "base_document_version": [
+        "INTEGER",
+        false,
+        null
+      ],
+      "base_version_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "content": [
+        "TEXT",
+        false,
+        null
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "document_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "kind": [
+        "VARCHAR(16)",
+        false,
+        "'document'::character varying"
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "status": [
+        "VARCHAR(16)",
+        false,
+        "'pending'::character varying"
+      ],
+      "title": [
+        "VARCHAR(300)",
+        false,
+        null
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "version": [
+        "INTEGER",
+        false,
+        "1"
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "accepted_version_id",
+          "document_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_columns": [
+          "id",
+          "item_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "versions"
+      },
+      {
+        "constrained_columns": [
+          "base_version_id",
+          "document_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_columns": [
+          "id",
+          "item_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "versions"
+      },
+      {
+        "constrained_columns": [
+          "document_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_columns": [
+          "id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "items"
+      },
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_columns": [
+          "id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts"
+      }
+    ],
+    "indexes": {
+      "research_proposal_owner": {
+        "columns": [
+          "owner_id",
+          "document_id",
+          "updated_at",
+          "id"
+        ],
+        "unique": false,
+        "where": null
+      }
+    },
+    "primary": [
+      "id"
+    ],
+    "unique": {}
+  }
+}
