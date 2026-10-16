@@ -460,9 +460,9 @@ await chat.getByRole("button", { name: "보내기" }).click();
 check("R9. running state shown", await appears(chat.getByText("Codex가 응답하는 중입니다.")));
 await page.reload(); // 진행 중 재접속
 check("R9. reply after reconnect (polling)", await appears(chat.getByText("모의 응답:"), 15000));
-// 대화 목록 탭은 general(도구 없음): 모의 모델의 research_list 호출은 서버 거부로 표시된다.
-check("R9. user message shows accepted scope (general)", await appears(chat.locator("li[data-role=user]", { hasText: "질문 하나" }).getByText("보낸 범위: 일반 질문")));
-check("R9. out-of-scope tool call shown as rejected", await appears(chat.getByText("허용되지 않는 도구라 서버가 실행하지 않았습니다").first()));
+// 대화 목록 탭은 general: #14부터 소유자 도구 전부라 모의 모델의 research_list 호출이 실행된다(거부는 R22 공개 글).
+check("R9. user message shows sent page hint (general)", await appears(chat.locator("li[data-role=user]", { hasText: "질문 하나" }).getByText("보낸 화면: 일반")));
+check("R9. owner tool call completed on general page", await appears(chat.locator("li", { hasText: "research_list" }).last().getByText("completed")));
 await chat.getByRole("button", { name: /research_list/ }).first().click();
 check("R9. tool input shown inert", await appears(chat.locator("pre", { hasText: '"query": "질문 하나"' })));
 await chat.getByRole("button", { name: "저장된 원본 기록 보기" }).click();
@@ -866,20 +866,23 @@ async function confirmSingleTurn(label, text) {
   });
   const lastTool = () => chat.locator("li", { hasText: "research_list" }).last();
 
-  // general 페이지: 도구 없음, 질문은 가능
-  check("R22. general page scope shown", await appears(chat.getByText("다음 질문 범위: 일반 질문")));
+  // general 페이지: #14부터 소유자 도구 전부(화면은 참고일 뿐)
+  check("R22. general page hint shown", await appears(chat.getByText("보고 있는 화면: 일반")));
+  check("R22. owner wording: no per-page tool limits", await appears(chat.getByText("연결 관계와 보관도 처리합니다", { exact: false })));
+  check("R22. web search saving wording", await appears(chat.getByText("출처 주소와 수집 시각을 붙여 자료로 저장합니다", { exact: false })));
+  check("R22. no shell/Bash capability advertised (#23)", !/Bash|셸|명령(을)? 실행/.test(await chat.innerText()));
   check("R22. memory wording: earlier conversation continues", await appears(chat.getByText("이전 대화 내용은 이 대화에 계속 이어집니다.")));
   await chat.getByLabel("메시지").fill("일반 페이지 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
   await chat.getByText("모의 응답: 일반 페이지 질문").waitFor({ timeout: 15000 });
   check("R22. general page sends kind general", JSON.stringify(bodies.at(-1)?.page) === '{"kind":"general"}', JSON.stringify(bodies.at(-1)));
   check("R22. general: draft cleared after success", (await chat.getByLabel("메시지").inputValue()) === "");
-  check("R22. general: tool call rejected", await appears(lastTool().getByText("거부됨")));
+  check("R22. general: owner tool completed", await appears(lastTool().getByText("completed")));
 
   // 자료 목록(작업 공간): research_list 허용
   await page.goto(U("/research/?tab=materials"));
   await chat.getByLabel("메시지").waitFor();
-  check("R22. workspace scope shown", await appears(chat.getByText("다음 질문 범위: 내 자료")));
+  check("R22. workspace hint shown", await appears(chat.getByText("보고 있는 화면: 내 자료")));
   await chat.getByLabel("메시지").fill("자료 목록 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
   await chat.getByText("모의 응답: 자료 목록 질문").waitFor({ timeout: 15000 });
@@ -890,7 +893,7 @@ async function confirmSingleTurn(label, text) {
   const materialId = new URL(materialAUrl).searchParams.get("id");
   await page.goto(materialAUrl);
   await chat.getByLabel("메시지").waitFor();
-  check("R22. material page scope shown", await appears(chat.getByText("다음 질문 범위: 이 자료")));
+  check("R22. material page hint shown", await appears(chat.getByText("보고 있는 화면: 이 자료")));
   await chat.getByLabel("메시지").fill("자료 페이지 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
   await chat.getByText("Codex가 응답하는 중입니다.").waitFor();
@@ -898,9 +901,29 @@ async function confirmSingleTurn(label, text) {
   await page.waitForURL(U("/"));
   await chat.getByText("모의 응답: 자료 페이지 질문").waitFor({ timeout: 15000 });
   check("R22. material page sends material + id", bodies.at(-1)?.page?.kind === "material" && bodies.at(-1)?.page?.resourceId === materialId, JSON.stringify(bodies.at(-1)?.page));
-  check("R22. navigation during run: sent scope stays material", await appears(chat.locator("li[data-role=user]", { hasText: "자료 페이지 질문" }).getByText(/보낸 범위: 이 자료/)));
-  check("R22. next scope follows current page", await appears(chat.getByText("다음 질문 범위: 일반 질문")));
-  check("R22. material scope: list tool rejected", await appears(lastTool().getByText("거부됨")));
+  check("R22. navigation during run: sent page stays material", await appears(chat.locator("li[data-role=user]", { hasText: "자료 페이지 질문" }).getByText(/보낸 화면: 이 자료/)));
+  check("R22. next hint follows current page", await appears(chat.getByText("보고 있는 화면: 일반")));
+  check("R22. material page: list tool not limited by page", await appears(lastTool().getByText("completed")));
+
+  // 공개 글: 유일한 도구 경계. 소유자 도구 호출은 서버가 거부한다.
+  const pub22 = await api.send("POST", "/research/documents", { title: "범위 공개 글", content: "공개 본문" });
+  const pv22 = await api.get(`/research/documents/${pub22.body.id}/publication-preview`);
+  const pubd22 = await api.send("POST", `/research/documents/${pub22.body.id}/publications`, {
+    versionId: pv22.versionId,
+    expectedVersion: pv22.expectedVersion,
+    previewToken: pv22.previewToken,
+  });
+  check("R22. setup: publication", pubd22.status === 201, String(pubd22.status));
+  await page.goto(U(`/public/document/?id=${pub22.body.id}`));
+  await chat.getByLabel("메시지").waitFor();
+  check("R22. public document scope shown", await appears(chat.getByText("다음 질문 범위: 이 공개 글")));
+  check("R22. public wording: read only, no web search", await appears(chat.getByText("웹을 검색하거나 아무것도 저장·수정하지 않습니다", { exact: false })));
+  await chat.getByLabel("메시지").fill("공개 글 질문");
+  await chat.getByRole("button", { name: "보내기" }).click();
+  await chat.getByText("모의 응답: 공개 글 질문").waitFor({ timeout: 15000 });
+  check("R22. public: sent scope badge", await appears(chat.locator("li[data-role=user]", { hasText: "공개 글 질문" }).getByText(/보낸 범위: 이 공개 글/)));
+  check("R22. public: owner tool rejected", await appears(lastTool().getByText("거부됨")));
+  check("R22. public: rejection wording", await appears(lastTool().getByText("허용되지 않는 도구라 서버가 실행하지 않았습니다", { exact: false })));
   await page.unroute("**/api/research/sessions/*/messages");
 
   // 기존 대화 링크: 대화창에서 열고 입력창·polling은 하나
@@ -942,7 +965,7 @@ async function confirmSingleTurn(label, text) {
   await chat.getByText("모의 응답: 범위 고정 재전송").first().waitFor({ timeout: 15000 });
   await header.getByRole("link", { name: "상태" }).first().click();
   await page.waitForURL(/\/status\/$/);
-  check("R22. retry notice: original scope is used", await appears(chat.getByText("처음 보낸 범위(이 자료)로 처리됩니다", { exact: false })));
+  check("R22. retry notice: original page is used", await appears(chat.getByText("처음 보낸 화면(이 자료) 기준으로 처리됩니다", { exact: false })));
   await chat.getByRole("button", { name: "다시 보내기" }).click();
   await chat.getByRole("button", { name: "보내기", exact: true }).waitFor();
   check(

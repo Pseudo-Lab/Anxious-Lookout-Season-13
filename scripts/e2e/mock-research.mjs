@@ -515,22 +515,28 @@ function handleMutation(owner, method, path, b, user) {
 function sessionSummary(s) {
   const out = { id: s.id, title: s.title, state: s.state, createdAt: s.createdAt, updatedAt: s.updatedAt, version: s.version };
   if (s.context) out.context = s.context;
-  // #9: 가장 최근 접수 요청의 범위(없으면 general/none)
+  // #9: 가장 최근 접수 요청의 범위(없으면 general/owner_research)
   Object.assign(out, s.scope ?? GENERAL_SCOPE);
   return out;
 }
 
 // #9 api-contracts/issue9-page-chat.md 페이지 범위. 서버가 자원을 확인해 정한다(브라우저의 도구 목록·URL을 받지 않는다).
-const READ4 = ["research_get", "research_versions", "research_version_get", "research_relations"];
+// #14: 소유자 화면은 모두 같은 owner_research(소유자 DB 도구 전부)이고 page는 힌트다. 공개 글만 읽기 범위로 남는다.
+const OWNER_TOOLS = [
+  "research_list", "research_get", "research_versions", "research_version_get", "research_relations",
+  "research_material_save", "research_document_save", "research_material_update", "research_document_update",
+  "research_relation_save", "research_relation_update", "research_archive",
+];
+const OWNER = { capability: "owner_research", tools: OWNER_TOOLS };
 const PAGE_KINDS = {
-  general: { capability: "none", tools: [] },
+  general: OWNER,
   public_document: { capability: "public_context_read", tools: ["research_page_context"], detail: true },
-  material: { capability: "material_read_update", tools: [...READ4, "research_material_update"], detail: true },
-  document: { capability: "document_read_update", tools: [...READ4, "research_document_update"], detail: true },
-  material_workspace: { capability: "material_list_save", tools: ["research_list", "research_material_save"] },
-  document_workspace: { capability: "document_list_save", tools: ["research_list", "research_document_save"] },
+  material: { ...OWNER, detail: true },
+  document: { ...OWNER, detail: true },
+  material_workspace: OWNER,
+  document_workspace: OWNER,
 };
-const GENERAL_SCOPE = { page: { kind: "general" }, capability: "none", allowedTools: [] };
+const GENERAL_SCOPE = { page: { kind: "general" }, capability: OWNER.capability, allowedTools: OWNER.tools };
 
 function resolvePage(owner, p) {
   if (p === undefined) return { scope: GENERAL_SCOPE };

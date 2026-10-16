@@ -298,7 +298,8 @@ async function dropFirstSend(p) {
   check("O8. continue created exactly one more document", (await fixtureDocs()) === before + 2);
 }
 
-// I. #9 통합(실제 API + 실제 runner + offline fixture): 요청별 페이지 범위를 서버가 고정·강제하고 화면이 그대로 표시한다.
+// I. #9/#14 통합(실제 API + 실제 runner + offline fixture): 요청별 화면 문맥을 서버가 고정하고 화면이 그대로 표시한다.
+//    #14: 소유자 화면은 모두 owner_research(화면은 힌트), 공개 글만 research_page_context 읽기 범위.
 //    fixture native는 매 turn research_document_save(또는 /fixture/page-context에서 research_page_context)를 호출한다.
 {
   const s3 = await newSession(page, "범위 세션", U("/"));
@@ -313,34 +314,32 @@ async function dropFirstSend(p) {
   const lastTool = (name = "research_document_save") => chat.locator("li", { hasText: name }).last();
   let docs = await fixtureDocs();
 
-  // I1. general(홈): 도구 없는 질문·답변. 실제 callback 거부가 rejected로 투영되고 문서는 생기지 않는다.
-  check("I1. home shows general scope", await appears(chat.getByText("다음 질문 범위: 일반 질문")));
+  // I1. general(홈): #14부터 소유자 도구 전부. 실제 callback이 저장을 실행하고 문서가 하나 생긴다.
+  check("I1. home shows general page hint", await appears(chat.getByText("보고 있는 화면: 일반")));
   await send(chat, "일반 페이지 질문");
   check("I1. general: answer shown", await appears(answers().nth(0)));
   await settled(chat);
   check("I1. general: body page {kind:general}", JSON.stringify(bodies.at(-1)?.body.page) === '{"kind":"general"}', JSON.stringify(bodies.at(-1)?.body));
-  check("I1. general: accepted scope badge from server", await appears(userMsgs(chat, "일반 페이지 질문").getByText("보낸 범위: 일반 질문")));
-  check(
-    "I1. general: real tool callback refused -> rejected shown",
-    (await appears(lastTool().getByText("거부됨"))) && (await appears(lastTool().getByText("허용되지 않는 도구라 서버가 실행하지 않았습니다")))
-  );
-  check("I1. general: no document written", (await fixtureDocs()) === docs, `${docs} -> ${await fixtureDocs()}`);
+  check("I1. general: accepted page badge from server", await appears(userMsgs(chat, "일반 페이지 질문").getByText("보낸 화면: 일반")));
+  check("I1. general: owner tool completed", await appears(lastTool().getByText("completed")));
+  check("I1. general: exactly one document written", (await fixtureDocs()) === docs + 1, `${docs} -> ${await fixtureDocs()}`);
+  docs = await fixtureDocs();
 
-  // I2. 문서 작업 공간: 같은 대화에서 다음 질문만 저장 허용
+  // I2. 문서 작업 공간: 같은 대화에서 화면 힌트만 바뀐다
   await page.goto(DOCS);
   await chat.getByLabel("메시지").waitFor();
-  check("I2. documents tab shows document_workspace scope", await appears(chat.getByText("다음 질문 범위: 내 문서")));
+  check("I2. documents tab shows document_workspace hint", await appears(chat.getByText("보고 있는 화면: 내 문서")));
   await send(chat, "문서 목록 질문");
   check("I2. workspace: answer shown", await appears(answers().nth(1)));
   await settled(chat);
   check("I2. workspace: body page", JSON.stringify(bodies.at(-1)?.body.page) === '{"kind":"document_workspace"}', JSON.stringify(bodies.at(-1)?.body.page));
-  check("I2. workspace: scope badge", await appears(userMsgs(chat, "문서 목록 질문").getByText("보낸 범위: 내 문서")));
+  check("I2. workspace: page badge", await appears(userMsgs(chat, "문서 목록 질문").getByText("보낸 화면: 내 문서")));
   check("I2. workspace: tool completed", await appears(lastTool().getByText("completed")));
   check("I2. workspace: exactly one document written", (await fixtureDocs()) === docs + 1, `${docs} -> ${await fixtureDocs()}`);
   check("I2. earlier general turn kept in same conversation", (await userMsgs(chat, "일반 페이지 질문").count()) === 1);
   docs = await fixtureDocs();
 
-  // I3. 실행 중 페이지 이동: 접수된 요청 범위(문서 작업 공간)는 바뀌지 않는다
+  // I3. 실행 중 페이지 이동: 접수된 요청의 화면 문맥(문서 작업 공간)은 바뀌지 않는다
   await send(chat, "/fixture/hold");
   await chat.getByText("Codex가 응답하는 중입니다.").waitFor();
   await header.getByRole("link", { name: "홈" }).first().click();
@@ -349,8 +348,8 @@ async function dropFirstSend(p) {
   await settled(chat);
   check("I3. navigation during run: tool still completed", await appears(lastTool().getByText("completed")));
   check("I3. navigation during run: document written once", (await fixtureDocs()) === docs + 1, `${docs} -> ${await fixtureDocs()}`);
-  check("I3. sent scope stays 내 문서", await appears(userMsgs(chat, "/fixture/hold").getByText("보낸 범위: 내 문서")));
-  check("I3. next scope follows current page", await appears(chat.getByText("다음 질문 범위: 일반 질문")));
+  check("I3. sent page stays 내 문서", await appears(userMsgs(chat, "/fixture/hold").getByText("보낸 화면: 내 문서")));
+  check("I3. next hint follows current page", await appears(chat.getByText("보고 있는 화면: 일반")));
   docs = await fixtureDocs();
 
   // I4. 결과 불명 → 다른 페이지로 이동 → 다시 보내기: 처음 key·body(page 포함) 그대로, 실제 replay, 409 없음, 중복 없음
@@ -374,7 +373,7 @@ async function dropFirstSend(p) {
   await settled(chat);
   await header.getByRole("link", { name: "상태" }).first().click();
   await page.waitForURL(/\/status\/$/);
-  check("I4. retry notice names original scope", await appears(chat.getByText("처음 보낸 범위(내 문서)로 처리됩니다", { exact: false })));
+  check("I4. retry notice names original page", await appears(chat.getByText("처음 보낸 화면(내 문서) 기준으로 처리됩니다", { exact: false })));
   await chat.getByRole("button", { name: "다시 보내기" }).click();
   await chat.getByRole("button", { name: "보내기", exact: true }).waitFor();
   check(
@@ -392,14 +391,14 @@ async function dropFirstSend(p) {
   // I5. 없는 문서 상세에서 질문: 접수 전 404, general로 낮추지 않음, 입력 유지
   await page.goto(U(`/research/document/?id=${crypto.randomUUID()}`));
   await chat.getByLabel("메시지").waitFor();
-  check("I5. detail page shows document scope", await appears(chat.getByText("다음 질문 범위: 이 문서")));
+  check("I5. detail page shows document hint", await appears(chat.getByText("보고 있는 화면: 이 문서")));
   await send(chat, "없는 문서 질문");
   check("I5. unknown resource -> refused before admission", await appears(chat.getByText("메시지를 보내지 못했습니다.")));
   check("I5. input kept", (await chat.getByLabel("메시지").inputValue()) === "없는 문서 질문");
   check("I5. nothing added", (await userMsgs(chat, "없는 문서 질문").count()) === 0 && (await fixtureDocs()) === docs);
   await chat.getByLabel("메시지").fill("");
 
-  // I6. 공개 글 상세: research_page_context만 허용. 같은 호출을 홈에서 보내면 거부.
+  // I6. 공개 글 상세: research_page_context만 허용(소유자 도구 거부). 같은 page-context 호출을 홈(owner 모드)에서 보내면 거부.
   const pubDoc = await api.send("POST", "/research/documents", { title: "범위 공개 글", content: "공개 범위 본문" });
   const pv = pubDoc.status === 201 ? await api.get(`/research/documents/${pubDoc.body.id}/publication-preview`) : null;
   const pub = pv?.status === 200
@@ -424,10 +423,20 @@ async function dropFirstSend(p) {
     );
     check("I6. public: page context tool completed", await appears(lastTool("research_page_context").getByText("completed")));
     check("I6. public: badge carries server title", await appears(userMsgs(chat, "/fixture/page-context").first().getByText(/보낸 범위: 이 공개 글 · 범위 공개 글/)));
+    // #14: 공개 글은 유일한 도구 경계. 소유자 저장 호출은 실제 callback이 거부하고 문서는 생기지 않는다.
+    docs = await fixtureDocs();
+    await send(chat, "공개 글 저장 시도");
+    check("I6. public: answer shown for owner-tool turn", await appears(answers().nth(5)));
+    await settled(chat);
+    check(
+      "I6. public: owner save refused -> rejected shown",
+      (await appears(lastTool().getByText("거부됨"))) && (await appears(lastTool().getByText("허용되지 않는 도구라 서버가 실행하지 않았습니다", { exact: false })))
+    );
+    check("I6. public: no document written", (await fixtureDocs()) === docs, `${docs} -> ${await fixtureDocs()}`);
     await page.goto(U("/"));
     await chat.getByLabel("메시지").waitFor();
     await send(chat, "/fixture/page-context");
-    check("I6. home: answer shown", await appears(answers().nth(5)));
+    check("I6. home: answer shown", await appears(answers().nth(6)));
     await settled(chat);
     check("I6. home: same page-context call rejected (no historical context authority)", await appears(lastTool("research_page_context").getByText("거부됨")));
   }
