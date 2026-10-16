@@ -14,9 +14,11 @@ the Store enforces ownership. The existing per-request native catalog is unchang
 Tool descriptions explain web material provenance and versioned, citation-preserving
 writing. No new publish or destructive deletion tool is added.
 
-This checkpoint does not enable shell/web or claim #14 operational acceptance.
-Subsequent slices must validate the pinned Codex 0.160.1 binary and OS sandbox,
-command concurrency/time/resource controls, private file isolation and turn timing.
+The first checkpoint did not enable shell/web or claim #14 operational acceptance.
+The web/timing slice below follows it. By user/PM decision on 2026-10-16, Bash,
+OS sandbox validation, command concurrency/time/resource controls and private file
+isolation are excluded from #14 and tracked in #23, whose start requires a user
+decision. Shell remains disabled; BASH-BOUNDARY.md retains the investigation.
 The pinned generated schema exposes thread/start developerInstructions, but the
 turn/start schema has no direct developerInstructions override. The compact mode
 hint therefore remains attached to user input for now; public access is never

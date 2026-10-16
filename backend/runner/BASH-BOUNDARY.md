@@ -1,8 +1,12 @@
 # Issue 14 Bash boundary investigation (2026-10-16)
 
-Bash remains disabled. Do not treat enabling `features.shell_tool` or selecting
-workspace-write as proof of command isolation. PM decides whether this patch should
-include Bash after reviewing these facts and alternatives.
+Bash remains disabled. The user/PM decision on 2026-10-16 excludes Bash from #14
+and moves executor isolation, resource bounds and image rebuilds to
+[issue #23](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/23).
+The user will decide when #23 starts; this report does not authorize that work.
+Do not treat enabling `features.shell_tool` or selecting workspace-write as proof
+of command isolation. The observations and alternatives below are retained as
+investigation evidence for #23.
 
 ## Reproduced facts
 
@@ -52,7 +56,7 @@ build/import/transition. A future Dockerfile change must be paired with enforcem
 - Existing CNP permits runner-to-provider traffic for Codex. Bash needs a separate
   enforced no-network namespace/profile; retaining CNP alone is not deny-network.
 
-## Alternatives for PM/user decision
+## Investigated alternatives (option 1 selected for #14)
 
 1. Defer Bash; ship owner DB tools, native web search and timing first. This is the
    current implemented state. No sandbox or CNP weakening is required.
