@@ -45,6 +45,19 @@ For new owners, optional `executor` in rollout values is validated and copied to
 controller inputs; preparation publishes v2 only when supplied. Existing published
 bindings remain unchanged when controller inputs change.
 
+The concrete rollout input template is
+[`values.example.json`](../../infra/hosting/m3/multi-user-runners/rollout/values.example.json).
+Its `executor` block demonstrates the 30-second/65536-byte opt-in. The
+`registry.invalid` executor image and all-zero digest are placeholders, not a
+built or approved image. Before rendering, PM replaces this with the reviewed
+`shell-executor` image digest and replaces runtimeImage, runnerImage and
+provisionerImageId with builds containing #23 (the template's older image IDs do
+not include the bridge/init code). PM also refreshes the existing node, namespace,
+provider-account and allowlist values from reviewed operational evidence.
+Remove the entire optional `executor` block for legacy v1 new-owner preparation.
+Use the same reviewed executor object in the existing-owner maintenance inputs;
+changing rollout values alone never upgrades an existing binding.
+
 For an existing v1 owner, PM stops controllers/API/creator workers, obtains an
 accepted termination proof, and uses `python -m ops.runner_binding_image report`
 then `apply` in the reviewed maintenance container. Private inputs retain the
