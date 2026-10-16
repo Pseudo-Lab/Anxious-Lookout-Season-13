@@ -10,7 +10,8 @@ export type FetchFailure =
   | { kind: "timeout" }
   // 200이 아닌 응답. JSON 오류 본문이면 code를 담는다(Traefik 502 HTML 등은 code 없음).
   // fields는 422 validation_error의 필드별 안내(입력값은 포함되지 않음).
-  | { kind: "http"; status: number; code?: string; fields?: FieldError[] }
+  // reason은 409 conflict의 세부 사유(#22 error.details.reason). 없을 수 있다.
+  | { kind: "http"; status: number; code?: string; fields?: FieldError[]; reason?: string }
   // 2xx이지만 JSON이 아니거나 형식이 맞지 않음
   | { kind: "invalid"; status: number };
 
@@ -29,11 +30,11 @@ function isJson(res: Response): boolean {
   return (res.headers.get("content-type") ?? "").toLowerCase().includes("application/json");
 }
 
-async function readError(res: Response): Promise<{ code?: string; fields?: FieldError[] }> {
+async function readError(res: Response): Promise<{ code?: string; fields?: FieldError[]; reason?: string }> {
   if (!isJson(res)) return {};
   try {
     const body: unknown = await res.json();
-    const error = (body as { error?: { code?: unknown; fields?: unknown } } | null)?.error;
+    const error = (body as { error?: { code?: unknown; fields?: unknown; details?: { reason?: unknown } } } | null)?.error;
     const code = typeof error?.code === "string" ? error.code : undefined;
     const fields = Array.isArray(error?.fields)
       ? error.fields.filter(
@@ -41,7 +42,8 @@ async function readError(res: Response): Promise<{ code?: string; fields?: Field
             typeof (f as FieldError)?.path === "string" && typeof (f as FieldError)?.message === "string"
         )
       : undefined;
-    return { code, fields: fields?.length ? fields : undefined };
+    const reason = typeof error?.details?.reason === "string" ? error.details.reason : undefined;
+    return { code, fields: fields?.length ? fields : undefined, ...(reason ? { reason } : {}) };
   } catch {
     return {};
   }

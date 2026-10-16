@@ -46,7 +46,8 @@ function NewDocument() {
 
 export default function NewDocumentPage() {
   return (
-    <div className="mx-auto max-w-3xl">
+    // 편집기 나란히 보기를 위해 넓게 쓴다.
+    <div className="mx-auto max-w-6xl">
       <Link href="/research/?tab=documents" className="text-sm text-stone-500 hover:text-stone-800">
         ← 문서 목록
       </Link>

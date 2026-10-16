@@ -1,15 +1,16 @@
 "use client";
 
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useDeferredValue, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type { FetchFailure } from "@/lib/api/client";
 import type { DocumentInput, MaterialInput } from "@/lib/research/api";
 import { CONTENT_KINDS, CONTENT_KIND_LABELS, LIMITS, type ContentKind } from "@/lib/research/types";
 import { fromLocalInput, toLocalInput } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
+import SafeMarkdown from "@/components/research/SafeMarkdown";
 
-const inputClass = "w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none";
+export const inputClass = "w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none";
 
-function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
+export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
   return (
     <label className="block">
       <span className="mb-1 block text-sm font-medium text-stone-700">{label}</span>
@@ -132,6 +133,86 @@ export function MaterialForm({
   );
 }
 
+type EditorView = "split" | "write" | "preview";
+const VIEW_LABELS: Record<EditorView, string> = { split: "나란히 보기", write: "작성만", preview: "미리보기만" };
+
+/**
+ * 문서 본문 편집기: 원문(Markdown) 입력과 미리보기. 미리보기는 저장된 본문과 같은 SafeMarkdown 규칙으로 그린다.
+ * 넓은 화면에서는 좌우, 좁은 화면에서는 위아래로 놓인다(편집기 폭 기준 container query).
+ */
+export function MarkdownEditor({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const id = useId();
+  const hintId = `${id}-hint`;
+  const [view, setView] = useState<EditorView>("split");
+  // 입력은 바로 반영하고 미리보기 렌더는 뒤따른다(긴 문서에서도 타이핑이 밀리지 않게).
+  const preview = useDeferredValue(value);
+  const previewBox = useRef<HTMLDivElement>(null);
+
+  // 나란히 볼 때 본문 스크롤 위치를 미리보기에 비율로 맞춘다.
+  function syncScroll(e: { currentTarget: HTMLTextAreaElement }) {
+    const box = previewBox.current;
+    if (view !== "split" || !box) return;
+    const t = e.currentTarget;
+    const ratio = t.scrollHeight > t.clientHeight ? t.scrollTop / (t.scrollHeight - t.clientHeight) : 0;
+    box.scrollTop = ratio * (box.scrollHeight - box.clientHeight);
+  }
+
+  return (
+    <div className="@container block">
+      <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+        <label htmlFor={id} className="text-sm font-medium text-stone-700">
+          본문
+        </label>
+        <div role="group" aria-label="편집 화면" className="flex rounded-lg bg-stone-100 p-0.5 text-xs">
+          {(Object.keys(VIEW_LABELS) as EditorView[]).map((v) => (
+            <button
+              key={v}
+              type="button"
+              aria-pressed={view === v}
+              onClick={() => setView(v)}
+              className={`rounded-md px-2.5 py-1 ${view === v ? "bg-white font-medium text-stone-900 shadow-sm" : "text-stone-600 hover:text-stone-900"}`}
+            >
+              {VIEW_LABELS[v]}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className={view === "split" ? "grid gap-3 @3xl:grid-cols-2" : ""}>
+        {/* 미리보기만 볼 때도 입력 내용은 그대로 둔다(숨기기만 한다). */}
+        <textarea
+          id={id}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onScroll={syncScroll}
+          maxLength={LIMITS.content}
+          rows={20}
+          aria-describedby={hintId}
+          hidden={view === "preview"}
+          className={`${inputClass} h-[60vh] min-h-64 resize-y font-mono`}
+        />
+        {view !== "write" && (
+          <div
+            ref={previewBox}
+            role="region"
+            aria-label="미리보기"
+            tabIndex={0}
+            className="h-[60vh] min-h-64 overflow-auto rounded-lg bg-white px-4 py-3 ring-1 ring-stone-200"
+          >
+            {preview.trim() ? (
+              <SafeMarkdown content={preview} />
+            ) : (
+              <p className="text-sm text-stone-400">본문을 쓰면 여기에 저장될 모습이 보입니다.</p>
+            )}
+          </div>
+        )}
+      </div>
+      <span id={hintId} className="mt-1 block text-xs text-stone-500">
+        {contentHint} 미리보기는 저장 후 화면과 같은 규칙(외부 이미지·HTML 미표시)으로 보입니다.
+      </span>
+    </div>
+  );
+}
+
 /** 문서 작성·수정 폼. 수정 저장은 새 내용 버전을 만든다. */
 export function DocumentForm({
   initial,
@@ -161,15 +242,7 @@ export function DocumentForm({
       <Field label="제목">
         <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={LIMITS.title} required className={inputClass} />
       </Field>
-      <Field label="본문" hint={contentHint}>
-        <textarea
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-          maxLength={LIMITS.content}
-          rows={20}
-          className={`${inputClass} font-mono`}
-        />
-      </Field>
+      <MarkdownEditor value={content} onChange={setContent} />
       {failure && <ErrorNotice failure={failure} prefix="저장하지 못했습니다." />}
       <FormActions busy={busy} submitLabel={submitLabel} onCancel={onCancel} />
     </form>

@@ -1,11 +1,14 @@
 import { apiUrl, fetchJson, type FetchFailure, type FetchResult } from "@/lib/api/client";
+import { own } from "@/lib/research/own";
 import {
   CONTENT_KINDS,
   type ArchiveResult,
   type CodexStatus,
   type ContentKind,
   type DocumentSummary,
+  type Draft,
   type Endpoint,
+  type Proposal,
   type ItemType,
   type Material,
   type MaterialSummary,
@@ -140,6 +143,69 @@ function parseVersion(v: unknown): Version | null {
   const summary = parseVersionSummary(v);
   if (!summary || !isObj(v) || !isStr(v.content)) return null;
   return { ...summary, content: v.content };
+}
+
+const isNullableId = (v: unknown): v is string | null => v === null || isId(v);
+
+function parseDraft(v: unknown): Draft | null {
+  if (!isObj(v) || !isId(v.id) || !isNullableId(v.documentId) || !isInt(v.revision) || !isStr(v.title) || !isStr(v.updatedAt)) return null;
+  if (!(v.baseDocumentVersion === null || isInt(v.baseDocumentVersion)) || !isNullableId(v.baseVersionId)) return null;
+  if (v.state !== "active" && v.state !== "committed" && v.state !== "discarded") return null;
+  if (v.content !== undefined && !isStr(v.content)) return null;
+  return {
+    id: v.id,
+    documentId: v.documentId,
+    revision: v.revision,
+    baseDocumentVersion: v.baseDocumentVersion,
+    baseVersionId: v.baseVersionId,
+    title: v.title,
+    ...(isStr(v.content) ? { content: v.content } : {}),
+    updatedAt: v.updatedAt,
+    state: v.state,
+  };
+}
+
+function parseProposal(v: unknown): Proposal | null {
+  if (!isObj(v) || !isId(v.id) || !isId(v.documentId) || !isInt(v.version) || !isInt(v.baseDocumentVersion) || !isId(v.baseVersionId)) return null;
+  if (!isStr(v.title) || !isStr(v.createdAt) || !isStr(v.updatedAt) || !isNullableId(v.acceptedVersionId)) return null;
+  if (v.status !== "pending" && v.status !== "accepted" && v.status !== "discarded") return null;
+  if (v.content !== undefined && !isStr(v.content)) return null;
+  return {
+    id: v.id,
+    documentId: v.documentId,
+    version: v.version,
+    baseDocumentVersion: v.baseDocumentVersion,
+    baseVersionId: v.baseVersionId,
+    title: v.title,
+    ...(isStr(v.content) ? { content: v.content } : {}),
+    status: v.status,
+    acceptedVersionId: v.acceptedVersionId,
+    createdAt: v.createdAt,
+    updatedAt: v.updatedAt,
+  };
+}
+
+function parseDocumentDraft(v: unknown): { draft: Draft | null } | null {
+  if (!isObj(v) || !("draft" in v)) return null;
+  if (v.draft === null) return { draft: null };
+  const draft = parseDraft(v.draft);
+  return draft ? { draft } : null;
+}
+
+function parseCommit(v: unknown): { draft: Draft; document: ResearchDocument } | null {
+  if (!isObj(v)) return null;
+  const draft = parseDraft(v.draft);
+  const document = parseDocument(v.document);
+  return draft && document ? { draft, document } : null;
+}
+
+function parseAccept(v: unknown): { proposal: Proposal; document: ResearchDocument; draft: Draft | null } | null {
+  if (!isObj(v)) return null;
+  const proposal = parseProposal(v.proposal);
+  const document = parseDocument(v.document);
+  const draft = v.draft === null || v.draft === undefined ? null : parseDraft(v.draft);
+  if (!proposal || !document || (v.draft != null && !draft)) return null;
+  return { proposal, document, draft };
 }
 
 function parseEndpoint(v: unknown): Endpoint | null {
@@ -524,6 +590,55 @@ export const listVersions = (type: ItemType, id: string, cursor?: string | null)
 export const getVersion = (type: ItemType, id: string, versionId: string) =>
   fetchJson(apiUrl(`/research/${collection(type)}/${enc(id)}/versions/${enc(versionId)}`), parseVersion);
 
+// ---- #22 서버 초안·Codex 제안 ----
+
+export interface DraftInput {
+  title: string;
+  content: string;
+}
+
+/** 새 초안. 기존 문서면 base(문서 version·현재 snapshot ID)를 함께 보낸다. */
+export const createDraft = (
+  input: DraftInput & { documentId?: string; baseDocumentVersion?: number; baseVersionId?: string },
+  ctx: MutationContext
+) => mutate("/research/document-drafts", "POST", input, parseDraft, ctx);
+export const listDrafts = (cursor?: string | null) =>
+  fetchJson(apiUrl(`/research/document-drafts${listQuery(cursor)}`), parsePage(parseDraft));
+export const getDraft = (id: string) => fetchJson(apiUrl(`/research/document-drafts/${enc(id)}`), parseDraft);
+export const getDocumentDraft = (documentId: string) =>
+  fetchJson(apiUrl(`/research/documents/${enc(documentId)}/draft`), parseDocumentDraft);
+export const saveDraft = (id: string, input: DraftInput, expectedDraftRevision: number, ctx: MutationContext) =>
+  mutate(`/research/document-drafts/${enc(id)}`, "PUT", { ...input, expectedDraftRevision }, parseDraft, ctx);
+export const discardDraft = (id: string, expectedDraftRevision: number, ctx: MutationContext) =>
+  mutate(`/research/document-drafts/${enc(id)}`, "DELETE", { expectedDraftRevision }, parseDraft, ctx);
+/** 명시 저장: 버전 1개를 만든다. 기존 문서는 expectedVersion 필수, base가 바뀌었으면 비교 뒤 현재 snapshot ID를 resolvedBaseVersionId로. */
+export const commitDraft = (
+  id: string,
+  body: { expectedDraftRevision: number; expectedVersion?: number; resolvedBaseVersionId?: string },
+  ctx: MutationContext
+) => mutate(`/research/document-drafts/${enc(id)}/commit`, "POST", body, parseCommit, ctx);
+
+export const listProposals = (documentId: string, cursor?: string | null) =>
+  fetchJson(apiUrl(`/research/documents/${enc(documentId)}/proposals${listQuery(cursor)}`), parsePage(parseProposal));
+export const getProposal = (documentId: string, proposalId: string) =>
+  fetchJson(apiUrl(`/research/documents/${enc(documentId)}/proposals/${enc(proposalId)}`), parseProposal);
+export const acceptProposal = (
+  documentId: string,
+  proposalId: string,
+  body: {
+    expectedProposalVersion: number;
+    expectedVersion: number;
+    resolvedBaseVersionId: string;
+    title: string;
+    content: string;
+    draftId?: string;
+    expectedDraftRevision?: number;
+  },
+  ctx: MutationContext
+) => mutate(`/research/documents/${enc(documentId)}/proposals/${enc(proposalId)}/accept`, "POST", body, parseAccept, ctx);
+export const discardProposal = (documentId: string, proposalId: string, expectedProposalVersion: number, ctx: MutationContext) =>
+  mutate(`/research/documents/${enc(documentId)}/proposals/${enc(proposalId)}/discard`, "POST", { expectedProposalVersion }, parseProposal, ctx);
+
 // ---- 관계 ----
 
 export interface RelationInput {
@@ -619,6 +734,17 @@ const RUNNER_REFUSAL_CODES = new Set([
   "codex_runner_stopped",
 ]);
 
+// #22 409 conflict의 세부 사유(error.details.reason). 다른 409에는 없을 수 있어 일반 문구로 둔다.
+const CONFLICT_REASONS: Record<string, string> = {
+  active_draft_exists: "이 문서에는 이미 작성 중인 초안이 있습니다. 그 초안을 불러와 이어서 쓰세요.",
+  draft_revision: "다른 탭이나 기기에서 이 초안이 먼저 바뀌었습니다. 서버의 초안과 지금 입력 중 하나를 고르세요.",
+  draft_closed: "이 초안은 이미 저장되었거나 버려져 더 이상 고칠 수 없습니다. 지금 입력은 화면에 남아 있습니다.",
+  document_version: "문서가 그사이 바뀌었습니다. 현재 버전과 비교한 뒤 다시 저장하세요.",
+  base_changed: "초안을 시작한 뒤 문서가 바뀌었습니다. 현재 버전과 비교한 뒤 다시 저장하세요.",
+  archived: "보관한 문서라 저장하거나 수락할 수 없습니다. 입력은 그대로 있습니다.",
+  proposal_closed: "이 제안은 이미 수락되었거나 버려졌습니다. 목록을 새로 불러오세요.",
+};
+
 /** 계약의 오류 코드를 사용자 안내 문구로 바꾼다. 알 수 없는 실패는 null(호출 측이 일반 문구 사용). */
 export function researchErrorMessage(failure: FetchFailure): string | null {
   if (failure.kind !== "http") return null;
@@ -636,7 +762,7 @@ export function researchErrorMessage(failure: FetchFailure): string | null {
     case "not_found":
       return "항목을 찾을 수 없습니다.";
     case "conflict":
-      return "다른 곳에서 먼저 변경되었습니다. 최신 내용을 다시 불러온 뒤 시도해 주세요.";
+      return own(CONFLICT_REASONS, failure.reason ?? "") ?? "다른 곳에서 먼저 변경되었습니다. 최신 내용을 다시 불러온 뒤 시도해 주세요.";
     case "duplicate":
       return "같은 관계가 이미 있습니다.";
     case "idempotency_conflict":

@@ -68,7 +68,8 @@ wait_file() {
 
 $OFF down --volumes >/dev/null 2>&1 || true
 $BASE up -d db mock-github
-$BASE run --rm migrate
+# #22 서버 초안·제안(0005_writing)까지 적용한다(compose 기본 migrate는 0004).
+$BASE run --rm migrate python -m app.migrate --revision 0005_writing
 $BASE up -d api web gateway
 wait_ready
 echo "== base stack ready"

@@ -37,6 +37,7 @@ async function newPage() {
   page.on("console", (m) => {
     if (m.type() === "error" && !/Failed to load resource/.test(m.text())) consoleErrors.push(m.text());
   });
+  page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${e.message}`));
   page.on("request", (req) => {
     const h = new URL(req.url()).host;
     if (h !== new URL(ORIGIN).host) externalHosts.add(h);
@@ -1088,7 +1089,9 @@ await page.setViewportSize({ width: 1280, height: 800 });
   await tab2.goto(U("/api/auth/github/start"));
   await tab2.waitForURL(U("/"));
   await tab2.close();
-  await main.getByRole("button", { name: "새 버전으로 저장" }).click(); // A의 CSRF → 403 → me 재조회 → B
+  // A의 CSRF → 403 → me 재조회 → B. #22부터는 초안 자동 저장이 먼저 403을 받아 편집기가 이미 닫혔을 수 있다.
+  const save14 = main.getByRole("button", { name: "새 버전으로 저장" });
+  if (await save14.isVisible()) await save14.click({ timeout: 5000 }).catch(() => {});
   check("R14. switched account sees not found", await appears(main.getByText("항목을 찾을 수 없습니다")));
   check("R14. previous account draft discarded", (await main.locator("textarea").count()) === 0 && !(await main.innerText()).includes("A의 미저장 초안"));
   check("R14. previous account title not shown", (await main.getByRole("heading", { name: "문서 D", exact: true }).count()) === 0);
@@ -1131,7 +1134,8 @@ let docEUrl;
   check("R15. exactly one document created", (await counts()).documents === before15.documents + 1);
 }
 
-// R16. 충돌 후 최신 다시 불러오기가 일시 실패해도 미저장 입력 유지(리뷰 major)
+// R16. #22 편집 중 다른 곳에서 문서가 저장되면 초안 자동 저장이 멈춘다. 최신 문서 다시 불러오기가 일시 실패해도 입력 유지(리뷰 major),
+//      다시 불러온 뒤에는 현재 버전과 비교해야 저장된다(비교 없이 덮어쓰지 않음).
 {
   const id = new URL(docEUrl).searchParams.get("id");
   await main.getByRole("button", { name: "내용 수정" }).click();
@@ -1139,17 +1143,22 @@ let docEUrl;
   const cur = await api.get(`/research/documents/${id}`);
   await api.send("PATCH", `/research/documents/${id}`, { title: cur.title, content: "외부 수정", expectedVersion: cur.version });
   await main.getByRole("button", { name: "새 버전으로 저장" }).click();
-  await main.getByText("다른 곳에서 먼저 변경되었습니다").waitFor();
+  check("R16. autosave stopped: document changed", await appears(main.getByText("자동 저장을 멈췄습니다. 문서가 그사이 바뀌었습니다", { exact: false })));
   await page.route(`**/api/research/documents/${id}`, (route) => (route.request().method() === "GET" ? route.abort() : route.continue()));
-  await main.getByRole("button", { name: /최신 내용 다시 불러오기/ }).click();
+  await main.getByRole("button", { name: "최신 문서를 불러와 계속" }).click();
   check("R16. reload failure shown", await appears(main.getByText("최신 내용을 불러오지 못했습니다")));
   check("R16. draft kept after reload failure", (await main.getByLabel("본문").inputValue()) === "B 초안");
   await page.unroute(`**/api/research/documents/${id}`);
-  await main.getByRole("button", { name: /최신 내용 다시 불러오기/ }).click();
-  await page.waitForFunction(() => !document.body.innerText.includes("최신 내용을 불러오지 못했습니다"));
+  await main.getByRole("button", { name: "최신 문서를 불러와 계속" }).click();
+  await main.getByText("초안 자동 저장됨").waitFor();
   await main.getByRole("button", { name: "새 버전으로 저장" }).click();
+  check(
+    "R16. compare required before overwriting the newer version",
+    (await appears(main.getByText("에서 내 초안으로 바뀌는 내용입니다", { exact: false }))) && (await appears(main.locator('[data-diff="del"]', { hasText: "외부 수정" })))
+  );
+  await main.getByRole("button", { name: "비교했고 이 내용으로 저장" }).click();
   await main.getByRole("button", { name: "내용 수정" }).waitFor();
-  check("R16. save after reload succeeds with draft", await appears(main.locator(".prose").getByText("B 초안")));
+  check("R16. save after compare succeeds with draft", await appears(main.locator(".prose").getByText("B 초안")));
 }
 
 // R17. 생성 요청 응답 유실 → 401 → 같은 계정 재로그인: 같은 요청 복구로 중복 없음 / 다른 계정에는 비노출(PM 보완)
@@ -1520,6 +1529,170 @@ let docEUrl;
   check("R23c. Escape closes with focus outside panel", await appears(rp.getByRole("button", { name: "Codex 대화창 열기" })));
   check("R23c. focus returns to dock button", await rp.evaluate(() => document.activeElement?.getAttribute("aria-label") === "Codex 대화창 열기"));
   await r.context.close();
+}
+
+// W1. #22 문서 편집기: 분할 미리보기(저장 화면과 같은 SafeMarkdown 규칙)와 버전 비교(GitHub 스타일 줄 단위)
+{
+  // 앞 블록이 계정을 바꾸고 로그아웃하므로 새 창에서 로그인한다.
+  const wctx = await newPage();
+  await login(wctx.page);
+  const page = wctx.page;
+  const main = page.locator("main");
+  const api = apiClient(page);
+  const same = Array.from({ length: 12 }, (_, k) => `같은 줄 ${k + 1}`).join("\n");
+  const w = await api.send("POST", "/research/documents", { title: "편집기 문서", content: `첫 줄\n바꿀 문장 하나\n${same}\n끝 줄\n` });
+  check("W1. setup: document created", w.status === 201, String(w.status));
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(U(`/research/document/?id=${w.body.id}`));
+  await main.getByRole("button", { name: "내용 수정" }).click();
+  const body = main.getByLabel("본문");
+  const preview = main.getByRole("region", { name: "미리보기" });
+  check("W1. split view is default", (await main.getByRole("button", { name: "나란히 보기" }).getAttribute("aria-pressed")) === "true");
+  check("W1. preview shows current body", await appears(preview.getByText("바꿀 문장 하나")));
+  const original = await body.inputValue();
+  await body.fill(`# 미리보기 제목\n\n<script>window.__w1 = 1</script>\n\n![그림](https://example.com/w1.png)\n\n**굵게**`);
+  check("W1. preview follows input (heading rendered)", await appears(preview.getByRole("heading", { name: "미리보기 제목" })));
+  check(
+    "W1. preview keeps safe rules: no raw HTML, no external image",
+    (await preview.locator("script, img").count()) === 0 && (await appears(preview.getByText("[이미지: 그림]"))) && (await page.evaluate(() => window.__w1)) === undefined
+  );
+  const tb = await body.boundingBox();
+  const pb = await preview.boundingBox();
+  check("W1. wide screen: side by side", !!tb && !!pb && pb.x > tb.x + tb.width - 1 && Math.abs(pb.y - tb.y) < 4, JSON.stringify({ tb, pb }));
+  await page.setViewportSize({ width: 375, height: 800 });
+  const tb2 = await body.boundingBox();
+  const pb2 = await preview.boundingBox();
+  const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  check("W1. narrow screen: stacked, no horizontal scroll", !!tb2 && !!pb2 && pb2.y >= tb2.y + tb2.height - 1 && over <= 0, JSON.stringify({ tb2, pb2, over }));
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await main.getByRole("button", { name: "미리보기만" }).click();
+  check("W1. preview only: editor hidden, input kept", !(await body.isVisible()) && (await preview.isVisible()) && (await body.inputValue()).startsWith("# 미리보기 제목"));
+  await main.getByRole("button", { name: "작성만" }).click();
+  check("W1. write only: preview hidden", (await preview.count()) === 0 && (await body.isVisible()));
+
+  // 두 번째 버전 저장 → 버전 비교
+  await body.fill(original.replace("바꿀 문장 하나", "바뀐 문장 하나").replace("끝 줄", "끝 줄\n새로 쓴 줄"));
+  await main.getByLabel("제목", { exact: true }).fill("편집기 문서 2");
+  await main.getByRole("button", { name: "새 버전으로 저장" }).click();
+  await main.getByRole("button", { name: "내용 수정" }).waitFor();
+  await main.getByRole("button", { name: "버전 비교", exact: true }).click();
+  const cmp = main.getByRole("region", { name: "버전 비교" });
+  check("W1. compare: summary +2 −1", await appears(cmp.getByText("+2줄")) && (await appears(cmp.getByText("−1줄"))));
+  check("W1. compare: removed and added lines", (await appears(cmp.locator('[data-diff="del"]', { hasText: "바꿀 문장 하나" }))) && (await appears(cmp.locator('[data-diff="add"]', { hasText: "새로 쓴 줄" }))));
+  check("W1. compare: changed word highlighted", (await cmp.locator("ins", { hasText: "바뀐" }).count()) === 1 && (await cmp.locator("del", { hasText: "바꿀" }).count()) === 1);
+  check("W1. compare: title change shown", await appears(cmp.locator("ins", { hasText: "편집기 문서 2" })));
+  const fold = cmp.getByRole("button", { name: /같은 줄 \d+개 펼치기/ });
+  check("W1. compare: unchanged lines folded", (await fold.count()) === 1 && (await cmp.getByText("같은 줄 6", { exact: true }).count()) === 0);
+  await fold.click();
+  check("W1. compare: fold expands", await appears(cmp.getByText("같은 줄 6", { exact: true })));
+  await cmp.getByRole("button", { name: "방향 바꾸기" }).click();
+  check("W1. compare: reversed direction", await appears(cmp.getByText("+1줄")) && (await appears(cmp.getByText("−2줄"))));
+  await cmp.getByRole("button", { name: "비교 닫기" }).click();
+  await main.getByRole("button", { name: /v2\s/ }).click();
+  await main.getByRole("button", { name: "이전 버전과 비교" }).click();
+  check("W1. per-version compare opens panel with focus", await appears(cmp.getByText("+2줄")) && (await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))) === "버전 비교");
+  await page.setViewportSize({ width: 375, height: 800 });
+  const over2 = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  check("W1. compare fits 375px", over2 <= 0, `overflow ${over2}px`);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.context().close();
+}
+
+// W2. #22 서버 초안 자동 저장·복구·탭 간 충돌·버리기, Codex 제안 검토(diff)·수락·버리기, 이전 버전으로 되돌리기
+{
+  const wctx = await newPage();
+  await login(wctx.page);
+  const page = wctx.page;
+  const main = page.locator("main");
+  const chat = page.locator("#chat-panel");
+  const api = apiClient(page);
+  await setMock("codex=fixture&window=&remaining=");
+  const doc = await api.send("POST", "/research/documents", { title: "자동 저장 문서", content: "원래 본문\n" });
+  const id = doc.body.id;
+  const draftOf = async () => (await api.get(`/research/documents/${id}/draft`)).draft;
+  await page.goto(U(`/research/document/?id=${id}`));
+  await main.getByRole("button", { name: "내용 수정" }).click();
+  await main.getByLabel("본문").fill("자동 저장된 초안");
+  check("W2. autosave: saved status shown", await appears(main.getByText("초안 자동 저장됨"), 8000));
+  const d1 = await draftOf();
+  const head = await api.get(`/research/documents/${id}`);
+  check("W2. autosave creates a draft, not a version", d1?.content === "자동 저장된 초안" && head.version === 1 && head.content === "원래 본문\n", JSON.stringify({ d1, v: head.version }));
+  await page.reload();
+  check("W2. reload: draft notice, saved version still shown", (await appears(main.getByText("저장하지 않은 초안이 있습니다", { exact: false }))) && (await appears(main.locator(".prose").getByText("원래 본문"))));
+  await main.getByRole("button", { name: "초안 이어서 편집" }).click();
+  check("W2. resume restores draft", (await main.getByLabel("본문").inputValue()) === "자동 저장된 초안");
+
+  // 다른 탭이 같은 초안을 먼저 바꿈 → 조용히 덮어쓰지 않고 고르게 한다
+  const other = await draftOf();
+  await api.send("PUT", `/research/document-drafts/${other.id}`, { title: other.title, content: "다른 탭 초안", expectedDraftRevision: other.revision });
+  await main.getByLabel("본문").fill("내 입력");
+  check("W2. conflict: other tab change detected", await appears(main.getByText("다른 탭이나 기기에서 이 문서의 초안이 바뀌었습니다", { exact: false }), 8000));
+  check("W2. conflict: server draft not overwritten yet", (await draftOf()).content === "다른 탭 초안");
+  await main.getByRole("button", { name: "차이 보기" }).click();
+  check("W2. conflict: diff between server draft and my input", await appears(main.locator('[data-diff="del"]', { hasText: "다른 탭 초안" })));
+  await main.getByRole("button", { name: /지금 입력으로 계속/ }).click();
+  await main.getByText("초안 자동 저장됨").waitFor();
+  check("W2. conflict: keep mine saves over server draft", (await draftOf()).content === "내 입력");
+  await main.getByRole("button", { name: "새 버전으로 저장" }).click();
+  await main.getByRole("button", { name: "내용 수정" }).waitFor();
+  const v2 = await api.get(`/research/documents/${id}`);
+  check("W2. commit: one new version, draft closed", v2.content === "내 입력" && (await draftOf()) === null && (await appears(main.locator(".prose").getByText("내 입력"))), String(v2.version));
+
+  // 초안 버리기: 저장된 문서로 돌아가고 버전은 늘지 않는다
+  await main.getByRole("button", { name: "내용 수정" }).click();
+  await main.getByLabel("본문").fill("버릴 초안");
+  await main.getByText("초안 자동 저장됨").waitFor();
+  await main.getByRole("button", { name: "초안 버리기…" }).click();
+  await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+  await main.getByRole("button", { name: "내용 수정" }).waitFor();
+  check(
+    "W2. discard: back to saved document, no version, no draft",
+    (await appears(main.locator(".prose").getByText("내 입력"))) && (await draftOf()) === null && (await api.get(`/research/documents/${id}`)).version === v2.version
+  );
+
+  // Codex 제안: 대화에서 만들어도 문서는 바뀌지 않는다 → 대화의 '제안 검토' 링크 → diff → 수락
+  const sess = await api.send("POST", "/research/sessions", { title: "편집 대화" });
+  check("W2. setup: session", sess.status === 201, String(sess.status));
+  await page.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  await chat.getByRole("link", { name: /편집 대화/ }).click();
+  await chat.getByLabel("메시지").fill("/fixture/propose 문장 하나 더해줘");
+  await chat.getByRole("button", { name: "보내기" }).click();
+  await chat.getByText("모의 응답: /fixture/propose 문장 하나 더해줘").waitFor({ timeout: 15000 });
+  check("W2. proposal: chat explains document not changed", await appears(chat.getByText("수락하기 전에는 문서가 바뀌지 않습니다", { exact: false })));
+  check("W2. proposal: document unchanged", (await api.get(`/research/documents/${id}`)).version === v2.version);
+  await chat.getByRole("link", { name: "제안 검토" }).click();
+  const proposalsBox = main.locator("#proposals");
+  check("W2. proposal: diff vs current document", await appears(proposalsBox.locator('[data-diff="add"]', { hasText: "Codex가 덧붙인 문장" })));
+  check("W2. proposal: link opens that proposal", (await proposalsBox.getByRole("button", { name: /Codex 제안/ }).first().getAttribute("aria-expanded")) === "true");
+  await proposalsBox.getByRole("button", { name: "제안 수락" }).click();
+  await proposalsBox.getByRole("button", { name: "수락 확인" }).click();
+  check("W2. proposal: accepted becomes new version", await appears(main.locator(".prose").getByText("Codex가 덧붙인 문장")));
+  const v3 = await api.get(`/research/documents/${id}`);
+  check("W2. proposal: exactly one version added", v3.latestVersion.number === v2.latestVersion.number + 1, `${v2.latestVersion.number} -> ${v3.latestVersion.number}`);
+  check("W2. proposal: moved to history", await appears(proposalsBox.getByRole("button", { name: /지난 제안 1건/ })));
+
+  // 두 번째 제안은 버린다: 문서·버전 변화 없음
+  await chat.getByLabel("메시지").fill("/fixture/propose 또 고쳐줘");
+  await chat.getByRole("button", { name: "보내기" }).click();
+  await chat.getByText("모의 응답: /fixture/propose 또 고쳐줘").waitFor({ timeout: 15000 });
+  await chat.getByRole("link", { name: "제안 검토" }).last().click();
+  await proposalsBox.getByRole("button", { name: "제안 버리기" }).click();
+  check("W2. proposal discard: no pending left", await appears(proposalsBox.getByText("검토할 제안이 없습니다")));
+  check("W2. proposal discard: document unchanged", (await api.get(`/research/documents/${id}`)).version === v3.version);
+
+  // 이전 버전으로 되돌리기 = 그 내용을 새 버전으로 저장(원래 버전은 그대로)
+  await main.getByRole("button", { name: /^v1\s/ }).click();
+  await main.getByRole("button", { name: "이 버전으로 되돌리기(편집기에 불러오기)" }).click();
+  const restored = await page
+    .waitForFunction(() => document.querySelector("main textarea")?.value === "원래 본문\n", null, { timeout: 8000 })
+    .then(() => true)
+    .catch(() => false);
+  check("W2. restore: editor loaded with v1", restored, JSON.stringify(await main.getByLabel("본문").inputValue()));
+  await main.getByRole("button", { name: "새 버전으로 저장" }).click();
+  await main.getByRole("button", { name: "내용 수정" }).waitFor();
+  const v4 = await api.get(`/research/documents/${id}`);
+  check("W2. restore: saved as a new version", v4.content === "원래 본문\n" && v4.latestVersion.number === v3.latestVersion.number + 1);
+  await page.context().close();
 }
 
 // R10. 다른 사용자: 타인 ID는 404로 숨김

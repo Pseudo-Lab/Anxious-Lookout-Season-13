@@ -133,6 +133,8 @@ const items = new Map(); // id -> item
 const relations = new Map(); // id -> relation
 const sessions = new Map(); // id -> session
 const idem = new Map(); // owner:key -> { fp, status, body }
+const drafts = new Map(); // #22 id -> draft
+const proposals = new Map(); // #22 id -> proposal
 
 const now = () => new Date().toISOString();
 const uuid = () => crypto.randomUUID();
@@ -263,8 +265,149 @@ const stale = (b, current) => !Number.isInteger(b.expectedVersion) || b.expected
 
 // ---- 처리 ----
 
+// ---- #22 서버 초안·Codex 제안(api-contracts/issue22-writing-editor.md) ----
+
+const conflict = (reason) => fail(409, "conflict", "The draft, proposal or document changed; compare before retrying", { details: { reason } });
+// 소유자는 응답에 싣지 않고, 목록에는 본문을 싣지 않는다.
+function writingView(row, withContent = true) {
+  const out = { ...row };
+  delete out.owner;
+  if (!withContent) delete out.content;
+  return out;
+}
+const draftView = writingView;
+const proposalView = writingView;
+const activeDraftOf = (owner, documentId) =>
+  [...drafts.values()].find((d) => d.owner === owner && d.documentId === documentId && d.state === "active");
+function draftFields(b) {
+  const fields = [];
+  if (typeof b.title !== "string" || b.title.length > 300) fields.push({ path: "body.title", message: "string<=300" });
+  if (typeof b.content !== "string" || b.content.length > 200000) fields.push({ path: "body.content", message: "string<=200000" });
+  return fields;
+}
+function changeDocument(item, title, content) {
+  item.versions.push(newVersion("document", { title, content }, item.versions.length + 1));
+  item.version++;
+  item.updatedAt = now();
+}
+
+/** 모의 Codex의 research_document_update: 제안만 만들고 문서는 바꾸지 않는다. */
+export function createProposal(owner, documentId, title, content) {
+  const item = owned(documentId, owner, "document");
+  if (!item || item.archived) return null;
+  const t = now();
+  const p = {
+    id: uuid(), owner, documentId, version: 1, baseDocumentVersion: item.version, baseVersionId: latest(item).id,
+    title, content, origin: "codex", status: "pending", acceptedVersionId: null, createdAt: t, updatedAt: t,
+  };
+  proposals.set(p.id, p);
+  return p;
+}
+
+function handleWriting(owner, method, path, b) {
+  let m;
+  if (method === "POST" && path === "/research/document-drafts") {
+    const fields = draftFields(b);
+    if (fields.length) return fail(422, "validation_error", "Invalid request", { fields });
+    let base = { documentId: null, baseDocumentVersion: null, baseVersionId: null };
+    if (b.documentId !== undefined && b.documentId !== null) {
+      const item = owned(b.documentId, owner, "document");
+      if (!item) return fail(404, "not_found", "Not found");
+      if (item.archived) return conflict("archived");
+      if (activeDraftOf(owner, item.id)) return conflict("active_draft_exists");
+      if (b.baseDocumentVersion !== item.version) return conflict("document_version");
+      if (b.baseVersionId !== latest(item).id) return conflict("base_changed");
+      base = { documentId: item.id, baseDocumentVersion: item.version, baseVersionId: latest(item).id };
+    }
+    const d = { id: uuid(), owner, ...base, revision: 1, title: b.title, content: b.content, updatedAt: now(), state: "active" };
+    drafts.set(d.id, d);
+    return ok(201, draftView(d));
+  }
+  if ((m = /^\/research\/document-drafts\/([^/]+)(\/commit)?$/.exec(path))) {
+    const d = drafts.get(m[1]);
+    if (!d || d.owner !== owner) return fail(404, "not_found", "Not found");
+    if (d.state !== "active") return conflict("draft_closed");
+    if (b.expectedDraftRevision !== d.revision) return conflict("draft_revision");
+    const doc = d.documentId ? owned(d.documentId, owner, "document") : null;
+    if (method === "DELETE" && !m[2]) {
+      d.state = "discarded";
+      d.revision++;
+      d.updatedAt = now();
+      return ok(200, draftView(d));
+    }
+    if (method === "PUT" && !m[2]) {
+      const fields = draftFields(b);
+      if (fields.length) return fail(422, "validation_error", "Invalid request", { fields });
+      if (doc?.archived) return conflict("archived");
+      d.title = b.title;
+      d.content = b.content;
+      d.revision++;
+      d.updatedAt = now();
+      return ok(200, draftView(d));
+    }
+    if (method === "POST" && m[2]) {
+      const fields = validateItem("document", { title: d.title, content: d.content });
+      if (fields.length) return fail(422, "validation_error", "Invalid request", { fields });
+      let item;
+      if (doc) {
+        if (doc.archived) return conflict("archived");
+        if (b.expectedVersion !== doc.version) return conflict("document_version");
+        const moved = doc.version !== d.baseDocumentVersion || latest(doc).id !== d.baseVersionId;
+        if (moved ? b.resolvedBaseVersionId !== latest(doc).id : b.resolvedBaseVersionId !== undefined && b.resolvedBaseVersionId !== latest(doc).id)
+          return conflict("base_changed");
+        changeDocument(doc, d.title, d.content);
+        item = doc;
+      } else {
+        if (b.expectedVersion !== undefined || b.resolvedBaseVersionId !== undefined) return fail(422, "validation_error", "New drafts have no document base");
+        const t = now();
+        item = { id: uuid(), type: "document", owner, versions: [newVersion("document", d, 1)], version: 1, archived: false, createdAt: t, updatedAt: t, publication: null };
+        items.set(item.id, item);
+        Object.assign(d, { documentId: item.id, baseDocumentVersion: item.version, baseVersionId: latest(item).id });
+      }
+      d.state = "committed";
+      d.revision++;
+      d.updatedAt = now();
+      return ok(200, { draft: draftView(d), document: detail(item) });
+    }
+  }
+  if (method === "POST" && (m = /^\/research\/documents\/([^/]+)\/proposals\/([^/]+)\/(accept|discard)$/.exec(path))) {
+    const doc = owned(m[1], owner, "document");
+    const p = proposals.get(m[2]);
+    if (!doc || !p || p.owner !== owner || p.documentId !== doc.id) return fail(404, "not_found", "Not found");
+    if (p.status !== "pending" || b.expectedProposalVersion !== p.version) return conflict("proposal_closed");
+    let resolved = null;
+    if (m[3] === "accept") {
+      if (doc.archived) return conflict("archived");
+      if (b.expectedVersion !== doc.version) return conflict("document_version");
+      if (b.resolvedBaseVersionId !== latest(doc).id) return conflict("base_changed");
+      const fields = validateItem("document", { title: b.title, content: b.content });
+      if (fields.length) return fail(422, "validation_error", "Invalid request", { fields });
+      const active = activeDraftOf(owner, doc.id);
+      if (active) {
+        if (b.draftId !== active.id) return conflict("draft_revision");
+        if (b.expectedDraftRevision !== active.revision) return conflict("draft_revision");
+      } else if (b.draftId !== undefined) return conflict("draft_closed");
+      changeDocument(doc, b.title, b.content);
+      if (active) {
+        active.state = "committed";
+        active.revision++;
+        active.updatedAt = now();
+        resolved = draftView(active);
+      }
+      p.status = "accepted";
+      p.acceptedVersionId = latest(doc).id;
+    } else p.status = "discarded";
+    p.version++;
+    p.updatedAt = now();
+    return m[3] === "accept" ? ok(200, { proposal: proposalView(p), document: detail(doc), draft: resolved }) : ok(200, proposalView(p));
+  }
+  return null;
+}
+
 function handleMutation(owner, method, path, b, user) {
   if (path === "/research/codex/runner" && method === "POST") return prepareRunner(owner, b);
+  const writing = handleWriting(owner, method, path, b);
+  if (writing) return writing;
   let m;
   // 자료·문서 생성
   if (method === "POST" && (m = /^\/research\/(materials|documents)$/.exec(path))) {
@@ -503,6 +646,14 @@ function handleMutation(owner, method, path, b, user) {
         // #23 api-contracts/issue23-shell-display.md: /fixture/shell-{ok,fail,timeout,busy,cancel,long}이면 shell 실행 결과를 투영한다.
         const shellCase = /\/fixture\/shell-([a-z]+)/.exec(b.text)?.[1];
         if (shellCase) s.items.push(shellItem(shellCase, scope));
+        // #22 /fixture/propose: 보고 있는 문서에 Codex 제안을 만든다(research_document_update는 제안만 만들고 문서를 바꾸지 않는다).
+        if (b.text.includes("/fixture/propose") && scope.page.kind === "document" && scope.capability === "owner_research") {
+          const doc = owned(scope.page.resourceId, owner, "document");
+          const input = { id: scope.page.resourceId, mutationId: uuid(), expectedVersion: doc?.version, title: doc ? `${latest(doc).title} (제안)` : "", content: doc ? `${latest(doc).content}\nCodex가 덧붙인 문장` : "" };
+          const p = doc ? createProposal(owner, doc.id, input.title, input.content) : null;
+          const output = p ? [{ type: "inputText", text: JSON.stringify(proposalView(p, false)) }] : { error: { code: "not_found" } };
+          s.items.push({ id: uuid(), type: "tool_call", name: "research_document_update", input, output, status: p ? "completed" : "failed", raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
+        }
         const answer = b.text.includes("/fixture/wide-answer") ? WIDE_ANSWER : `모의 응답: **${b.text}**`;
         s.items.push({ id: uuid(), type: "message", role: "assistant", text: answer, raw: { kind: "agent_message", fixture: true } });
         s.state = "idle";
@@ -644,6 +795,30 @@ function previewOf(doc, v) {
 
 function handleRead(owner, path, url) {
   let m;
+  if (path === "/research/document-drafts") {
+    const list = [...drafts.values()].filter((d) => d.owner === owner && d.state === "active").sort(byUpdated).map((d) => draftView(d, false));
+    return ok(200, page(list, url));
+  }
+  if ((m = /^\/research\/document-drafts\/([^/]+)$/.exec(path))) {
+    const d = drafts.get(m[1]);
+    return d && d.owner === owner ? ok(200, draftView(d)) : fail(404, "not_found", "Not found");
+  }
+  if ((m = /^\/research\/documents\/([^/]+)\/(draft|proposals)(?:\/([^/]+))?$/.exec(path))) {
+    const doc = owned(m[1], owner, "document");
+    if (!doc) return fail(404, "not_found", "Not found");
+    if (m[2] === "draft" && !m[3]) {
+      const d = activeDraftOf(owner, doc.id);
+      return ok(200, { draft: d ? draftView(d) : null });
+    }
+    if (m[2] === "proposals" && !m[3]) {
+      const list = [...proposals.values()].filter((p) => p.owner === owner && p.documentId === doc.id).sort((x, y) => (x.createdAt < y.createdAt ? 1 : -1));
+      return ok(200, page(list.map((p) => proposalView(p, false)), url));
+    }
+    if (m[2] === "proposals") {
+      const p = proposals.get(m[3]);
+      return p && p.owner === owner && p.documentId === doc.id ? ok(200, proposalView(p)) : fail(404, "not_found", "Not found");
+    }
+  }
   if ((m = /^\/research\/(materials|documents)$/.exec(path))) {
     const type = m[1] === "materials" ? "material" : "document";
     const archived = url.searchParams.get("archived") === "true";
