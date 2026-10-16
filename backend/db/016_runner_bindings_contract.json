@@ -1,0 +1,137 @@
+{
+  "resources": {
+    "columns": {
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "kind": [
+        "TEXT",
+        false,
+        null
+      ],
+      "name": [
+        "TEXT",
+        false,
+        null
+      ],
+      "uid": [
+        "UUID",
+        false,
+        null
+      ]
+    },
+    "primary": [
+      "kind",
+      "name"
+    ],
+    "checks": {
+      "resources_kind_check": "kind = ANY (ARRAY['pvc'::text, 'pv'::text, 'secret'::text])"
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "runner_bindings",
+        "referred_table": "bindings",
+        "referred_columns": [
+          "owner_id"
+        ]
+      }
+    ],
+    "unique": {
+      "resources_kind_uid_key": [
+        "kind",
+        "uid"
+      ]
+    },
+    "indexes": {
+      "resources_kind_uid_key": {
+        "columns": [
+          "kind",
+          "uid"
+        ],
+        "unique": true,
+        "where": null
+      }
+    }
+  },
+  "bindings": {
+    "columns": {
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "state_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "namespace": [
+        "TEXT",
+        false,
+        null
+      ],
+      "namespace_uid": [
+        "UUID",
+        false,
+        null
+      ],
+      "plan": [
+        "JSONB",
+        false,
+        null
+      ],
+      "published_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ]
+    },
+    "primary": [
+      "owner_id"
+    ],
+    "checks": {
+      "bindings_plan_check": "jsonb_typeof(plan) = 'object'::text"
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "runner_runtime",
+        "referred_table": "registry",
+        "referred_columns": [
+          "owner_id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "state_id"
+        ],
+        "referred_schema": "runner_runtime",
+        "referred_table": "registry",
+        "referred_columns": [
+          "state_id"
+        ]
+      }
+    ],
+    "unique": {
+      "bindings_state_id_key": [
+        "state_id"
+      ]
+    },
+    "indexes": {
+      "bindings_state_id_key": {
+        "columns": [
+          "state_id"
+        ],
+        "unique": true,
+        "where": null
+      }
+    }
+  }
+}

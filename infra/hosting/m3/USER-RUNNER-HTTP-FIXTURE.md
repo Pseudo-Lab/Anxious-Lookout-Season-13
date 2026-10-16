@@ -111,3 +111,26 @@ entry keys while one pendingEnsure/state is coalesced; receipts are not Pod coun
 The existing admin permission CLI deletes every session for an account whenever
 approval/role is changed. Test eligibility transitions through re-login; an old
 session is not retained across this change.
+
+## Issue #16 dynamic account selection
+
+With `CODEX_USER_RUNNERS_ENABLE=true`, leaving both
+`CODEX_USER_RUNNER_ACCOUNT_ID` and `CODEX_USER_RUNNER_ALLOWLIST` unset selects all
+approved editors/admins. The HTTP fixture overlay intentionally sets neither:
+accounts created and approved during T1 become eligible without an API restart.
+No fixture-only bypass or fixed account UUID is required.
+
+An explicit `CODEX_USER_RUNNER_ACCOUNT_ID` retains the single-account restriction.
+Alternatively set `CODEX_USER_RUNNER_ALLOWLIST` to a comma-separated list of distinct
+canonical account UUIDs. Configuring both nonempty is rejected at startup. A blank
+allowlist means unrestricted approved membership, not an empty-deny list; disable
+the feature flag to disable runner access. Approval/role is always rechecked.
+
+While enabled, excluded accounts receive `not_enabled_for_account` status,
+prepare 403, and message preflight 503 `codex_not_enabled_for_account`; they cannot
+fall back to personal/static runner dispatch. Feature-off retains the legacy path.
+`/me` keeps the boolean `user.codexRunner` field.
+
+This selection slice does not create storage or dynamic runtime bindings. The
+existing single-plan live configuration still requires its explicit owner setting;
+plan multiplexing and automatic provisioning are separate rollout prerequisites.

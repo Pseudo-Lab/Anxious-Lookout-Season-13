@@ -205,6 +205,7 @@ class KubePods:
                 and type(secret.get('data')) is dict and set(secret['data']) == {'token'})
         token = base64.b64decode(secret['data']['token'], validate=True).decode('ascii')
         require(len(token) >= 32 and not any(ch.isspace() for ch in token))
+        return token
 
     def _pod(self, obj, plan):
         uid = self._metadata(obj, 'Pod', plan.identity.name, plan.identity, generation=True)

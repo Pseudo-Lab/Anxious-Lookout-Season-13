@@ -1,0 +1,209 @@
+{
+  "entries": {
+    "checks": {
+      "entries_generation_check": "generation > 0"
+    },
+    "columns": {
+      "consumed_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        true,
+        null
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "generation": [
+        "BIGINT",
+        false,
+        null
+      ],
+      "key": [
+        "UUID",
+        false,
+        null
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "session_hash": [
+        "VARCHAR(64)",
+        false,
+        null
+      ],
+      "state_id": [
+        "UUID",
+        false,
+        null
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "runner_runtime",
+        "referred_table": "registry"
+      },
+      {
+        "constrained_columns": [
+          "session_hash"
+        ],
+        "referred_columns": [
+          "token_hash"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "sessions"
+      },
+      {
+        "constrained_columns": [
+          "state_id"
+        ],
+        "referred_columns": [
+          "state_id"
+        ],
+        "referred_schema": "runner_runtime",
+        "referred_table": "registry"
+      }
+    ],
+    "indexes": {},
+    "primary": [
+      "owner_id",
+      "key"
+    ],
+    "unique": {}
+  },
+  "stops": {
+    "checks": {
+      "stops_check": "node_name IS NULL AND node_uid IS NULL AND boot_id IS NULL OR node_name IS NOT NULL AND length(node_name) > 0 AND node_uid IS NOT NULL AND boot_id IS NOT NULL",
+      "stops_check1": "completed_at IS NULL OR proof IS NOT NULL AND node_uid IS NOT NULL",
+      "stops_generation_check": "generation > 0",
+      "stops_proof_check": "proof IS NULL OR jsonb_typeof(proof) = 'object'::text",
+      "stops_receipt_check": "receipt IS NULL OR jsonb_typeof(receipt) = 'object'::text",
+      "stops_requested_revision_check": "requested_revision >= 0"
+    },
+    "columns": {
+      "boot_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "completed_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        true,
+        null
+      ],
+      "generation": [
+        "BIGINT",
+        false,
+        null
+      ],
+      "node_name": [
+        "TEXT",
+        true,
+        null
+      ],
+      "node_uid": [
+        "UUID",
+        true,
+        null
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "pod_uid": [
+        "UUID",
+        false,
+        null
+      ],
+      "proof": [
+        "JSONB",
+        true,
+        null
+      ],
+      "receipt": [
+        "JSONB",
+        true,
+        null
+      ],
+      "requested_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "requested_revision": [
+        "BIGINT",
+        false,
+        null
+      ],
+      "state_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "stop_id": [
+        "UUID",
+        false,
+        null
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "runner_runtime",
+        "referred_table": "registry"
+      },
+      {
+        "constrained_columns": [
+          "state_id"
+        ],
+        "referred_columns": [
+          "state_id"
+        ],
+        "referred_schema": "runner_runtime",
+        "referred_table": "registry"
+      }
+    ],
+    "indexes": {
+      "stops_pod_uid_key": {
+        "columns": [
+          "pod_uid"
+        ],
+        "unique": true,
+        "where": null
+      },
+      "stops_stop_id_key": {
+        "columns": [
+          "stop_id"
+        ],
+        "unique": true,
+        "where": null
+      }
+    },
+    "primary": [
+      "owner_id",
+      "generation"
+    ],
+    "unique": {
+      "stops_pod_uid_key": [
+        "pod_uid"
+      ],
+      "stops_stop_id_key": [
+        "stop_id"
+      ]
+    }
+  }
+}

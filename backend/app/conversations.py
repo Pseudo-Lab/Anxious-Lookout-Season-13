@@ -244,7 +244,14 @@ def register_conversations(app, authorized, sessions, settings, response, write,
             fail("not_ready", "Conversation schema is not ready", 503)
 
     def runner_for(owner, store=None):
+        if app.state.user_runners_enabled and not selected(app, owner):
+            fail('codex_not_enabled_for_account', 'Runner is not enabled for this account', 503)
         if selected(app, owner):
+            if store is not None:
+                from .user_runners import registry_status, checked_registry
+                lifecycle = registry_status(checked_registry(store.db), owner)
+                if lifecycle['reason'] != 'runner_unreachable':
+                    preflight(store)
             if app.state.user_runner_runtime:
                 return runtime_runner(app, owner)
             if store is not None:
@@ -258,6 +265,8 @@ def register_conversations(app, authorized, sessions, settings, response, write,
 
     def refresh(store, row):
         if row.state != "running":
+            return
+        if app.state.user_runners_enabled and not selected(app, store.owner):
             return
         if selected(app, store.owner):
             # Without the bound service transport, preserve accepted uncertainty;
@@ -364,11 +373,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
     @app.get(prefix + "/codex/status")
     def status(request: Request):
         if app.state.user_runners_enabled:
-            with sessions() as db:
-                login = current_session(db, request)
-                use_runtime = bool(login and selected(app, login.account_id))
-            if use_runtime:
-                return runner_status(request)
+            return runner_status(request)
         with authorized(request) as store:
             return response(connection_status(store.owner))
 

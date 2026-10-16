@@ -9,13 +9,14 @@ ERRORS = {"auth_expired": "codex_auth_expired", "auth_revoked": "codex_auth_revo
           "model_unavailable": "codex_model_unavailable", "policy_refused": "codex_policy_refused",
           "budget_exhausted": "codex_budget_exhausted", "provider_rate_limited": "codex_rate_limited", "not_enabled_for_account": "codex_not_enabled_for_account"}
 
-# These six codes are definitive only before durable message admission/dispatch.
+# These codes are definitive only before durable message admission/dispatch.
 # Keep them separate from Native/provider errors used after a submit attempt.
 RUNNER_PREFLIGHT_ERRORS = {"not_prepared": "codex_runner_not_prepared",
                           "provisioning": "codex_provisioning",
                           "capacity_wait": "codex_capacity_wait",
                           "runner_unreachable": "codex_runner_unreachable",
                           "runner_failed": "codex_runner_failed",
+                          "stopping": "codex_runner_stopped",
                           "idle_stopped": "codex_runner_stopped"}
 
 

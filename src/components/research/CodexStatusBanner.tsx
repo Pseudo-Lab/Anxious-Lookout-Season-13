@@ -2,7 +2,7 @@
 
 import type { FetchResult } from "@/lib/api/client";
 import type { CodexStatus } from "@/lib/research/types";
-import { useCodexRunner, useCodexStatus } from "@/components/research/CodexStatusProvider";
+import { credentialWait, useCodexRunner, useCodexStatus } from "@/components/research/CodexStatusProvider";
 import { isUncertain } from "@/lib/research/idempotency";
 import { own } from "@/lib/research/own";
 import { formatDateTime } from "@/lib/research/format";
@@ -24,13 +24,15 @@ const UNAVAILABLE_REASONS: Record<string, string> = {
 
 export { useCodexStatus };
 
-// #10 실행 환경 상태(api-contracts/issue10-user-runners-interface-v1.md). 완료 시점은 약속하지 않는다.
-type RunnerAction = "prepare" | "retry" | "resume";
+// #10 실행 환경 상태(api-contracts/issue10-user-runners-interface-v1.md, #16 issue16-multi-user-runners-draft.md).
+// 완료 시점은 약속하지 않는다.
+type RunnerAction = "prepare" | "resume";
 interface RunnerState {
   title: string;
   body: string;
   action?: RunnerAction;
   progress?: boolean;
+  warn?: boolean;
 }
 const RUNNER_STATES: Record<string, RunnerState> = {
   not_prepared: { title: "대화 환경이 아직 준비되지 않았습니다", body: "‘대화 준비’를 누르면 내 환경을 준비합니다.", action: "prepare" },
@@ -41,14 +43,22 @@ const RUNNER_STATES: Record<string, RunnerState> = {
   },
   // 연결 문제·생성 결과 확인 중을 함께 뜻한다. 짧게 끝난다거나 새 환경을 만든다고 약속하지 않는다.
   runner_unreachable: { title: "환경 연결 확인 중", body: "환경 연결과 준비 결과를 확인하고 있습니다.", progress: true },
-  runner_failed: { title: "환경을 준비하지 못했습니다", body: "‘다시 시도’를 누르면 다시 준비합니다.", action: "retry" },
+  // #16: 종료 확인 중. 이 동안의 준비 요청은 저장되지 않으므로 끝나면 다시 켠다고 약속하지 않는다(버튼 없음).
+  stopping: { title: "환경 정리 중", body: "이전 환경이 꺼졌는지 확인하고 있습니다. 확인이 끝나면 환경을 다시 켤 수 있습니다.", progress: true },
+  // #16: 결과가 불확실한 실패라 운영자 확인(reconciliation)이 필요하다. 준비를 다시 보내는 버튼은 두지 않는다.
+  runner_failed: {
+    title: "확인이 필요합니다",
+    body: "환경 상태를 확정하지 못해 운영자 확인이 필요합니다. 확인이 끝나면 다시 사용할 수 있습니다.",
+    warn: true,
+  },
+  // 유휴 시간은 운영 설정이라 숫자를 적지 않는다.
   idle_stopped: {
     title: "환경이 쉬는 중",
-    body: "30분 동안 사용하지 않아 환경을 잠시 껐습니다. 대화와 자료는 그대로입니다.",
+    body: "한동안 사용하지 않아 환경을 잠시 껐습니다. 대화와 자료는 그대로입니다.",
     action: "resume",
   },
 };
-const ACTION_LABELS: Record<RunnerAction, string> = { prepare: "대화 준비", retry: "다시 시도", resume: "환경 다시 켜기" };
+const ACTION_LABELS: Record<RunnerAction, string> = { prepare: "대화 준비", resume: "환경 다시 켜기" };
 
 /** 실행 환경 상태(아는 reason)면 그 안내. */
 export function runnerState(result: FetchResult<CodexStatus> | null): RunnerState | null {
@@ -56,7 +66,7 @@ export function runnerState(result: FetchResult<CodexStatus> | null): RunnerStat
   return own(RUNNER_STATES, result.data.reason) ?? null;
 }
 
-/** 실행 환경 준비 버튼(대화 준비·다시 시도·환경 다시 켜기). 누를 때마다 새 준비 요청이다. 준비 대상 계정에만 보인다. */
+/** 실행 환경 준비 버튼(대화 준비·환경 다시 켜기). 누를 때마다 새 준비 요청이다. 준비 대상 계정에만 보인다. */
 export function RunnerActionButton({ result }: { result: FetchResult<CodexStatus> | null }) {
   const runner = useCodexRunner();
   const action = runnerState(result)?.action;
@@ -101,7 +111,7 @@ export function CodexStatusView({ result }: { result: FetchResult<CodexStatus> |
   const runner = s.available ? undefined : own(RUNNER_STATES, s.reason);
   if (runner) {
     return (
-      <Notice tone={runner.action === "retry" ? "warn" : "info"}>
+      <Notice tone={runner.warn ? "warn" : "info"}>
         <span className="flex items-start gap-2">
           {runner.progress && (
             <span
@@ -123,6 +133,7 @@ export function CodexStatusView({ result }: { result: FetchResult<CodexStatus> |
     return (
       <Notice tone="warn">
         {why} 새 대화를 진행할 수 없지만 이전 대화 기록은 계속 볼 수 있습니다. 다른 모델로 자동 전환하지 않습니다.
+        {credentialWait(s) && " 운영자가 조치하면 반영되도록 이 화면에서 상태를 주기적으로 다시 확인합니다."}
         {model}
       </Notice>
     );

@@ -57,7 +57,7 @@ def runtime(client, admin, plan, monkeypatch):
     return owner, auth, runtime, server, deletes, calls
 
 
-def test_web_prepares_one_pod_dispatches_reads_and_logout_deletes_exact_uid(client, admin, runtime):
+def test_web_logout_records_exact_uid_stop_without_unverified_deletion(client, admin, runtime):
     owner, auth, rt, server, deletes, calls = runtime
     for _ in range(2):
         result = client.post('/api/research/codex/runner', json={}, headers=headers(auth))
@@ -73,8 +73,10 @@ def test_web_prepares_one_pod_dispatches_reads_and_logout_deletes_exact_uid(clie
     assert client.get(path).json()['state'] == 'idle'
     uid = server.pod['metadata']['uid']
     assert client.post('/api/auth/logout', headers=auth).status_code == 204
-    assert deletes == [uid] and server.pod is None
-    assert read(admin, owner).phase == Phase.FAILED
+    assert deletes == [] and server.pod is not None
+    from app.runner_termination_control import stop_for
+    with admin.begin() as db:
+        assert str(stop_for(db,read(admin,owner))['pod_uid']) == uid
     assert str(read(admin, owner).pod_uid) == uid  # No unsupported release/termination proof.
     assert client.get('/api/auth/me').status_code == 401
 
@@ -104,26 +106,24 @@ def test_stop_requires_csrf_and_fences_future_dispatch_without_deleting_state(cl
     assert reply.status_code == 200 and reply.json()['terminationRequested'] is True
     assert read(admin, owner).state_id == rt.plan.identity.state_id
     assert client.get('/api/research/codex/status').json()['available'] is False
-    assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == 503
+    assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == 202
     assert sum(method == 'POST' for method, _ in server.requests) == 1
 
 
-def test_delete_failure_retains_session_and_dispatch_fence_for_retry(client, admin, runtime, monkeypatch):
+def test_stop_intent_failure_retains_session_for_retry(client, admin, runtime, monkeypatch):
     owner, auth, rt, server, deletes, calls = runtime
     rt.ensure(owner)
-    original = rt.pods._request
-    def refused(method, *args, **kwargs):
-        if method == 'DELETE':
-            raise ValueError('synthetic uncertain delete')
-        return original(method, *args, **kwargs)
-    monkeypatch.setattr(rt.pods, '_request', refused)
+    from app import runner_termination_control as control
+    original = control.request_stop
+    def refused(*args, **kwargs):
+        raise ValueError('synthetic intent persistence failure')
+    monkeypatch.setattr(control, 'request_stop', refused)
     assert client.post('/api/auth/logout', headers=auth).status_code == 503
     assert client.get('/api/auth/me').status_code == 200
-    assert read(admin, owner).phase == Phase.FAILED
-    assert client.get('/api/research/codex/status').json()['available'] is False
-    monkeypatch.setattr(rt.pods, '_request', original)
+    assert read(admin, owner).pod_uid is not None
+    monkeypatch.setattr(control, 'request_stop', original)
     assert client.post('/api/auth/logout', headers=auth).status_code == 204
-    assert len(deletes) == 1
+    assert len(deletes) == 0
 
 
 def test_wrong_native_uid_cannot_mark_status_available(client, runtime, monkeypatch):

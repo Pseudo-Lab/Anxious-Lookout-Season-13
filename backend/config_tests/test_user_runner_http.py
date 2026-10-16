@@ -22,6 +22,8 @@ from config_tests.test_runner_registry import schema, admin, read, preservation_
 @pytest.fixture(scope='module', autouse=True)
 def research_schema(schema):
     auth_migrate('0004_publication')
+    from ops.runner_termination_migrate import migrate
+    migrate()
 
 
 @pytest.fixture
@@ -129,6 +131,7 @@ def test_concurrent_tabs_coalesce_into_single_owner_runtime_and_outbox(client, a
 @pytest.mark.parametrize('role,approved', [('commenter',True),('editor',False),('admin',False)])
 def test_ineligible_status_200_and_prepare_403_never_creates_state(client, admin, role, approved):
     owner, auth = identity(client, admin, role=role, approved=approved)
+    client.app.state.user_runner_account = None
     assert client.get('/api/auth/me').json()['user']['codexRunner'] is False
     status = client.get('/api/research/codex/status')
     assert status.status_code == 200 and status.json()['reason'] == 'not_enabled_for_account'
@@ -222,7 +225,7 @@ def test_registry_ready_still_refuses_without_transport_and_legacy_static_bypass
 
 
 @pytest.mark.parametrize('reason,phase', [('not_prepared',None),('provisioning',Phase.PREPARING),
-    ('capacity_wait',Phase.WAITING),('runner_unreachable',Phase.UNREACHABLE),('runner_failed',Phase.FAILED),('idle_stopped',Phase.STOPPED)])
+    ('capacity_wait',Phase.WAITING),('runner_unreachable',Phase.UNREACHABLE),('runner_failed',Phase.FAILED),('idle_stopped',Phase.STOPPED),('stopping',Phase.STOPPING)])
 def test_six_preflight_codes_make_no_message_receipt_tool_or_dispatch(client, admin, reason, phase):
     owner, auth = identity(client, admin); conversation = create_conversation(client, auth)
     if phase is not None:
@@ -238,6 +241,9 @@ def test_six_preflight_codes_make_no_message_receipt_tool_or_dispatch(client, ad
                 # Isolated controlled state fixture; not actual controller evidence.
                 db.execute(text('UPDATE runner_runtime.registry SET phase=:phase WHERE owner_id=:owner'),
                            {'phase': phase.value, 'owner': owner})
+            elif phase == Phase.STOPPING:
+                db.execute(text("UPDATE runner_runtime.registry SET phase='stopping',pod_uid=:pod WHERE owner_id=:owner"),
+                           {'pod': uuid4(), 'owner': owner})
     before = preservation_snapshot(admin); key = uuid4()
     path = '/api/research/sessions/' + conversation['id'] + '/messages'
     for _ in range(2):
@@ -300,7 +306,7 @@ def test_status_phase_changes_hints_and_stopped_reprepare_retain_binding(client,
         state = Registry(db).observe(Fence.of(state), pod_uid=uuid4(), ready=True, active_requests=0,
             ambiguous=False, verified=True, now=datetime.now(timezone.utc))
         state = Registry(db).idle(Fence.of(state), now=state.last_activity + timedelta(minutes=30), verified=True)
-    assert client.get('/api/research/codex/status').json()['reason'] == 'runner_unreachable'
+    assert client.get('/api/research/codex/status').json()['reason'] == 'stopping'
     with admin.begin() as db:
         Registry(db).stopped(Fence.of(state), terminated_pod_uid=state.pod_uid, verified=True)
         # Synthetic clock alignment for the re-entry HTTP request, not a timeout inference.
@@ -484,7 +490,7 @@ def test_retained_create_receipt_does_not_hide_idle_stopped_status(client, admin
     assert preservation_snapshot(admin) == snapshot
 
 
-def test_feature_on_nonselected_account_keeps_trial_status_dispatch_and_refresh(client, admin):
+def test_feature_on_nonselected_account_cannot_fall_back_to_trial(client, admin):
     selected_owner, _ = identity(client, admin)
     other, auth = identity(client, admin, number='98765')
     client.app.state.user_runner_account = selected_owner
@@ -493,19 +499,121 @@ def test_feature_on_nonselected_account_keeps_trial_status_dispatch_and_refresh(
     client.app.state.codex_verification = 'fixture'
     assert client.get('/api/auth/me').json()['user']['codexRunner'] is False
     status = client.get('/api/research/codex/status').json()
-    assert status['available'] is True and status['remainingAdmissions'] == 2
+    assert status['available'] is False and status['reason'] == 'not_enabled_for_account'
     assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == 403
     conversation = create_conversation(client, auth)
     path = '/api/research/sessions/' + conversation['id']
-    assert client.post(path+'/messages', json={'text': 'trial', 'expectedVersion': 1}, headers=headers(auth)).status_code == 202
-    assert runner.submits == 1
+    reply = client.post(path+'/messages', json={'text': 'trial', 'expectedVersion': 1}, headers=headers(auth))
+    assert reply.status_code == 503 and reply.json()['error']['code'] == 'codex_not_enabled_for_account'
+    assert runner.submits == 0
     client.get(path)
-    assert runner.reads > 0 and read(admin, other) is None
+    assert runner.reads == runner.health_calls == 0 and read(admin, other) is None
 
 
-def test_no_selected_account_never_enables_any_account(client, admin):
+def test_no_selected_account_enables_dynamic_approved_accounts(client, admin):
     owner, auth = identity(client, admin)
     client.app.state.user_runner_account = None
-    assert client.get('/api/auth/me').json()['user']['codexRunner'] is False
-    assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == 403
-    assert read(admin, owner) is None
+    assert client.get('/api/auth/me').json()['user']['codexRunner'] is True
+    assert client.get('/api/research/codex/status').json()['reason'] == 'not_prepared'
+    assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == 202
+    first = read(admin, owner)
+    other, auth = identity(client, admin, role='admin', number='67890')
+    client.app.state.user_runner_account = None
+    assert client.get('/api/auth/me').json()['user']['codexRunner'] is True
+    assert client.get('/api/research/codex/status').json()['reason'] == 'not_prepared'
+    assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == 202
+    assert read(admin, other).state_id != first.state_id
+    assert read(admin, owner) == first
+
+
+@pytest.mark.parametrize('included', [True, False])
+def test_allowlist_applies_to_me_status_prepare_and_message(client, admin, included):
+    owner, auth = identity(client, admin)
+    client.app.state.user_runner_account = None
+    client.app.state.user_runner_allowlist = frozenset([owner if included else uuid4()])
+    assert client.get('/api/auth/me').json()['user']['codexRunner'] is included
+    assert client.get('/api/research/codex/status').json()['reason'] == (
+        'not_prepared' if included else 'not_enabled_for_account')
+    assert client.post('/api/research/codex/runner', json={}, headers=headers(auth)).status_code == (202 if included else 403)
+    conversation = create_conversation(client, auth)
+    before = preservation_snapshot(admin)
+    reply = client.post('/api/research/sessions/'+conversation['id']+'/messages',
+                        json={'text':'keep draft','expectedVersion':1}, headers=headers(auth))
+    assert reply.status_code == 503 and reply.json()['error']['code'] == (
+        'codex_provisioning' if included else 'codex_not_enabled_for_account')
+    assert preservation_snapshot(admin) == before
+
+
+def test_allowlist_configuration_is_canonical_and_explicit(monkeypatch):
+    from app.user_runners import selected_allowlist
+    monkeypatch.delenv('CODEX_USER_RUNNER_ACCOUNT_ID', raising=False)
+    monkeypatch.delenv('CODEX_USER_RUNNER_ALLOWLIST', raising=False)
+    assert selected_allowlist() is None
+    one, two = uuid4(), uuid4()
+    monkeypatch.setenv('CODEX_USER_RUNNER_ALLOWLIST', f'{one},{two}')
+    assert selected_allowlist() == frozenset([one, two])
+    for raw in (f'{one},{one}', str(one)+',', ' '+str(one), one.hex, 'invalid'):
+        monkeypatch.setenv('CODEX_USER_RUNNER_ALLOWLIST', raw)
+        with pytest.raises(ValueError): selected_allowlist()
+    monkeypatch.setenv('CODEX_USER_RUNNER_ALLOWLIST', str(one))
+    monkeypatch.setenv('CODEX_USER_RUNNER_ACCOUNT_ID', str(one))
+    with pytest.raises(ValueError): selected_allowlist()
+
+
+@pytest.mark.parametrize('pod', [False, True])
+def test_failed_prepare_requires_reconciliation_and_preserves_evidence(client, admin, pod):
+    owner, auth = identity(client, admin)
+    key = uuid4()
+    client.post('/api/research/codex/runner', json={}, headers=headers(auth, key))
+    with admin.begin() as db:
+        db.execute(text("UPDATE runner_runtime.registry SET phase='runner_failed',pod_uid=:pod WHERE owner_id=:owner"),
+                   {'owner': owner, 'pod': uuid4() if pod else None})
+    before = preservation_snapshot(admin)
+    for attempt in (key, uuid4()):
+        reply = client.post('/api/research/codex/runner', json={}, headers=headers(auth, attempt))
+        assert reply.status_code == 409
+        assert reply.json()['error']['code'] == 'runner_reconciliation_required'
+        assert client.get('/api/research/codex/status').json()['reason'] == 'runner_failed'
+    assert preservation_snapshot(admin) == before
+
+
+def test_stopping_status_is_read_only_and_does_not_probe_native(client, admin):
+    owner, auth = identity(client, admin)
+    client.post('/api/research/codex/runner', json={}, headers=headers(auth))
+    with admin.begin() as db:
+        db.execute(text("UPDATE runner_runtime.registry SET phase='stopping',pod_uid=:pod WHERE owner_id=:owner"),
+                   {'owner': owner, 'pod': uuid4()})
+    class NoTransport:
+        def close(self):
+            pass
+        def runner(self, owner):
+            pytest.fail('stopping must not probe native')
+    client.app.state.user_runner_runtime = NoTransport()
+    before = preservation_snapshot(admin)
+    status = client.get('/api/research/codex/status')
+    assert status.json() == {'available': False, 'reason': 'stopping', 'retryAfterSeconds': 5,
+                             'verification': 'unverified', 'model': 'gpt-6.1-sol'}
+    assert preservation_snapshot(admin) == before
+
+
+@pytest.mark.parametrize('reason,hint', [('not_configured',30), ('auth_expired',30),
+                                       ('auth_revoked',30), ('policy_refused',None)])
+def test_bound_credential_failures_include_read_only_poll_hint(client, admin, reason, hint):
+    owner, auth = identity(client, admin)
+    client.post('/api/research/codex/runner', json={}, headers=headers(auth))
+    with admin.begin() as db:
+        db.execute(text("UPDATE runner_runtime.registry SET phase='ready',pod_uid=:pod WHERE owner_id=:owner"),
+                   {'owner': owner, 'pod': uuid4()})
+    class Health:
+        def close(self):
+            pass
+        def runner(self, account):
+            assert account == owner
+            return self
+        def health(self):
+            return {'available': False, 'reason': reason, 'verification': 'unverified'}
+    client.app.state.user_runner_runtime = Health()
+    before = preservation_snapshot(admin)
+    result = client.get('/api/research/codex/status').json()
+    assert result['reason'] == reason and result.get('retryAfterSeconds') == hint
+    assert preservation_snapshot(admin) == before

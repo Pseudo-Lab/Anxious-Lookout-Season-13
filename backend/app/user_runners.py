@@ -17,7 +17,7 @@ from sqlalchemy import select
 from .codex_policy import MODEL, RUNNER_PREFLIGHT_ERRORS, ERRORS
 from .models import Account
 from .research import fail
-from .runner_registry import Registry
+from .runner_registry import Registry, ReconciliationRequired, StopRequested
 from .runner_schema import validate
 from runner.lifecycle import Phase, Refused
 
@@ -52,7 +52,28 @@ def selected_account():
 
 
 def selected(app, owner):
-    return bool(app.state.user_runners_enabled and owner == app.state.user_runner_account)
+    if not app.state.user_runners_enabled:
+        return False
+    allowlist = app.state.user_runner_allowlist
+    if allowlist is not None:
+        return owner in allowlist
+    # Preserve the deployed single-owner restriction when explicitly configured.
+    return app.state.user_runner_account is None or owner == app.state.user_runner_account
+
+
+def selected_allowlist():
+    raw = os.getenv('CODEX_USER_RUNNER_ALLOWLIST', '')
+    if not raw:
+        return None
+    if os.getenv('CODEX_USER_RUNNER_ACCOUNT_ID', ''):
+        raise ValueError('Configure either runner allowlist or single account')
+    values = raw.split(',')
+    if len(values) > 1000:
+        raise ValueError('Runner allowlist is too large')
+    owners = frozenset(UUID(value) for value in values)
+    if len(owners) != len(values) or any(str(UUID(value)) != value for value in values):
+        raise ValueError('Runner allowlist requires distinct canonical UUIDs')
+    return owners
 
 
 def status_body(state=None, *, permitted=True, creation_reserved=False):
@@ -63,11 +84,11 @@ def status_body(state=None, *, permitted=True, creation_reserved=False):
         return result
     # No trusted service transport is connected in this HTTP source chunk.
     # A ready Pod cannot establish actual authentication/model availability.
-    reason = {Phase.READY: 'runner_unreachable', Phase.STOPPING: 'runner_unreachable'}.get(state.phase, state.phase.value)
+    reason = {Phase.READY: 'runner_unreachable'}.get(state.phase, state.phase.value)
     if state.pod_uid is None and creation_reserved:
         reason = 'runner_unreachable'
     result['reason'] = reason
-    hint = {'provisioning': 2, 'capacity_wait': 15, 'runner_unreachable': 5}.get(reason)
+    hint = {'provisioning': 2, 'capacity_wait': 15, 'runner_unreachable': 5, 'stopping': 5}.get(reason)
     if hint is not None:
         result['retryAfterSeconds'] = hint
     return result
@@ -90,6 +111,9 @@ def preflight(store):
 
 def registry_status(registry, owner, state=None):
     state = registry.read(owner) if state is None else state
+    from .runner_termination_control import stop_for
+    if stop_for(registry.db, state) is not None:
+        return {**status_body(state), 'available':False, 'reason':'stopping', 'retryAfterSeconds':5}
     return status_body(state, creation_reserved=registry.creation_reserved(state))
 
 
@@ -100,8 +124,11 @@ def live_status(app, owner, fallback):
     try:
         health = runtime.runner(owner).health()
         available = health['available'] and health.get('reason') is None
-        return {'available': available, 'reason': None if available else health.get('reason') or 'unavailable',
-                'model': MODEL, 'verification': health['verification']}
+        result = {'available': available, 'reason': None if available else health.get('reason') or 'unavailable',
+                  'model': MODEL, 'verification': health['verification']}
+        if result['reason'] in {'not_configured', 'auth_expired', 'auth_revoked'}:
+            result['retryAfterSeconds'] = 30
+        return result
     except Exception:
         return fallback
 
@@ -142,7 +169,7 @@ def register(app, sessions, settings, current_session):
             account = db.scalar(select(Account).where(Account.id == login.account_id).with_for_update(read=True))
             if not current_session(db, request):
                 fail('unauthenticated', 'Authentication required', 401)
-            permitted = eligible(account, app.state.research_policy)
+            permitted = can_prepare(app, account)
             if mutate:
                 if not permitted or not selected(app, account.id):
                     fail('forbidden', 'Runner preparation is not permitted', 403)
@@ -181,15 +208,22 @@ def register(app, sessions, settings, current_session):
             except (ValueError, TypeError, AttributeError):
                 fail('validation_error', 'A UUID Idempotency-Key is required', 422)
             registry = checked_registry(db)
+            stopping = False
             try:
                 state, _ = registry.enter(account.id, key, utc_now)
+            except StopRequested:
+                from .runner_termination_control import queue_entry
+                state = queue_entry(db,account.id,key,current_session(db,request).token_hash)
+                stopping = True
+            except ReconciliationRequired:
+                fail('runner_reconciliation_required', 'Runner state requires reconciliation', 409)
             except Refused:
                 fail('codex_runner_unreachable', 'Runner state requires reconciliation', 503)
             # Body shares GET's parser, and contains no private runtime identities.
-            code = 200 if state.pod_uid is not None else 202
+            code = 202 if stopping else 200 if state.pod_uid is not None else 202
             fallback = registry_status(registry, account.id, state)
             owner = account.id
-        if app.state.user_runner_runtime:
+        if app.state.user_runner_runtime and not stopping:
             try:
                 app.state.user_runner_runtime.ensure(owner)
             except Exception:

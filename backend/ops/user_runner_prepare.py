@@ -40,9 +40,9 @@ def resource_names(state):
     return {'native': 'native-'+suffix, 'control': 'control-'+suffix, 'transport': 'transport-'+suffix}
 
 
-def volume(name_, namespace, path, node, labels):
+def volume(name_, namespace, path, node, labels, capacity='1Gi'):
     return {'apiVersion': 'v1', 'kind': 'PersistentVolume', 'metadata': {'name': name_, 'labels': labels},
-            'spec': {'capacity': {'storage': '1Gi'}, 'accessModes': ['ReadWriteOnce'],
+            'spec': {'capacity': {'storage': capacity}, 'accessModes': ['ReadWriteOnce'],
                      'persistentVolumeReclaimPolicy': 'Retain', 'storageClassName': '',
                      'volumeMode': 'Filesystem', 'local': {'path': str(path)},
                      'claimRef': {'namespace': namespace, 'name': name_},
@@ -50,8 +50,10 @@ def volume(name_, namespace, path, node, labels):
                          {'key': 'kubernetes.io/hostname', 'operator': 'In', 'values': [node]}]}]}}}}
 
 
-def prepare(value, output):
+def prepare(value, output, *, from_intent=False, storage_allocator=None):
     require(os.geteuid() == 0 and output.is_absolute() and output == output.resolve())
+    from ops.runner_storage import sizes, BYTES
+    capacities = {kind: str(size//BYTES)+'Gi' for kind, size in sizes().items()} if from_intent else dict(native='1Gi', control='1Gi')
     owner = UUID(value['owner'])
     require(str(owner) == value['owner'])
     namespace = name(value['namespace']); namespace_uid = UUID(value['namespaceUid'])
@@ -71,6 +73,7 @@ def prepare(value, output):
     pods = KubePods(value['api'], namespace, bearer, value['caFile'], [])
     engine = create_engine(secret('DATABASE_URL'), hide_parameters=True,
                            connect_args={'connect_timeout': 3, 'options': '-c statement_timeout=15000'})
+    guard = None
     try:
         ns = request(pods.client, 'GET', '/api/v1/namespaces/'+namespace)
         require(ns['metadata']['uid'] == str(namespace_uid) and not ns['metadata'].get('deletionTimestamp'))
@@ -83,25 +86,47 @@ def prepare(value, output):
         # New output directory is also the local preparation permit. A failed run
         # cannot silently repeat CREATEs or reset an ambiguous generation.
         output.mkdir(mode=0o700)
-        from app.runner_migrate import migrate
-        migrate()
+        if not from_intent:
+            from app.runner_migrate import migrate
+            migrate()
         with engine.begin() as db:
             validate(db)
             registry = Registry(db)
             registry._eligible(owner)
             registry._lock(owner)
-            require(registry.read(owner) is None)
-            state, _ = registry.enter(owner, uuid4(), lambda: datetime.now(timezone.utc))
+            if from_intent:
+                state = registry._current(owner)
+                require(state.pod_uid is None and not registry.creation_reserved(state))
+            else:
+                require(registry.read(owner) is None)
+                state, _ = registry.enter(owner, uuid4(), lambda: datetime.now(timezone.utc))
             require(state.phase == Phase.PREPARING and state.generation == 1)
+        if from_intent:
+            guard = engine.connect()
+            guard.begin()
+            guarded = Registry(guard)
+            guarded._eligible(owner)
+            require(guarded._current(owner) == state)
         write(output/'preparation.json', {'owner': str(owner), 'state': str(state.state_id),
               'namespace': namespace, 'namespaceUid': str(namespace_uid)}, owner=0)
         names = resource_names(state.state_id)
         labels = {LABEL+'owner': str(owner), LABEL+'state': str(state.state_id)}
         storage = root/state.state_id.hex
-        storage.mkdir(mode=0o700)
+        if from_intent:
+            require(storage_allocator is not None)
+            storage_allocator(storage)
+            write(output/'storage-restore.json', {'version': 1, 'owner': str(owner),
+                  'state': str(state.state_id), 'path': str(storage), 'layout': 'bounded-ext4'}, owner=0)
+        else:
+            storage.mkdir(mode=0o700)
         refs = {}
         for kind in ('native', 'control'):
-            path = storage/kind; path.mkdir(mode=0o700)
+            if from_intent:
+                from ops.runner_storage import data_path
+                path = data_path(storage, kind)
+                require(path.is_dir() and path == path.resolve() and not any(path.iterdir()))
+            else:
+                path = storage/kind; path.mkdir(mode=0o700)
             if kind == 'native':
                 initialize_binding(path, str(owner), str(state.state_id))
             else:
@@ -109,13 +134,13 @@ def prepare(value, output):
             for file in path.iterdir():
                 os.chown(file, 10001, 10001)
             os.chown(path, 10001, 10001)
-            manifest = volume(names[kind], namespace, path, value['node'], labels)
+            manifest = volume(names[kind], namespace, path, value['node'], labels, capacities[kind])
             pv = request(pods.client, 'POST', '/api/v1/persistentvolumes', body=manifest, expected=201)
             pvc = pods._request('POST', 'persistentvolumeclaims', body={
                 'apiVersion': 'v1', 'kind': 'PersistentVolumeClaim',
                 'metadata': {'name': names[kind], 'namespace': namespace, 'labels': labels},
                 'spec': {'accessModes': ['ReadWriteOnce'], 'storageClassName': '', 'volumeMode': 'Filesystem',
-                         'volumeName': names[kind], 'resources': {'requests': {'storage': '1Gi'}}}})
+                         'volumeName': names[kind], 'resources': {'requests': {'storage': capacities[kind]}}}})
             refs[kind] = {'name': names[kind], 'uid': pvc['metadata']['uid'], 'volume': pv['metadata']['name']}
         transport = secrets.token_urlsafe(48)
         obj = pods._request('POST', 'secrets', body={'apiVersion': 'v1', 'kind': 'Secret',
@@ -135,6 +160,9 @@ def prepare(value, output):
               'snapshotId': str(uuid4()), 'expectedAccountId': account})
         os.chown(output, 10001, 10001)
     finally:
+        if guard is not None:
+            guard.rollback()
+            guard.close()
         pods.close(); engine.dispose()
 
 
