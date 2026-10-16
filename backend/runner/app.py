@@ -43,6 +43,21 @@ class Turn(BaseModel):
         return Scope.model_validate(value).model_dump(mode="json", exclude_none=True) if value is not None else None
 
 
+class Drain(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    stopId: str
+    ownerId: str
+    stateId: str
+    podUid: str
+    generation: int = Field(gt=0)
+
+    @field_validator('stopId', 'ownerId', 'stateId', 'podUid')
+    @classmethod
+    def identity(cls, value):
+        canonical_uuid(value)
+        return value
+
+
 def bind_owner(root, owner):
     if root.is_symlink():
         raise RuntimeError("Runner state must be a private volume")
@@ -624,11 +639,12 @@ class Native:
 
     def close(self):
         if self.closed:
-            return
+            return getattr(self, 'clean_shutdown', False)
         self.closing = True
         active_at_start = self.active_session is not None
         alive_at_start = self.process.poll() is None
         forced = False
+        worker = getattr(self, "worker", None)
         binding_ok = not getattr(self, "binding_failed", False)
         try:
             self.check_binding()
@@ -654,8 +670,11 @@ class Native:
             if worker:
                 worker.join(timeout=20)
         finally:
+            clean = (binding_ok and alive_at_start and not forced and not active_at_start
+                     and self.active_session is None and self.process.poll() == 0
+                     and not (worker and worker.is_alive()))
+            self.clean_shutdown = clean
             if self.auth:
-                clean = binding_ok and alive_at_start and not forced and not active_at_start and self.active_session is None and self.process.poll() == 0
                 self.auth.close(clean=clean)
             for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
                 if stream:
@@ -664,6 +683,7 @@ class Native:
                     except (BrokenPipeError, OSError):
                         pass
             self.closed = True
+        return self.clean_shutdown
 
 
 def create_app():
@@ -681,6 +701,7 @@ def create_app():
     if len(token) < 32 or model != MODEL or os.getenv("CODEX_API_KEY_FILE"):
         raise ValueError("Explicit private runner configuration is required")
     root = Path(os.environ.get("RUNNER_STATE_DIR", "/state"))
+    lifecycle_lock = threading.RLock()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -692,6 +713,7 @@ def create_app():
             supply = None
             app.state.native, app.state.auth_failure = None, None
             app.state.stopping = False
+            app.state.drain = None
             try:
                 mode = os.getenv("CODEX_AUTH_MODE", "none")
                 if mode == "personal-cache":
@@ -715,7 +737,7 @@ def create_app():
                                   binding_check=(lambda: require_binding(root, owner, state_id)) if state_id else None)
                 if mode in {'access-only', 'access-service'}:
                     app.state.auth_failure = 'not_configured'
-                    def apply(envelope):
+                    def apply_locked(envelope):
                         if app.state.stopping:
                             raise CodexFailure('unavailable')
                         require_binding(root, owner, state_id)
@@ -733,6 +755,9 @@ def create_app():
                         except Exception as failure:
                             app.state.auth_failure = failure.reason if isinstance(failure, CodexFailure) else 'unavailable'
                             raise
+                    def apply(envelope):
+                        with lifecycle_lock:
+                            return apply_locked(envelope)
                     supply = SupplySocket(auth.control, apply)
                 else:
                     app.state.native = start_native()
@@ -743,13 +768,15 @@ def create_app():
             try:
                 yield
             finally:
-                app.state.stopping = True
+                with lifecycle_lock:
+                    app.state.stopping = True
                 if supply:
                     supply.close()
-                if app.state.native:
-                    app.state.native.close()
-                elif auth:
-                    auth.close()
+                with lifecycle_lock:
+                    if app.state.native:
+                        app.state.native.close()
+                    elif auth:
+                        auth.close()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -778,14 +805,18 @@ def create_app():
     @app.get("/health")
     def health():
         native = app.state.native
+        if app.state.stopping:
+            return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid,
+                    "verification": "unverified", "available": False, "reason": "unavailable", "model": MODEL}
         if not native:
             return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, "verification": "unverified", "available": False, "reason": app.state.auth_failure, "model": MODEL}
         reason = native.availability()
         return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, "verification": "fixture" if native.fixture else "real" if native.real_verified else "unverified", "available": reason is None, "reason": reason, "model": MODEL,
                 **(native.auth.status() if getattr(native, 'external', False) else {})}
 
-    @app.post("/sessions/{identity}/turn", status_code=202)
-    def turn(identity: uuid.UUID, body: Turn):
+    def turn_locked(identity, body):
+        if app.state.stopping:
+            return JSONResponse({"ownerId": owner, "error": "codex_runner_stopped"}, status_code=503)
         if not app.state.native:
             return JSONResponse({"ownerId": owner, "error": str(CodexFailure(app.state.auth_failure))}, status_code=503)
         try:
@@ -796,13 +827,65 @@ def create_app():
             return JSONResponse({"ownerId": owner, "error": "conflict"}, status_code=409)
         return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, "state": "running", "requestId": str(body.requestId)}
 
-    @app.get("/sessions/{identity}")
-    def read(identity: uuid.UUID):
+    @app.post("/sessions/{identity}/turn", status_code=202)
+    def turn(identity: uuid.UUID, body: Turn):
+        with lifecycle_lock:
+            return turn_locked(identity, body)
+
+    @app.post('/lifecycle/drain')
+    def drain(body: Drain):
+        # The authenticated controller binds generation to the current registry
+        # and this Pod UID. A receipt proves only native drain, never Pod death.
+        with lifecycle_lock:
+            if (body.ownerId, body.stateId, body.podUid) != (owner, state_id, pod_uid):
+                return JSONResponse({'error': 'codex_policy_refused'}, status_code=409)
+            value = body.model_dump()
+            if app.state.drain is not None:
+                if app.state.drain != value:
+                    return JSONResponse({'error': 'conflict'}, status_code=409)
+                receipt = read_private(root / ('termination-'+pod_uid+'.json'))
+                return receipt
+            native = app.state.native
+            if app.state.stopping:
+                return JSONResponse({'error': 'codex_runner_stopped'}, status_code=503)
+            if (root / ('termination-'+pod_uid+'.json')).exists():
+                return JSONResponse({'error': 'codex_policy_refused'}, status_code=409)
+            if native is not None:
+                with native.state_lock:
+                    # Failed/unknown projections require reconciliation too;
+                    # process death alone cannot resolve an uncertain request.
+                    if (native.active_session is not None or native.lock.locked()
+                            or any(entry.get('state') != 'idle' for entry in native.mapping.values())):
+                        return JSONResponse({'error': 'conflict'}, status_code=409)
+                    app.state.stopping = True
+                    native.closing = True
+                clean = native.close() is True
+            else:
+                # No native constructed is safe only for a never-supplied runner.
+                # A startup failure may have spawned a child before raising.
+                if app.state.auth_failure != 'not_configured':
+                    return JSONResponse({'error': 'codex_unavailable'}, status_code=503)
+                app.state.stopping = True
+                clean = not (root / 'broker.json').exists() and not (root / 'codex').exists()
+            receipt = {**value, 'version': 1, 'clean': clean}
+            require_binding(root, owner, state_id)
+            write_private(root / ('termination-'+pod_uid+'.json'), receipt)
+            app.state.drain = value
+            return receipt
+
+    def read_locked(identity):
+        if app.state.stopping:
+            return JSONResponse({"ownerId": owner, "error": "codex_runner_stopped"}, status_code=503)
         if not app.state.native:
             return JSONResponse({"ownerId": owner, "error": str(CodexFailure(app.state.auth_failure))}, status_code=503)
         result = app.state.native.read(str(identity))
         if result is None:
             return JSONResponse({"ownerId": owner, "error": "not_found"}, status_code=404)
         return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, **result}
+
+    @app.get("/sessions/{identity}")
+    def read(identity: uuid.UUID):
+        with lifecycle_lock:
+            return read_locked(identity)
 
     return app
