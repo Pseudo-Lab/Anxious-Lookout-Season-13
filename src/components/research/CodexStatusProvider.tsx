@@ -127,14 +127,34 @@ export function CodexStatusProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  // 진행 중인 상태 조회(세대마다 하나). 진행 중에 다시 요청되면 겹쳐 보내지 않고, 끝난 뒤 한 번만 더 조회한다
+  // (그사이 바뀐 상태를 놓치지 않게). 계정·자격이 바뀐 새 세대의 조회는 기다리지 않고 바로 보낸다.
+  const inflight = useRef<{ epoch: number; again: boolean; done: Promise<void> } | null>(null);
+
   const reload = useCallback(async () => {
     // 연구 권한이 없는 계정·비로그인은 조회하지 않는다(기존 권한 흐름).
     if (!researchRef.current) return;
     const started = epochRef.current;
-    const mine = ++seq.current;
-    const result = await getCodexStatus();
-    if (started !== epochRef.current || mine !== seq.current) return;
-    apply(started, result);
+    const running = inflight.current;
+    if (running && running.epoch === started) {
+      running.again = true;
+      return running.done;
+    }
+    const entry = { epoch: started, again: false, done: Promise.resolve() };
+    const run = async () => {
+      do {
+        entry.again = false;
+        const mine = ++seq.current;
+        const result = await getCodexStatus();
+        if (started !== epochRef.current) return;
+        if (mine === seq.current) apply(started, result);
+      } while (entry.again);
+    };
+    inflight.current = entry;
+    entry.done = run().finally(() => {
+      if (inflight.current === entry) inflight.current = null;
+    });
+    return entry.done;
   }, [apply]);
 
   // 준비 요청 하나. 응답·실패 모두 시작 세대가 지금 세대일 때만 반영한다. 자동으로 다시 보내지 않는다.

@@ -418,6 +418,57 @@ await step("N20", async () => {
   await setMock("runnerAll=ready&credHint=1");
 });
 
+// N21. 리뷰(e525e5a) 반례: 상태 조회가 늦게 끝나는 동안 탭 표시 전환·대화창 다시 열기를 반복해도 같은 세대의 조회는 겹치지 않는다
+// (동시 최대 1개). 진행 중에 다시 요청되면 끝난 뒤 한 번만 더 조회해 최신 상태를 반영한다.
+await step("N21", async () => {
+  await setMock("runnerAll=auth_expired&credHint=1&hint=");
+  await page.goto(U(`/research/session/?id=${sid}`));
+  await openPanel();
+  await chat.getByText(/서버의 Codex 인증이 만료되어/).first().waitFor();
+  let open = 0;
+  let maxOpen = 0;
+  let sent = 0;
+  const isStatus = (r) => r.method() === "GET" && new URL(r.url()).pathname.endsWith("/research/codex/status");
+  const onReq = (r) => {
+    if (!isStatus(r)) return;
+    sent += 1;
+    open += 1;
+    maxOpen = Math.max(maxOpen, open);
+  };
+  const onDone = (r) => {
+    if (isStatus(r)) open -= 1;
+  };
+  page.on("request", onReq);
+  page.on("requestfinished", onDone);
+  page.on("requestfailed", onDone);
+  await page.route("**/api/research/codex/status", async (route) => {
+    await sleep(2500);
+    await route.continue();
+  });
+  try {
+    for (let i = 0; i < 3; i++) {
+      await setHidden(true);
+      await page.waitForTimeout(100);
+      await setHidden(false);
+      await page.waitForTimeout(250);
+    }
+    await closePanel();
+    await page.getByRole("button", { name: "Codex 대화창 열기" }).click();
+    await chat.waitFor();
+    // 진행 중에 바뀐 상태: 보류된 조회 뒤 한 번 더 조회해 반영해야 한다.
+    await setMock("runnerAll=ready");
+    await sleep(7000);
+    check("N21. delayed status GETs never overlap (max 1 in flight)", maxOpen === 1, `max=${maxOpen} sent=${sent}`);
+    check("N21. repeated requests coalesced into one trailing read", sent >= 2 && sent <= 3, String(sent));
+    check("N21. trailing read reflects the newer state", await appears(chat.getByText(/테스트용 모의 Codex/).or(chat.getByText("Codex에 연결되어 있습니다", { exact: false })), 8000));
+  } finally {
+    await page.unroute("**/api/research/codex/status");
+    page.off("request", onReq);
+    page.off("requestfinished", onDone);
+    page.off("requestfailed", onDone);
+  }
+});
+
 // N8. 이전 API(준비 경로 없음·codexRunner 없음): 진입당 1회 404 뒤 기존 상태 조회, 405/403/500도 반복 없음
 await step("N8", async () => {
   for (const [label, q] of [
