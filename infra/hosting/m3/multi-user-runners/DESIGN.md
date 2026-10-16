@@ -211,3 +211,17 @@ multiplexing, or durable session-bound entry intents during stopping. In particu
 stopping POST is not yet a promise of queued re-entry. Credential polling observes
 operator repair; it does not initiate supply. Poll at 30–60 seconds only while the
 conversation/tab is visible, without overlapping requests or a fixed count cap.
+
+## Implemented source checkpoints (2026-10-16)
+
+D3, DB observer, legacy recovery and idle source slices have separate partial review
+approvals; none is full #16/live approval. PROVISIONING.md, TERMINATION.md and
+HOST-SUPPLY.md describe the current source behavior and override earlier draft
+mechanics where stated. Host supply uses a finite trusted host process and
+stdin-only kubectl transport without a Docker socket. It records a durable exclusive
+attempt permit before exec and never automatically resends the same rejected or
+uncertain source/Pod combination; operator reconciliation is required. Source-token
+replacement or a new Pod/generation yields a new scoped identity. Existing native
+health remains authoritative for browser auth failure reasons. Operator alert wiring,
+new runtime image binding/cutover, host namespace/mount proof and end-to-end provider
+checks remain rollout work; do not treat code tests as evidence of these operations.

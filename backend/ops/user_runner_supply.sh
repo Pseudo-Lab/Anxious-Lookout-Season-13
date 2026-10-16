@@ -25,4 +25,4 @@ docker run --rm -i --user "$(id -u):$(id -g)" --network none --read-only \
   --source "/source/$RUNNER_SOURCE_FILE" --inputs "/inputs/$RUNNER_SUPPLY_INPUT_FILE" \
   --supply-mode service --export |
   kubectl --kubeconfig "$RUNNER_KUBECONFIG" -n "$RUNNER_NAMESPACE" exec -i "$RUNNER_POD" \
-    -- python -B -m runner.access_supply /control/access.sock
+    -- python -B -m runner.access_supply /control/access.sock --expected-pod-uid "$RUNNER_POD_UID"

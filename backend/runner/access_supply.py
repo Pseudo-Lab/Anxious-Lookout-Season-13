@@ -1,17 +1,28 @@
 """Same-UID local socket client: bounded private stdin, only safe receipt stdout."""
 import json
+import os
 import socket
 import sys
 from pathlib import Path
 
 from .access import MAX_ENVELOPE
 from .auth import private_directory
+from .binding import canonical_uuid
 
 
 def main():
     try:
-        if len(sys.argv) != 2:
+        if len(sys.argv) not in (2, 4):
             raise ValueError()
+        if len(sys.argv) == 4:
+            if sys.argv[2] != '--expected-pod-uid':
+                raise ValueError()
+            expected = canonical_uuid(sys.argv[3])
+            actual = canonical_uuid(os.environ.get('RUNNER_POD_UID', ''))
+            if expected != actual:
+                raise ValueError()
+        # Refuse a stale exec target before consuming credential stdin. The
+        # host still checks registry generation/UID and serializes with stop.
         path = Path(sys.argv[1])
         private_directory(path.parent)
         payload = sys.stdin.buffer.read(MAX_ENVELOPE+1)

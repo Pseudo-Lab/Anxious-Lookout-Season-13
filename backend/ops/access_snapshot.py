@@ -34,15 +34,17 @@ def service_envelope(source, inputs):
             "snapshotId": inputs["snapshotId"], "accountId": account, "accessToken": token, "expiresAt": expiry}
 
 
-def selected_file(path):
+def selected_file(path, *, expected_uid=None):
     path = Path(path)
     if not path.is_absolute() or path != path.resolve() or path.is_symlink():
         raise SourceFailure('policy_refused', 'source_not_canonical_regular_private_file')
     before = path.lstat()
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    if not stat.S_ISREG(before.st_mode):
+        raise SourceFailure('policy_refused', 'source_not_canonical_regular_private_file')
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, 'rb') as source:
         info = os.fstat(source.fileno())
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != (os.geteuid() if expected_uid is None else expected_uid) or info.st_mode & 0o077
                 or info.st_nlink != 1 or info.st_size > 1_000_000):
             raise SourceFailure('policy_refused', 'source_owner_mode_links_or_size_refused')
         raw = source.read(1_000_001)
