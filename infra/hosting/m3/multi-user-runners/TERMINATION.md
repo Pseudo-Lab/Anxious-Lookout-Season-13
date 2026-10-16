@@ -24,11 +24,29 @@ that receipt with fresh host proof before committing a lifecycle transition.
 `ops.runner_termination.HostTermination` is a separate root-only host verifier. It
 requires the host PID namespace, a canonical read-only host proc path, a trusted
 root-owned CRI socket and executable, expected Node name/UID and boot ID. Fresh
+root host inventory must independently supply `host_pid_namespace` and
+`host_cgroup_namespace`, obtained on that host with `readlink /proc/1/ns/pid`
+and `readlink /proc/1/ns/cgroup`, paired with the boot ID. The observer refuses
+missing references and compares both its own namespaces and the proc PID1
+namespaces with them. Never populate these inputs by discovering namespaces
+inside the observer container. Run the observer with host PID **and cgroup**
+namespaces; sharing only a boot ID does not prove process visibility.
+Fresh
 Pod absence and Ready Node identity/heartbeat bracket CRI plus cgroup inspection.
 Matching ready sandboxes, non-exited containers, processes, unknown ownership,
 query errors, incomplete proc visibility, boot/Node drift or observations taking
 over 30 seconds refuse proof. Caller must fence creators and verify the old Pod
 was assigned to this Node; the verifier does not infer that relationship.
+Every CRI ownership UID must be a canonical UUID before comparison; an empty or
+malformed UID is unknown ownership and blocks evidence.
+
+For the real isolated-PID regression, pass `TEST_PARENT_PID_NAMESPACE` and
+`TEST_PARENT_CGROUP_NAMESPACE` to the Docker test service, capturing each with
+`readlink /proc/1/ns/{pid,cgroup}` in the invoking parent environment. Keep the
+test container in its default isolated PID namespace. The test asserts that the
+reference differs from its own namespace and that construction refuses it. This
+regression skips if independent references were not supplied; reported validation
+must explicitly include an invocation with them.
 
 Tests use fake Native/process/CRI/proc and real fixture adapter tests inside Docker.
 These modules are not yet wired to DB stop intents, slot release, HTTP stopping
