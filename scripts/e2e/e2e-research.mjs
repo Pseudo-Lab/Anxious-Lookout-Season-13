@@ -1925,6 +1925,51 @@ let docEUrl;
   await page.unroute(pattern);
   check("W6. late A save does not move the address back", idOf() === b && (await bodyIs("Body B")), page.url());
   check("W6. late A save landed on A", (await api.get(`/research/document-drafts/${a}`)).content === "Late A");
+
+  // 리뷰 F4 잔여: 다른 초안 조회가 끝나기 전에 뒤로 가기 → 내렸던 편집기 상태를 되살리지 않고 서버에서 다시 읽는다.
+  const holdGet = async (id) => {
+    let release;
+    let seen;
+    const gate = new Promise((r) => (release = r));
+    const arrived = new Promise((r) => (seen = r));
+    const pat = `**/api/research/document-drafts/${id}`;
+    await page.route(pat, async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      seen();
+      await gate;
+      // 뒤로 가기로 요청이 이미 취소됐을 수 있다.
+      return route.continue().catch(() => {});
+    });
+    return { release, arrived, done: () => page.unroute(pat) };
+  };
+  // (1) 이 화면에서 만든 C(편집기에는 서버 초안 객체가 없던 경우)
+  const c = await makeDraft("초안 C", "Body C");
+  const g1 = await holdGet(a);
+  await main.getByRole("link", { name: "초안 A" }).click();
+  await g1.arrived;
+  await page.goBack();
+  await page.waitForURL(new RegExp(`draft=${c}`));
+  check("W6. back during load: created draft C reloaded (not blank)", (await bodyIs("Body C")) && (await main.getByLabel("제목").inputValue()) === "초안 C");
+  g1.release();
+  await g1.done();
+  await body().fill("Body C edited");
+  await main.getByText("초안 자동 저장됨").waitFor();
+  check("W6. back during load: edits go to C, no new draft id", idOf() === c && (await api.get(`/research/document-drafts/${c}`)).content === "Body C edited", page.url());
+  // (2) 불러왔던 A로 돌아올 때 오래된 스냅샷이 아니라 최신 내용
+  await main.getByRole("link", { name: "초안 A" }).click();
+  await page.waitForURL(new RegExp(`draft=${a}`));
+  await bodyIs("Late A");
+  await api.send("PUT", `/research/document-drafts/${a}`, { title: "초안 A", content: "A from elsewhere", expectedDraftRevision: (await api.get(`/research/document-drafts/${a}`)).revision });
+  const g2 = await holdGet(b);
+  await main.getByRole("link", { name: "초안 B" }).click();
+  await g2.arrived;
+  await page.goBack();
+  await page.waitForURL(new RegExp(`draft=${a}`));
+  check("W6. back during load: loaded draft A shows latest server content", await bodyIs("A from elsewhere"));
+  g2.release();
+  await g2.done();
+  await page.waitForTimeout(1000);
+  check("W6. back during load: address and body stay A after late B response", idOf() === a && (await bodyIs("A from elsewhere")), page.url());
   await page.context().close();
 }
 

@@ -62,14 +62,18 @@ function OtherDrafts({ current, reload }: { current: string | null; reload: stri
 // bound: 편집기가 저장하는 초안 ID(새 편집기는 첫 자동 저장 전까지 null).
 // transit: 주소가 아직 따라오지 않은 이전 주소 값(편집기가 방금 만든 초안으로 바꾸는 중이거나, 찾지 못한 초안 주소에서 새로 시작한 경우).
 // 주소(?draft=)가 bound·transit과 맞지 않는 동안에는 편집기를 그리지 않는다(다른 초안 주소에서 이 초안을 고치지 않게, 리뷰 F4).
+// released: 주소가 맞지 않아 편집기를 한 번 내렸다(다른 초안으로 이동 중 등). 내린 화면 상태는 다시 쓰지 않는다.
+// 주소가 다시 같아져도(뒤로 가기) 서버에서 최신 초안을 다시 읽는다(오래된 view.draft나 빈 편집기로 되살리지 않게, 리뷰 F4 잔여).
 interface View {
   key: string;
   draft: Draft | null;
   bound: string | null;
   transit?: string | null;
   note?: string;
+  released?: boolean;
 }
-const matches = (v: View, param: string | null) => param === v.bound || (v.transit !== undefined && param === v.transit);
+const matches = (v: View, param: string | null) =>
+  !v.released && (param === v.bound || (v.transit !== undefined && param === v.transit));
 
 function NewDocument() {
   const router = useRouter();
@@ -85,14 +89,14 @@ function NewDocument() {
   useEffect(() => {
     const v = viewRef.current;
     let active = true;
-    if (v && param === v.bound) {
+    if (v && !v.released && param === v.bound) {
       // 주소가 지금 편집기를 따라왔다. 이전 주소 값은 더 맞추지 않는다.
       if (v.transit !== undefined) void Promise.resolve().then(() => active && setView((cur) => (cur && cur.key === v.key ? { ...cur, transit: undefined } : cur)));
       return () => {
         active = false;
       };
     }
-    if (v && v.transit !== undefined && param === v.transit) return;
+    if (v && !v.released && v.transit !== undefined && param === v.transit) return;
     if (!param) {
       // 다른 초안을 보다가 새 문서로 왔다
       void Promise.resolve().then(() => active && setView({ key: `new:${Date.now()}`, draft: null, bound: null }));
@@ -113,6 +117,8 @@ function NewDocument() {
     };
   }, [param, router]);
 
+  // 주소가 지금 편집기와 맞지 않게 된 첫 렌더에서 화면 상태를 내린다(이전 렌더 정보로 상태를 고치는 React 패턴).
+  if (view && !view.released && !matches(view, param)) setView({ ...view, released: true });
   if (!view || !matches(view, param)) return <p className="text-sm text-stone-500">초안을 불러오는 중...</p>;
   const key = view.key;
   return (
