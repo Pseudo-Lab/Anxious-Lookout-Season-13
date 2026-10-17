@@ -169,3 +169,21 @@ on each restart. If a restored volume's fsGroup handling widens the data directo
 permissions, the API first verifies it owns that real directory and tightens its
 mode to 0700. Foreign ownership and symlink paths are rejected. The private parent
 gate protects any retained file mode widened by the storage driver.
+
+### Offline frontend integration fixture
+
+The integration Compose API now mounts project-scoped `post-images` at
+`/var/lib/posts/images`; the offline overlay preserves this mount alongside its
+read-only fixture credentials. Rebuild the test image from this branch and set
+M3_FIXTURE_IMAGE to that image. Its Dockerfile seeds UID10001 mount ownership.
+Use a fresh disposable database migrated explicitly to 0006_posts, as in the
+frontend live-offline script; older provisional schemas/images are incompatible.
+
+In the offline native fixture only, a user message containing
+`/fixture/post-propose` reads the current post with research_get on a post page,
+or the latest draft revision with research_post_draft_get on a post_workspace
+page with draftId, then calls research_post_propose with a complete candidate.
+Without either hint it proposes a new post. Source metadata is retained and
+"Complete fixture post proposal" is appended to title/body. Read failure stops
+without a proposal. This creates a pending proposal only; acceptance remains the
+human HTTP action. The production native binary has no such fixture command.

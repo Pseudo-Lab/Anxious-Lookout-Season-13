@@ -185,3 +185,53 @@ def test_mapping_rejects_shared_or_ambiguous_bindings(tmp_path, monkeypatch, dam
     mapping.write_text(raw)
     monkeypatch.setenv("CODEX_RUNNERS_FILE", str(mapping))
     with pytest.raises(ValueError): runners_from_file()
+
+
+@pytest.mark.parametrize('kind', ['post', 'draft', 'new', 'read-failure'])
+def test_offline_post_proposal_reads_current_source(tmp_path, monkeypatch, kind):
+    from tests.test_posts import content
+    identity = str(uuid.uuid4())
+    source = content(title='Human title', content='Human words', slug='human-slug', tags=['kept'])
+    page = {'kind': 'post', 'resourceId': identity} if kind in {'post', 'read-failure'} else (
+        {'kind': 'post_workspace', 'draftId': identity} if kind == 'draft' else {'kind': 'post_workspace'})
+    calls = []
+    def callback(request):
+        call = json.loads(request.content); calls.append(call)
+        if call['name'] == 'research_get':
+            if kind == 'read-failure': return httpx.Response(404, json={'error': {'code':'not_found'}})
+            return httpx.Response(200, json={'id':identity, 'version':7, 'latestVersion':source})
+        if call['name'] == 'research_post_draft_get':
+            return httpx.Response(200, json={'draft': {**source, 'id':identity, 'revision':9}})
+        return httpx.Response(200, json={'id':str(uuid.uuid4()), 'status':'pending'})
+    monkeypatch.setattr(httpx, 'Client', lambda **kw: HTTP_CLIENT(transport=httpx.MockTransport(callback), **kw))
+    native = Native(tmp_path/'native', 'gpt-6.1-sol', '/usr/local/bin/codex-fixture', 'http://callback.invalid/tools')
+    try:
+        session = str(uuid.uuid4())
+        native.accept(session, Turn(requestId=uuid.uuid4(), text='Please /fixture/post-propose now',
+            tools=definitions(), toolToken='p'*40, scope={'page':page}))
+        record = wait_idle(native, session)
+        assert record['state'] == 'idle'
+        if kind == 'read-failure':
+            assert [call['name'] for call in calls] == ['research_get']
+            return
+        proposal = calls[-1]
+        assert proposal['name'] == 'research_post_propose'
+        args = proposal['arguments']
+        assert 'Complete fixture post proposal' in args['title']
+        assert args['content'].endswith('Complete fixture post proposal')
+        if kind == 'post':
+            assert calls[0]['arguments'] == {'type':'post', 'id':identity}
+            assert args['postId'] == identity and args['expectedVersion'] == 7
+        elif kind == 'draft':
+            assert calls[0]['arguments'] == {'draftId':identity}
+            assert args['draftId'] == identity and args['expectedDraftRevision'] == 9
+            assert 'postId' not in args
+        else:
+            assert len(calls) == 1 and 'postId' not in args and 'draftId' not in args
+        if kind in {'post','draft'}:
+            assert args['content'].startswith('Human words') and args['slug'] == 'human-slug'
+            assert args['tags'] == ['kept']
+        tools = [item for item in record['record']['turns'][0]['items'] if item['type'] == 'dynamicToolCall']
+        assert all(item['status'] == 'completed' for item in tools)
+    finally:
+        native.close()

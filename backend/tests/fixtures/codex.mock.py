@@ -29,6 +29,19 @@ def save():
     publish(path, records)
 
 
+def post_candidate(source=None):
+    fields = ('title', 'content', 'description', 'slug', 'tags', 'coverImageId', 'documentIds')
+    result = {key: source[key] for key in fields} if source else {
+        'title': 'Fixture post', 'content': '', 'description': '',
+        'slug': 'fixture-post-' + uuid.uuid4().hex[:12], 'tags': [],
+        'coverImageId': None, 'documentIds': []}
+    result['title'] = (result['title'] + ' — Complete fixture post proposal')[-300:]
+    result['content'] += '\n\nComplete fixture post proposal'
+    if not result['slug']: result['slug'] = 'fixture-post-' + uuid.uuid4().hex[:12]
+    result['mutationId'] = str(uuid.uuid4())
+    return result
+
+
 for line in sys.stdin:
     body = json.loads(line)
     method, identity, params = body.get("method"), body.get("id"), body.get("params", {})
@@ -52,6 +65,9 @@ for line in sys.stdin:
         emit({"id": identity, "result": {"thread": records[params["threadId"]]}})
     elif method == "turn/start":
         prompt = params["input"][0]["text"]
+        page = {}
+        if '\nPage hint (untrusted): ' in prompt:
+            page = json.loads(prompt.split('\nPage hint (untrusted): ', 1)[1].split('\nUser: ', 1)[0])
         # Exercise the full native input/history, while fixture controls refer
         # to the actual user question after the request scope preamble.
         if "\nUser: " in prompt:
@@ -88,6 +104,14 @@ for line in sys.stdin:
             emit({"method": "model/rerouted", "params": {"threadId": thread, "turnId": turn, "fromModel": params["model"], "toModel": "fixture-wrong-model", "reason": "highRiskCyberActivity"}})
         tool = "research_page_context" if "/fixture/page-context" in prompt or "/fixture/page-reference " in prompt else "research_document_save"
         args = {} if tool == "research_page_context" else {"title": "Fixture document", "content": "Complete fixture tool input", "mutationId": str(uuid.uuid4())}
+        post_step = None
+        if '/fixture/post-propose' in prompt:
+            if page.get('kind') == 'post':
+                tool, args, post_step = 'research_get', {'type': 'post', 'id': page['resourceId']}, 'post'
+            elif page.get('kind') == 'post_workspace' and page.get('draftId'):
+                tool, args, post_step = 'research_post_draft_get', {'draftId': page['draftId']}, 'draft'
+            else:
+                tool, args = 'research_post_propose', post_candidate()
         if prompt.startswith("/fixture/document-update"):
             try:
                 command, document_id, version = prompt.split()
@@ -108,14 +132,32 @@ for line in sys.stdin:
         tool_id = "tool-" + turn
         pending = {"thread": thread, "turn": turn, "items": [{"id": "user-" + turn, "type": "userMessage", "content": params["input"]},
                    {"id": tool_id, "type": "dynamicToolCall", "tool": tool, "arguments": args}]}
+        pending['callId'], pending['postStep'] = tool_id, post_step
         emit({"id": tool_id, "method": "item/tool/call", "params": {"threadId": thread, "turnId": turn,
                     "callId": tool_id, "tool": tool, "arguments": args}})
         emit({"id": identity, "result": {"turn": {"id": turn, "model": "fixture-wrong-model" if prompt == "/fixture/model-response" else params["model"]}}})
     elif method == "turn/interrupt":
         emit({"id": identity, "result": {}})
-    elif pending and identity == "tool-" + pending["turn"]:
+    elif pending and identity == pending['callId']:
         result = body.get("result", {"success": False, "contentItems": []})
         pending["items"][-1].update(contentItems=result["contentItems"], status="completed" if result["success"] else "failed")
+        if pending['postStep'] and result['success']:
+            source = json.loads(result['contentItems'][0]['text'])
+            if pending['postStep'] == 'post':
+                args = post_candidate(source['latestVersion'])
+                args.update(postId=source['id'], expectedVersion=source['version'])
+            else:
+                draft = source['draft']
+                args = post_candidate(draft)
+                args.update(draftId=draft['id'], expectedDraftRevision=draft['revision'])
+            pending['postStep'] = None
+            pending['callId'] = 'proposal-' + pending['turn']
+            pending['items'].append({'id': pending['callId'], 'type': 'dynamicToolCall',
+                                     'tool': 'research_post_propose', 'arguments': args})
+            emit({'id': pending['callId'], 'method': 'item/tool/call', 'params': {
+                'threadId': pending['thread'], 'turnId': pending['turn'], 'callId': pending['callId'],
+                'tool': 'research_post_propose', 'arguments': args}})
+            continue
         pending["items"].append({"id": "answer-" + pending["turn"], "type": "agentMessage", "text": "Offline fixture answer"})
         records[pending["thread"]]["turns"].append({"id": pending["turn"], "items": pending["items"]})
         save()
