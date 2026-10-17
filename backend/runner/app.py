@@ -613,7 +613,7 @@ class Native:
         try:
             self.check_binding()
             kind = (body.scope or {}).get("page", {}).get("kind")
-            web_mode = "live" if kind in POLICIES and kind != "public_document" else "disabled"
+            web_mode = "live" if kind in POLICIES and kind not in {"public_document", "public_post"} else "disabled"
             if self.shell_enabled or (entry["thread"] in self.thread_web_modes and self.thread_web_modes[entry["thread"]] != web_mode):
                 self.reset_thread_tools()
             config = {"web_search": web_mode}

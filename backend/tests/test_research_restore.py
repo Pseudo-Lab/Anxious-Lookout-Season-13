@@ -93,7 +93,7 @@ def test_posts_restore_retains_versions_and_drafts(admin, monkeypatch):
         with candidate.connect() as db:
             assert validate_research(db) == '0006_posts'
             assert db.execute(text("SELECT payload->>'content',state FROM research.post_drafts WHERE id=:id"), {'id': active['id']}).one() == ('Unsaved words', 'active')
-            assert db.execute(text("SELECT payload->>'content' FROM research.post_versions")).scalar_one() == 'Version'
+            assert db.execute(text("SELECT payload->>'content' FROM research.post_versions WHERE post_id=:id"), {'id': post['id']}).scalar_one() == 'Version'
             assert db.execute(text("SELECT payload->>'content',status FROM research.post_proposals WHERE id=:id"), {'id': proposal['id']}).one() == ('Unsaved words', 'pending')
     finally:
         if candidate is not None: candidate.dispose()

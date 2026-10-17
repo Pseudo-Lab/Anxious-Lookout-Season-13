@@ -112,7 +112,13 @@ def create_app(settings=None):
                     return callback_failure("server_error")
                 return error("not_ready", "Service is not ready", 503)
         response = await call_next(request)
-        response.headers["Cache-Control"] = "no-store"
+        public_posts = settings.base_path + '/api/public/posts'
+        cacheable_path = (request.url.path == public_posts or request.url.path.startswith(public_posts + '/')
+                          or request.url.path == settings.base_path + '/api/public/post-tags')
+        if not (request.method == 'GET' and cacheable_path and response.status_code in {200, 304}):
+            response.headers['Cache-Control'] = 'no-store'
+        else:
+            response.headers.setdefault('Cache-Control', 'no-store')
         return response
 
     @app.exception_handler(RequestValidationError)

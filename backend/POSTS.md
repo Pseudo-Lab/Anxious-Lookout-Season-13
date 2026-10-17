@@ -29,9 +29,21 @@ acceptedDocumentId and acceptedVersionId. Old-schema new-document tool calls fai
 closed; they never fall back to direct creation. Existing human document APIs and
 material collection tools retain their behavior.
 
-Image capability, post publication and MDX seed remain later checkpoints. Until
-implemented, coverImageId and internal image URLs fail closed with 503, and
-Post.publication is null. This partial branch is not full #28 acceptance.
+Stage 3 adds immutable publication snapshots, preview tokens bound to reference
+state, republish/withdraw, anonymous listing/detail/tags and revalidation ETags.
+Only the current head is public. References expose titles and public links, never
+private document bodies. Archiving a post atomically withdraws its publication.
+Public-post conversations use the accepted publication snapshot and have no
+owner tools, shell or web-search authority.
+
+The original three MDX files are frozen in db/legacy-posts; 0006 imports them once
+with deterministic IDs, original slugs/dates/authors/body and owner=NULL. They are
+public-only legacy imports, not implicitly owned by any account. Re-running the
+reviewed migration does not duplicate them. Frontend MDX reads/files can be removed
+after the seed checkpoint is pushed. Source import never executes MDX.
+
+Image capability remains a later checkpoint. Until implemented, coverImageId and
+internal image URLs fail closed with 503. This is not full #28 acceptance.
 
 The migration extends structural/grant verification and the database recovery
 signature. Old publication/writing/conversation capabilities recognize 0006.

@@ -24,7 +24,8 @@ def runner_schema(schema):
     migrate("0006_posts")
 
 
-def test_same_native_thread_owner_pages_then_public_and_legacy_refuse(tmp_path, monkeypatch, caplog):
+@pytest.mark.parametrize('public_kind', ['public_document', 'public_post'])
+def test_same_native_thread_owner_pages_then_public_and_legacy_refuse(tmp_path, monkeypatch, caplog, public_kind):
     caplog.set_level("INFO", logger="uvicorn.error")
     calls = []
     def callback(request):
@@ -60,7 +61,7 @@ def test_same_native_thread_owner_pages_then_public_and_legacy_refuse(tmp_path, 
         owner_pid = native.process.pid
         assert native.thread_web_modes[saved["threadId"]] == "live"
         native.accept(session, Turn(requestId=uuid.uuid4(), text="public question", tools=definitions(), toolToken="p" * 40,
-                      scope={"page": {"kind": "public_document", "resourceId": str(uuid.uuid4())}}))
+                      scope={"page": {"kind": public_kind, "resourceId": str(uuid.uuid4())}}))
         public = wait_idle(native, session)
         assert native.process.pid != owner_pid and public["threadId"] == saved["threadId"]
         assert native.thread_web_modes[saved["threadId"]] == "disabled"

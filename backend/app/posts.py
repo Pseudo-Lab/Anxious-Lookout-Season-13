@@ -103,10 +103,11 @@ def version_value(row, content=True):
 
 
 def post_value(store, row, content=True):
+    from .post_publications import info
     account = store.db.get(Account, store.owner)
     return {'id': str(row.id), 'version': row.version, 'archived': row.archived,
             'createdAt': stamp(row.created_at), 'updatedAt': stamp(row.updated_at),
-            'author': {'login': account.login}, 'latestVersion': version_value(head(store, row), content), 'publication': None}
+            'author': {'login': account.login}, 'latestVersion': version_value(head(store, row), content), 'publication': info(store.db, row.id)}
 
 
 def draft_value(row, content=True):
@@ -227,6 +228,9 @@ def archive(store, identity, body):
     ready(store); store.graph_lock()
     row = owned(store, identity, active=True)
     expect(row, body.expectedVersion)
+    from .post_models import PostPublicationHead
+    publication = store.db.get(PostPublicationHead, row.id)
+    if publication: publication.publication_id = None
     row.archived = True
     row.version += 1
     row.updated_at = datetime.now(timezone.utc)

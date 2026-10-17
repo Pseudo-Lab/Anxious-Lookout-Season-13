@@ -64,3 +64,21 @@ class PostProposal(Base):
     accepted_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))
+
+
+class PostPublication(Base):
+    __tablename__ = 'post_publications'
+    __table_args__ = {'schema': 'research'}
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, server_default=text('gen_random_uuid()'))
+    post_id: Mapped[uuid.UUID] = mapped_column(UUID)
+    version_id: Mapped[uuid.UUID] = mapped_column(UUID)
+    snapshot: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))
+
+
+class PostPublicationHead(Base):
+    __tablename__ = 'post_publication_heads'
+    __table_args__ = {'schema': 'research'}
+    post_id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True)
+    publication_id: Mapped[uuid.UUID | None] = mapped_column(UUID)

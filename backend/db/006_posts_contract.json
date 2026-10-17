@@ -637,5 +637,137 @@
         "where": null
       }
     }
+  },
+  "post_publications": {
+    "columns": {
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "post_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "version_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "snapshot": [
+        "JSONB",
+        false,
+        null
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ]
+    },
+    "primary": [
+      "id"
+    ],
+    "checks": {
+      "post_publications_snapshot_check": "jsonb_typeof(snapshot) = 'object'::text"
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "post_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "posts",
+        "referred_columns": [
+          "id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "version_id",
+          "post_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "post_versions",
+        "referred_columns": [
+          "id",
+          "post_id"
+        ]
+      }
+    ],
+    "unique": {
+      "post_publications_id_post_id_key": [
+        "id",
+        "post_id"
+      ]
+    },
+    "indexes": {
+      "post_publications_id_post_id_key": {
+        "columns": [
+          "id",
+          "post_id"
+        ],
+        "unique": true,
+        "where": null
+      },
+      "research_post_public_listing": {
+        "columns": [
+          "updated_at",
+          "id"
+        ],
+        "unique": false,
+        "where": null
+      }
+    }
+  },
+  "post_publication_heads": {
+    "columns": {
+      "post_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "publication_id": [
+        "UUID",
+        true,
+        null
+      ]
+    },
+    "primary": [
+      "post_id"
+    ],
+    "checks": {},
+    "foreign": [
+      {
+        "constrained_columns": [
+          "post_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "posts",
+        "referred_columns": [
+          "id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "publication_id",
+          "post_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "post_publications",
+        "referred_columns": [
+          "id",
+          "post_id"
+        ]
+      }
+    ],
+    "unique": {},
+    "indexes": {}
   }
 }

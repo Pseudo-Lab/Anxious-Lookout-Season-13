@@ -25,6 +25,7 @@ def signature(connection, revoked_grants=False):
         tables += ('research.document_drafts', 'research.document_proposals')
     if marker == '0006_posts':
         tables += ('research.posts', 'research.post_versions', 'research.post_drafts', 'research.post_proposals')
+        tables += ('research.post_publications', 'research.post_publication_heads')
     def rows(name):
         values = [dict(row._mapping) for row in connection.execute(text("SELECT * FROM " + name))]
         if name == "research.conversations" and revoked_grants:

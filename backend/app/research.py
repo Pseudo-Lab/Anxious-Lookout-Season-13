@@ -518,6 +518,8 @@ def register_research(app, sessions, settings, current_session, error):
     register_post_proposals(app, authorized, settings, response, write)
     from .document_proposals import register as register_document_proposals
     register_document_proposals(app, authorized, settings, response, write)
+    from .post_publications import register as register_post_publications
+    register_post_publications(app, authorized, sessions, settings, response, write)
     from .publications import register_publications
     register_publications(app, authorized, sessions, settings, response, write)
     from .membership import register_membership

@@ -266,7 +266,8 @@ def test_missing_publication_grant_or_tampered_membership_authority_fails_closed
 
 
 def test_membership_revocation_waits_for_admitted_tool_then_denies_later_calls(client, admin, monkeypatch):
-    from app.research import Store
+    from app import document_proposals
+    migrate('0006_posts')
     _, auth = identity(client, admin, role="admin")
     manager_cookie = dict(client.cookies)
     target, target_auth = identity(client, admin, "222222")
@@ -279,12 +280,12 @@ def test_membership_revocation_waits_for_admitted_tool_then_denies_later_calls(c
         db.execute(text("UPDATE research.conversations SET state='running',request_id=:req,tool_token_hash=:hash,tool_expires_at=now()+interval '1 minute',login_hash=:login,native_record=CAST(:record AS jsonb) WHERE id=:id"),
                    {"id": session["id"], "req": request_id, "hash": hashlib.sha256(secret.encode()).hexdigest(), "login": login, "record": json.dumps(metadata)})
     admitted, release = Event(), Event()
-    original = Store.create_item
-    def hold(store, kind, body):
+    original = document_proposals.create
+    def hold(store, body):
         admitted.set()
         assert release.wait(5)
-        return original(store, kind, body)
-    monkeypatch.setattr(Store, "create_item", hold)
+        return original(store, body)
+    monkeypatch.setattr(document_proposals, 'create', hold)
     tool_body = {"sessionId": session["id"], "requestId": str(request_id), "name": "research_document_save",
                  "arguments": {"title": "Admitted before revocation", "content": "Committed once", "mutationId": str(uuid.uuid4())}}
     def call_tool():
@@ -313,4 +314,5 @@ def test_membership_revocation_waits_for_admitted_tool_then_denies_later_calls(c
         assert change.result(timeout=5).status_code == 200
     assert call_tool().status_code == 403
     with admin.connect() as db:
-        assert db.execute(text("SELECT count(*) FROM research.items WHERE owner_id=:id AND kind='document'"), {"id": target}).scalar_one() == 1
+        assert db.execute(text("SELECT count(*) FROM research.items WHERE owner_id=:id AND kind='document'"), {"id": target}).scalar_one() == 0
+        assert db.execute(text('SELECT count(*) FROM research.document_proposals WHERE owner_id=:id'), {'id': target}).scalar_one() == 1

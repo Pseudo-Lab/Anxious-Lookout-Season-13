@@ -78,3 +78,23 @@ ALTER TABLE research.document_proposals ALTER COLUMN base_version_id DROP NOT NU
 ALTER TABLE research.document_proposals ADD CONSTRAINT document_proposal_base CHECK(
  (document_id IS NULL AND base_document_version IS NULL AND base_version_id IS NULL) OR
  (document_id IS NOT NULL AND base_document_version IS NOT NULL AND base_version_id IS NOT NULL));
+
+CREATE TABLE research.post_publications (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ post_id uuid NOT NULL REFERENCES research.posts(id),
+ version_id uuid NOT NULL,
+ snapshot jsonb NOT NULL CHECK(jsonb_typeof(snapshot)='object'),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(id,post_id),
+ FOREIGN KEY(version_id,post_id) REFERENCES research.post_versions(id,post_id)
+);
+CREATE TABLE research.post_publication_heads (
+ post_id uuid PRIMARY KEY REFERENCES research.posts(id),
+ publication_id uuid,
+ FOREIGN KEY(publication_id,post_id) REFERENCES research.post_publications(id,post_id)
+);
+CREATE INDEX research_post_public_listing ON research.post_publications(updated_at DESC,id DESC);
+REVOKE ALL ON research.post_publications,research.post_publication_heads FROM PUBLIC;
+GRANT SELECT,INSERT ON research.post_publications TO anxious_api;
+GRANT SELECT,INSERT,UPDATE ON research.post_publication_heads TO anxious_api;

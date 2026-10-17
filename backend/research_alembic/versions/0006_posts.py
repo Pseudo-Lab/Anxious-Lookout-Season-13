@@ -11,6 +11,8 @@ depends_on = None
 def upgrade():
     ddl = (Path(__file__).resolve().parents[2] / 'db/006_posts.sql').read_text()
     op.get_bind().connection.driver_connection.execute(ddl, prepare=False)
+    from research_alembic.post_seed import seed
+    seed(op.get_bind())
 
 
 def downgrade():

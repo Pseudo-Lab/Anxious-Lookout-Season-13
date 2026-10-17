@@ -94,6 +94,9 @@ def dispatch(store, name, arguments, context=None):
     if name == "research_page_context":
         if not context:
             fail("not_found", "No saved page context", 404)
+        if 'postId' in context:
+            if body.materialId is not None: fail('not_found', 'Not found', 404)
+            return context
         if body.materialId is not None:
             identity = str(parse_id(body.materialId))
             for material in context["materials"]:
