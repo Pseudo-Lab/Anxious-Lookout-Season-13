@@ -153,6 +153,16 @@ wrong schema must stop cutover. Only after PM's evidence review may DB and PVC
 be switched together while writers remain stopped. Preserve previous DB/PVC for
 recovery; never mix generations.
 
+Build the API, runner and frontend artifacts from the final approved SHA before
+patching a Deployment to use them. Record their immutable image digests and
+confirm availability on the selected node (the renderer uses imagePullPolicy
+Never). A development test image with an earlier release stamp and a /source bind
+is test evidence only, not a release artifact. Keep admissions stopped across
+the migration and image switch; do not reopen until both the final 0006 schema
+and the matching API/frontend images pass the checks above. The initial 0005
+backup predates image metadata, so post_image_inventory applies only after 0006;
+record an empty/pre-cutover image PVC separately for that initial backup.
+
 The Docker fixture tests/post_image_recovery_probe.py prepares independent
 source/candidate databases, snapshots files, and verifies a real external
 pg_dump/pg_restore plus file restore and missing-byte rejection. This is isolated

@@ -60,6 +60,11 @@ class CreateDraft(PostText):
     basePostVersion: int | None = Field(default=None, ge=1)
     baseVersionId: str | None = None
 
+    @field_validator('postId')
+    @classmethod
+    def post_identity(cls, value):
+        return str(UUID(value)) if value is not None else None
+
     @model_validator(mode='after')
     def base(self):
         if self.postId is None:

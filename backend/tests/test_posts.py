@@ -168,6 +168,21 @@ def test_bad_input_csrf_and_schema_grants(client, admin):
     assert client.get('/api/research/health').status_code == 200
 
 
+@pytest.mark.parametrize('post_id', ['', 'not-a-uuid'])
+def test_invalid_draft_post_id_is_validation_error_without_writes(client, admin, post_id):
+    _, auth = identity(client, admin)
+    key = str(uuid.uuid4())
+    result = client.post(ROOT, json={**content(), 'postId': post_id,
+        'basePostVersion': 1, 'baseVersionId': str(uuid.uuid4())}, headers=headers(auth, key))
+    assert result.status_code == 422, result.text
+    assert result.json()['error']['code'] == 'validation_error'
+    with admin.connect() as db:
+        assert db.execute(text('SELECT count(*) FROM research.post_drafts')).scalar_one() == 0
+        assert db.execute(text('SELECT count(*) FROM research.idempotency WHERE key=:key'), {'key': key}).scalar_one() == 0
+    # A rejected payload must not consume the key or prevent a valid new draft.
+    assert client.post(ROOT, json=content(), headers=headers(auth, key)).status_code == 201
+
+
 def test_old_marker_fails_closed_for_post_writes(client, admin):
     _, auth = identity(client, admin)
     with admin.begin() as db:
