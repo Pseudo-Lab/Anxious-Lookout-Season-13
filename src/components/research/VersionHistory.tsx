@@ -1,41 +1,55 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { FetchResult } from "@/lib/api/client";
 import { getVersion, listVersions } from "@/lib/research/api";
 import { useLoad } from "@/lib/research/hooks";
 import { usePagedList } from "@/lib/research/usePagedList";
-import { CONTENT_KIND_LABELS, type ItemType, type Version } from "@/lib/research/types";
+import { CONTENT_KIND_LABELS, type ItemType, type Page, type Version } from "@/lib/research/types";
 import { formatDateTime } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import SafeMarkdown from "@/components/research/SafeMarkdown";
 import TextDiff from "@/components/research/TextDiff";
 
-function VersionBody({
-  type,
-  itemId,
+/** 버전 목록·본문을 가져오는 곳(자료·문서 #22, 글 #28). 렌더마다 새로 만들어도 key가 같으면 다시 부르지 않는다. */
+export interface VersionSource<V extends VersionLike> {
+  // 캐시·다시 불러오기 key 앞부분(대상 종류·ID)
+  key: string;
+  // 목록 항목에는 본문이 없어도 된다
+  list: (cursor: string | null) => Promise<FetchResult<Page<VersionLike>>>;
+  get: (versionId: string) => Promise<FetchResult<V>>;
+  // 본문 위 메타 표시(출처 등)
+  meta?: (v: V) => ReactNode;
+  // 본문 비교 위에 보일 메타 변경(슬러그·태그 등)
+  metaDiff?: (before: V, after: V) => ReactNode;
+  ownImages?: boolean;
+}
+interface VersionLike {
+  id: string;
+  number: number;
+  title: string;
+  content?: string;
+  createdAt: string;
+}
+
+function VersionBody<V extends VersionLike>({
+  source,
   versionId,
   onRestore,
 }: {
-  type: ItemType;
-  itemId: string;
+  source: VersionSource<V>;
   versionId: string;
-  onRestore?: (v: Version) => void;
+  onRestore?: (v: V) => void;
 }) {
-  const { result } = useLoad(`${type}:${itemId}:${versionId}`, () => getVersion(type, itemId, versionId));
+  const { result } = useLoad(`${source.key}:${versionId}`, () => source.get(versionId));
   if (!result) return <p className="text-sm text-stone-500">불러오는 중...</p>;
   if (!result.ok) return <ErrorNotice failure={result.failure} prefix="버전을 불러오지 못했습니다." />;
   const v = result.data;
   return (
     <div className="space-y-3 rounded-lg bg-stone-50 p-4">
       <p className="font-medium text-stone-900">{v.title}</p>
-      {v.sourceUrl && (
-        <p className="break-all text-xs text-stone-500">
-          출처 {v.sourceUrl}
-          {v.collectedAt && ` · 수집 ${formatDateTime(v.collectedAt)}`}
-          {v.contentKind && ` · ${CONTENT_KIND_LABELS[v.contentKind]}`}
-        </p>
-      )}
-      <SafeMarkdown content={v.content} />
+      {source.meta?.(v)}
+      <SafeMarkdown content={v.content ?? ""} ownImages={source.ownImages} />
       {onRestore && (
         // 되돌리기 = 이 내용을 편집기에 불러와 새 버전으로 저장. 원래 버전·공개본은 지우거나 바꾸지 않는다.
         <button onClick={() => onRestore(v)} className="text-sm font-medium text-indigo-600 hover:text-indigo-800">
@@ -47,24 +61,27 @@ function VersionBody({
 }
 
 // 두 저장 버전의 비교. 각 버전은 불변 스냅샷이라 같은 ID면 언제나 같은 결과다.
-function VersionCompare({ type, itemId, beforeId, afterId }: { type: ItemType; itemId: string; beforeId: string; afterId: string }) {
-  const before = useLoad(`${type}:${itemId}:${beforeId}`, () => getVersion(type, itemId, beforeId)).result;
-  const after = useLoad(`${type}:${itemId}:${afterId}`, () => getVersion(type, itemId, afterId)).result;
+function VersionCompare<V extends VersionLike>({ source, beforeId, afterId }: { source: VersionSource<V>; beforeId: string; afterId: string }) {
+  const before = useLoad(`${source.key}:${beforeId}`, () => source.get(beforeId)).result;
+  const after = useLoad(`${source.key}:${afterId}`, () => source.get(afterId)).result;
   if (!before || !after) return <p className="text-sm text-stone-500">비교할 버전을 불러오는 중...</p>;
   if (!before.ok) return <ErrorNotice failure={before.failure} prefix="기준 버전을 불러오지 못했습니다." />;
   if (!after.ok) return <ErrorNotice failure={after.failure} prefix="비교할 버전을 불러오지 못했습니다." />;
   return (
-    <TextDiff
-      key={`${beforeId}:${afterId}`}
-      before={before.data.content}
-      after={after.data.content}
-      beforeTitle={before.data.title}
-      afterTitle={after.data.title}
-    />
+    <>
+      {source.metaDiff?.(before.data, after.data)}
+      <TextDiff
+        key={`${beforeId}:${afterId}`}
+        before={before.data.content ?? ""}
+        after={after.data.content ?? ""}
+        beforeTitle={before.data.title}
+        afterTitle={after.data.title}
+      />
+    </>
   );
 }
 
-/** 이전 내용 버전 목록. 각 버전은 저장 당시의 전체 스냅샷이다. */
+/** 이전 내용 버전 목록(자료·문서). 각 버전은 저장 당시의 전체 스냅샷이다. */
 export default function VersionHistory({
   type,
   itemId,
@@ -78,7 +95,32 @@ export default function VersionHistory({
   // #22 문서: 이전 버전 내용을 편집기로 불러온다(현재 버전에는 표시하지 않음)
   onRestore?: (v: Version) => void;
 }) {
-  const list = usePagedList(`${type}:${itemId}:${latestVersionId}`, (cursor) => listVersions(type, itemId, cursor));
+  const source: VersionSource<Version> = {
+    key: `${type}:${itemId}`,
+    list: (cursor) => listVersions(type, itemId, cursor),
+    get: (versionId) => getVersion(type, itemId, versionId),
+    meta: (v) =>
+      v.sourceUrl ? (
+        <p className="break-all text-xs text-stone-500">
+          출처 {v.sourceUrl}
+          {v.collectedAt && ` · 수집 ${formatDateTime(v.collectedAt)}`}
+          {v.contentKind && ` · ${CONTENT_KIND_LABELS[v.contentKind]}`}
+        </p>
+      ) : null,
+  };
+  return <VersionHistoryView source={source} latestVersionId={latestVersionId} onRestore={onRestore} />;
+}
+
+export function VersionHistoryView<V extends VersionLike>({
+  source,
+  latestVersionId,
+  onRestore,
+}: {
+  source: VersionSource<V>;
+  latestVersionId: string;
+  onRestore?: (v: V) => void;
+}) {
+  const list = usePagedList(`${source.key}:${latestVersionId}`, (cursor) => source.list(cursor));
   const [open, setOpen] = useState<string | null>(null);
   // 비교: 기준(이전)과 대상(이후) 버전 ID. 목록은 최신순이다.
   const [compare, setCompare] = useState<{ before: string; after: string } | null>(null);
@@ -167,7 +209,7 @@ export default function VersionHistory({
           {compare.before === compare.after ? (
             <p className="text-sm text-stone-600">같은 버전을 골랐습니다. 다른 버전을 고르세요.</p>
           ) : (
-            <VersionCompare type={type} itemId={itemId} beforeId={compare.before} afterId={compare.after} />
+            <VersionCompare source={source} beforeId={compare.before} afterId={compare.after} />
           )}
         </div>
       )}
@@ -188,7 +230,7 @@ export default function VersionHistory({
             </button>
             {open === v.id && (
               <div className="space-y-2 px-4 pb-4">
-                <VersionBody type={type} itemId={itemId} versionId={v.id} onRestore={v.id === latestVersionId ? undefined : onRestore} />
+                <VersionBody source={source} versionId={v.id} onRestore={v.id === latestVersionId ? undefined : onRestore} />
                 {previousOf(v.id) && (
                   <button
                     onClick={() => openCompare(previousOf(v.id)!, v.id)}
