@@ -59,7 +59,7 @@ class ProposalAccept(DocumentChange, ProposalExpected):
 
 
 def ready(store):
-    if store.db.execute(text('SELECT version_num FROM research.alembic_version')).scalar_one() != '0005_writing':
+    if store.db.execute(text('SELECT version_num FROM research.alembic_version')).scalar_one() not in {'0005_writing', '0006_posts'}:
         fail('not_ready', 'Writing schema is not ready', 503)
 
 
@@ -93,10 +93,11 @@ def draft_value(row, content=True):
 
 
 def proposal_value(row, content=True):
-    result = {'id': str(row.id), 'documentId': str(row.document_id), 'version': row.version,
-        'baseDocumentVersion': row.base_document_version, 'baseVersionId': str(row.base_version_id),
+    result = {'id': str(row.id), 'documentId': str(row.document_id) if row.document_id else None, 'version': row.version,
+        'baseDocumentVersion': row.base_document_version, 'baseVersionId': str(row.base_version_id) if row.base_version_id else None,
         'title': row.title, 'origin': 'codex', 'status': row.status,
         'acceptedVersionId': str(row.accepted_version_id) if row.accepted_version_id else None,
+        'acceptedDocumentId': str(row.document_id) if row.status == 'accepted' else None,
         'createdAt': stamp(row.created_at), 'updatedAt': stamp(row.updated_at)}
     if content: result['content'] = row.content
     return result

@@ -37,7 +37,7 @@ async function api(req, res, path, url) {
     idempotencyKey: req.headers["idempotency-key"] ?? null,
   });
   if (path.startsWith("/admin/")) return handleAdmin(req, res, path, url);
-  if (path.startsWith("/research/") || path.startsWith("/public/")) {
+  if (path.startsWith("/research/") || path.startsWith("/public/") || path.startsWith("/media/")) {
     return handleResearch(req, res, path, url, sessions.get(sid(req)) ?? null);
   }
   if (path === "/health") {

@@ -1,0 +1,888 @@
+{
+  "posts": {
+    "columns": {
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "owner_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "legacy_import": [
+        "BOOLEAN",
+        false,
+        "false"
+      ],
+      "slug": [
+        "VARCHAR(100)",
+        false,
+        null
+      ],
+      "version": [
+        "INTEGER",
+        false,
+        "1"
+      ],
+      "content_number": [
+        "INTEGER",
+        false,
+        "1"
+      ],
+      "archived": [
+        "BOOLEAN",
+        false,
+        "false"
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ]
+    },
+    "primary": [
+      "id"
+    ],
+    "checks": {
+      "posts_check": "(owner_id IS NULL) = legacy_import",
+      "posts_content_number_check": "content_number > 0",
+      "posts_slug_check": "slug::text ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text",
+      "posts_version_check": "version > 0"
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts",
+        "referred_columns": [
+          "id"
+        ]
+      }
+    ],
+    "unique": {
+      "posts_id_owner_id_key": [
+        "id",
+        "owner_id"
+      ],
+      "posts_slug_key": [
+        "slug"
+      ]
+    },
+    "indexes": {
+      "posts_id_owner_id_key": {
+        "columns": [
+          "id",
+          "owner_id"
+        ],
+        "unique": true,
+        "where": null
+      },
+      "posts_slug_key": {
+        "columns": [
+          "slug"
+        ],
+        "unique": true,
+        "where": null
+      },
+      "research_post_owner": {
+        "columns": [
+          "owner_id",
+          "updated_at",
+          "id"
+        ],
+        "unique": false,
+        "where": null
+      }
+    }
+  },
+  "post_versions": {
+    "columns": {
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "post_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "number": [
+        "INTEGER",
+        false,
+        null
+      ],
+      "payload": [
+        "JSONB",
+        false,
+        null
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "image_ids": [
+        "UUID[]",
+        false,
+        "'{}'::uuid[]"
+      ]
+    },
+    "primary": [
+      "id"
+    ],
+    "checks": {
+      "post_versions_number_check": "number > 0",
+      "post_versions_payload_check": "jsonb_typeof(payload) = 'object'::text"
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "post_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "posts",
+        "referred_columns": [
+          "id"
+        ]
+      }
+    ],
+    "unique": {
+      "post_versions_id_post_id_key": [
+        "id",
+        "post_id"
+      ],
+      "post_versions_post_id_number_key": [
+        "post_id",
+        "number"
+      ]
+    },
+    "indexes": {
+      "post_versions_id_post_id_key": {
+        "columns": [
+          "id",
+          "post_id"
+        ],
+        "unique": true,
+        "where": null
+      },
+      "post_versions_post_id_number_key": {
+        "columns": [
+          "post_id",
+          "number"
+        ],
+        "unique": true,
+        "where": null
+      },
+      "research_post_version_listing": {
+        "columns": [
+          "post_id",
+          "updated_at",
+          "id"
+        ],
+        "unique": false,
+        "where": null
+      }
+    }
+  },
+  "post_drafts": {
+    "columns": {
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "post_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "revision": [
+        "INTEGER",
+        false,
+        "1"
+      ],
+      "base_post_version": [
+        "INTEGER",
+        true,
+        null
+      ],
+      "base_version_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "payload": [
+        "JSONB",
+        false,
+        null
+      ],
+      "state": [
+        "VARCHAR(16)",
+        false,
+        "'active'::character varying"
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "image_ids": [
+        "UUID[]",
+        false,
+        "'{}'::uuid[]"
+      ]
+    },
+    "primary": [
+      "id"
+    ],
+    "checks": {
+      "post_drafts_base_post_version_check": "base_post_version > 0",
+      "post_drafts_check": "post_id IS NULL AND base_post_version IS NULL AND base_version_id IS NULL OR post_id IS NOT NULL AND base_post_version IS NOT NULL AND base_version_id IS NOT NULL",
+      "post_drafts_payload_check": "jsonb_typeof(payload) = 'object'::text",
+      "post_drafts_revision_check": "revision > 0",
+      "post_drafts_state_check": "state::text = ANY (ARRAY['active'::character varying, 'committed'::character varying, 'discarded'::character varying]::text[])"
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "base_version_id",
+          "post_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "post_versions",
+        "referred_columns": [
+          "id",
+          "post_id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts",
+        "referred_columns": [
+          "id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "post_id",
+          "owner_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "posts",
+        "referred_columns": [
+          "id",
+          "owner_id"
+        ]
+      }
+    ],
+    "unique": {},
+    "indexes": {
+      "research_active_post_draft": {
+        "columns": [
+          "owner_id",
+          "post_id"
+        ],
+        "unique": true,
+        "where": "((state)::text = 'active'::text)"
+      },
+      "research_post_draft_owner": {
+        "columns": [
+          "owner_id",
+          "state",
+          "updated_at",
+          "id"
+        ],
+        "unique": false,
+        "where": null
+      }
+    }
+  },
+  "post_proposals": {
+    "columns": {
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "post_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "version": [
+        "INTEGER",
+        false,
+        "1"
+      ],
+      "base_post_version": [
+        "INTEGER",
+        true,
+        null
+      ],
+      "base_version_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "base_draft_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "base_draft_revision": [
+        "INTEGER",
+        true,
+        null
+      ],
+      "payload": [
+        "JSONB",
+        false,
+        null
+      ],
+      "status": [
+        "VARCHAR(16)",
+        false,
+        "'pending'::character varying"
+      ],
+      "accepted_post_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "accepted_version_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "image_ids": [
+        "UUID[]",
+        false,
+        "'{}'::uuid[]"
+      ]
+    },
+    "primary": [
+      "id"
+    ],
+    "checks": {
+      "post_proposals_base_draft_revision_check": "base_draft_revision > 0",
+      "post_proposals_base_post_version_check": "base_post_version > 0",
+      "post_proposals_check": "post_id IS NULL AND base_post_version IS NULL AND base_version_id IS NULL OR post_id IS NOT NULL AND base_post_version IS NOT NULL AND base_version_id IS NOT NULL",
+      "post_proposals_check1": "(base_draft_id IS NULL) = (base_draft_revision IS NULL)",
+      "post_proposals_check2": "(status::text = 'accepted'::text) = (accepted_version_id IS NOT NULL)",
+      "post_proposals_check3": "(accepted_post_id IS NULL) = (accepted_version_id IS NULL)",
+      "post_proposals_payload_check": "jsonb_typeof(payload) = 'object'::text",
+      "post_proposals_status_check": "status::text = ANY (ARRAY['pending'::character varying, 'accepted'::character varying, 'discarded'::character varying]::text[])",
+      "post_proposals_version_check": "version > 0"
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "accepted_post_id",
+          "owner_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "posts",
+        "referred_columns": [
+          "id",
+          "owner_id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "accepted_version_id",
+          "accepted_post_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "post_versions",
+        "referred_columns": [
+          "id",
+          "post_id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "base_draft_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "post_drafts",
+        "referred_columns": [
+          "id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "base_version_id",
+          "post_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "post_versions",
+        "referred_columns": [
+          "id",
+          "post_id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts",
+        "referred_columns": [
+          "id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "post_id",
+          "owner_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "posts",
+        "referred_columns": [
+          "id",
+          "owner_id"
+        ]
+      }
+    ],
+    "unique": {},
+    "indexes": {
+      "research_post_proposal_owner": {
+        "columns": [
+          "owner_id",
+          "updated_at",
+          "id"
+        ],
+        "unique": false,
+        "where": null
+      }
+    }
+  },
+  "document_proposals": {
+    "columns": {
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "document_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "kind": [
+        "VARCHAR(16)",
+        false,
+        "'document'::character varying"
+      ],
+      "version": [
+        "INTEGER",
+        false,
+        "1"
+      ],
+      "base_document_version": [
+        "INTEGER",
+        true,
+        null
+      ],
+      "base_version_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "title": [
+        "VARCHAR(300)",
+        false,
+        null
+      ],
+      "content": [
+        "TEXT",
+        false,
+        null
+      ],
+      "status": [
+        "VARCHAR(16)",
+        false,
+        "'pending'::character varying"
+      ],
+      "accepted_version_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ]
+    },
+    "primary": [
+      "id"
+    ],
+    "checks": {
+      "document_proposal_base": "document_id IS NULL AND base_document_version IS NULL AND base_version_id IS NULL OR document_id IS NOT NULL AND base_document_version IS NOT NULL AND base_version_id IS NOT NULL",
+      "document_proposals_base_document_version_check": "base_document_version > 0",
+      "document_proposals_check": "(status::text = 'accepted'::text) = (accepted_version_id IS NOT NULL)",
+      "document_proposals_content_check": "length(content) >= 1 AND length(content) <= 200000",
+      "document_proposals_kind_check": "kind::text = 'document'::text",
+      "document_proposals_status_check": "status::text = ANY (ARRAY['pending'::character varying, 'accepted'::character varying, 'discarded'::character varying]::text[])",
+      "document_proposals_title_check": "length(btrim(title::text)) > 0",
+      "document_proposals_version_check": "version > 0"
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "accepted_version_id",
+          "document_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "versions",
+        "referred_columns": [
+          "id",
+          "item_id",
+          "owner_id",
+          "kind"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "base_version_id",
+          "document_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "versions",
+        "referred_columns": [
+          "id",
+          "item_id",
+          "owner_id",
+          "kind"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "document_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "items",
+        "referred_columns": [
+          "id",
+          "owner_id",
+          "kind"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts",
+        "referred_columns": [
+          "id"
+        ]
+      }
+    ],
+    "unique": {},
+    "indexes": {
+      "research_proposal_owner": {
+        "columns": [
+          "owner_id",
+          "document_id",
+          "updated_at",
+          "id"
+        ],
+        "unique": false,
+        "where": null
+      }
+    }
+  },
+  "post_publications": {
+    "columns": {
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "post_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "version_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "snapshot": [
+        "JSONB",
+        false,
+        null
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "image_ids": [
+        "UUID[]",
+        false,
+        "'{}'::uuid[]"
+      ]
+    },
+    "primary": [
+      "id"
+    ],
+    "checks": {
+      "post_publications_snapshot_check": "jsonb_typeof(snapshot) = 'object'::text"
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "post_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "posts",
+        "referred_columns": [
+          "id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "version_id",
+          "post_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "post_versions",
+        "referred_columns": [
+          "id",
+          "post_id"
+        ]
+      }
+    ],
+    "unique": {
+      "post_publications_id_post_id_key": [
+        "id",
+        "post_id"
+      ]
+    },
+    "indexes": {
+      "post_publications_id_post_id_key": {
+        "columns": [
+          "id",
+          "post_id"
+        ],
+        "unique": true,
+        "where": null
+      },
+      "research_post_public_listing": {
+        "columns": [
+          "updated_at",
+          "id"
+        ],
+        "unique": false,
+        "where": null
+      }
+    }
+  },
+  "post_publication_heads": {
+    "columns": {
+      "post_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "publication_id": [
+        "UUID",
+        true,
+        null
+      ]
+    },
+    "primary": [
+      "post_id"
+    ],
+    "checks": {},
+    "foreign": [
+      {
+        "constrained_columns": [
+          "post_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "posts",
+        "referred_columns": [
+          "id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "publication_id",
+          "post_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "post_publications",
+        "referred_columns": [
+          "id",
+          "post_id"
+        ]
+      }
+    ],
+    "unique": {},
+    "indexes": {}
+  },
+  "post_images": {
+    "columns": {
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "mime_type": [
+        "VARCHAR(32)",
+        false,
+        null
+      ],
+      "size": [
+        "INTEGER",
+        false,
+        null
+      ],
+      "width": [
+        "INTEGER",
+        false,
+        null
+      ],
+      "height": [
+        "INTEGER",
+        false,
+        null
+      ],
+      "sha256": [
+        "VARCHAR(64)",
+        false,
+        null
+      ],
+      "deleted": [
+        "BOOLEAN",
+        false,
+        "false"
+      ],
+      "purged": [
+        "BOOLEAN",
+        false,
+        "false"
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ]
+    },
+    "primary": [
+      "id"
+    ],
+    "checks": {
+      "post_images_check": "(width::bigint * height) <= 16000000",
+      "post_images_check1": "NOT purged OR deleted",
+      "post_images_height_check": "height >= 1 AND height <= 8192",
+      "post_images_mime_type_check": "mime_type::text = ANY (ARRAY['image/png'::character varying, 'image/jpeg'::character varying, 'image/webp'::character varying]::text[])",
+      "post_images_sha256_check": "sha256::text ~ '^[a-f0-9]{64}$'::text",
+      "post_images_size_check": "size >= 1 AND size <= 5242880",
+      "post_images_width_check": "width >= 1 AND width <= 8192"
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts",
+        "referred_columns": [
+          "id"
+        ]
+      }
+    ],
+    "unique": {},
+    "indexes": {
+      "research_post_image_owner": {
+        "columns": [
+          "owner_id",
+          "updated_at",
+          "id"
+        ],
+        "unique": false,
+        "where": null
+      }
+    }
+  }
+}

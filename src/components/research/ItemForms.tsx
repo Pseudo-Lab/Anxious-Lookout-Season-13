@@ -1,6 +1,6 @@
 "use client";
 
-import { useDeferredValue, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useDeferredValue, useId, useRef, useState, type FormEvent, type ReactNode, type Ref } from "react";
 import type { FetchFailure } from "@/lib/api/client";
 import type { DocumentInput, MaterialInput } from "@/lib/research/api";
 import { CONTENT_KINDS, CONTENT_KIND_LABELS, LIMITS, type ContentKind } from "@/lib/research/types";
@@ -140,7 +140,21 @@ const VIEW_LABELS: Record<EditorView, string> = { split: "나란히 보기", wri
  * 문서 본문 편집기: 원문(Markdown) 입력과 미리보기. 미리보기는 저장된 본문과 같은 SafeMarkdown 규칙으로 그린다.
  * 넓은 화면에서는 좌우, 좁은 화면에서는 위아래로 놓인다(편집기 폭 기준 container query).
  */
-export function MarkdownEditor({ value, onChange, readOnly = false }: { value: string; onChange: (v: string) => void; readOnly?: boolean }) {
+/** ownImages: 글(#28)의 자체 업로드 이미지를 미리보기에 띄운다(공개 화면과 같은 규칙). */
+export function MarkdownEditor({
+  value,
+  onChange,
+  readOnly = false,
+  ownImages = false,
+  textareaRef,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  readOnly?: boolean;
+  ownImages?: boolean;
+  // 커서 위치에 내용을 넣을 때(#28 이미지)
+  textareaRef?: Ref<HTMLTextAreaElement>;
+}) {
   const id = useId();
   const hintId = `${id}-hint`;
   const [view, setView] = useState<EditorView>("split");
@@ -181,6 +195,7 @@ export function MarkdownEditor({ value, onChange, readOnly = false }: { value: s
         {/* 미리보기만 볼 때도 입력 내용은 그대로 둔다(숨기기만 한다). */}
         <textarea
           id={id}
+          ref={textareaRef}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           onScroll={syncScroll}
@@ -200,7 +215,7 @@ export function MarkdownEditor({ value, onChange, readOnly = false }: { value: s
             className="h-[60vh] min-h-64 overflow-auto rounded-lg bg-white px-4 py-3 ring-1 ring-stone-200"
           >
             {preview.trim() ? (
-              <SafeMarkdown content={preview} />
+              <SafeMarkdown content={preview} ownImages={ownImages} />
             ) : (
               <p className="text-sm text-stone-400">본문을 쓰면 여기에 저장될 모습이 보입니다.</p>
             )}
@@ -208,7 +223,7 @@ export function MarkdownEditor({ value, onChange, readOnly = false }: { value: s
         )}
       </div>
       <span id={hintId} className="mt-1 block text-xs text-stone-500">
-        {contentHint} 미리보기는 저장 후 화면과 같은 규칙(외부 이미지·HTML 미표시)으로 보입니다.
+        {contentHint} 미리보기는 저장 후 화면과 같은 규칙(외부 이미지·HTML 미표시{ownImages ? ", 직접 올린 이미지만 표시" : ""})으로 보입니다.
       </span>
     </div>
   );

@@ -257,3 +257,17 @@ def test_executor_schema_limits_agree_with_renderer(values):
                     {**values['executor'], 'image': 'mutable:latest'}):
         candidate = {**values, 'executor': invalid}
         with pytest.raises(ValueError): rollout.checked(candidate)
+
+
+def test_post_images_pvc_mount_and_repeat_render(values, baseline, maps):
+    candidate, _ = rollout.deployment(values, baseline, maps)
+    spec = candidate['spec']['template']['spec']
+    assert {'name': 'post-images', 'persistentVolumeClaim': {'claimName': 'hosting-post-images'}} in spec['volumes']
+    assert {'name': 'post-images', 'mountPath': '/var/lib/posts/images'} in spec['containers'][0]['volumeMounts']
+    assert {'name': 'POST_IMAGE_ROOT', 'value': '/var/lib/posts/images/data'} in spec['containers'][0]['env']
+    repeated, _ = rollout.deployment(values, candidate, maps)
+    assert repeated['spec']['template']['spec'] == spec
+    rendered = rollout.render(values, baseline, TEMPLATES, maps)
+    pvc = json.loads(rendered['post-images-pvc.json'])
+    assert pvc['spec']['accessModes'] == ['ReadWriteOnce']
+    assert pvc['metadata']['name'] == 'hosting-post-images'

@@ -9,6 +9,7 @@ import {
   type Draft,
   type Endpoint,
   type Proposal,
+  type AnyDocumentProposal,
   type ItemType,
   type Material,
   type MaterialSummary,
@@ -199,6 +200,28 @@ function parseCommit(v: unknown): { draft: Draft; document: ResearchDocument } |
   return draft && document ? { draft, document } : null;
 }
 
+function parseAnyProposal(v: unknown): AnyDocumentProposal | null {
+  if (!isObj(v) || !isId(v.id) || !isNullableId(v.documentId) || !isInt(v.version)) return null;
+  if ((v.baseDocumentVersion !== null && !isInt(v.baseDocumentVersion)) || !isNullableId(v.baseVersionId) || !isNullableId(v.acceptedDocumentId)) return null;
+  if (!isStr(v.title) || !isStr(v.createdAt) || !isStr(v.updatedAt) || !isNullableId(v.acceptedVersionId)) return null;
+  if (v.status !== "pending" && v.status !== "accepted" && v.status !== "discarded") return null;
+  if (v.content !== undefined && !isStr(v.content)) return null;
+  return {
+    id: v.id,
+    documentId: v.documentId,
+    version: v.version,
+    baseDocumentVersion: v.baseDocumentVersion,
+    baseVersionId: v.baseVersionId,
+    title: v.title,
+    ...(isStr(v.content) ? { content: v.content } : {}),
+    status: v.status,
+    acceptedVersionId: v.acceptedVersionId,
+    acceptedDocumentId: v.acceptedDocumentId,
+    createdAt: v.createdAt,
+    updatedAt: v.updatedAt,
+  };
+}
+
 function parseAccept(v: unknown): { proposal: Proposal; document: ResearchDocument; draft: Draft | null } | null {
   if (!isObj(v)) return null;
   const proposal = parseProposal(v.proposal);
@@ -247,7 +270,7 @@ function parseRelation(v: unknown): Relation | null {
   return out;
 }
 
-function parsePage<T>(parse: (v: unknown) => T | null) {
+export function parsePage<T>(parse: (v: unknown) => T | null) {
   return (body: unknown): Page<T> | null => {
     if (!isObj(body) || !Array.isArray(body.items)) return null;
     if (body.nextCursor !== null && !isStr(body.nextCursor)) return null;
@@ -514,7 +537,7 @@ export interface MutationContext {
   idempotencyKey: string;
 }
 
-function mutate<T>(
+export function mutate<T>(
   path: `/${string}`,
   method: "POST" | "PATCH" | "PUT" | "DELETE",
   body: unknown,
@@ -532,7 +555,7 @@ function mutate<T>(
   });
 }
 
-function listQuery(cursor?: string | null, extra?: Record<string, string>): string {
+export function listQuery(cursor?: string | null, extra?: Record<string, string>): string {
   const params = new URLSearchParams({ limit: "30", ...extra });
   if (cursor) params.set("cursor", cursor);
   return `?${params.toString()}`;
@@ -638,6 +661,23 @@ export const acceptProposal = (
 ) => mutate(`/research/documents/${enc(documentId)}/proposals/${enc(proposalId)}/accept`, "POST", body, parseAccept, ctx);
 export const discardProposal = (documentId: string, proposalId: string, expectedProposalVersion: number, ctx: MutationContext) =>
   mutate(`/research/documents/${enc(documentId)}/proposals/${enc(proposalId)}/discard`, "POST", { expectedProposalVersion }, parseProposal, ctx);
+
+// #28 D1: 문서 제안 전체(새 문서 제안 포함). 기존 문서 제안은 위 문서별 경로로 수락한다.
+export const listDocumentProposals = (cursor?: string | null) =>
+  fetchJson(apiUrl(`/research/document-proposals${listQuery(cursor)}`), parsePage(parseAnyProposal));
+export const getDocumentProposal = (proposalId: string) =>
+  fetchJson(apiUrl(`/research/document-proposals/${enc(proposalId)}`), (v) => {
+    const p = parseAnyProposal(v);
+    return p && p.content !== undefined ? p : null;
+  });
+/** 새 문서 제안 수락: 사람이 확인한 제목·본문으로 문서와 첫 버전을 만든다. */
+export const acceptNewDocumentProposal = (
+  proposalId: string,
+  body: { expectedProposalVersion: number; title: string; content: string },
+  ctx: MutationContext
+) => mutate(`/research/document-proposals/${enc(proposalId)}/accept`, "POST", body, parseAccept, ctx);
+export const discardDocumentProposal = (proposalId: string, expectedProposalVersion: number, ctx: MutationContext) =>
+  mutate(`/research/document-proposals/${enc(proposalId)}/discard`, "POST", { expectedProposalVersion }, parseAnyProposal, ctx);
 
 // ---- 관계 ----
 

@@ -6,7 +6,8 @@ import { commitDraft, discardDraft, getDocument, getDraft, researchErrorMessage,
 import { useMutation } from "@/lib/research/hooks";
 import { formatDateTime } from "@/lib/research/format";
 import { LIMITS, type Draft, type ResearchDocument } from "@/lib/research/types";
-import { useDraftEditor, type SaveStatus } from "@/lib/research/useDraftEditor";
+import { useDraftEditor } from "@/lib/research/useDraftEditor";
+import type { DraftLike, SaveStatus } from "@/lib/research/useServerDraft";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import { Field, MarkdownEditor, inputClass } from "@/components/research/ItemForms";
 import Notice from "@/components/research/Notice";
@@ -14,7 +15,7 @@ import TextDiff from "@/components/research/TextDiff";
 
 // #22 문서 편집기: 서버 초안 자동 저장 + 명시 저장(새 버전). 초안은 버전이 아니고 공개본도 바꾸지 않는다.
 
-function StatusLine({ status, onRetry }: { status: SaveStatus; onRetry: () => void }) {
+export function StatusLine({ status, onRetry }: { status: SaveStatus<DraftLike>; onRetry: () => void }) {
   let text: string;
   switch (status.kind) {
     case "clean":
@@ -50,7 +51,7 @@ function StatusLine({ status, onRetry }: { status: SaveStatus; onRetry: () => vo
   );
 }
 
-const isReason = (f: FetchFailure | null, ...reasons: string[]) =>
+export const isReason = (f: FetchFailure | null, ...reasons: string[]) =>
   !!f && f.kind === "http" && f.code === "conflict" && reasons.includes(f.reason ?? "");
 
 export default function DocumentEditor({

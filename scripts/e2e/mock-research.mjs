@@ -1,6 +1,10 @@
 // M3 모의 API (api-contracts/m3-research-data.md). 화면 검증용 메모리 구현이며 실제 backend·DB·Codex가 아니다.
 // 계약의 소유권(타인 ID 404), Origin/CSRF, Idempotency-Key 재생, expectedVersion 충돌, 정책 대기 응답을 흉내 낸다.
 import crypto from "node:crypto";
+import {
+  IMAGE_LIMIT, createPostProposal, handleImageDelete, handleImageRead, handlePostMutation, handlePostRead, handlePublicPosts,
+  mediaBytes, newPostDraftOf, postTitle, publicPostTitle, uploadImage,
+} from "./mock-posts.mjs";
 
 export const FIXED_MODEL = "gpt-6.1-sol";
 // 넓은 표·코드·긴 문자열이 있는 답변(대화창 폭·가로 넘침 검증용). 마지막 열 머리글은 "마지막열"로 끝을 확인한다.
@@ -261,6 +265,17 @@ function owned(id, owner, type) {
   const item = items.get(id);
   return item && item.owner === owner && (!type || item.type === type) ? item : null;
 }
+// #28 글 모의 API에 넘기는 문서 조회(본인 문서만)
+const docView = (item) => ({
+  id: item.id, title: latest(item).title, version: item.version, latestVersionId: latest(item).id, archived: item.archived, published: !!item.publication,
+});
+const postDocs = {
+  get: (owner, id) => {
+    const item = owned(id, owner, "document");
+    return item ? docView(item) : null;
+  },
+  list: (owner) => [...items.values()].filter((i) => i.owner === owner && i.type === "document").sort(byUpdated).map(docView),
+};
 const stale = (b, current) => !Number.isInteger(b.expectedVersion) || b.expectedVersion !== current;
 
 // ---- 처리 ----
@@ -277,6 +292,8 @@ function writingView(row, withContent = true) {
 }
 const draftView = writingView;
 const proposalView = writingView;
+// #28 문서 제안 전체 목록 항목(새 문서 제안은 수락 전 documentId·base가 null)
+const anyProposalView = (p, withContent = true) => ({ ...writingView(p, withContent), acceptedDocumentId: p.status === "accepted" ? p.documentId : null });
 const activeDraftOf = (owner, documentId) =>
   [...drafts.values()].find((d) => d.owner === owner && d.documentId === documentId && d.state === "active");
 function draftFields(b) {
@@ -306,6 +323,23 @@ export function createProposal(owner, documentId, title, content) {
 
 function handleWriting(owner, method, path, b) {
   let m;
+  if (method === "POST" && (m = /^\/research\/document-proposals\/([^/]+)\/(accept|discard)$/.exec(path))) {
+    const p = proposals.get(m[1]);
+    if (!p || p.owner !== owner) return fail(404, "not_found", "Not found");
+    if (p.status !== "pending" || b.expectedProposalVersion !== p.version) return conflict("proposal_closed");
+    if (m[2] === "discard") {
+      Object.assign(p, { status: "discarded", version: p.version + 1, updatedAt: now() });
+      return ok(200, anyProposalView(p));
+    }
+    if (p.documentId !== null) return fail(422, "validation_error", "Use the existing document proposal acceptance route");
+    const fields = validateItem("document", { title: b.title, content: b.content });
+    if (fields.length) return fail(422, "validation_error", "Invalid request", { fields });
+    const t = now();
+    const item = { id: uuid(), type: "document", owner, versions: [newVersion("document", { title: b.title, content: b.content }, 1)], version: 1, archived: false, createdAt: t, updatedAt: t, publication: null };
+    items.set(item.id, item);
+    Object.assign(p, { documentId: item.id, baseDocumentVersion: 1, baseVersionId: latest(item).id, acceptedVersionId: latest(item).id, status: "accepted", version: p.version + 1, updatedAt: t });
+    return ok(200, { proposal: anyProposalView(p), document: detail(item), draft: null });
+  }
   if (method === "POST" && path === "/research/document-drafts") {
     const fields = draftFields(b);
     if (fields.length) return fail(422, "validation_error", "Invalid request", { fields });
@@ -408,6 +442,8 @@ function handleMutation(owner, method, path, b, user) {
   if (path === "/research/codex/runner" && method === "POST") return prepareRunner(owner, b);
   const writing = handleWriting(owner, method, path, b);
   if (writing) return writing;
+  const post = handlePostMutation(owner, method, path, b, user, postDocs) ?? (method === "DELETE" ? handleImageDelete(owner, path) : null);
+  if (post) return post;
   let m;
   // 자료·문서 생성
   if (method === "POST" && (m = /^\/research\/(materials|documents)$/.exec(path))) {
@@ -654,6 +690,32 @@ function handleMutation(owner, method, path, b, user) {
           const output = p ? [{ type: "inputText", text: JSON.stringify(proposalView(p, false)) }] : { error: { code: "not_found" } };
           s.items.push({ id: uuid(), type: "tool_call", name: "research_document_update", input, output, status: p ? "completed" : "failed", raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
         }
+        // #28 /fixture/post-propose: 보고 있는 글(또는 작성 중인 새 글 초안, 없으면 새 글)에 Codex 글 제안을 만든다.
+        if (b.text.includes("/fixture/post-propose") && scope.capability === "owner_research" && (scope.page.kind === "post" || scope.page.kind === "post_workspace")) {
+          const target = scope.page.kind === "post" ? { postId: scope.page.resourceId } : scope.page.draftId ? { draftId: scope.page.draftId } : {};
+          const p = createPostProposal(owner, target, (from) => ({
+            title: from.title ? `${from.title} (제안)` : "Codex가 쓴 새 글",
+            content: `${from.content ? `${from.content}\n` : ""}Codex가 덧붙인 문단`,
+            description: from.description || "Codex 요약",
+            tags: [...from.tags, "codex"].filter((t, i, a) => a.indexOf(t) === i),
+            slug: from.slug,
+          }));
+          const input = { mutationId: uuid(), ...target };
+          const output = p ? [{ type: "inputText", text: JSON.stringify(p) }] : { error: { code: "not_found" } };
+          s.items.push({ id: uuid(), type: "tool_call", name: "research_post_propose", input, output, status: p ? "completed" : "failed", raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
+        }
+        // #28 D1 /fixture/doc-save: research_document_save는 새 문서를 바로 만들지 않고 제안을 남긴다.
+        if (b.text.includes("/fixture/doc-save") && scope.capability === "owner_research") {
+          const t = now();
+          const p = {
+            id: uuid(), owner, documentId: null, version: 1, baseDocumentVersion: null, baseVersionId: null,
+            title: "Codex 새 문서", content: "Codex가 정리한 새 문서 본문", origin: "codex", status: "pending", acceptedVersionId: null, createdAt: t, updatedAt: t,
+          };
+          proposals.set(p.id, p);
+          const input = { mutationId: uuid(), title: p.title, content: p.content };
+          const output = [{ type: "inputText", text: JSON.stringify(anyProposalView(p, false)) }];
+          s.items.push({ id: uuid(), type: "tool_call", name: "research_document_save", input, output, status: "completed", raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
+        }
         const answer = b.text.includes("/fixture/wide-answer") ? WIDE_ANSWER : `모의 응답: **${b.text}**`;
         s.items.push({ id: uuid(), type: "message", role: "assistant", text: answer, raw: { kind: "agent_message", fixture: true } });
         s.state = "idle";
@@ -712,6 +774,8 @@ const OWNER_TOOLS = [
   "research_list", "research_get", "research_versions", "research_version_get", "research_relations",
   "research_material_save", "research_document_save", "research_material_update", "research_document_update",
   "research_relation_save", "research_relation_update", "research_archive",
+  // #28
+  "research_post_propose", "research_post_draft_get",
 ];
 const OWNER = { capability: "owner_research", tools: OWNER_TOOLS };
 const PAGE_KINDS = {
@@ -721,6 +785,10 @@ const PAGE_KINDS = {
   document: { ...OWNER, detail: true },
   material_workspace: OWNER,
   document_workspace: OWNER,
+  // #28: 새 글 초안은 draftId(별도 필드), 기존 글은 resourceId=postId, 공개 글은 resourceId=PublicPost.postId
+  post_workspace: { ...OWNER, draft: true },
+  post: { ...OWNER, detail: true },
+  public_post: { capability: "public_post_read", tools: ["research_page_context"], detail: true },
 };
 const GENERAL_SCOPE = { page: { kind: "general" }, capability: OWNER.capability, allowedTools: OWNER.tools };
 
@@ -728,14 +796,26 @@ function resolvePage(owner, p) {
   if (p === undefined) return { scope: GENERAL_SCOPE };
   const bad = (message) => ({ error: fail(422, "validation_error", "Invalid request", { fields: [{ path: "body.page", message }] }) });
   if (!p || typeof p !== "object" || Array.isArray(p)) return bad("object");
-  if (Object.keys(p).some((k) => k !== "kind" && k !== "resourceId")) return bad("unknown field");
+  if (Object.keys(p).some((k) => k !== "kind" && k !== "resourceId" && k !== "draftId")) return bad("unknown field");
   const def = PAGE_KINDS[p.kind];
   if (!def) return bad("kind");
+  if (p.draftId !== undefined && !def.draft) return bad("draftId not allowed");
   if (!def.detail) {
     if (p.resourceId !== undefined) return bad("resourceId not allowed");
+    if (p.draftId !== undefined) {
+      if (typeof p.draftId !== "string" || !UUID_RE.test(p.draftId)) return bad("draftId");
+      const d = newPostDraftOf(owner, p.draftId);
+      if (!d) return { error: fail(404, "not_found", "Not found") };
+      return { scope: { page: { kind: p.kind, draftId: p.draftId, title: d.title }, capability: def.capability, allowedTools: def.tools } };
+    }
     return { scope: { page: { kind: p.kind }, capability: def.capability, allowedTools: def.tools } };
   }
   if (typeof p.resourceId !== "string" || !UUID_RE.test(p.resourceId)) return bad("resourceId");
+  if (p.kind === "post" || p.kind === "public_post") {
+    const t = p.kind === "post" ? postTitle(owner, p.resourceId) : publicPostTitle(p.resourceId);
+    if (t === null) return { error: fail(404, "not_found", "Not found") };
+    return { scope: { page: { kind: p.kind, resourceId: p.resourceId, title: t }, capability: def.capability, allowedTools: def.tools } };
+  }
   const item = items.get(p.resourceId);
   let title;
   if (p.kind === "public_document") {
@@ -795,6 +875,16 @@ function previewOf(doc, v) {
 
 function handleRead(owner, path, url) {
   let m;
+  const post = handlePostRead(owner, path, url, postDocs) ?? handleImageRead(owner, path, url);
+  if (post) return post;
+  if (path === "/research/document-proposals") {
+    const list = [...proposals.values()].filter((p) => p.owner === owner).sort((x, y) => (x.createdAt < y.createdAt ? 1 : -1)).map((p) => anyProposalView(p, false));
+    return ok(200, page(list, url));
+  }
+  if ((m = /^\/research\/document-proposals\/([^/]+)$/.exec(path))) {
+    const p = proposals.get(m[1]);
+    return p && p.owner === owner ? ok(200, anyProposalView(p)) : fail(404, "not_found", "Not found");
+  }
   if (path === "/research/document-drafts") {
     const list = [...drafts.values()].filter((d) => d.owner === owner && d.state === "active").sort(byUpdated).map((d) => draftView(d, false));
     return ok(200, page(list, url));
@@ -886,8 +976,24 @@ function handleRead(owner, path, url) {
 
 /** `/research/...`, `/public/...` 요청 처리. user는 현재 session 사용자(없으면 null). */
 export async function handleResearch(req, res, path, url, session) {
+  // #28 이미지 원본: 발행본에 쓰인 것은 누구나, 아니면 소유자만(DB 권한 검사 흉내). 없거나 권한이 없으면 404.
+  const media = /^\/media\/post-images\/([^/]+)$/.exec(path);
+  if (media) {
+    if (req.method !== "GET") return send(res, 405, { error: { code: "method_not_allowed", message: "Method not allowed" } });
+    const found = mediaBytes(session?.user.accountId ?? null, media[1]);
+    if (!found) return send(res, 404, { error: { code: "not_found", message: "Not found" } });
+    res.writeHead(200, {
+      "Content-Type": found.type,
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'",
+      "Cache-Control": found.isPublic ? "public, max-age=0, must-revalidate" : "no-store",
+    });
+    return res.end(found.bytes);
+  }
   if (path.startsWith("/public/")) {
     if (req.method !== "GET") return send(res, 405, { error: { code: "method_not_allowed", message: "Method not allowed" } });
+    const post = handlePublicPosts(path, url);
+    if (post) return send(res, post.status, post.body);
     // 실제 계약: 공개는 문서 보관과 독립적이다(보관해도 철회 전까지 공개 유지).
     const published = [...items.values()].filter((i) => i.type === "document" && i.publication);
     if (path === "/public/documents") {
@@ -930,6 +1036,24 @@ export async function handleResearch(req, res, path, url, session) {
   const key = req.headers["idempotency-key"];
   if (typeof key !== "string" || !UUID_RE.test(key)) {
     return send(res, 422, { error: { code: "validation_error", message: "Idempotency-Key required", fields: [{ path: "header.Idempotency-Key", message: "uuid" }] } });
+  }
+  if (req.method === "POST" && path === "/research/post-images") {
+    // 원본 바이트(multipart 아님). 상한을 넘으면 더 읽지 않고 413.
+    const chunks = [];
+    let size = 0;
+    for await (const c of req) {
+      size += c.length;
+      if (size > IMAGE_LIMIT) break;
+      chunks.push(c);
+    }
+    const bytes = Buffer.concat(chunks);
+    const type = (req.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+    const r = size > IMAGE_LIMIT ? { status: 413, body: { error: { code: "payload_too_large", message: "Image exceeds size limit" } } } : uploadImage(owner, type, bytes);
+    const fp = `POST ${path} ${type} ${crypto.createHash("sha256").update(bytes).digest("hex")}`;
+    const prev = idem.get(`${owner}:${key}`);
+    if (prev) return prev.fp !== fp ? send(res, 409, { error: { code: "idempotency_conflict", message: "Idempotency conflict" } }) : send(res, prev.status, prev.body);
+    idem.set(`${owner}:${key}`, { fp, status: r.status, body: r.body });
+    return send(res, r.status, r.body);
   }
   const body = await readBody(req);
   if (body === null || typeof body !== "object") return send(res, 422, { error: { code: "validation_error", message: "Invalid JSON" } });

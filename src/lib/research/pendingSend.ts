@@ -19,11 +19,15 @@ export function loadPendingSend(accountId: string, sessionId: string): PendingSe
   const r = loadRequest<{ text?: unknown; expectedVersion?: unknown; page?: unknown }>(accountId, scope(sessionId));
   if (!r || typeof r.body?.text !== "string" || !Number.isInteger(r.body.expectedVersion)) return null;
   const out: PendingSend = { key: r.key, text: r.body.text, expectedVersion: r.body.expectedVersion as number };
-  const page = r.body.page as { kind?: unknown; resourceId?: unknown } | undefined;
+  const page = r.body.page as { kind?: unknown; resourceId?: unknown; draftId?: unknown } | undefined;
   if (page !== undefined) {
     // 보관한 body와 다르게 보내면 같은 key에서 409가 되므로, 알아볼 수 없는 보관분은 복구하지 않는다.
     if (typeof page !== "object" || page === null || typeof page.kind !== "string") return null;
-    out.page = { kind: page.kind as PageDescriptor["kind"], ...(typeof page.resourceId === "string" && { resourceId: page.resourceId }) };
+    out.page = {
+      kind: page.kind as PageDescriptor["kind"],
+      ...(typeof page.resourceId === "string" && { resourceId: page.resourceId }),
+      ...(typeof page.draftId === "string" && { draftId: page.draftId }),
+    };
   }
   return out;
 }

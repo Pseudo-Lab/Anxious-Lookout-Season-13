@@ -120,8 +120,13 @@ const page = A.page;
 const main = page.locator("main");
 const chat = chatOf(page);
 const api = apiClient(page);
+// #28 D1: fixture의 research_document_save는 문서를 바로 만들지 않고 새 문서 제안을 남긴다. 도구 쓰기 횟수는 그 제안 수로 센다.
 const fixtureDocs = async (p = api) =>
+  (await p.get("/research/document-proposals?limit=100")).body.items.filter((d) => d.title === "Fixture document" && d.documentId === null).length;
+const directFixtureDocs = async (p = api) =>
   (await p.get("/research/documents?limit=100")).body.items.filter((d) => d.title === "Fixture document").length;
+// 1×1 PNG(서버가 실제로 decode·재인코딩한다)
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 const userMsgs = (m, text) => m.locator("li[data-role=user]", { hasText: text });
 
 // 새 대화는 페이지 이동 없이 대화창에 열린다. 그 뒤 질문할 페이지(기본: 문서 작업 공간)로 옮긴다. 반환값은 기존 대화 링크.
@@ -170,7 +175,9 @@ await toolBtn.first().click();
 check("O2. full tool input shown inert", await appears(chat.locator("pre", { hasText: "Complete fixture tool input" })));
 await chat.getByRole("button", { name: "저장된 원본 기록 보기" }).first().click();
 check("O2. stored raw item shown", await appears(chat.locator("pre", { hasText: "research_document_save" })));
-check("O2. tool saved owned document via real API", (await fixtureDocs()) === docs0 + 1, `${docs0} -> ${await fixtureDocs()}`);
+check("O2. tool left one new-document proposal via real API", (await fixtureDocs()) === docs0 + 1, `${docs0} -> ${await fixtureDocs()}`);
+check("O2. D1: no document created directly", (await directFixtureDocs()) === 0, String(await directFixtureDocs()));
+check("O2. chat links the new-document proposal", await appears(chat.getByText("Codex가 새 문서를 제안했습니다", { exact: false })));
 
 // O3. 미기록 실패 입력: failed + platform 표시, 후속 명시 입력 성공 후에도 보존
 await send(chat, "/fixture/unrecorded");
@@ -463,7 +470,9 @@ async function dropFirstSend(p) {
   await openAt(page, s1, U(`/research/document/?id=${id}`));
   await send(chat, `/fixture/document-update ${id} ${d.body.version}`);
   await settled(chat);
-  check("IW. chat shows proposal with review link", await appears(chat.getByRole("link", { name: "제안 검토" })));
+  // #28 D1 뒤로는 이전 research_document_save 차례에도 '제안 검토'(새 문서 제안) 링크가 있으므로 이 도구 항목의 링크를 기다린다.
+  const updLink = chat.locator("li", { hasText: "research_document_update" }).last().getByRole("link", { name: "제안 검토" });
+  check("IW. chat shows proposal with review link", await appears(updLink));
   const head = (await api.get(`/research/documents/${id}`)).body;
   const props = (await api.get(`/research/documents/${id}/proposals`)).body?.items ?? [];
   check(
@@ -471,7 +480,7 @@ async function dropFirstSend(p) {
     head.content === "제안 전 본문\n" && head.latestVersion.number === 1 && props.length === 1 && props[0].status === "pending",
     JSON.stringify({ n: head.latestVersion.number, props: props.map((p) => p.status) })
   );
-  await chat.getByRole("link", { name: "제안 검토" }).last().click();
+  await updLink.click();
   const box = main.locator("#proposals");
   check("IW. proposal diff shown", await appears(box.locator('[data-diff="add"]', { hasText: "Complete fixture proposal content" })));
   await box.getByRole("button", { name: "제안 수락" }).click();
@@ -484,6 +493,196 @@ async function dropFirstSend(p) {
     after.latestVersion.number === 2 && after.title === "Fixture proposal" && accepted[0]?.status === "accepted" && accepted[0]?.acceptedVersionId === after.latestVersion.id,
     JSON.stringify({ n: after.latestVersion.number, s: accepted[0]?.status })
   );
+}
+
+// IP. #28 글(실제 API + 실제 runner): 이관 글 공개 → /write 초안 자동 저장·복구 → 저장 → 발행·익명 공개 → 재발행 diff → 발행 취소.
+//     D1: fixture research_document_save는 새 문서 제안 → 검토 → 수락해야 문서가 생긴다. 공개 글 대화 범위는 public_post(postId).
+{
+  const anonCtx = await browser.newContext();
+  const anon = await anonCtx.newPage();
+  await anon.goto(U("/posts/"));
+  check("IP1. legacy MDX posts imported (0006 seed) and listed", await appears(anon.getByRole("link", { name: /Observatory에 오신 것을 환영합니다/ })));
+  await anon.goto(U("/posts/welcome-to-observatory/"));
+  await anon.locator("article h1").first().waitFor().catch(() => {});
+  const legacy = await anon.locator("main").innerText();
+  check("IP1. legacy post detail with original author", legacy.includes("Observatory에 오신 것을 환영합니다") && legacy.includes("관리자"), legacy.slice(0, 160));
+  await anon.goto(U("/tags/AI/"));
+  check("IP1. legacy tag page", await appears(anon.getByRole("link", { name: /Transformer 아키텍처 이해하기/ })));
+
+  const doc = await api.send("POST", "/research/documents", { title: "글 바탕 문서", content: "비공개 바탕 본문" });
+  check("IP2. setup: document", doc.status === 201, String(doc.status));
+  await page.goto(U("/write/new/"));
+  await main.getByLabel("제목").fill("오프라인 첫 글");
+  await main.getByLabel("주소(slug)").fill("Offline First Post");
+  await main.getByLabel("태그", { exact: true }).fill("오프라인");
+  await main.getByLabel("태그", { exact: true }).press("Enter");
+  await main.getByLabel("요약").fill("실 API 글 요약");
+  await main.getByRole("button", { name: "문서 연결" }).click();
+  await main.getByLabel("연결할 문서 찾기").fill("글 바탕");
+  await main.getByRole("button", { name: "글 바탕 문서 연결" }).click();
+  await main.getByLabel("본문").fill("# 오프라인 본문\n\n첫 버전 문장");
+  await main.getByText("초안 자동 저장됨").first().waitFor({ timeout: 20000 });
+  await page.waitForURL(/[?&]draft=/, { timeout: 10000 }).catch(() => {});
+  const draftId = new URL(page.url()).searchParams.get("draft");
+  const d = draftId ? await api.get(`/research/post-drafts/${draftId}`) : null;
+  check(
+    "IP2. real API draft holds all post fields",
+    d?.status === 200 && d.body.slug === "offline-first-post" && d.body.tags?.[0] === "오프라인" && d.body.documentIds?.[0] === doc.body.id && d.body.postId === null,
+    JSON.stringify(d?.body ?? null).slice(0, 200)
+  );
+  await page.reload();
+  await main.getByLabel("제목").waitFor();
+  check("IP2. reload restores server draft", (await main.getByLabel("제목").inputValue()) === "오프라인 첫 글" && (await main.getByLabel("주소(slug)").inputValue()) === "offline-first-post");
+  await main.getByRole("button", { name: "글 저장" }).click();
+  await page.waitForURL(/\/write\/\?id=/, { timeout: 20000 }).catch(() => {});
+  const postId = new URL(page.url()).searchParams.get("id");
+  const p1 = postId ? await api.get(`/research/posts/${postId}`) : null;
+  check("IP2. commit: post v1, draft committed", p1?.status === 200 && p1.body.latestVersion.number === 1 && (await api.get(`/research/post-drafts/${draftId}`)).body.state === "committed");
+
+  // 발행: 미리보기의 문서 제목 공개 안내 → 발행 → 익명 조회(문서 본문 비공개)
+  const pub = main.getByRole("region", { name: "발행" });
+  await pub.getByRole("button", { name: "발행 미리보기" }).click();
+  check("IP3. preview warns linked document title becomes public", await appears(pub.getByText("함께 공개되는 문서 제목 (1)")));
+  await pub.getByRole("button", { name: "이 버전 발행" }).click();
+  check("IP3. published", await appears(pub.getByText("발행했습니다", { exact: false })));
+  await anon.goto(U("/posts/offline-first-post/"));
+  await anon.locator("article h1").first().waitFor().catch(() => {});
+  const pubText = await anon.locator("main").innerText();
+  check("IP3. anonymous public post shows v1", pubText.includes("첫 버전 문장") && pubText.includes("오프라인 첫 글"));
+  check("IP3. based-on document title shown, private body not", pubText.includes("글 바탕 문서") && !pubText.includes("비공개 바탕 본문"));
+  const pubRes = await anon.request.get(U("/api/public/posts/offline-first-post"));
+  check(
+    "IP3. public API revalidation headers (ETag + must-revalidate)",
+    pubRes.status() === 200 && !!pubRes.headers()["etag"] && (pubRes.headers()["cache-control"] ?? "").includes("must-revalidate"),
+    `${pubRes.status()} ${pubRes.headers()["cache-control"]}`
+  );
+  await anon.goto(U("/"));
+  check("IP3. home lists the new post first", await appears(anon.locator("main article").first().getByText("오프라인 첫 글")));
+
+  // 수정 → v2 → 현재 공개본 대비 diff → 재발행 → 발행 취소
+  await main.getByRole("button", { name: "내용 수정" }).click();
+  await main.getByLabel("본문").fill("# 오프라인 본문\n\n두 번째 버전 문장\n");
+  // 이미지(D2): 원본 바이트 업로드 → 본문에 삽입 → 표지 지정. 서버가 형식 검사·재인코딩한다.
+  const imageBox = main.getByRole("region", { name: "이미지" });
+  await imageBox.getByLabel("이미지 파일").setInputFiles({ name: "offline.png", mimeType: "image/png", buffer: PNG });
+  check("IP4. image uploaded via real API", await appears(imageBox.getByText("올렸습니다", { exact: false })), (await imageBox.innerText()).slice(0, 200));
+  const uploaded = (await api.get("/research/post-images")).body?.items?.[0];
+  check("IP4. image url is canonical own path", !!uploaded && uploaded.url === `/api/media/post-images/${uploaded.id}` && uploaded.mimeType === "image/png", JSON.stringify(uploaded));
+  check("IP4. markdown inserted", (await main.getByLabel("본문").inputValue()).includes(`(/api/media/post-images/${uploaded?.id})`));
+  await imageBox.getByRole("button", { name: "표지로" }).first().click();
+  await main.getByText("초안 자동 저장됨").first().waitFor({ timeout: 20000 });
+  await main.getByRole("button", { name: "새 버전으로 저장" }).click();
+  await main.getByRole("button", { name: "내용 수정" }).waitFor({ timeout: 20000 });
+  await pub.getByLabel("발행할 버전").selectOption((await api.get(`/research/posts/${postId}`)).body.latestVersion.id);
+  await pub.getByRole("button", { name: "발행 미리보기" }).click();
+  check("IP4. republish diff vs current publication", await appears(pub.locator('[data-diff="add"]', { hasText: "두 번째 버전 문장" })));
+  await pub.getByRole("button", { name: "이 버전으로 다시 발행" }).click();
+  check("IP4. republished", await appears(pub.getByText("발행했습니다", { exact: false })));
+  await anon.goto(U("/posts/offline-first-post/"));
+  check("IP4. anonymous sees v2", await appears(anon.getByText("두 번째 버전 문장")));
+  await anon.locator("article .prose img").first().waitFor({ timeout: 20000 }).catch(() => {});
+  const pubImgs = await anon.locator("article img").evaluateAll((els) => els.map((e) => [e.getAttribute("src"), e.complete && e.naturalWidth > 0]));
+  check("IP4. anonymous: cover + body image load from real API", pubImgs.length === 2 && pubImgs.every(([src, loaded]) => src === uploaded?.url && loaded), JSON.stringify(pubImgs));
+  const media = await anon.request.get(U(uploaded?.url ?? "/x"));
+  check(
+    "IP4. published image public with nosniff + revalidate",
+    media.status() === 200 && media.headers()["x-content-type-options"] === "nosniff" && (media.headers()["cache-control"] ?? "").includes("must-revalidate"),
+    `${media.status()} ${media.headers()["cache-control"]}`
+  );
+
+  // Codex 글 수정 제안(실제 fixture research_post_propose): 수락 전 글·발행본 그대로 → 검토 → 수락 = 새 버전 1개
+  await openAt(page, s1, U(`/write/?id=${postId}`));
+  const beforeProp = (await api.get(`/research/posts/${postId}`)).body;
+  await send(chat, "/fixture/post-propose 다듬어줘");
+  await settled(chat);
+  check("IP9. chat: post proposal link", await appears(chat.getByText("Codex가 글 수정 제안을 만들었습니다", { exact: false })));
+  check("IP9. real API: post unchanged before acceptance", (await api.get(`/research/posts/${postId}`)).body.latestVersion.number === beforeProp.latestVersion.number);
+  await chat.locator("li", { hasText: "research_post_propose" }).last().getByRole("link", { name: "제안 검토" }).click();
+  const propBox = main.locator("#proposals");
+  check("IP9. proposal diff shown", await appears(propBox.locator('[data-diff="add"]', { hasText: "Complete fixture post proposal" })));
+  await propBox.getByRole("button", { name: "제안 수락" }).click();
+  await propBox.getByRole("button", { name: "수락 확인" }).click();
+  check("IP9. accepted content shown", await appears(main.locator(".prose").getByText("Complete fixture post proposal")));
+  const afterProp = (await api.get(`/research/posts/${postId}`)).body;
+  check("IP9. exactly one version, publication unchanged", afterProp.latestVersion.number === beforeProp.latestVersion.number + 1 && afterProp.publication?.versionId === beforeProp.publication?.versionId);
+
+  // 공개 글 대화 범위: public_post + PublicPost.postId, 소유자 도구 없음
+  const bodies = [];
+  const record = async (route) => {
+    bodies.push(route.request().postDataJSON());
+    return route.continue().catch(() => {});
+  };
+  await page.route("**/api/research/sessions/*/messages", record);
+  await openAt(page, s1, U("/posts/offline-first-post/"));
+  await page.locator("article h1").first().waitFor();
+  check("IP5. public post scope shown (bounded)", await appears(chat.getByText("다음 질문 범위: 이 발행 글")));
+  await send(chat, "/fixture/page-context 발행 글 질문");
+  await settled(chat);
+  check("IP5. page sent as public_post with postId", bodies.at(-1)?.page?.kind === "public_post" && bodies.at(-1)?.page?.resourceId === postId, JSON.stringify(bodies.at(-1)?.page));
+  check("IP5. server admitted public_post scope", await appears(userMsgs(chat, "발행 글 질문").first().getByText(/보낸 범위: 이 발행 글/)));
+  check("IP5. no new-document proposal from public scope", !(await chat.locator("li", { hasText: "발행 글 질문" }).last().innerText()).includes("research_document_save"));
+
+  // 새 글 초안 화면의 문맥: post_workspace + draftId
+  await page.goto(U("/write/new/"));
+  await main.getByLabel("제목").fill("문맥 초안");
+  await main.getByText("초안 자동 저장됨").first().waitFor({ timeout: 20000 });
+  await page.waitForURL(/[?&]draft=/, { timeout: 10000 }).catch(() => {});
+  const ctxDraft = new URL(page.url()).searchParams.get("draft");
+  await chat.getByLabel("메시지").waitFor();
+  check("IP6. write workspace hint", await appears(chat.getByText("보고 있는 화면: 글 쓰기")));
+  const ip6Responses = [];
+  const onIp6 = async (r) => {
+    if (r.request().method() === "POST" && /\/api\/research\/sessions\/[^/]+\/messages$/.test(new URL(r.url()).pathname))
+      ip6Responses.push(`${r.status()} ${(await r.text().catch(() => "")).slice(0, 300)}`);
+  };
+  page.on("response", onIp6);
+  await send(chat, "초안 문맥 질문");
+  await settled(chat);
+  await page.waitForTimeout(1000);
+  page.off("response", onIp6);
+  console.log(`INFO IP6 message responses: ${ip6Responses.join(" | ")}`);
+  check("IP6. page sent as post_workspace with draftId", bodies.at(-1)?.page?.kind === "post_workspace" && bodies.at(-1)?.page?.draftId === ctxDraft, JSON.stringify(bodies.at(-1)?.page));
+  check("IP6. server accepted the draft context", (await appears(userMsgs(chat, "초안 문맥 질문"))), `${ip6Responses.join(" | ")} || ${(await chat.innerText()).slice(-300)}`);
+  await page.unroute("**/api/research/sessions/*/messages", record);
+  const docProposalLink = chat.locator("li", { hasText: "research_document_save" }).last().getByRole("link", { name: "제안 검토" });
+  const docProposalHref = await docProposalLink.getAttribute("href");
+
+  // 작성 중인 새 글 초안에 대한 Codex 제안(fixture가 research_post_draft_get으로 최신 revision을 읽음) → 수락하면 새 글, 초안 닫힘
+  await send(chat, "/fixture/post-propose 이어서 써줘");
+  await settled(chat);
+  check("IP10. chat: new post proposal", await appears(chat.getByText("Codex가 새 글을 제안했습니다", { exact: false })));
+  const props10 = (await api.get("/research/post-proposals?limit=100")).body?.items ?? [];
+  check("IP10. real API: proposal bound to the open draft", props10.some((x) => x.postId === null && x.baseDraftId === ctxDraft && x.status === "pending"), JSON.stringify(props10.map((x) => x.baseDraftId)));
+  await chat.locator("li", { hasText: "research_post_propose" }).last().getByRole("link", { name: "제안 검토" }).click();
+  await page.waitForURL(/\/write\/new\/\?proposal=/, { timeout: 20000 }).catch(() => {});
+  check("IP10. review diff from the draft", await appears(main.locator('[data-diff="add"]', { hasText: "Complete fixture post proposal" })));
+  check("IP10. fixture slug prefilled", /^fixture-post-/.test(await main.getByLabel("주소(slug)").inputValue()));
+  await main.getByRole("button", { name: "제안 수락" }).click();
+  await main.getByRole("button", { name: "수락 확인" }).click();
+  await page.waitForURL(/\/write\/\?id=/, { timeout: 20000 }).catch(() => {});
+  check("IP10. accepted: new post page", await appears(main.getByRole("region", { name: "발행" })));
+  check("IP10. real API: base draft committed", (await api.get(`/research/post-drafts/${ctxDraft}`)).body?.state === "committed");
+
+  // D1: 그 turn의 research_document_save는 새 문서 제안 → 대화 '제안 검토' → 수락하면 문서 1개
+  const direct = await directFixtureDocs();
+  check("IP7. chat linked the new-document proposal", !!docProposalHref && docProposalHref.includes("/research/document/new/?proposal="), String(docProposalHref));
+  await page.goto(U(docProposalHref ?? "/"));
+  await page.waitForURL(/\/research\/document\/new\/\?proposal=/, { timeout: 20000 }).catch(() => {});
+  await main.getByRole("button", { name: "제안 수락(새 문서 만들기)" }).click();
+  await page.waitForURL(/\/research\/document\/\?id=/, { timeout: 20000 }).catch(() => {});
+  check("IP7. accepted: document created from proposal", await appears(main.getByRole("heading", { name: "Fixture document" })));
+  check("IP7. exactly one document added", (await directFixtureDocs()) === direct + 1, `${direct} -> ${await directFixtureDocs()}`);
+
+  // 발행 취소: 익명 404, 목록에서 빠짐
+  await page.goto(U(`/write/?id=${postId}`));
+  await pub.getByRole("button", { name: "발행 취소…" }).click();
+  await pub.getByRole("button", { name: "발행 취소", exact: true }).click();
+  check("IP8. unpublished", await appears(pub.getByText("발행을 취소했습니다", { exact: false })));
+  await anon.goto(U("/posts/offline-first-post/"));
+  check("IP8. anonymous 404 after unpublish", await appears(anon.getByText("글을 찾을 수 없습니다")));
+  check("IP8. public API 404", (await anon.request.get(U("/api/public/posts/offline-first-post"))).status() === 404);
+  check("IP8. image no longer public after unpublish", (await anon.request.get(U(uploaded?.url ?? "/x"))).status() === 404);
+  await anonCtx.close();
 }
 
 // O10. #7 모델 우회/불일치(model/rerouted): codex_model_unavailable, 해당 turn의 assistant 결과는 projection에서 제외되고

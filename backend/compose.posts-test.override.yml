@@ -1,0 +1,5 @@
+services:
+  mock-github:
+    image: anxious-s13-back-issue28-test
+  test:
+    image: anxious-s13-back-issue28-test

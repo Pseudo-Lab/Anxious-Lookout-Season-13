@@ -17,7 +17,7 @@ import { storeGeneration } from "@/lib/research/pendingStore";
 import { clearDraft, loadDraft, saveDraft } from "@/lib/research/chatState";
 import { useAuth } from "@/hooks/useAuth";
 import type { AcceptedScope, PageDescriptor, SessionDetail, SessionItem, ToolCallItem } from "@/lib/research/types";
-import { describePage, kindText, sameDescriptor, scopeLabel } from "@/lib/research/pageContext";
+import { describePage, kindText, pageUnresolved, sameDescriptor, scopeLabel, useRegisteredPage } from "@/lib/research/pageContext";
 import { own } from "@/lib/research/own";
 import { BASE_PATH } from "@/lib/constants";
 import { SHELL_STATUS_LABELS, SHELL_TOOL, shellNote, shellView } from "@/lib/research/shell";
@@ -67,9 +67,12 @@ function RawItem({ sessionId, itemId, label = "저장된 원본 전체" }: { ses
 
 const TOOL_STATUS_LABELS: Record<string, string> = { rejected: "거부됨" };
 
-// #22 research_document_update는 문서를 바꾸지 않고 제안(Proposal)을 만든다. 출력(JSON 또는 text 조각)에서 제안 위치만 읽는다.
-function proposalRef(item: ToolCallItem): { documentId: string; id: string } | null {
-  if (item.name !== "research_document_update" || item.status === "rejected") return null;
+// #22 research_document_update는 문서를 바꾸지 않고 제안(Proposal)을 만든다. #28 D1: research_document_save(새 문서)와
+// research_post_propose(글)도 제안이다. 도구 결과는 flat Proposal이며 출력(JSON 또는 text 조각)에서 제안 위치만 읽는다.
+const PROPOSAL_TOOLS = new Set(["research_document_update", "research_document_save", "research_post_propose"]);
+const enc = encodeURIComponent;
+function proposalRef(item: ToolCallItem): { href: string; text: string } | null {
+  if (!PROPOSAL_TOOLS.has(item.name) || item.status === "rejected") return null;
   const candidates: unknown[] = Array.isArray(item.output)
     ? item.output.map((part) => {
         const text = (part as { text?: unknown } | null)?.text;
@@ -82,8 +85,18 @@ function proposalRef(item: ToolCallItem): { documentId: string; id: string } | n
       })
     : [item.output];
   for (const c of candidates) {
-    const v = c as { id?: unknown; documentId?: unknown; status?: unknown } | null;
-    if (v && typeof v.id === "string" && typeof v.documentId === "string" && v.status === "pending") return { documentId: v.documentId, id: v.id };
+    const v = c as { id?: unknown; documentId?: unknown; postId?: unknown; status?: unknown } | null;
+    if (!v || typeof v.id !== "string" || v.status !== "pending") continue;
+    const hash = `#proposal-${enc(v.id)}`;
+    if (item.name === "research_post_propose") {
+      if (typeof v.postId === "string") return { href: `/write/?id=${enc(v.postId)}${hash}`, text: "Codex가 글 수정 제안을 만들었습니다. 수락하기 전에는 글이 바뀌지 않습니다." };
+      if (v.postId === null) return { href: `/write/new/?proposal=${enc(v.id)}`, text: "Codex가 새 글을 제안했습니다. 수락하기 전에는 글이 만들어지지 않습니다." };
+      continue;
+    }
+    if (typeof v.documentId === "string")
+      return { href: `/research/document/?id=${enc(v.documentId)}${hash}`, text: "Codex가 문서 수정 제안을 만들었습니다. 수락하기 전에는 문서가 바뀌지 않습니다." };
+    if (v.documentId === null && item.name === "research_document_save")
+      return { href: `/research/document/new/?proposal=${enc(v.id)}`, text: "Codex가 새 문서를 제안했습니다. 수락하기 전에는 문서가 만들어지지 않습니다." };
   }
   return null;
 }
@@ -132,12 +145,9 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
       {shell?.truncated && <p className="px-3 pb-2 text-xs text-stone-600">출력이 길어 저장 상한까지만 남았습니다.</p>}
       {proposal && (
         <p className="px-3 pb-2 text-xs text-indigo-800">
-          Codex가 문서 수정 제안을 만들었습니다. 수락하기 전에는 문서가 바뀌지 않습니다.{" "}
-          {/* 같은 문서를 보고 있으면 해당 제안으로 이동만 하고 목록을 새로 불러온다(hashchange). */}
-          <a
-            href={`${BASE_PATH}/research/document/?id=${encodeURIComponent(proposal.documentId)}#proposal-${encodeURIComponent(proposal.id)}`}
-            className="font-medium underline hover:no-underline"
-          >
+          {proposal.text}{" "}
+          {/* 같은 문서·글을 보고 있으면 해당 제안으로 이동만 하고 목록을 새로 불러온다(hashchange). */}
+          <a href={`${BASE_PATH}${proposal.href}`} className="font-medium underline hover:no-underline">
             제안 검토
           </a>
         </p>
@@ -340,10 +350,13 @@ function Composer({
   const [busy, setBusy] = useState(false);
   const running = session.state === "running";
 
+  const unresolved = pageUnresolved(page);
   async function submit(e: FormEvent) {
     e.preventDefault();
     const body = text.trim();
     if (!body || busy || blocked) return;
+    // 공개 글의 범위(postId)를 확정하기 전에는 새 질문을 보내지 않는다. 결과 미확인 재전송은 처음 보낸 범위 그대로라 허용한다.
+    if (unresolved && !(pending !== null && pending.text === body)) return;
     if (!csrfToken) {
       setFailure({ kind: "http", status: 401, code: "unauthenticated" });
       return;
@@ -398,6 +411,11 @@ function Composer({
     <>
       <div className="mt-auto space-y-2 pt-2">
         <ScopeHint page={page} />
+        {unresolved && !retrying && (
+          <Notice tone="info">
+            이 공개 글을 확인한 뒤에 질문할 수 있습니다(글을 불러오는 중이거나 찾을 수 없는 글). 입력은 그대로 있으며 자동으로 보내지 않습니다.
+          </Notice>
+        )}
         {failure && <ErrorNotice failure={failure} prefix="메시지를 보내지 못했습니다." />}
         {blocked &&
           (runnerState(codex) ? (
@@ -447,7 +465,7 @@ function Composer({
           <NextScope page={page} />
           <button
             type="submit"
-            disabled={busy || running || blocked || text.trim() === ""}
+            disabled={busy || running || blocked || text.trim() === "" || (unresolved && !retrying)}
             className="min-h-11 shrink-0 rounded-lg bg-indigo-600 px-4 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 md:min-h-9"
           >
             {busy ? "보내는 중..." : retrying ? "다시 보내기" : "보내기"}
@@ -471,7 +489,7 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
   const reloadCodex = codex.reload;
   const pathname = usePathname();
   const search = useSearchParams();
-  const page = describePage(pathname, search);
+  const page = describePage(pathname, search, useRegisteredPage());
 
   // turn이 끝날 때마다(성공·실패) 연결 상태를 다시 확인한다. 실행 중 인증 만료·사용 한도·모델 차단이
   // 생겼으면 안내와 보내기 잠금에 바로 반영되고, 첫 실제 응답 뒤의 확인 상태도 갱신된다.

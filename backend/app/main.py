@@ -86,7 +86,7 @@ def create_app(settings=None):
     async def auth_transport(request, call_next):
         # Mock transport is confined to APP_ENV=test. Never let a public HTTP
         # callback issue a real app session merely because configured origin is HTTPS.
-        is_auth = request.url.path.startswith((prefix + "/auth/", prefix + "/research/", prefix + "/admin/"))
+        is_auth = request.url.path.startswith((prefix + "/auth/", prefix + "/research/", prefix + "/admin/", prefix + "/media/"))
         needs_protection = settings.oauth_mode == "github" or bool(request.cookies.get(SESSION_COOKIE))
         if is_auth and needs_protection and settings.oauth_mode != "mock":
             protocol = request.url.scheme
@@ -112,7 +112,14 @@ def create_app(settings=None):
                     return callback_failure("server_error")
                 return error("not_ready", "Service is not ready", 503)
         response = await call_next(request)
-        response.headers["Cache-Control"] = "no-store"
+        public_posts = settings.base_path + '/api/public/posts'
+        cacheable_path = (request.url.path == public_posts or request.url.path.startswith(public_posts + '/')
+                          or request.url.path == settings.base_path + '/api/public/post-tags'
+                          or request.url.path.startswith(settings.base_path + '/api/media/post-images/'))
+        if not (request.method == 'GET' and cacheable_path and response.status_code in {200, 304}):
+            response.headers['Cache-Control'] = 'no-store'
+        else:
+            response.headers.setdefault('Cache-Control', 'no-store')
         return response
 
     @app.exception_handler(RequestValidationError)

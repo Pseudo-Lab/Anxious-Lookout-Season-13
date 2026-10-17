@@ -21,6 +21,9 @@ services:
       RESEARCH_ACCESS_POLICY: approved
       ADMIN_DATABASE_URL: ""  # Operator fixture credentials remain in explicit ops services.
       API_DATABASE_PASSWORD: ""
+      POST_IMAGE_ROOT: /var/lib/posts/images/data
+    volumes:
+      - post-images:/var/lib/posts/images
   migrate:
     extends:
       file: compose.m3-test.yml
@@ -62,3 +65,4 @@ networks:
   browser: {}
 volumes:
   db-test-data:
+  post-images:

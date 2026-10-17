@@ -7,6 +7,7 @@ import AuthGate from "@/components/research/AuthGate";
 import { DocumentList, MaterialList, SessionList } from "@/components/research/ItemLists";
 import CodexStatusBanner from "@/components/research/CodexStatusBanner";
 import NewSessionForm from "@/components/research/NewSessionForm";
+import { NewDocumentProposals } from "@/components/research/NewDocumentProposals";
 
 const TABS = [
   { key: "materials", label: "자료" },
@@ -39,7 +40,12 @@ function ResearchHome() {
       </nav>
       <AuthGate>
         {tab === "materials" && <MaterialList />}
-        {tab === "documents" && <DocumentList />}
+        {tab === "documents" && (
+          <div className="space-y-4">
+            <NewDocumentProposals />
+            <DocumentList />
+          </div>
+        )}
         {tab === "sessions" && (
           <SessionList
             action={

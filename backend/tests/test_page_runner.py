@@ -21,10 +21,11 @@ HTTP_CLIENT = httpx.Client
 
 @pytest.fixture(scope="module", autouse=True)
 def runner_schema(schema):
-    migrate("0004_publication")
+    migrate("0006_posts")
 
 
-def test_same_native_thread_owner_pages_then_public_and_legacy_refuse(tmp_path, monkeypatch, caplog):
+@pytest.mark.parametrize('public_kind', ['public_document', 'public_post'])
+def test_same_native_thread_owner_pages_then_public_and_legacy_refuse(tmp_path, monkeypatch, caplog, public_kind):
     caplog.set_level("INFO", logger="uvicorn.error")
     calls = []
     def callback(request):
@@ -54,13 +55,13 @@ def test_same_native_thread_owner_pages_then_public_and_legacy_refuse(tmp_path, 
         with pytest.raises(RuntimeError):
             native.accept(session, second.model_copy(update={"scope": {"page": {"kind": "document_workspace"}}}))
         stored = json.loads((tmp_path / "native/codex/fixture-native-record.json").read_text())
-        assert len(stored[saved["threadId"]]["tools"]) == 13
+        assert stored[saved['threadId']]['tools'] == definitions()
         trace = json.loads((tmp_path / "native/codex/fixture-model-rpc.json").read_text())
         assert [entry["method"] for entry in trace] == ["thread/start", "turn/start", "thread/resume", "turn/start"]
         owner_pid = native.process.pid
         assert native.thread_web_modes[saved["threadId"]] == "live"
         native.accept(session, Turn(requestId=uuid.uuid4(), text="public question", tools=definitions(), toolToken="p" * 40,
-                      scope={"page": {"kind": "public_document", "resourceId": str(uuid.uuid4())}}))
+                      scope={"page": {"kind": public_kind, "resourceId": str(uuid.uuid4())}}))
         public = wait_idle(native, session)
         assert native.process.pid != owner_pid and public["threadId"] == saved["threadId"]
         assert native.thread_web_modes[saved["threadId"]] == "disabled"
@@ -132,14 +133,14 @@ def test_two_users_dedicated_transport_native_process_history_and_tool_owner(cli
             detail = client.get("/api/research/sessions/" + session["id"]).json()
             assert detail["state"] == "idle" and next(item for item in detail["items"] if item["type"] == "tool_call")["status"] == "completed"
             assert detail["items"][0]["text"] == "my private draft"
-            docs = client.get("/api/research/documents").json()["items"]
+            docs = client.get("/api/research/document-proposals").json()["items"]
             assert len(docs) == 1
             details.append((detail, docs))
         assert len(callbacks) == 2 and {item["sessionId"] for item in callbacks} == {session_a["id"], session_b["id"]}
         assert details[0][1][0]["id"] != details[1][1][0]["id"]
         assert runner_a.app.state.native.read(session_b["id"]) is None and runner_b.app.state.native.read(session_a["id"]) is None
         assert client.get("/api/research/sessions/" + session_a["id"]).status_code == 404
-        assert client.get("/api/research/documents/" + details[0][1][0]["id"]).status_code == 404
+        assert client.get("/api/research/document-proposals/" + details[0][1][0]["id"]).status_code == 404
         with pytest.raises(httpx.HTTPStatusError):
             Runner("http://runner-b", "a" * 40, owner_a, applications[0][1]).health()
         with pytest.raises(ValueError):
@@ -154,7 +155,7 @@ def test_two_users_dedicated_transport_native_process_history_and_tool_owner(cli
         refused = [item for item in continued["items"] if item["type"] == "tool_call"][-1]
         assert refused["status"] == "completed"
         assert [item["page"]["kind"] for item in continued["items"] if item.get("role") == "user"] == ["document_workspace", "general"]
-        assert len(callbacks) == 3 and len(client.get("/api/research/documents").json()["items"]) == 2
+        assert len(callbacks) == 3 and len(client.get("/api/research/document-proposals").json()["items"]) == 2
         # A third, unmapped editor never borrows either runner.
         client.cookies.clear()
         _, auth_c = identity(client, admin, "333333")
@@ -184,3 +185,53 @@ def test_mapping_rejects_shared_or_ambiguous_bindings(tmp_path, monkeypatch, dam
     mapping.write_text(raw)
     monkeypatch.setenv("CODEX_RUNNERS_FILE", str(mapping))
     with pytest.raises(ValueError): runners_from_file()
+
+
+@pytest.mark.parametrize('kind', ['post', 'draft', 'new', 'read-failure'])
+def test_offline_post_proposal_reads_current_source(tmp_path, monkeypatch, kind):
+    from tests.test_posts import content
+    identity = str(uuid.uuid4())
+    source = content(title='Human title', content='Human words', slug='human-slug', tags=['kept'])
+    page = {'kind': 'post', 'resourceId': identity} if kind in {'post', 'read-failure'} else (
+        {'kind': 'post_workspace', 'draftId': identity} if kind == 'draft' else {'kind': 'post_workspace'})
+    calls = []
+    def callback(request):
+        call = json.loads(request.content); calls.append(call)
+        if call['name'] == 'research_get':
+            if kind == 'read-failure': return httpx.Response(404, json={'error': {'code':'not_found'}})
+            return httpx.Response(200, json={'id':identity, 'version':7, 'latestVersion':source})
+        if call['name'] == 'research_post_draft_get':
+            return httpx.Response(200, json={'draft': {**source, 'id':identity, 'revision':9}})
+        return httpx.Response(200, json={'id':str(uuid.uuid4()), 'status':'pending'})
+    monkeypatch.setattr(httpx, 'Client', lambda **kw: HTTP_CLIENT(transport=httpx.MockTransport(callback), **kw))
+    native = Native(tmp_path/'native', 'gpt-6.1-sol', '/usr/local/bin/codex-fixture', 'http://callback.invalid/tools')
+    try:
+        session = str(uuid.uuid4())
+        native.accept(session, Turn(requestId=uuid.uuid4(), text='Please /fixture/post-propose now',
+            tools=definitions(), toolToken='p'*40, scope={'page':page}))
+        record = wait_idle(native, session)
+        assert record['state'] == 'idle'
+        if kind == 'read-failure':
+            assert [call['name'] for call in calls] == ['research_get']
+            return
+        proposal = calls[-1]
+        assert proposal['name'] == 'research_post_propose'
+        args = proposal['arguments']
+        assert 'Complete fixture post proposal' in args['title']
+        assert args['content'].endswith('Complete fixture post proposal')
+        if kind == 'post':
+            assert calls[0]['arguments'] == {'type':'post', 'id':identity}
+            assert args['postId'] == identity and args['expectedVersion'] == 7
+        elif kind == 'draft':
+            assert calls[0]['arguments'] == {'draftId':identity}
+            assert args['draftId'] == identity and args['expectedDraftRevision'] == 9
+            assert 'postId' not in args
+        else:
+            assert len(calls) == 1 and 'postId' not in args and 'draftId' not in args
+        if kind in {'post','draft'}:
+            assert args['content'].startswith('Human words') and args['slug'] == 'human-slug'
+            assert args['tags'] == ['kept']
+        tools = [item for item in record['record']['turns'][0]['items'] if item['type'] == 'dynamicToolCall']
+        assert all(item['status'] == 'completed' for item in tools)
+    finally:
+        native.close()

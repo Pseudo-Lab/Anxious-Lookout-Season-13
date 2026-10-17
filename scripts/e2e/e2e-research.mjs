@@ -1859,7 +1859,10 @@ let docEUrl;
   await page.waitForURL(draftUrl);
   await main.getByRole("button", { name: "초안 버리기…" }).click();
   await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
-  check("W3. discard: blank editor, address reset", (await appears(main.getByText("초안을 버렸습니다"))) && (await main.getByLabel("제목").inputValue()) === "" && !page.url().includes("?draft="));
+  // 안내·빈 편집기는 주소 교체(router.replace)보다 먼저 보일 수 있어 주소는 따라올 때까지 기다린다(최대 5초).
+  const discardedShown = await appears(main.getByText("초안을 버렸습니다"));
+  const addressReset = await page.waitForURL((u) => !u.search.includes("draft="), { timeout: 5000 }).then(() => true).catch(() => false);
+  check("W3. discard: blank editor, address reset", discardedShown && (await main.getByLabel("제목").inputValue()) === "" && addressReset, page.url());
   check("W3. discarded draft not listed", (await main.getByRole("link", { name: "새 초안 문서" }).count()) === 0);
   await main.getByLabel("제목").fill("저장할 새 문서");
   await main.getByLabel("본문").fill("저장할 본문");

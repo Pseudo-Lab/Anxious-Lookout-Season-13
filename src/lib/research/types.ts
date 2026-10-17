@@ -113,6 +113,14 @@ export interface Proposal {
   updatedAt: string;
 }
 
+/** #28 D1: 문서 제안 전체 목록의 항목. 새 문서 제안(research_document_save)은 수락 전까지 documentId·base가 null이다. */
+export interface AnyDocumentProposal extends Omit<Proposal, "documentId" | "baseDocumentVersion" | "baseVersionId"> {
+  documentId: string | null;
+  baseDocumentVersion: number | null;
+  baseVersionId: string | null;
+  acceptedDocumentId: string | null;
+}
+
 export interface Endpoint {
   type: ItemType;
   id: string;
@@ -223,11 +231,23 @@ export type SessionState = "idle" | "running" | "failed";
 
 // 질문을 보낸 페이지(#9 api-contracts/issue9-page-chat.md). front는 kind·resourceId만 보내고
 // 문맥·허용 도구는 서버가 자원 소유·공개 상태를 확인해 요청마다 정한다.
-export type PageKind = "general" | "public_document" | "material" | "document" | "material_workspace" | "document_workspace";
+export type PageKind =
+  | "general"
+  | "public_document"
+  | "material"
+  | "document"
+  | "material_workspace"
+  | "document_workspace"
+  // #28 글: 목록·새 글(draftId), 기존 글(resourceId=postId), 공개 글(resourceId=PublicPost.postId)
+  | "post_workspace"
+  | "post"
+  | "public_post";
 
 export interface PageDescriptor {
   kind: PageKind;
   resourceId?: string;
+  // #28 post_workspace에서 작성 중인 새 글 초안
+  draftId?: string;
 }
 
 // 서버가 접수한 요청의 적용 범위(표시용). 새 값이 생길 수 있으므로 kind·capability는 문자열로 받고 모르는 값은 일반 문구로 표시한다.

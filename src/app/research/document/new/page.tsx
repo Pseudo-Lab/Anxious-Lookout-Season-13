@@ -1,16 +1,18 @@
 "use client";
 
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getDraft, listDrafts } from "@/lib/research/api";
 import { usePagedList } from "@/lib/research/usePagedList";
+import { useAddressedDraft, type DraftLookup } from "@/lib/research/useAddressedDraft";
 import { formatDateTime } from "@/lib/research/format";
 import type { Draft } from "@/lib/research/types";
 import AuthGate from "@/components/research/AuthGate";
 import DocumentEditor from "@/components/research/DocumentEditor";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
+import { NewDocumentProposalReview, NewDocumentProposals } from "@/components/research/NewDocumentProposals";
 
 // #22 새 문서: 입력은 서버 초안(documentId 없음)으로 자동 저장되고 주소(?draft=)로 복구된다. ‘문서 저장’만 문서와 첫 버전을 만든다.
 // 초안은 계정별 서버 자원이라 다른 계정에는 보이지 않는다(브라우저 저장소에 본문을 두지 않는다).
@@ -58,68 +60,37 @@ function OtherDrafts({ current, reload }: { current: string | null; reload: stri
   );
 }
 
-// 지금 화면의 편집기와 그 편집기가 쓰는 초안.
-// bound: 편집기가 저장하는 초안 ID(새 편집기는 첫 자동 저장 전까지 null).
-// transit: 주소가 아직 따라오지 않은 이전 주소 값(편집기가 방금 만든 초안으로 바꾸는 중이거나, 찾지 못한 초안 주소에서 새로 시작한 경우).
-// 주소(?draft=)가 bound·transit과 맞지 않는 동안에는 편집기를 그리지 않는다(다른 초안 주소에서 이 초안을 고치지 않게, 리뷰 F4).
-// released: 주소가 맞지 않아 편집기를 한 번 내렸다(다른 초안으로 이동 중 등). 내린 화면 상태는 다시 쓰지 않는다.
-// 주소가 다시 같아져도(뒤로 가기) 서버에서 최신 초안을 다시 읽는다(오래된 view.draft나 빈 편집기로 되살리지 않게, 리뷰 F4 잔여).
-interface View {
-  key: string;
-  draft: Draft | null;
-  bound: string | null;
-  transit?: string | null;
-  note?: string;
-  released?: boolean;
+// 주소의 초안 확인: 새 문서 초안만 이어 쓰고, 이미 저장된 초안은 그 문서로 간다.
+async function lookup(id: string): Promise<DraftLookup<Draft>> {
+  const r = await getDraft(id);
+  if (r.ok && r.data.state === "active" && r.data.documentId === null) return { kind: "active", draft: r.data };
+  if (r.ok && r.data.state === "committed" && r.data.documentId)
+    return { kind: "committed", href: `/research/document/?id=${encodeURIComponent(r.data.documentId)}` };
+  return { kind: "missing" };
 }
-const matches = (v: View, param: string | null) =>
-  !v.released && (param === v.bound || (v.transit !== undefined && param === v.transit));
 
-function NewDocument() {
+// #28 D1 새 문서 제안 검토(?proposal=). 수락하면 그 문서로, 버리면 문서 목록으로 간다.
+function ReviewProposal({ id }: { id: string }) {
   const router = useRouter();
-  const param = useSearchParams().get("draft");
-  const [view, setView] = useState<View | null>(param ? null : { key: "new", draft: null, bound: null });
-  const viewRef = useRef(view);
-  const paramRef = useRef(param);
-  useEffect(() => {
-    viewRef.current = view;
-    paramRef.current = param;
-  });
+  return (
+    <NewDocumentProposalReview
+      id={id}
+      onDone={(doc) => (doc ? router.push(`/research/document/?id=${encodeURIComponent(doc.id)}`) : router.replace("/research/?tab=documents"))}
+    />
+  );
+}
 
-  useEffect(() => {
-    const v = viewRef.current;
-    let active = true;
-    if (v && !v.released && param === v.bound) {
-      // 주소가 지금 편집기를 따라왔다. 이전 주소 값은 더 맞추지 않는다.
-      if (v.transit !== undefined) void Promise.resolve().then(() => active && setView((cur) => (cur && cur.key === v.key ? { ...cur, transit: undefined } : cur)));
-      return () => {
-        active = false;
-      };
-    }
-    if (v && !v.released && v.transit !== undefined && param === v.transit) return;
-    if (!param) {
-      // 다른 초안을 보다가 새 문서로 왔다
-      void Promise.resolve().then(() => active && setView({ key: `new:${Date.now()}`, draft: null, bound: null }));
-      return () => {
-        active = false;
-      };
-    }
-    void getDraft(param).then((r) => {
-      if (!active) return;
-      if (r.ok && r.data.state === "active" && r.data.documentId === null) setView({ key: r.data.id, draft: r.data, bound: r.data.id });
-      else if (r.ok && r.data.state === "committed" && r.data.documentId)
-        router.replace(`/research/document/?id=${encodeURIComponent(r.data.documentId)}`);
-      else
-        setView({ key: `new:${param}:${Date.now()}`, draft: null, bound: null, transit: param, note: "이어 쓸 초안을 찾지 못해 새 문서로 시작합니다." });
-    });
-    return () => {
-      active = false;
-    };
-  }, [param, router]);
+function NewDocumentPageInner() {
+  const search = useSearchParams();
+  const proposal = search.get("proposal");
+  if (proposal) return <ReviewProposal key={proposal} id={proposal} />;
+  return <NewDocument param={search.get("draft")} />;
+}
 
-  // 주소가 지금 편집기와 맞지 않게 된 첫 렌더에서 화면 상태를 내린다(이전 렌더 정보로 상태를 고치는 React 패턴).
-  if (view && !view.released && !matches(view, param)) setView({ ...view, released: true });
-  if (!view || !matches(view, param)) return <p className="text-sm text-stone-500">초안을 불러오는 중...</p>;
+function NewDocument({ param }: { param: string | null }) {
+  const router = useRouter();
+  const { view, onDraft, onDiscarded } = useAddressedDraft({ param, newPath: NEW_PATH, lookup });
+  if (!view) return <p className="text-sm text-stone-500">초안을 불러오는 중...</p>;
   const key = view.key;
   return (
     <div className="space-y-4">
@@ -128,20 +99,11 @@ function NewDocument() {
         key={key}
         doc={null}
         draft={view.draft}
-        onDraft={(d) => {
-          // 이미 다른 편집기로 바뀌었으면(늦은 자동 저장 응답) 주소를 건드리지 않는다.
-          const cur = viewRef.current;
-          if (!cur || cur.key !== key || cur.bound === d.id) return;
-          const from = paramRef.current;
-          setView((v) => (v && v.key === key ? { ...v, bound: d.id, transit: from } : v));
-          router.replace(`${NEW_PATH}?draft=${encodeURIComponent(d.id)}`, { scroll: false });
-        }}
+        onDraft={(d) => onDraft(key, d)}
         onCommitted={(doc) => router.push(`/research/document/?id=${encodeURIComponent(doc.id)}`)}
-        onDiscarded={() => {
-          setView({ key: `new:${Date.now()}`, draft: null, bound: null, transit: paramRef.current, note: "초안을 버렸습니다." });
-          router.replace(NEW_PATH, { scroll: false });
-        }}
+        onDiscarded={() => onDiscarded("초안을 버렸습니다.")}
       />
+      <NewDocumentProposals reload={key} />
       <OtherDrafts current={view.bound} reload={key} />
     </div>
   );
@@ -157,7 +119,7 @@ export default function NewDocumentPage() {
       <h1 className="mb-6 mt-2 text-2xl font-bold text-stone-900">새 문서</h1>
       <AuthGate>
         <Suspense>
-          <NewDocument />
+          <NewDocumentPageInner />
         </Suspense>
       </AuthGate>
     </div>
