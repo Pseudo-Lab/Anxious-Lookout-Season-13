@@ -17,7 +17,7 @@ import { storeGeneration } from "@/lib/research/pendingStore";
 import { clearDraft, loadDraft, saveDraft } from "@/lib/research/chatState";
 import { useAuth } from "@/hooks/useAuth";
 import type { AcceptedScope, PageDescriptor, SessionDetail, SessionItem, ToolCallItem } from "@/lib/research/types";
-import { describePage, kindText, sameDescriptor, scopeLabel, useRegisteredPage } from "@/lib/research/pageContext";
+import { describePage, kindText, pageUnresolved, sameDescriptor, scopeLabel, useRegisteredPage } from "@/lib/research/pageContext";
 import { own } from "@/lib/research/own";
 import { BASE_PATH } from "@/lib/constants";
 import { SHELL_STATUS_LABELS, SHELL_TOOL, shellNote, shellView } from "@/lib/research/shell";
@@ -350,10 +350,13 @@ function Composer({
   const [busy, setBusy] = useState(false);
   const running = session.state === "running";
 
+  const unresolved = pageUnresolved(page);
   async function submit(e: FormEvent) {
     e.preventDefault();
     const body = text.trim();
     if (!body || busy || blocked) return;
+    // 공개 글의 범위(postId)를 확정하기 전에는 새 질문을 보내지 않는다. 결과 미확인 재전송은 처음 보낸 범위 그대로라 허용한다.
+    if (unresolved && !(pending !== null && pending.text === body)) return;
     if (!csrfToken) {
       setFailure({ kind: "http", status: 401, code: "unauthenticated" });
       return;
@@ -408,6 +411,11 @@ function Composer({
     <>
       <div className="mt-auto space-y-2 pt-2">
         <ScopeHint page={page} />
+        {unresolved && !retrying && (
+          <Notice tone="info">
+            이 공개 글을 확인한 뒤에 질문할 수 있습니다(글을 불러오는 중이거나 찾을 수 없는 글). 입력은 그대로 있으며 자동으로 보내지 않습니다.
+          </Notice>
+        )}
         {failure && <ErrorNotice failure={failure} prefix="메시지를 보내지 못했습니다." />}
         {blocked &&
           (runnerState(codex) ? (
@@ -457,7 +465,7 @@ function Composer({
           <NextScope page={page} />
           <button
             type="submit"
-            disabled={busy || running || blocked || text.trim() === ""}
+            disabled={busy || running || blocked || text.trim() === "" || (unresolved && !retrying)}
             className="min-h-11 shrink-0 rounded-lg bg-indigo-600 px-4 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 md:min-h-9"
           >
             {busy ? "보내는 중..." : retrying ? "다시 보내기" : "보내기"}

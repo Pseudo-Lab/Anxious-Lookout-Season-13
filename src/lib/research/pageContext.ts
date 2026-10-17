@@ -51,6 +51,9 @@ export function useRegisteredPage() {
 export function describePage(pathname: string, search: URLSearchParams, extra?: { path: string; page: PageDescriptor } | null): PageDescriptor {
   const path = norm(pathname);
   if (extra && extra.path === path) return extra.page;
+  // 공개 글(#28)은 slug로는 postId를 알 수 없다. 글을 불러와 등록하기 전(또는 찾지 못한 경우)에는 자원 없는 public_post로 두어
+  // 보내기를 잠근다(pageUnresolved). 소유자 범위(general)로 대신 보내지 않는다(리뷰 F2).
+  if (/^\/posts\/[^/]+\/$/.test(path)) return { kind: "public_post" };
   switch (path) {
     case "/public/document/":
       return detail("public_document", search.get("id"));
@@ -79,6 +82,9 @@ export function describePage(pathname: string, search: URLSearchParams, extra?: 
       return { kind: "general" };
   }
 }
+
+/** 범위를 아직 정하지 못한 페이지(공개 글을 불러오는 중이거나 찾지 못함). 새 질문을 보내지 않는다. */
+export const pageUnresolved = (page: PageDescriptor) => page.kind === "public_post" && !page.resourceId;
 
 export const sameDescriptor = (a?: PageDescriptor, b?: PageDescriptor) =>
   (a?.kind ?? "general") === (b?.kind ?? "general") && a?.resourceId === b?.resourceId && a?.draftId === b?.draftId;

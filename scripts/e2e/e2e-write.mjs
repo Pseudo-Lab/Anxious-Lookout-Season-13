@@ -156,6 +156,49 @@ check("WP3. commit opens post page", await appears(main.getByRole("heading", { n
 const p1 = await api.get(`/research/posts/${postId}`);
 check("WP3. commit: v1 with fields, draft closed", p1.latestVersion.number === 1 && p1.latestVersion.slug === "first-post-1" && (await api.get(`/research/post-drafts/${draftId}`)).state === "committed");
 
+// WP3b. 리뷰 F1: 업로드를 기다리는 동안 바꾼 제목·본문·메타를 업로드 완료가 되돌리지 않는다. 그동안 저장·버리기는 잠긴다.
+{
+  await page.goto(U("/write/new/"));
+  await main.getByLabel("제목").fill("업로드 전 제목");
+  await main.getByLabel("본문").fill("업로드 전 본문");
+  let release;
+  const held = new Promise((r) => (release = r));
+  const hold = async (route) => {
+    if (route.request().method() === "POST") await held;
+    return route.continue().catch(() => {});
+  };
+  await page.route("**/api/research/post-images", hold);
+  const box = main.getByRole("region", { name: "이미지" });
+  await box.getByLabel("이미지 파일").setInputFiles({ name: "slow.png", mimeType: "image/png", buffer: PNG });
+  await main.getByText("이미지를 올리는 중입니다", { exact: false }).waitFor();
+  check("WP3b. save/discard locked during upload", (await main.getByRole("button", { name: "글 저장" }).isDisabled()) && (await main.getByRole("button", { name: "초안 버리기…" }).isDisabled()));
+  await main.getByLabel("제목").fill("업로드 중 바꾼 제목");
+  await main.getByLabel("본문").fill("업로드 중 바꾼 본문");
+  await main.getByLabel("요약").fill("업로드 중 요약");
+  await main.getByLabel("태그", { exact: true }).fill("업로드중");
+  await main.getByLabel("태그", { exact: true }).press("Enter");
+  release();
+  await box.getByText("올렸습니다", { exact: false }).waitFor();
+  await page.unroute("**/api/research/post-images", hold);
+  const body = await main.getByLabel("본문").inputValue();
+  check(
+    "WP3b. latest title/body/meta kept, image appended",
+    (await main.getByLabel("제목").inputValue()) === "업로드 중 바꾼 제목" &&
+      body.startsWith("업로드 중 바꾼 본문") &&
+      /!\[slow\]\([^)]+post-images\/[0-9a-f-]+\)/.test(body) &&
+      (await main.getByLabel("요약").inputValue()) === "업로드 중 요약" &&
+      (await main.getByRole("button", { name: "태그 업로드중 빼기" }).count()) === 1,
+    JSON.stringify(body)
+  );
+  check("WP3b. save unlocked after upload", !(await main.getByRole("button", { name: "글 저장" }).isDisabled()));
+  await saved();
+  const d = await api.get(`/research/post-drafts/${await draftParam()}`);
+  check("WP3b. server draft has the latest input", d.title === "업로드 중 바꾼 제목" && d.description === "업로드 중 요약" && d.content.startsWith("업로드 중 바꾼 본문"));
+  await main.getByRole("button", { name: "초안 버리기…" }).click();
+  await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+  await main.getByText("초안을 버렸습니다").waitFor();
+}
+
 // WP4. 저장 전 주소 확인(끝 하이픈은 초안에는 남지만 저장은 막는다)
 await page.goto(U("/write/new/"));
 await main.getByLabel("제목").fill("주소 확인");
@@ -318,6 +361,69 @@ await page.goto(U("/posts/first-post-1/"));
 await page.locator("article h1").first().waitFor();
 await openChat("글 대화");
 check("WP12. public post scope: bounded", await appears(chat.getByText("다음 질문 범위: 이 발행 글")));
+{
+  // 리뷰 F2: 공개 글의 postId를 확정하기 전·찾지 못한 경우에는 보내지 않는다(general/소유자 범위로 대신 보내지 않음).
+  const sent = [];
+  const record = (route) => {
+    sent.push(route.request().postDataJSON());
+    return route.continue().catch(() => {});
+  };
+  await page.route("**/api/research/sessions/*/messages", record);
+  let release;
+  const held = new Promise((r) => (release = r));
+  const hold = async (route) => {
+    await held;
+    return route.continue().catch(() => {});
+  };
+  await page.route("**/api/public/posts/first-post-1", hold);
+  await page.goto(U("/posts/first-post-1/"));
+  await openChat("글 대화");
+  await chat.getByLabel("메시지").fill("느린 공개 글 질문");
+  const sendBtn = chat.getByRole("button", { name: "보내기" });
+  check("WP12. F2: send locked while public post loads", (await appears(chat.getByText("이 공개 글을 확인한 뒤에 질문할 수 있습니다", { exact: false }))) && (await sendBtn.isDisabled()));
+  await chat.getByLabel("메시지").press("Enter").catch(() => {});
+  await chat.locator("form").evaluate((f) => f.requestSubmit()).catch(() => {});
+  await page.waitForTimeout(500);
+  check("WP12. F2: nothing sent before scope is known", sent.length === 0, JSON.stringify(sent.map((b) => b.page)));
+  // 조회가 끝나지 않으면 클라이언트 timeout(5초)으로 실패 화면이 된다. 실패해도 잠금은 유지된다.
+  check("WP12. F2: load failure keeps send locked", (await appears(page.getByText("글을 불러오지 못했습니다", { exact: false }), 10000)) && (await sendBtn.isDisabled()));
+  release();
+  await page.unroute("**/api/public/posts/first-post-1", hold);
+  await page.reload();
+  await page.locator("article h1").first().waitFor();
+  await chat.getByLabel("메시지").fill("느린 공개 글 질문");
+  await sendBtn.and(page.locator(":enabled")).waitFor();
+  await sendBtn.click();
+  await chat.getByText("모의 응답: 느린 공개 글 질문").waitFor({ timeout: 15000 });
+  check("WP12. F2: sent as public_post with postId after load", sent.at(-1)?.page?.kind === "public_post" && sent.at(-1)?.page?.resourceId === postId, JSON.stringify(sent.at(-1)?.page));
+  // 찾을 수 없는 글: 계속 잠김
+  await page.goto(U("/posts/no-such-post/"));
+  await openChat("글 대화");
+  await page.getByText("글을 찾을 수 없습니다").waitFor();
+  await chat.getByLabel("메시지").fill("없는 글 질문");
+  check("WP12. F2: not-found post keeps send locked", (await sendBtn.isDisabled()) && (await appears(chat.getByText("이 공개 글을 확인한 뒤에 질문할 수 있습니다", { exact: false }))));
+  // 공개 글 간 이동: 이전 글의 postId를 다음 글에 쓰지 않는다
+  let release2;
+  const held2 = new Promise((r) => (release2 = r));
+  const hold2 = async (route) => {
+    await held2;
+    return route.continue().catch(() => {});
+  };
+  await page.route("**/api/public/posts/welcome-to-observatory", hold2);
+  await page.goto(U("/posts/first-post-1/"));
+  await page.locator("article h1").first().waitFor();
+  await page.getByRole("link", { name: "글 목록" }).first().click();
+  await page.getByRole("link", { name: /Observatory에 오신 것을 환영합니다/ }).first().click();
+  await page.waitForURL(U("/posts/welcome-to-observatory/"));
+  await openChat("글 대화");
+  await chat.getByLabel("메시지").fill("다른 글 질문");
+  check("WP12. F2: moving between posts relocks until the new post loads", await sendBtn.isDisabled());
+  check("WP12. F2: nothing sent while moving", !sent.some((b) => b.text === "다른 글 질문"));
+  release2();
+  await page.unroute("**/api/public/posts/welcome-to-observatory", hold2);
+  await page.unroute("**/api/research/sessions/*/messages", record);
+  await chat.getByLabel("메시지").fill("");
+}
 
 // WP12b. 쓰는 이미지는 지울 수 없고, 쓰지 않는 이미지는 지울 수 있다
 await page.goto(U(`/write/?id=${postId}`));

@@ -69,19 +69,24 @@ export default function PostEditor({
     onDraft,
   });
   const { values, status } = editor;
-  const set = (patch: Partial<PostText>) => editor.setValues({ ...values, ...patch });
+  // 모든 변경은 최신 입력에 덧붙인다(렌더 시점 값을 캡처하지 않는다).
+  const set = (patch: Partial<PostText>) => editor.update((v) => ({ ...v, ...patch }));
   // 이미지 Markdown을 본문 커서 위치에 넣는다(커서가 없으면 끝에). 앞뒤를 빈 줄로 띄운다.
   const body = useRef<HTMLTextAreaElement>(null);
   function insert(markdown: string) {
-    const el = body.current;
-    const text = values.content;
-    // 입력란이 초점을 잃어도 마지막 선택 위치는 남아 있다
-    const at = el?.selectionEnd ?? text.length;
-    const before = text.slice(0, at);
-    const after = text.slice(at);
-    const piece = `${before && !before.endsWith("\n\n") ? (before.endsWith("\n") ? "\n" : "\n\n") : ""}${markdown}${after.startsWith("\n") ? "" : "\n"}`;
-    set({ content: before + piece + after });
+    editor.update((v) => {
+      const el = body.current;
+      const text = v.content;
+      // 입력란이 초점을 잃어도 마지막 선택 위치는 남아 있다(업로드를 기다리는 동안 바뀐 본문 기준)
+      const at = Math.min(el?.selectionEnd ?? text.length, text.length);
+      const before = text.slice(0, at);
+      const after = text.slice(at);
+      const piece = `${before && !before.endsWith("\n\n") ? (before.endsWith("\n") ? "\n" : "\n\n") : ""}${markdown}${after.startsWith("\n") ? "" : "\n"}`;
+      return { ...v, content: before + piece + after };
+    });
   }
+  // 이미지 업로드 중에는 저장·닫기·버리기를 잠근다(완료 결과가 닫힌 편집기나 저장된 버전 밖에 남지 않게).
+  const [uploading, setUploading] = useState(false);
   const { run, busy } = useMutation();
   const [failure, setFailure] = useState<FetchFailure | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -122,7 +127,7 @@ export default function PostEditor({
 
   const [finishing, setFinishing] = useState<null | "commit" | "close" | "discard">(null);
   async function finish(kind: "commit" | "close" | "discard", action: () => Promise<boolean>) {
-    if (finishing) return;
+    if (finishing || uploading) return;
     setFinishing(kind);
     let done = false;
     try {
@@ -253,7 +258,13 @@ export default function PostEditor({
         />
       </Field>
       <DocumentLinks ids={values.documentIds} onChange={(documentIds) => set({ documentIds })} readOnly={locked} />
-      <ImagePanel coverImageId={values.coverImageId} onInsert={insert} onCover={(coverImageId) => set({ coverImageId })} readOnly={locked} />
+      <ImagePanel
+        coverImageId={values.coverImageId}
+        onInsert={insert}
+        onCover={(coverImageId) => set({ coverImageId })}
+        onUploading={setUploading}
+        readOnly={locked}
+      />
       <MarkdownEditor value={values.content} onChange={(content) => set({ content })} readOnly={locked} ownImages textareaRef={body} />
       {locked && (
         <p role="status" className="text-xs text-stone-600">
@@ -261,6 +272,11 @@ export default function PostEditor({
         </p>
       )}
       <StatusLine status={status} onRetry={() => void editor.flush()} />
+      {uploading && (
+        <p role="status" className="text-xs text-stone-600">
+          이미지를 올리는 중입니다. 끝나면 본문 커서 위치에 넣으며, 그동안 저장·닫기·버리기는 잠깁니다. 입력은 계속할 수 있습니다.
+        </p>
+      )}
 
       {status.kind === "conflict" && (
         <Notice tone="warn">
@@ -349,20 +365,20 @@ export default function PostEditor({
         <button
           type="button"
           onClick={() => void finish("commit", commit)}
-          disabled={busy || locked || status.kind === "conflict"}
+          disabled={busy || locked || uploading || status.kind === "conflict"}
           className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
         >
           {finishing === "commit" ? "저장 중..." : post ? (contentMoved && comparing ? "비교했고 이 내용으로 저장" : "새 버전으로 저장") : "글 저장"}
         </button>
         {onClose && (
-          <button type="button" onClick={() => void finish("close", close)} disabled={busy || locked} className="rounded-lg px-4 py-2 text-sm text-stone-600 hover:bg-stone-100">
+          <button type="button" onClick={() => void finish("close", close)} disabled={busy || locked || uploading} className="rounded-lg px-4 py-2 text-sm text-stone-600 hover:bg-stone-100">
             편집 닫기(초안 보관)
           </button>
         )}
         {confirmDiscard ? (
           <span className="flex items-center gap-2 text-sm">
             <span className="text-stone-600">{post ? "초안을 버리고 저장된 글로 돌아갈까요?" : "이 초안을 버릴까요?"}</span>
-            <button type="button" onClick={() => void finish("discard", discard)} disabled={busy || locked} className="font-medium text-red-700 underline hover:no-underline">
+            <button type="button" onClick={() => void finish("discard", discard)} disabled={busy || locked || uploading} className="font-medium text-red-700 underline hover:no-underline">
               초안 버리기
             </button>
             <button type="button" onClick={() => setConfirmDiscard(false)} className="text-stone-600 underline hover:no-underline">
@@ -370,7 +386,7 @@ export default function PostEditor({
             </button>
           </span>
         ) : (
-          <button type="button" onClick={() => setConfirmDiscard(true)} disabled={busy || locked} className="ml-auto text-sm text-stone-500 hover:text-red-700">
+          <button type="button" onClick={() => setConfirmDiscard(true)} disabled={busy || locked || uploading} className="ml-auto text-sm text-stone-500 hover:text-red-700">
             초안 버리기…
           </button>
         )}

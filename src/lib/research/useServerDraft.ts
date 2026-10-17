@@ -216,6 +216,9 @@ export function useServerDraft<V, D extends DraftLike, B>({
     [schedule, setStatus]
   );
 
+  /** 최신 입력을 기준으로 바꾼다(비동기 작업 뒤에도 그 사이의 입력을 덮어쓰지 않게, #28 리뷰 F1). */
+  const update = useCallback((fn: (current: V) => V) => setValues(fn(valuesRef.current)), [setValues]);
+
   /** 남은 입력을 바로 저장하고 결과를 기다린다. 저장된 초안(없으면 null)과 성공 여부를 돌려준다. */
   const flush = useCallback(async (): Promise<{ ok: boolean; draft: D | null }> => {
     if (retryTimer.current) {
@@ -295,5 +298,5 @@ export function useServerDraft<V, D extends DraftLike, B>({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { values, setValues, draft, status, flush, takeServer, keepMine, resume };
+  return { values, setValues, update, draft, status, flush, takeServer, keepMine, resume };
 }

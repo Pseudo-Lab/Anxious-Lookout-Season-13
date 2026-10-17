@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FetchFailure } from "@/lib/api/client";
 import { IMAGE_MAX_BYTES, IMAGE_TYPES, deletePostImage, listPostImages, ownImageUrl, uploadPostImage } from "@/lib/posts/api";
 import { postErrorMessage } from "@/lib/posts/errors";
@@ -27,14 +27,32 @@ export default function ImagePanel({
   coverImageId,
   onInsert,
   onCover,
+  onUploading,
   readOnly,
 }: {
   coverImageId: string | null;
   // 본문 커서 위치에 Markdown을 넣는다
   onInsert: (markdown: string) => void;
   onCover: (id: string | null) => void;
+  // 업로드 시작·끝(편집기가 저장·닫기를 잠근다)
+  onUploading?: (uploading: boolean) => void;
   readOnly?: boolean;
 }) {
+  // 늦게 끝난 업로드가 닫힌(언마운트) 편집기나 잠긴 편집기에 쓰지 않게 최신 상태를 따로 본다.
+  const alive = useRef(true);
+  const latestReadOnly = useRef(readOnly);
+  const onUploadingRef = useRef(onUploading);
+  useEffect(() => {
+    latestReadOnly.current = readOnly;
+    onUploadingRef.current = onUploading;
+  });
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      onUploadingRef.current?.(false);
+    };
+  }, []);
   const [tick, setTick] = useState(0);
   const list = usePagedList(`post-images:${tick}`, (cursor) => listPostImages(cursor));
   const [open, setOpen] = useState(false);
@@ -56,14 +74,21 @@ export default function ImagePanel({
       return;
     }
     setUploading(true);
+    onUploading?.(true);
     const res = await run(`post-image:upload:${f.name}:${f.size}:${f.lastModified}:${f.type}`, (ctx) => uploadPostImage(f, ctx));
+    if (!alive.current) return;
     setUploading(false);
+    onUploadingRef.current?.(false);
     if (!res.ok) {
       setFailure(res.failure);
       return;
     }
-    onInsert(`![${altOf(f.name)}](${res.data.url})`);
-    setNote(`올렸습니다(${res.data.width}×${res.data.height}, ${sizeText(res.data.size)}). 본문 커서 위치에 넣었습니다. 발행하기 전에는 나만 볼 수 있습니다.`);
+    if (latestReadOnly.current) {
+      setNote("올렸지만 편집기가 잠겨 있어 본문에 넣지 않았습니다. 내 이미지에서 다시 넣을 수 있습니다.");
+    } else {
+      onInsert(`![${altOf(f.name)}](${res.data.url})`);
+      setNote(`올렸습니다(${res.data.width}×${res.data.height}, ${sizeText(res.data.size)}). 본문 커서 위치에 넣었습니다. 발행하기 전에는 나만 볼 수 있습니다.`);
+    }
     setOpen(true);
     setTick((t) => t + 1);
   }
