@@ -88,6 +88,19 @@ for line in sys.stdin:
             emit({"method": "model/rerouted", "params": {"threadId": thread, "turnId": turn, "fromModel": params["model"], "toModel": "fixture-wrong-model", "reason": "highRiskCyberActivity"}})
         tool = "research_page_context" if "/fixture/page-context" in prompt or "/fixture/page-reference " in prompt else "research_document_save"
         args = {} if tool == "research_page_context" else {"title": "Fixture document", "content": "Complete fixture tool input", "mutationId": str(uuid.uuid4())}
+        if prompt.startswith("/fixture/document-update"):
+            try:
+                command, document_id, version = prompt.split()
+                assert command == "/fixture/document-update"
+                document_id = str(uuid.UUID(document_id))
+                version = int(version)
+                assert version > 0
+            except (ValueError, AssertionError):
+                emit({"id": identity, "error": {"code": -32602, "message": "Usage: /fixture/document-update <document UUID> <positive expectedVersion>"}})
+                continue
+            tool = "research_document_update"
+            args = {"id": document_id, "expectedVersion": version, "title": "Fixture proposal",
+                    "content": "Complete fixture proposal content", "mutationId": str(uuid.uuid4())}
         if prompt == "/fixture/credential-tool":
             args["content"] = json.loads((path.parent / "auth.json").read_text())["tokens"]["access_token"]
         if "/fixture/page-reference " in prompt:

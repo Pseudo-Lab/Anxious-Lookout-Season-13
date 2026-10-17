@@ -14,7 +14,7 @@ from tests.test_policy_publication import connect, publish
 
 @pytest.fixture(scope="module", autouse=True)
 def page_schema(schema):
-    migrate("0004_publication")
+    migrate("0005_writing")
 
 
 class HeldRunner:
@@ -180,7 +180,12 @@ def test_detail_scope_fixed_on_acceptance_reads_updates_conflicts_and_history(cl
     update = {**edited, "id": target["id"], "expectedVersion": 1, "mutationId": str(uuid.uuid4())}
     assert callback(client, session, runner, "research_" + kind + "_update", update).status_code == 409
     update.update(expectedVersion=2, title="Tool edit", mutationId=str(uuid.uuid4()))
-    assert callback(client, session, runner, "research_" + kind + "_update", update).json()["version"] == 3
+    result = callback(client, session, runner, "research_" + kind + "_update", update).json()
+    if kind == 'document':
+        assert result['status'] == 'pending' and result['baseDocumentVersion'] == 2
+        assert client.get('/api/research/documents/'+target['id']).json()['version'] == 2
+    else:
+        assert result['version'] == 3
     with admin.connect() as db:
         stored = db.execute(text("SELECT native_record FROM research.conversations WHERE id=:id"), {"id": session["id"]}).scalar_one()
         assert stored["platformRequests"][0]["scope"]["context"]["version"] == 1

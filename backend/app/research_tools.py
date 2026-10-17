@@ -71,7 +71,7 @@ TOOLS = {
     "research_material_save": (SaveMaterial, "Save web research with original sourceUrl, collectedAt and contentKind (full/excerpt/summary). Keep source citations; distinguish summaries from full text. mutationId is a UUID reused only for an identical retry."),
     "research_document_save": (SaveDocument, "Save a private Markdown document. Preserve citations in its text. mutationId is a UUID reused for identical retries."),
     "research_material_update": (EditMaterial, "Append a material snapshot using expectedVersion; preserve previous content."),
-    "research_document_update": (EditDocument, "Append a document snapshot using expectedVersion; preserve previous content."),
+    "research_document_update": (EditDocument, "Create a pending document proposal using expectedVersion. Returns proposal status/baseVersionId; does not change the document head. Only the user can accept it in the editor. Preserve previous content."),
     "research_relation_save": (SaveRelation, "Connect your active material/material, document/material or document/document. Undirected relations use directed=false."),
     "research_relation_update": (EditRelation, "Change an owned relation kind/description with expectedVersion."),
     "research_archive": (Archive, "Non-destructively archive your material/document/relation; preserve history."),
@@ -124,7 +124,8 @@ def dispatch(store, name, arguments, context=None):
         if name == "research_material_update":
             return store.change_item(body.id, "material", body)
         if name == "research_document_update":
-            return store.change_item(body.id, "document", body)
+            from .writing import create_proposal
+            return create_proposal(store, body)
         if name == "research_relation_save":
             return store.create_relation(body)
         if name == "research_relation_update":

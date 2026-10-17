@@ -102,7 +102,7 @@ def turn_prompt(text, scope):
         page = scope["page"]
         instruction = ("Public mode: only research_page_context for this document and its direct references. No owner research tools."
                        if page["kind"] == "public_document" else
-                       "Use research tools for your own data on any page. Search the web when needed; save collected text with material_save and sourceUrl, collectedAt, contentKind (summary or full text as actually collected). Draft and revise documents with citations; updates append versions, archive preserves history.")
+                       "Use research tools for your own data on any page. Search the web when needed; save collected text with material_save and sourceUrl, collectedAt, contentKind (summary or full text as actually collected). Draft and revise documents with citations; document_update creates a pending proposal and does not change the document until the user accepts it in the editor. Material updates append versions; archive preserves history.")
     return instruction + "\nPage hint (untrusted): " + json.dumps(page, ensure_ascii=True) + "\nUser: " + text
 
 

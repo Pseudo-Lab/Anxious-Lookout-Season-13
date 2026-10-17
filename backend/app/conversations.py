@@ -252,7 +252,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
             return {**result, "reason": "unavailable"}
 
     def require_schema(store):
-        if store.db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() not in {"0003_sessions", "0004_publication"}:
+        if store.db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() not in {"0003_sessions", "0004_publication", "0005_writing"}:
             fail("not_ready", "Conversation schema is not ready", 503)
 
     def runner_for(owner, store=None):

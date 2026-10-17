@@ -12,6 +12,7 @@
     "version:write": "node scripts/write-version.mjs"
   },
   "dependencies": {
+    "diff": "8.0.4",
     "gray-matter": "^4.0.3",
     "next": "16.2.0",
     "next-mdx-remote": "^6.0.0",

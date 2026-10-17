@@ -19,6 +19,7 @@ import { useAuth } from "@/hooks/useAuth";
 import type { AcceptedScope, PageDescriptor, SessionDetail, SessionItem, ToolCallItem } from "@/lib/research/types";
 import { describePage, kindText, sameDescriptor, scopeLabel } from "@/lib/research/pageContext";
 import { own } from "@/lib/research/own";
+import { BASE_PATH } from "@/lib/constants";
 import { SHELL_STATUS_LABELS, SHELL_TOOL, shellNote, shellView } from "@/lib/research/shell";
 import { formatDateTime, toDisplayText } from "@/lib/research/format";
 import {
@@ -66,6 +67,27 @@ function RawItem({ sessionId, itemId, label = "저장된 원본 전체" }: { ses
 
 const TOOL_STATUS_LABELS: Record<string, string> = { rejected: "거부됨" };
 
+// #22 research_document_update는 문서를 바꾸지 않고 제안(Proposal)을 만든다. 출력(JSON 또는 text 조각)에서 제안 위치만 읽는다.
+function proposalRef(item: ToolCallItem): { documentId: string; id: string } | null {
+  if (item.name !== "research_document_update" || item.status === "rejected") return null;
+  const candidates: unknown[] = Array.isArray(item.output)
+    ? item.output.map((part) => {
+        const text = (part as { text?: unknown } | null)?.text;
+        if (typeof text !== "string") return null;
+        try {
+          return JSON.parse(text) as unknown;
+        } catch {
+          return null;
+        }
+      })
+    : [item.output];
+  for (const c of candidates) {
+    const v = c as { id?: unknown; documentId?: unknown; status?: unknown } | null;
+    if (v && typeof v.id === "string" && typeof v.documentId === "string" && v.status === "pending") return { documentId: v.documentId, id: v.id };
+  }
+  return null;
+}
+
 // 머리글에는 명령의 첫 줄만 짧게 보인다(전체는 펼쳐서 본다).
 const commandPreview = (command: string | null) => {
   const line = (command ?? "").split("\n")[0];
@@ -77,6 +99,7 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
   const [raw, setRaw] = useState(false);
   // #23: shell은 명령 실행으로 읽기 쉽게 보인다. 서버 기록은 그대로이며 모르는 값은 일반 도구처럼 표시한다.
   const shell = item.name === SHELL_TOOL ? shellView(item) : null;
+  const proposal = proposalRef(item);
   const note = shell
     ? shellNote(item.status, shell)
     : item.status === "rejected"
@@ -107,6 +130,18 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
         </p>
       )}
       {shell?.truncated && <p className="px-3 pb-2 text-xs text-stone-600">출력이 길어 저장 상한까지만 남았습니다.</p>}
+      {proposal && (
+        <p className="px-3 pb-2 text-xs text-indigo-800">
+          Codex가 문서 수정 제안을 만들었습니다. 수락하기 전에는 문서가 바뀌지 않습니다.{" "}
+          {/* 같은 문서를 보고 있으면 해당 제안으로 이동만 하고 목록을 새로 불러온다(hashchange). */}
+          <a
+            href={`${BASE_PATH}/research/document/?id=${encodeURIComponent(proposal.documentId)}#proposal-${encodeURIComponent(proposal.id)}`}
+            className="font-medium underline hover:no-underline"
+          >
+            제안 검토
+          </a>
+        </p>
+      )}
       {item.modelMismatch && (
         <div className="px-3 pb-2">
           <ModelMismatchNote />

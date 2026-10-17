@@ -218,8 +218,8 @@ check("L6. save after reload succeeds", await appears(main.locator(".prose").get
   await main.getByLabel("본문").fill("본문");
   let dropped = false;
   const keys = [];
-  await page.route("**/api/research/documents", async (route) => {
-    if (route.request().method() !== "POST") return route.continue();
+  // #22: 새 문서는 서버 초안 commit으로 만든다.
+  await page.route("**/api/research/document-drafts/*/commit", async (route) => {
     keys.push(route.request().headers()["idempotency-key"]);
     if (!dropped) {
       dropped = true;
@@ -232,7 +232,7 @@ check("L6. save after reload succeeds", await appears(main.locator(".prose").get
   check("L7. lost response shows failure", await appears(main.getByText("서버에 연결할 수 없습니다")));
   await main.getByRole("button", { name: "문서 저장" }).click();
   await page.waitForURL(/\/research\/document\/\?id=/);
-  await page.unroute("**/api/research/documents");
+  await page.unroute("**/api/research/document-drafts/*/commit");
   check("L7. same key reused", keys.length === 2 && keys[0] === keys[1], JSON.stringify(keys));
   check("L7. exactly one document created", (await countDocs()) === before + 1);
 }
@@ -277,13 +277,18 @@ const publicUrl = U(`/public/document/?id=${docD.body.id}`);
   await V.context.close();
 }
 
-// L8b. 공개 글 기반 개인 질문 세션(편집자 A): 맥락 표시, Codex는 미연결
+// L8b. 공개 글 기반 개인 질문 세션(편집자 A): 맥락 표시, Codex는 미연결. #9부터 새 대화는 이동 없이 대화창에서 열린다.
+const chatPanel = page.locator("#chat-panel");
 await page.goto(publicUrl);
 await main.getByLabel("새 대화 제목").waitFor();
 await main.getByRole("button", { name: "새 대화" }).click();
-await page.waitForURL(/\/research\/session\/\?id=/);
-check("L8b. session context from public document shown", await appears(main.getByText("공개 글에서 시작:")));
-const publicSessionUrl = page.url();
+check("L8b. session context from public document shown", await appears(chatPanel.getByText("공개 글에서 시작:")));
+const publicSessionId = await page.evaluate(() => {
+  const k = Object.keys(sessionStorage).find((key) => key.endsWith(":chat-ui"));
+  return k ? JSON.parse(sessionStorage.getItem(k)).sessionId : null;
+});
+check("L8b. new public session opened in panel", !!publicSessionId, String(publicSessionId));
+const publicSessionUrl = U(`/research/session/?id=${publicSessionId}`);
 
 // L8c. 공개 중 문서를 보관해도 철회할 수 있다(리뷰 F1): 보관 → 철회 버튼 유지 → 철회 → 익명 404
 {
@@ -419,24 +424,62 @@ check("L9. codex status not shown as available", await appears(main.getByText(/�
 check("L9. fixed model shown from real status", await appears(main.getByText("모델: gpt-6.1-sol (서버에서 고정)")));
 await main.getByLabel("새 대화 제목").fill("실물 세션");
 await main.getByRole("button", { name: "새 대화" }).click();
-await page.waitForURL(/\/research\/session\/\?id=/);
-const sessionUrl = page.url();
-check("L9. session created via real API", await appears(main.getByRole("heading", { name: "실물 세션" })));
-await main.getByLabel("메시지").fill("실물 질문");
+// #9부터 새 대화는 이동 없이 대화창에서 열린다.
+await chatPanel.getByLabel("메시지").waitFor();
+const sid = await page.evaluate(() => {
+  const k = Object.keys(sessionStorage).find((key) => key.endsWith(":chat-ui"));
+  return k ? JSON.parse(sessionStorage.getItem(k)).sessionId : null;
+});
+const sessionUrl = U(`/research/session/?id=${sid}`);
+check("L9. session created via real API", await appears(chatPanel.getByRole("heading", { name: "실물 세션" })));
+await chatPanel.getByLabel("메시지").fill("실물 질문");
 // 실제 status가 접수 불가이면 화면은 보내기를 잠근다. 서버 선접수 거절 자체는 API로 직접 확인한다.
-check("L9. send locked by real status", (await appears(main.getByText("보내기가 잠겨 있습니다"))) && (await main.getByRole("button", { name: "보내기" }).isDisabled()));
-check("L9. input preserved", (await main.getByLabel("메시지").inputValue()) === "실물 질문");
+check("L9. send locked by real status", (await appears(chatPanel.getByText("보내기가 잠겨 있습니다"))) && (await chatPanel.getByRole("button", { name: "보내기" }).isDisabled()));
+check("L9. input preserved", (await chatPanel.getByLabel("메시지").inputValue()) === "실물 질문");
 {
-  const sid = new URL(sessionUrl).searchParams.get("id");
   const detail = await api.get(`/research/sessions/${sid}`);
   const r = await api.send("POST", `/research/sessions/${sid}/messages`, { text: "실물 질문", expectedVersion: detail.body.version });
   check("L9. server refuses before admission (503 codex_unavailable)", r.status === 503 && r.body?.error?.code === "codex_unavailable", `${r.status} ${r.body?.error?.code}`);
   const after = await api.get(`/research/sessions/${sid}`);
   check("L9. refused POST added nothing", after.body.items.length === detail.body.items.length && after.body.version === detail.body.version);
 }
-check("L9. no unconfirmed send kept for definitive 503", !(await page.evaluate(() => JSON.stringify({ ...sessionStorage }))).includes("실물 질문"));
+check("L9. no unconfirmed send kept for definitive 503", !(await page.evaluate(() => JSON.stringify(Object.fromEntries(Object.entries(sessionStorage).filter(([k]) => k.includes(":session-send:")))))).includes("실물 질문"));
 await page.reload();
-check("L9. session persists after reload", await appears(main.getByRole("heading", { name: "실물 세션" })));
+check("L9. session persists after reload", await appears(chatPanel.getByRole("heading", { name: "실물 세션" })));
+
+// LW. #22 실제 API(0005_writing): 서버 초안 자동 저장·새로고침 복구·명시 저장, 다른 곳 저장 뒤 비교해야 저장, 버리기
+{
+  const created = await api.send("POST", "/research/documents", { title: "실물 편집 문서", content: "실물 원래 본문\n" });
+  check("LW. setup: document", created.status === 201, String(created.status));
+  const id = created.body.id;
+  const draftOf = async () => (await api.get(`/research/documents/${id}/draft`)).body?.draft ?? null;
+  await page.goto(U(`/research/document/?id=${id}`));
+  await main.getByRole("button", { name: "내용 수정" }).click();
+  await main.getByLabel("본문").fill("실물 자동 저장 초안");
+  check("LW. autosave saved", await appears(main.getByText("초안 자동 저장됨"), 10000));
+  const d = await draftOf();
+  const head = (await api.get(`/research/documents/${id}`)).body;
+  check("LW. real draft, no version", d?.content === "실물 자동 저장 초안" && d?.state === "active" && head.latestVersion.number === 1, JSON.stringify({ d, n: head.latestVersion.number }));
+  await page.reload();
+  await main.getByRole("button", { name: "초안 이어서 편집" }).click();
+  check("LW. reload restores real draft", (await main.getByLabel("본문").inputValue()) === "실물 자동 저장 초안");
+  // 다른 곳(직접 HTTP 저장)에서 문서가 바뀜 → 명시 저장은 비교 뒤에만
+  const ext = await api.send("PATCH", `/research/documents/${id}`, { title: head.title, content: "실물 외부 수정", expectedVersion: head.version });
+  check("setup. external PATCH 200", ext.status === 200, String(ext.status));
+  await main.getByRole("button", { name: "새 버전으로 저장" }).click();
+  check("LW. real 409 base_changed -> compare shown", await appears(main.locator('[data-diff="del"]', { hasText: "실물 외부 수정" }), 10000));
+  await main.getByRole("button", { name: "비교했고 이 내용으로 저장" }).click();
+  await main.getByRole("button", { name: "내용 수정" }).waitFor();
+  const after = (await api.get(`/research/documents/${id}`)).body;
+  check("LW. saved after compare: one version, draft closed", after.content === "실물 자동 저장 초안" && after.latestVersion.number === 3 && (await draftOf()) === null, String(after.latestVersion.number));
+  await main.getByRole("button", { name: "내용 수정" }).click();
+  await main.getByLabel("본문").fill("실물 버릴 초안");
+  await main.getByText("초안 자동 저장됨").waitFor();
+  await main.getByRole("button", { name: "초안 버리기…" }).click();
+  await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+  await main.getByRole("button", { name: "내용 수정" }).waitFor();
+  check("LW. discard: no draft, no version", (await draftOf()) === null && (await api.get(`/research/documents/${id}`)).body.latestVersion.number === 3);
+}
 
 // L10. 다른 승인 계정(B): A의 자료·세션은 404로 숨김, B 목록은 비어 있음
 {
@@ -446,7 +489,8 @@ check("L9. session persists after reload", await appears(main.getByRole("heading
   await B.page.goto(materialAUrl);
   check("L10. foreign material -> not found", await appears(bm.getByText("항목을 찾을 수 없습니다")));
   await B.page.goto(sessionUrl);
-  check("L10. foreign session -> not found", await appears(bm.getByText("항목을 찾을 수 없습니다")));
+  // #9: 대화 링크는 대화창에서 열린다. 다른 계정에는 찾을 수 없음으로 보인다.
+  check("L10. foreign session -> not found", await appears(B.page.locator("#chat-panel").getByText("항목을 찾을 수 없습니다")));
   await B.page.goto(U("/research/"));
   check("L10. B list empty", await appears(bm.getByText("아직 저장한 자료가 없습니다")));
   await B.context.close();
@@ -482,7 +526,11 @@ check("L9. session persists after reload", await appears(main.getByRole("heading
   check("L13. editor admin API -> 403 (real)", forbidden.status === 403, String(forbidden.status));
   // 작성자는 방문자 세션을 볼 수 없다: 새 편집자 P가 A의 공개 글 질문 세션 URL로 접근 → 404
   await P.page.goto(publicSessionUrl);
-  check("L13. other editor cannot open A's question session", await appears(P.page.locator("main").getByText("항목을 찾을 수 없습니다")));
+  const pPanel = P.page.locator("#chat-panel");
+  check(
+    "L13. other editor cannot open A's question session",
+    (await appears(pPanel.getByText("항목을 찾을 수 없습니다"))) && !(await pPanel.innerText()).includes("공개 글에서 시작")
+  );
   await P.context.close();
   await ADM.context.close();
 }
@@ -497,8 +545,7 @@ check("L9. session persists after reload", await appears(main.getByRole("heading
   const gate = new Promise((r) => (release = r));
   const seen = new Promise((r) => (accepted = r));
   let createdStatus = 0;
-  await page.route("**/api/research/documents", async (route) => {
-    if (route.request().method() !== "POST") return route.continue();
+  await page.route("**/api/research/document-drafts/*/commit", async (route) => {
     createdStatus = (await route.fetch()).status();
     accepted();
     await gate;
@@ -506,7 +553,7 @@ check("L9. session persists after reload", await appears(main.getByRole("heading
   });
   void main.getByRole("button", { name: "문서 저장" }).click();
   await seen;
-  check("L11. real create committed before logout", createdStatus === 201, String(createdStatus));
+  check("L11. real create committed before logout", createdStatus === 200, String(createdStatus));
   await page.locator("header").getByRole("button", { name: "로그아웃" }).first().click();
   await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
   const store = () => page.evaluate(() => JSON.stringify({ ...sessionStorage }));
@@ -514,7 +561,7 @@ check("L9. session persists after reload", await appears(main.getByRole("heading
   release();
   await page.waitForTimeout(1500);
   check("L11. late failure after logout leaves store empty", (await store()) === "{}", await store());
-  await page.unroute("**/api/research/documents");
+  await page.unroute("**/api/research/document-drafts/*/commit");
 }
 
 // L12. 로그아웃 후 실제 API 401, 화면은 로그인 안내

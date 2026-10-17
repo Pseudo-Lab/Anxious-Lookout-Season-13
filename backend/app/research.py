@@ -23,12 +23,13 @@ RESEARCH_REVISION = "0002_research"
 
 
 class ResearchError(Exception):
-    def __init__(self, code, message, status):
+    def __init__(self, code, message, status, details=None):
         self.code, self.message, self.status = code, message, status
+        self.details = details
 
 
-def fail(code, message, status):
-    raise ResearchError(code, message, status)
+def fail(code, message, status, details=None):
+    raise ResearchError(code, message, status, details)
 
 
 class Input(BaseModel):
@@ -371,6 +372,9 @@ def register_research(app, sessions, settings, current_session, error):
 
     @app.exception_handler(ResearchError)
     async def domain_error(request, exc):
+        if exc.details is not None:
+            return JSONResponse({'error': {'code': exc.code, 'message': exc.message, 'details': exc.details}},
+                                status_code=exc.status, headers={'Cache-Control': 'no-store'})
         return error(exc.code, exc.message, exc.status)
 
     @app.exception_handler(ValidationError)
@@ -506,6 +510,8 @@ def register_research(app, sessions, settings, current_session, error):
         with authorized(request, True) as store:
             return write(store, request, Expected, body, lambda parsed: store.change_relation(identity, parsed, archive=True))
 
+    from .writing import register_writing
+    register_writing(app, authorized, settings, response, write)
     from .publications import register_publications
     register_publications(app, authorized, sessions, settings, response, write)
     from .membership import register_membership

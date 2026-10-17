@@ -80,6 +80,39 @@ export interface Version extends VersionSummary {
   content: string;
 }
 
+// #22 서버 초안(api-contracts/issue22-writing-editor.md). 버전이 아니며 명시 저장(commit)만 버전을 만든다.
+export type DraftState = "active" | "committed" | "discarded";
+export interface Draft {
+  id: string;
+  // 아직 만들지 않은 새 문서 초안이면 null
+  documentId: string | null;
+  revision: number;
+  baseDocumentVersion: number | null;
+  baseVersionId: string | null;
+  title: string;
+  // 목록 응답에는 없다
+  content?: string;
+  updatedAt: string;
+  state: DraftState;
+}
+
+// #22 Codex 제안. 수락 전에는 최신 문서가 아니다.
+export type ProposalStatus = "pending" | "accepted" | "discarded";
+export interface Proposal {
+  id: string;
+  documentId: string;
+  version: number;
+  baseDocumentVersion: number;
+  baseVersionId: string;
+  title: string;
+  // 목록 응답에는 없다
+  content?: string;
+  status: ProposalStatus;
+  acceptedVersionId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Endpoint {
   type: ItemType;
   id: string;
