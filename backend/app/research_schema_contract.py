@@ -51,13 +51,13 @@ def validate_research(connection, check_privileges=True):
     if not {"alembic_version", *expected}.issubset(tables):
         raise RuntimeError("Research schema is incomplete")
     marker = connection.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one()
-    if marker not in {"0002_research", "0003_sessions", "0004_publication", "0005_writing"}:
+    if marker not in {"0002_research", "0003_sessions", "0004_publication", "0005_writing", "0006_posts"}:
         raise RuntimeError("Research revision is unsupported")
-    if marker in {"0003_sessions", "0004_publication", "0005_writing"}:
+    if marker in {"0003_sessions", "0004_publication", "0005_writing", "0006_posts"}:
         expected.update(json.loads((Path(__file__).resolve().parent.parent / "db" / "003_sessions_contract.json").read_text()))
         if not set(expected).issubset(tables):
             raise RuntimeError("Conversation schema is incomplete")
-    if marker in {"0004_publication", "0005_writing"}:
+    if marker in {"0004_publication", "0005_writing", "0006_posts"}:
         expected.update(json.loads((Path(__file__).resolve().parent.parent / "db" / "004_publication_contract.json").read_text()))
         if not set(expected).issubset(tables):
             raise RuntimeError("Publication schema is incomplete")
@@ -65,10 +65,14 @@ def validate_research(connection, check_privileges=True):
         frozen = (Path(__file__).resolve().parent.parent / "db" / "004_publication.sql").read_text().split("$membership$")[1].strip()
         if not function or function.prosrc.strip() != frozen or not function.prosecdef or not function.rolsuper or function.proconfig != ["search_path=pg_catalog"]:
             raise RuntimeError("Membership authority does not match the reviewed function")
-    if marker == '0005_writing':
+    if marker in {'0005_writing', '0006_posts'}:
         expected.update(json.loads((Path(__file__).resolve().parent.parent / 'db/005_writing_contract.json').read_text()))
         if not set(expected).issubset(tables):
             raise RuntimeError('Writing schema is incomplete')
+    if marker == '0006_posts':
+        expected.update(json.loads((Path(__file__).resolve().parent.parent / 'db/006_posts_contract.json').read_text()))
+        if not set(expected).issubset(tables):
+            raise RuntimeError('Posts schema is incomplete')
     actual = table_contracts(connection, expected)
     for name, contract in expected.items():
         if canonical(actual[name]) != canonical(contract):
@@ -90,11 +94,11 @@ def validate_research(connection, check_privileges=True):
         raise RuntimeError("Research schema grant is missing")
     required = {"items": {"SELECT", "INSERT", "UPDATE"}, "relations": {"SELECT", "INSERT", "UPDATE"},
                 "versions": {"SELECT", "INSERT"}, "idempotency": {"SELECT", "INSERT"}, "alembic_version": {"SELECT"}}
-    if marker in {"0003_sessions", "0004_publication", "0005_writing"}:
+    if marker in {"0003_sessions", "0004_publication", "0005_writing", "0006_posts"}:
         if "conversations" not in tables:
             raise RuntimeError("Conversation schema is incomplete")
         required["conversations"] = {"SELECT", "INSERT", "UPDATE"}
-    if marker in {"0004_publication", "0005_writing"}:
+    if marker in {"0004_publication", "0005_writing", "0006_posts"}:
         required.update(publications={"SELECT", "INSERT"}, publication_heads={"SELECT", "INSERT", "UPDATE"})
         if not connection.execute(text("SELECT has_function_privilege('anxious_api',:oid,'EXECUTE')"), {"oid": function.oid}).scalar_one():
             raise RuntimeError("Membership execute grant is missing")
@@ -103,8 +107,11 @@ def validate_research(connection, check_privileges=True):
         for column in ("role", "is_approved"):
             if connection.execute(text("SELECT has_column_privilege('anxious_api','auth.accounts',:column,'UPDATE')"), {"column": column}).scalar_one():
                 raise RuntimeError("API role must not bypass membership authority")
-    if marker == '0005_writing':
+    if marker in {'0005_writing', '0006_posts'}:
         required.update(document_drafts={'SELECT', 'INSERT', 'UPDATE'}, document_proposals={'SELECT', 'INSERT', 'UPDATE'})
+    if marker == '0006_posts':
+        required.update(posts={'SELECT', 'INSERT', 'UPDATE'}, post_drafts={'SELECT', 'INSERT', 'UPDATE'},
+                        post_versions={'SELECT', 'INSERT'})
     # Check effective table AND column privileges (including inherited grants).
     # Batch the matrix rather than issuing a separate query for every cell.
     privileges = connection.execute(text("""

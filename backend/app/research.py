@@ -512,6 +512,8 @@ def register_research(app, sessions, settings, current_session, error):
 
     from .writing import register_writing
     register_writing(app, authorized, settings, response, write)
+    from .posts import register_posts
+    register_posts(app, authorized, settings, response, write)
     from .publications import register_publications
     register_publications(app, authorized, sessions, settings, response, write)
     from .membership import register_membership

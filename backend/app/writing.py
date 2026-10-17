@@ -59,7 +59,7 @@ class ProposalAccept(DocumentChange, ProposalExpected):
 
 
 def ready(store):
-    if store.db.execute(text('SELECT version_num FROM research.alembic_version')).scalar_one() != '0005_writing':
+    if store.db.execute(text('SELECT version_num FROM research.alembic_version')).scalar_one() not in {'0005_writing', '0006_posts'}:
         fail('not_ready', 'Writing schema is not ready', 503)
 
 

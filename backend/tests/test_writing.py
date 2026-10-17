@@ -295,6 +295,7 @@ def test_old_schema_refuses_writing_and_never_falls_back_to_direct_tool_update(c
     assert client.post('/api/research/sessions/'+session['id']+'/messages',
         json={'text': 'propose', 'expectedVersion': 1}, headers=headers(auth)).status_code == 202
     with admin.begin() as db:
+        original_marker = db.execute(text('SELECT version_num FROM research.alembic_version')).scalar_one()
         db.execute(text("UPDATE research.alembic_version SET version_num='0004_publication'"))
     try:
         assert client.post(ROOT, json={'title': '', 'content': ''}, headers=headers(auth)).status_code == 503
@@ -305,4 +306,4 @@ def test_old_schema_refuses_writing_and_never_falls_back_to_direct_tool_update(c
         assert len(versions(client, doc)) == 1
     finally:
         with admin.begin() as db:
-            db.execute(text("UPDATE research.alembic_version SET version_num='0005_writing'"))
+            db.execute(text('UPDATE research.alembic_version SET version_num=:marker'), {'marker': original_marker})

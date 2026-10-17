@@ -56,3 +56,43 @@ def test_writing_restore_retains_drafts_proposals_and_reapplies_grants(admin, mo
         if candidate is not None: candidate.dispose()
         with admin.connect().execution_options(isolation_level='AUTOCOMMIT') as control:
             control.execute(text('DROP DATABASE ' + database + ' WITH (FORCE)'))
+
+
+def test_posts_restore_retains_versions_and_drafts(admin, monkeypatch):
+    import uuid
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.orm import Session
+    from app.migrate import migrate
+    from app.research import Store
+    from app.posts import CreateDraft, create_draft, commit_draft
+    from app.writing import DraftCommit
+    from app.research_schema_contract import validate_research
+    database = 'restore_posts_' + uuid.uuid4().hex
+    url = make_url(os.environ['ADMIN_DATABASE_URL']).set(database=database)
+    candidate = None
+    with admin.connect().execution_options(isolation_level='AUTOCOMMIT') as control:
+        control.execute(text('CREATE DATABASE ' + database))
+    try:
+        monkeypatch.setenv('ADMIN_DATABASE_URL', url.render_as_string(hide_password=False))
+        migrate('0006_posts')
+        candidate = create_engine(url, hide_parameters=True)
+        with Session(candidate) as db, db.begin():
+            owner = db.execute(text("INSERT INTO auth.accounts(github_id,login,is_approved,role) VALUES('444444','post-restore',true,'editor') RETURNING id")).scalar_one()
+            store = Store(db, owner)
+            body = dict(title='Retained', content='Version', description='', slug='restored', tags=[], coverImageId=None, documentIds=[])
+            initial = create_draft(store, CreateDraft(**body))
+            post = commit_draft(store, initial['id'], DraftCommit(expectedDraftRevision=1))['post']
+            body['content'] = 'Unsaved words'
+            active = create_draft(store, CreateDraft(**body, postId=post['id'], basePostVersion=1, baseVersionId=post['latestVersion']['id']))
+        with candidate.begin() as db:
+            db.execute(text('REVOKE UPDATE ON research.post_drafts FROM anxious_api'))
+        assert restore_candidate(url.render_as_string(hide_password=False), os.environ['API_DATABASE_PASSWORD'], database) == '0006_posts'
+        with candidate.connect() as db:
+            assert validate_research(db) == '0006_posts'
+            assert db.execute(text("SELECT payload->>'content',state FROM research.post_drafts WHERE id=:id"), {'id': active['id']}).one() == ('Unsaved words', 'active')
+            assert db.execute(text("SELECT payload->>'content' FROM research.post_versions")).scalar_one() == 'Version'
+    finally:
+        if candidate is not None: candidate.dispose()
+        with admin.connect().execution_options(isolation_level='AUTOCOMMIT') as control:
+            control.execute(text('DROP DATABASE ' + database + ' WITH (FORCE)'))
