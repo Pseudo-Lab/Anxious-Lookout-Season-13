@@ -247,7 +247,7 @@ function parseRelation(v: unknown): Relation | null {
   return out;
 }
 
-function parsePage<T>(parse: (v: unknown) => T | null) {
+export function parsePage<T>(parse: (v: unknown) => T | null) {
   return (body: unknown): Page<T> | null => {
     if (!isObj(body) || !Array.isArray(body.items)) return null;
     if (body.nextCursor !== null && !isStr(body.nextCursor)) return null;
@@ -514,7 +514,7 @@ export interface MutationContext {
   idempotencyKey: string;
 }
 
-function mutate<T>(
+export function mutate<T>(
   path: `/${string}`,
   method: "POST" | "PATCH" | "PUT" | "DELETE",
   body: unknown,
@@ -532,7 +532,7 @@ function mutate<T>(
   });
 }
 
-function listQuery(cursor?: string | null, extra?: Record<string, string>): string {
+export function listQuery(cursor?: string | null, extra?: Record<string, string>): string {
   const params = new URLSearchParams({ limit: "30", ...extra });
   if (cursor) params.set("cursor", cursor);
   return `?${params.toString()}`;

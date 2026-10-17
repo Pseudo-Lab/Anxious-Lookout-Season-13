@@ -23,11 +23,13 @@ async function appears(locator, timeout = 5000) {
 const setMock = (q) => fetch(`${ORIGIN}/__mock/set?${q}`).then((r) => r.json());
 
 // ---------- HTTP ----------
-for (const p of ["/", "/posts/", "/posts/welcome-to-observatory/", "/tags/", "/tags/AI/", "/status/", "/write/", "/admin/", "/view/?id=x", "/auth/login/"]) {
+// #28: 글·태그 상세는 DB 발행본을 브라우저가 조회하므로 없는 slug·태그도 셸은 200이다(화면에서 "찾을 수 없음").
+for (const p of ["/", "/posts/", "/posts/welcome-to-observatory/", "/posts/not-built-slug/", "/tags/", "/tags/AI/", "/tags/NewTag/", "/status/", "/write/", "/admin/", "/auth/login/"]) {
   const r = await fetch(U(p), { redirect: "manual" });
   check(`GET ${p} -> 200`, r.status === 200, `status ${r.status}`);
 }
-for (const p of ["/posts/not-built-slug/", "/tags/NewTag/", "/nope/", "/auth/callback/", "/admin/users/"]) {
+// #28 D4: /view는 제거됐다(/posts/[slug]로 통일)
+for (const p of ["/view/", "/nope/", "/auth/callback/", "/admin/users/"]) {
   const r = await fetch(U(p), { redirect: "manual" });
   const ct = r.headers.get("content-type") ?? "";
   check(`GET ${p} -> 404 html`, r.status === 404 && ct.includes("text/html"), `status ${r.status} ${ct}`);
@@ -50,6 +52,15 @@ for (const p of ["/posts/not-built-slug/", "/tags/NewTag/", "/nope/", "/auth/cal
   const r = await fetch(`${ORIGIN}${asset}`);
   check("static asset 200 immutable", r.status === 200 && (r.headers.get("cache-control") ?? "").includes("immutable"), r.headers.get("cache-control"));
   check("HTML has no supabase reference", !/supabase/i.test(html));
+}
+
+for (const p of ["/posts/welcome-to-observatory/", "/tags/AI/"]) {
+  // 동적 셸은 요청마다 렌더하고 공유 캐시에 저장되지 않아야 한다(발행 취소 즉시 반영, 읽기 전용 FS에 ISR 쓰기 없음).
+  const r = await fetch(U(p));
+  const cc = r.headers.get("cache-control") ?? "";
+  check(`${p} shell not cached (no s-maxage)`, !/s-maxage|immutable/.test(cc), cc);
+  const html = await r.text();
+  check(`${p} shell has no post body (browser loads it)`, !html.includes("Observatory는 스터디 그룹"));
 }
 
 // ---------- Browser ----------
@@ -180,7 +191,50 @@ await setMock("health=normal");
 
 // J. 글 상세: 좋아요·댓글 준비 중
 await page.goto(U("/posts/welcome-to-observatory/"));
-check("J. post detail shows like/comment 준비 중", (await page.locator("main").innerText()).includes("좋아요와 댓글 기능은 새 서버로 옮기는 중입니다"));
+check("J. post detail shows like/comment 준비 중", await appears(page.getByText("좋아요와 댓글 기능은 새 서버로 옮기는 중입니다")));
+
+// P. #28 공개 글(DB 발행본, 모의 seed = 이관된 MDX 3개)
+{
+  const apiCalls = [];
+  const onReq = (r) => {
+    const u = new URL(r.url());
+    if (u.pathname.startsWith(`${BASE}/api/public/`)) apiCalls.push(u.pathname + u.search);
+  };
+  page.on("request", onReq);
+  await page.goto(U("/"));
+  check("P. home lists recent published posts", await appears(page.getByRole("link", { name: /Observatory에 오신 것을 환영합니다/ })));
+  const home = await page.locator("main").innerText();
+  check("P. home shows all 3 imported posts, newest first",
+    home.indexOf("Observatory에 오신") < home.indexOf("Transformer 아키텍처") && home.indexOf("Transformer 아키텍처") < home.indexOf("개발자를 위한 Docker"), home.slice(0, 400));
+  check("P. home shows imported author name", home.includes("관리자"));
+  check("P. home asks first page only (limit=5)", apiCalls.some((c) => c.startsWith(`${BASE}/api/public/posts?`) && c.includes("limit=5")), apiCalls.join(","));
+  await page.goto(U("/posts/"));
+  check("P. /posts lists posts", await appears(page.getByRole("link", { name: /개발자를 위한 Docker 기초/ })));
+  await page.getByRole("link", { name: /개발자를 위한 Docker 기초/ }).first().click();
+  await page.waitForURL(U("/posts/docker-basics-for-developers/"));
+  await page.locator("article h1").first().waitFor();
+  check("P. detail title", (await page.locator("article h1").innerText()) === "개발자를 위한 Docker 기초");
+  check("P. raw HTML not rendered", (await page.locator("article b").count()) === 0);
+  check("P. external image stays a link (not loaded)", (await page.locator("article img").count()) === 0 && (await page.locator("article a", { hasText: "[이미지: 외부]" }).count()) === 1);
+  check("P. tab title from post", (await page.title()).startsWith("개발자를 위한 Docker 기초"), await page.title());
+  await page.goto(U("/posts/understanding-transformer-architecture/"));
+  await page.locator("article table").first().waitFor();
+  check("P. markdown table rendered", (await page.locator("article table").count()) === 1);
+  await page.getByRole("link", { name: "AI", exact: true }).first().click();
+  await page.waitForURL(U("/tags/AI/"));
+  check("P. tag page lists tagged post", await appears(page.getByRole("link", { name: /Transformer 아키텍처 이해하기/ })));
+  check("P. tag page excludes others", !(await page.locator("main").innerText()).includes("개발자를 위한 Docker"));
+  await page.goto(U("/tags/"));
+  check("P. tags page shows counts", await appears(page.getByRole("link", { name: "Docker (1)" })));
+  await page.goto(U(`/tags/${encodeURIComponent("논문리뷰")}/`));
+  check("P. non-ASCII tag decoded", await appears(page.getByRole("link", { name: /Transformer 아키텍처/ })));
+  check("P. non-ASCII tag heading", (await page.locator("main h1").innerText()).includes("논문리뷰"));
+  await page.goto(U("/posts/not-built-slug/"));
+  check("P. unknown slug -> not found notice", await appears(page.getByText("글을 찾을 수 없습니다")));
+  await page.goto(U("/tags/NewTag/"));
+  check("P. unknown tag -> empty list", await appears(page.getByText("아직 게시된 글이 없습니다")));
+  page.off("request", onReq);
+}
 
 // K. 로그아웃과 me 조회 경쟁: 로그아웃 이후 늦게 도착한 authenticated 응답이 로그인 UI를 되살리면 안 된다.
 async function loginApproved() {

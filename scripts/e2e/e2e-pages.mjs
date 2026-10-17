@@ -20,13 +20,16 @@ function check(name, ok, detail = "") {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? `  — ${detail}` : ""}`);
 }
 
-for (const p of ["/", "/posts/", "/posts/welcome-to-observatory/", "/tags/", "/tags/AI/", "/status/", "/write/", "/admin/", "/view/", "/auth/login/", "/research/", "/research/material/", "/research/document/", "/research/session/", "/research/material/new/", "/research/document/new/", "/public/", "/public/document/"]) {
+// #28: 글·태그는 API(DB 발행본)에서 오므로 export에는 동적 경로 자리표시(_)만 있다. /view는 제거됐다.
+for (const p of ["/", "/posts/", "/posts/_/", "/tags/", "/tags/_/", "/status/", "/write/", "/admin/", "/auth/login/", "/research/", "/research/material/", "/research/document/", "/research/session/", "/research/material/new/", "/research/document/new/", "/public/", "/public/document/"]) {
   const r = await fetch(U(p));
   check(`GET ${p} -> 200`, r.status === 200, `status ${r.status}`);
 }
 {
-  const r = await fetch(U("/nope/"));
-  check("GET /nope/ -> 404", r.status === 404, `status ${r.status}`);
+  for (const p of ["/nope/", "/view/"]) {
+    const r = await fetch(U(p));
+    check(`GET ${p} -> 404`, r.status === 404, `status ${r.status}`);
+  }
   const html = await (await fetch(U("/"))).text();
   const asset = /(?:src|href)="([^"]*\/_next\/static\/[^"]+\.(?:js|css))"/.exec(html)?.[1];
   check(`asset path uses base '${BASE}'`, asset?.startsWith(`${BASE}/_next/static/`), asset);
@@ -49,7 +52,7 @@ await page.goto(U("/"));
 await page.waitForLoadState("networkidle");
 check("header has no login link", (await header.getByRole("link", { name: "GitHub 로그인" }).count()) === 0);
 check("header has no 확인 실패 button", (await header.getByRole("button", { name: /로그인 상태 확인 실패/ }).count()) === 0);
-check("home lists mdx posts", (await page.locator("main").innerText()).includes("최근 글"));
+check("home shows no-API posts notice", await appears(page.getByText("API 서버가 없어 글을 제공하지 않습니다")));
 
 await page.goto(U("/auth/login/"));
 await page.waitForLoadState("networkidle");
@@ -73,9 +76,10 @@ for (const p of ["/public/", "/public/document/?id=x"]) {
 }
 check("header has no 내 연구/공개 문서 nav", (await header.getByRole("link", { name: /내 연구|공개 문서/ }).count()) === 0);
 
-await page.goto(U("/posts/welcome-to-observatory/"));
-await page.waitForLoadState("networkidle");
-check("post detail renders", (await page.locator("article h1").count()) === 1);
+for (const p of ["/posts/", "/posts/_/", "/tags/", "/tags/_/"]) {
+  await page.goto(U(p));
+  check(`${p} shows no-API posts notice`, await appears(page.getByText("API 서버가 없어 글을 제공하지 않습니다")));
+}
 
 check("browser made no /api requests", apiRequests.length === 0, apiRequests.join(", "));
 check("console has no errors", consoleErrors.length === 0, consoleErrors.join(" | "));

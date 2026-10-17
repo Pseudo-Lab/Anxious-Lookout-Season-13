@@ -1,11 +1,8 @@
 import Link from "next/link";
 import Hero from "@/components/layout/Hero";
-import PostList from "@/components/posts/PostList";
-import { getAllPosts } from "@/lib/posts/mdx";
+import PublicPostFeed from "@/components/posts/PublicPostFeed";
 
 export default function HomePage() {
-  const recentPosts = getAllPosts().slice(0, 5);
-
   return (
     <>
       <Hero />
@@ -20,7 +17,7 @@ export default function HomePage() {
             전체 보기 →
           </Link>
         </div>
-        <PostList posts={recentPosts} />
+        <PublicPostFeed limit={5} more={false} />
       </section>
     </>
   );

@@ -1,6 +1,7 @@
 // M3 모의 API (api-contracts/m3-research-data.md). 화면 검증용 메모리 구현이며 실제 backend·DB·Codex가 아니다.
 // 계약의 소유권(타인 ID 404), Origin/CSRF, Idempotency-Key 재생, expectedVersion 충돌, 정책 대기 응답을 흉내 낸다.
 import crypto from "node:crypto";
+import { handlePostMutation, handlePostRead, handlePublicPosts } from "./mock-posts.mjs";
 
 export const FIXED_MODEL = "gpt-6.1-sol";
 // 넓은 표·코드·긴 문자열이 있는 답변(대화창 폭·가로 넘침 검증용). 마지막 열 머리글은 "마지막열"로 끝을 확인한다.
@@ -261,6 +262,17 @@ function owned(id, owner, type) {
   const item = items.get(id);
   return item && item.owner === owner && (!type || item.type === type) ? item : null;
 }
+// #28 글 모의 API에 넘기는 문서 조회(본인 문서만)
+const docView = (item) => ({
+  id: item.id, title: latest(item).title, version: item.version, latestVersionId: latest(item).id, archived: item.archived, published: !!item.publication,
+});
+const postDocs = {
+  get: (owner, id) => {
+    const item = owned(id, owner, "document");
+    return item ? docView(item) : null;
+  },
+  list: (owner) => [...items.values()].filter((i) => i.owner === owner && i.type === "document").sort(byUpdated).map(docView),
+};
 const stale = (b, current) => !Number.isInteger(b.expectedVersion) || b.expectedVersion !== current;
 
 // ---- 처리 ----
@@ -408,6 +420,8 @@ function handleMutation(owner, method, path, b, user) {
   if (path === "/research/codex/runner" && method === "POST") return prepareRunner(owner, b);
   const writing = handleWriting(owner, method, path, b);
   if (writing) return writing;
+  const post = handlePostMutation(owner, method, path, b, user, postDocs);
+  if (post) return post;
   let m;
   // 자료·문서 생성
   if (method === "POST" && (m = /^\/research\/(materials|documents)$/.exec(path))) {
@@ -795,6 +809,8 @@ function previewOf(doc, v) {
 
 function handleRead(owner, path, url) {
   let m;
+  const post = handlePostRead(owner, path, url, postDocs);
+  if (post) return post;
   if (path === "/research/document-drafts") {
     const list = [...drafts.values()].filter((d) => d.owner === owner && d.state === "active").sort(byUpdated).map((d) => draftView(d, false));
     return ok(200, page(list, url));
@@ -888,6 +904,8 @@ function handleRead(owner, path, url) {
 export async function handleResearch(req, res, path, url, session) {
   if (path.startsWith("/public/")) {
     if (req.method !== "GET") return send(res, 405, { error: { code: "method_not_allowed", message: "Method not allowed" } });
+    const post = handlePublicPosts(path, url);
+    if (post) return send(res, post.status, post.body);
     // 실제 계약: 공개는 문서 보관과 독립적이다(보관해도 철회 전까지 공개 유지).
     const published = [...items.values()].filter((i) => i.type === "document" && i.publication);
     if (path === "/public/documents") {
