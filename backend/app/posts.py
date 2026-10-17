@@ -25,8 +25,8 @@ class PostText(Input):
     @field_validator('slug')
     @classmethod
     def slug_format(cls, value):
-        if value and not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', value):
-            raise ValueError('Use lowercase slug words joined with hyphens')
+        if value and not re.fullmatch(r'[a-z0-9-]+', value):
+            raise ValueError('Use lowercase slug letters, numbers and hyphens')
         return value
 
     @field_validator('tags')
@@ -80,7 +80,9 @@ def ready(store):
 
 
 def owned(store, identity, active=False):
-    row = store.db.scalar(select(Post).where(Post.id == parse_id(identity), Post.owner_id == store.owner).with_for_update())
+    # Mutations already hold the owner's graph lock. Reads must not lock a post
+    # before its draft while commit locks draft first (opposite lock ordering).
+    row = store.db.scalar(select(Post).where(Post.id == parse_id(identity), Post.owner_id == store.owner))
     if row is None: fail('not_found', 'Not found', 404)
     if active and row.archived: conflict('archived')
     return row
@@ -124,7 +126,7 @@ def draft(store, identity):
 
 def current_draft(store, identity):
     return store.db.scalar(select(PostDraft).where(PostDraft.post_id == identity, PostDraft.owner_id == store.owner,
-        PostDraft.state == 'active').with_for_update())
+        PostDraft.state == 'active'))
 
 
 def payload(body):
@@ -134,6 +136,8 @@ def payload(body):
 def validate_content(store, value, commit=False):
     if commit and any(not value[key].strip() for key in ('title', 'content', 'slug')):
         fail('validation_error', 'Title, content and slug are required to save a version', 422)
+    if commit and not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', value['slug']):
+        fail('validation_error', 'A saved slug requires words joined with single hyphens', 422)
     for identity in value['documentIds']:
         row = store.owned_item(identity, 'document', lock=True)
         if row.archived: fail('validation_error', 'Remove archived document references before saving', 422)

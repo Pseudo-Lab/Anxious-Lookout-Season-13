@@ -43,3 +43,38 @@ CREATE INDEX research_post_version_listing ON research.post_versions(post_id,upd
 REVOKE ALL ON research.posts,research.post_versions,research.post_drafts FROM PUBLIC;
 GRANT SELECT,INSERT,UPDATE ON research.posts,research.post_drafts TO anxious_api;
 GRANT SELECT,INSERT ON research.post_versions TO anxious_api;
+
+CREATE TABLE research.post_proposals (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ owner_id uuid NOT NULL REFERENCES auth.accounts(id),
+ post_id uuid,
+ version integer NOT NULL DEFAULT 1 CHECK(version>0),
+ base_post_version integer CHECK(base_post_version>0),
+ base_version_id uuid,
+ base_draft_id uuid REFERENCES research.post_drafts(id),
+ base_draft_revision integer CHECK(base_draft_revision>0),
+ payload jsonb NOT NULL CHECK(jsonb_typeof(payload)='object'),
+ status varchar(16) NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','accepted','discarded')),
+ accepted_post_id uuid,
+ accepted_version_id uuid,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ FOREIGN KEY(post_id,owner_id) REFERENCES research.posts(id,owner_id),
+ FOREIGN KEY(base_version_id,post_id) REFERENCES research.post_versions(id,post_id),
+ FOREIGN KEY(accepted_post_id,owner_id) REFERENCES research.posts(id,owner_id),
+ FOREIGN KEY(accepted_version_id,accepted_post_id) REFERENCES research.post_versions(id,post_id),
+ CHECK((post_id IS NULL AND base_post_version IS NULL AND base_version_id IS NULL) OR
+       (post_id IS NOT NULL AND base_post_version IS NOT NULL AND base_version_id IS NOT NULL)),
+ CHECK((base_draft_id IS NULL)=(base_draft_revision IS NULL)),
+ CHECK((status='accepted')=(accepted_version_id IS NOT NULL)),
+ CHECK((accepted_post_id IS NULL)=(accepted_version_id IS NULL))
+);
+CREATE INDEX research_post_proposal_owner ON research.post_proposals(owner_id,updated_at DESC,id DESC);
+REVOKE ALL ON research.post_proposals FROM PUBLIC;
+GRANT SELECT,INSERT,UPDATE ON research.post_proposals TO anxious_api;
+ALTER TABLE research.document_proposals ALTER COLUMN document_id DROP NOT NULL;
+ALTER TABLE research.document_proposals ALTER COLUMN base_document_version DROP NOT NULL;
+ALTER TABLE research.document_proposals ALTER COLUMN base_version_id DROP NOT NULL;
+ALTER TABLE research.document_proposals ADD CONSTRAINT document_proposal_base CHECK(
+ (document_id IS NULL AND base_document_version IS NULL AND base_version_id IS NULL) OR
+ (document_id IS NOT NULL AND base_document_version IS NOT NULL AND base_version_id IS NOT NULL));

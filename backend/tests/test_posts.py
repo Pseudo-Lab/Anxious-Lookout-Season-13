@@ -176,7 +176,8 @@ def test_old_marker_fails_closed_for_post_writes(client, admin):
     try:
         assert client.post(ROOT, json=content(), headers=headers(auth)).status_code == 503
         assert client.get('/api/research/posts').status_code == 503
-        assert client.get('/api/research/documents').status_code == 200
+        # 0006 changes the proposal schema too; a false older marker is rejected globally.
+        assert client.get('/api/research/documents').status_code == 503
     finally:
         with admin.begin() as db:
             db.execute(text('UPDATE research.alembic_version SET version_num=:marker'), {'marker': marker})

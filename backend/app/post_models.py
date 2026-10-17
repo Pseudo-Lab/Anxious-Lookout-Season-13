@@ -45,3 +45,22 @@ class PostDraft(Base):
     state: Mapped[str] = mapped_column(String(16), server_default='active')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))
+
+
+class PostProposal(Base):
+    __tablename__ = 'post_proposals'
+    __table_args__ = {'schema': 'research'}
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, server_default=text('gen_random_uuid()'))
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID)
+    post_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
+    version: Mapped[int] = mapped_column(Integer, server_default='1')
+    base_post_version: Mapped[int | None] = mapped_column(Integer)
+    base_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
+    base_draft_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
+    base_draft_revision: Mapped[int | None] = mapped_column(Integer)
+    payload: Mapped[dict] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(16), server_default='pending')
+    accepted_post_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
+    accepted_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))

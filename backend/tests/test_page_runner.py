@@ -21,7 +21,7 @@ HTTP_CLIENT = httpx.Client
 
 @pytest.fixture(scope="module", autouse=True)
 def runner_schema(schema):
-    migrate("0004_publication")
+    migrate("0006_posts")
 
 
 def test_same_native_thread_owner_pages_then_public_and_legacy_refuse(tmp_path, monkeypatch, caplog):
@@ -54,7 +54,7 @@ def test_same_native_thread_owner_pages_then_public_and_legacy_refuse(tmp_path, 
         with pytest.raises(RuntimeError):
             native.accept(session, second.model_copy(update={"scope": {"page": {"kind": "document_workspace"}}}))
         stored = json.loads((tmp_path / "native/codex/fixture-native-record.json").read_text())
-        assert len(stored[saved["threadId"]]["tools"]) == 13
+        assert stored[saved['threadId']]['tools'] == definitions()
         trace = json.loads((tmp_path / "native/codex/fixture-model-rpc.json").read_text())
         assert [entry["method"] for entry in trace] == ["thread/start", "turn/start", "thread/resume", "turn/start"]
         owner_pid = native.process.pid
@@ -132,14 +132,14 @@ def test_two_users_dedicated_transport_native_process_history_and_tool_owner(cli
             detail = client.get("/api/research/sessions/" + session["id"]).json()
             assert detail["state"] == "idle" and next(item for item in detail["items"] if item["type"] == "tool_call")["status"] == "completed"
             assert detail["items"][0]["text"] == "my private draft"
-            docs = client.get("/api/research/documents").json()["items"]
+            docs = client.get("/api/research/document-proposals").json()["items"]
             assert len(docs) == 1
             details.append((detail, docs))
         assert len(callbacks) == 2 and {item["sessionId"] for item in callbacks} == {session_a["id"], session_b["id"]}
         assert details[0][1][0]["id"] != details[1][1][0]["id"]
         assert runner_a.app.state.native.read(session_b["id"]) is None and runner_b.app.state.native.read(session_a["id"]) is None
         assert client.get("/api/research/sessions/" + session_a["id"]).status_code == 404
-        assert client.get("/api/research/documents/" + details[0][1][0]["id"]).status_code == 404
+        assert client.get("/api/research/document-proposals/" + details[0][1][0]["id"]).status_code == 404
         with pytest.raises(httpx.HTTPStatusError):
             Runner("http://runner-b", "a" * 40, owner_a, applications[0][1]).health()
         with pytest.raises(ValueError):
@@ -154,7 +154,7 @@ def test_two_users_dedicated_transport_native_process_history_and_tool_owner(cli
         refused = [item for item in continued["items"] if item["type"] == "tool_call"][-1]
         assert refused["status"] == "completed"
         assert [item["page"]["kind"] for item in continued["items"] if item.get("role") == "user"] == ["document_workspace", "general"]
-        assert len(callbacks) == 3 and len(client.get("/api/research/documents").json()["items"]) == 2
+        assert len(callbacks) == 3 and len(client.get("/api/research/document-proposals").json()["items"]) == 2
         # A third, unmapped editor never borrows either runner.
         client.cookies.clear()
         _, auth_c = identity(client, admin, "333333")

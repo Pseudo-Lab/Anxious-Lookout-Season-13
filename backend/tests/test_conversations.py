@@ -14,7 +14,7 @@ from tests.test_research import identity, headers
 
 @pytest.fixture(scope="module", autouse=True)
 def conversation_schema(schema):
-    migrate("0003_sessions")
+    migrate("0006_posts")
 
 
 class FixtureRunner:
@@ -41,7 +41,7 @@ class FixtureRunner:
         turn = {"id": str(uuid.uuid4()), "items": [{"id": "user-" + body["requestId"], "type": "userMessage", "content": [{"type": "text", "text": body["text"]}]},
                 {"id": "tool-" + body["requestId"], "type": "dynamicToolCall", "tool": "research_document_save", "arguments": arguments,
                  "contentItems": [{"type": "inputText", "text": json.dumps(result.json())}], "status": "completed" if allowed else "failed"},
-                {"id": "answer-" + body["requestId"], "type": "agentMessage", "text": "Fixture only: stored the document."}]}
+                {"id": "answer-" + body["requestId"], "type": "agentMessage", "text": "Fixture only: proposed a document."}]}
         record = {"ownerId": str(self.owner), "requestId": body["requestId"], "turnId": turn["id"], "state": "idle",
                   "record": {"turns": previous["record"]["turns"] + [turn]}}
         record_file.write_text(json.dumps(record))

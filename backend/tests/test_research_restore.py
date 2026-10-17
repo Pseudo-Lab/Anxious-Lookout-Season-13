@@ -66,6 +66,7 @@ def test_posts_restore_retains_versions_and_drafts(admin, monkeypatch):
     from app.migrate import migrate
     from app.research import Store
     from app.posts import CreateDraft, create_draft, commit_draft
+    from app.post_proposals import Propose, create as create_proposal
     from app.writing import DraftCommit
     from app.research_schema_contract import validate_research
     database = 'restore_posts_' + uuid.uuid4().hex
@@ -85,6 +86,7 @@ def test_posts_restore_retains_versions_and_drafts(admin, monkeypatch):
             post = commit_draft(store, initial['id'], DraftCommit(expectedDraftRevision=1))['post']
             body['content'] = 'Unsaved words'
             active = create_draft(store, CreateDraft(**body, postId=post['id'], basePostVersion=1, baseVersionId=post['latestVersion']['id']))
+            proposal = create_proposal(store, Propose(**body, postId=post['id'], expectedVersion=1, mutationId=str(uuid.uuid4())))
         with candidate.begin() as db:
             db.execute(text('REVOKE UPDATE ON research.post_drafts FROM anxious_api'))
         assert restore_candidate(url.render_as_string(hide_password=False), os.environ['API_DATABASE_PASSWORD'], database) == '0006_posts'
@@ -92,6 +94,7 @@ def test_posts_restore_retains_versions_and_drafts(admin, monkeypatch):
             assert validate_research(db) == '0006_posts'
             assert db.execute(text("SELECT payload->>'content',state FROM research.post_drafts WHERE id=:id"), {'id': active['id']}).one() == ('Unsaved words', 'active')
             assert db.execute(text("SELECT payload->>'content' FROM research.post_versions")).scalar_one() == 'Version'
+            assert db.execute(text("SELECT payload->>'content',status FROM research.post_proposals WHERE id=:id"), {'id': proposal['id']}).one() == ('Unsaved words', 'pending')
     finally:
         if candidate is not None: candidate.dispose()
         with admin.connect().execution_options(isolation_level='AUTOCOMMIT') as control:

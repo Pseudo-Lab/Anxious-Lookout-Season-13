@@ -14,11 +14,24 @@ are mutable only with matching revision. Archived references are retained in
 history and must be removed before a new commit. No private document body is
 copied into a post automatically.
 
-Image capability, post publication, MDX seed and Codex post proposals are later
-checkpoints. Until implemented, coverImageId and internal image URLs fail closed
-with 503, and Post.publication is null. The legacy document_save tool still has
-its 0005 behavior at stage 1; D1 enforcement is the next checkpoint, not a claim
-that this partial branch already meets #28 acceptance criteria.
+Stage 2 adds research_post_propose and research_post_draft_get, post read tools,
+post page hints, and owner proposal discovery/acceptance/discard. Proposal creation
+does not change the committed head or human draft. Acceptance verifies the current
+head and active draft revision, creates exactly one snapshot, and preserves the
+original proposal and draft text. A proposal for a new post has no post until it
+is accepted. Slug reservation also happens at acceptance.
+
+D1 also changes research_document_save into a pending proposal for a new document.
+Discover it at /api/research/document-proposals and explicitly accept or discard
+it there. Existing document proposals keep their nested document routes. New
+document proposals have null document/base fields until accepted, then expose
+acceptedDocumentId and acceptedVersionId. Old-schema new-document tool calls fail
+closed; they never fall back to direct creation. Existing human document APIs and
+material collection tools retain their behavior.
+
+Image capability, post publication and MDX seed remain later checkpoints. Until
+implemented, coverImageId and internal image URLs fail closed with 503, and
+Post.publication is null. This partial branch is not full #28 acceptance.
 
 The migration extends structural/grant verification and the database recovery
 signature. Old publication/writing/conversation capabilities recognize 0006.

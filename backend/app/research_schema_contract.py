@@ -111,7 +111,7 @@ def validate_research(connection, check_privileges=True):
         required.update(document_drafts={'SELECT', 'INSERT', 'UPDATE'}, document_proposals={'SELECT', 'INSERT', 'UPDATE'})
     if marker == '0006_posts':
         required.update(posts={'SELECT', 'INSERT', 'UPDATE'}, post_drafts={'SELECT', 'INSERT', 'UPDATE'},
-                        post_versions={'SELECT', 'INSERT'})
+                        post_versions={'SELECT', 'INSERT'}, post_proposals={'SELECT', 'INSERT', 'UPDATE'})
     # Check effective table AND column privileges (including inherited grants).
     # Batch the matrix rather than issuing a separate query for every cell.
     privileges = connection.execute(text("""

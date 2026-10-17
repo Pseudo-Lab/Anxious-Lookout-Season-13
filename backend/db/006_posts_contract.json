@@ -314,5 +314,328 @@
         "where": null
       }
     }
+  },
+  "post_proposals": {
+    "columns": {
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "post_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "version": [
+        "INTEGER",
+        false,
+        "1"
+      ],
+      "base_post_version": [
+        "INTEGER",
+        true,
+        null
+      ],
+      "base_version_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "base_draft_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "base_draft_revision": [
+        "INTEGER",
+        true,
+        null
+      ],
+      "payload": [
+        "JSONB",
+        false,
+        null
+      ],
+      "status": [
+        "VARCHAR(16)",
+        false,
+        "'pending'::character varying"
+      ],
+      "accepted_post_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "accepted_version_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ]
+    },
+    "primary": [
+      "id"
+    ],
+    "checks": {
+      "post_proposals_base_draft_revision_check": "base_draft_revision > 0",
+      "post_proposals_base_post_version_check": "base_post_version > 0",
+      "post_proposals_check": "post_id IS NULL AND base_post_version IS NULL AND base_version_id IS NULL OR post_id IS NOT NULL AND base_post_version IS NOT NULL AND base_version_id IS NOT NULL",
+      "post_proposals_check1": "(base_draft_id IS NULL) = (base_draft_revision IS NULL)",
+      "post_proposals_check2": "(status::text = 'accepted'::text) = (accepted_version_id IS NOT NULL)",
+      "post_proposals_check3": "(accepted_post_id IS NULL) = (accepted_version_id IS NULL)",
+      "post_proposals_payload_check": "jsonb_typeof(payload) = 'object'::text",
+      "post_proposals_status_check": "status::text = ANY (ARRAY['pending'::character varying, 'accepted'::character varying, 'discarded'::character varying]::text[])",
+      "post_proposals_version_check": "version > 0"
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "accepted_post_id",
+          "owner_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "posts",
+        "referred_columns": [
+          "id",
+          "owner_id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "accepted_version_id",
+          "accepted_post_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "post_versions",
+        "referred_columns": [
+          "id",
+          "post_id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "base_draft_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "post_drafts",
+        "referred_columns": [
+          "id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "base_version_id",
+          "post_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "post_versions",
+        "referred_columns": [
+          "id",
+          "post_id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts",
+        "referred_columns": [
+          "id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "post_id",
+          "owner_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "posts",
+        "referred_columns": [
+          "id",
+          "owner_id"
+        ]
+      }
+    ],
+    "unique": {},
+    "indexes": {
+      "research_post_proposal_owner": {
+        "columns": [
+          "owner_id",
+          "updated_at",
+          "id"
+        ],
+        "unique": false,
+        "where": null
+      }
+    }
+  },
+  "document_proposals": {
+    "columns": {
+      "id": [
+        "UUID",
+        false,
+        "gen_random_uuid()"
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "document_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "kind": [
+        "VARCHAR(16)",
+        false,
+        "'document'::character varying"
+      ],
+      "version": [
+        "INTEGER",
+        false,
+        "1"
+      ],
+      "base_document_version": [
+        "INTEGER",
+        true,
+        null
+      ],
+      "base_version_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "title": [
+        "VARCHAR(300)",
+        false,
+        null
+      ],
+      "content": [
+        "TEXT",
+        false,
+        null
+      ],
+      "status": [
+        "VARCHAR(16)",
+        false,
+        "'pending'::character varying"
+      ],
+      "accepted_version_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ]
+    },
+    "primary": [
+      "id"
+    ],
+    "checks": {
+      "document_proposal_base": "document_id IS NULL AND base_document_version IS NULL AND base_version_id IS NULL OR document_id IS NOT NULL AND base_document_version IS NOT NULL AND base_version_id IS NOT NULL",
+      "document_proposals_base_document_version_check": "base_document_version > 0",
+      "document_proposals_check": "(status::text = 'accepted'::text) = (accepted_version_id IS NOT NULL)",
+      "document_proposals_content_check": "length(content) >= 1 AND length(content) <= 200000",
+      "document_proposals_kind_check": "kind::text = 'document'::text",
+      "document_proposals_status_check": "status::text = ANY (ARRAY['pending'::character varying, 'accepted'::character varying, 'discarded'::character varying]::text[])",
+      "document_proposals_title_check": "length(btrim(title::text)) > 0",
+      "document_proposals_version_check": "version > 0"
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "accepted_version_id",
+          "document_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "versions",
+        "referred_columns": [
+          "id",
+          "item_id",
+          "owner_id",
+          "kind"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "base_version_id",
+          "document_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "versions",
+        "referred_columns": [
+          "id",
+          "item_id",
+          "owner_id",
+          "kind"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "document_id",
+          "owner_id",
+          "kind"
+        ],
+        "referred_schema": "research",
+        "referred_table": "items",
+        "referred_columns": [
+          "id",
+          "owner_id",
+          "kind"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts",
+        "referred_columns": [
+          "id"
+        ]
+      }
+    ],
+    "unique": {},
+    "indexes": {
+      "research_proposal_owner": {
+        "columns": [
+          "owner_id",
+          "document_id",
+          "updated_at",
+          "id"
+        ],
+        "unique": false,
+        "where": null
+      }
+    }
   }
 }
