@@ -139,7 +139,7 @@ const lastLogout = calls.filter((c) => c.path === "/auth/logout").at(-1);
 check("E. logout POST with X-CSRF-Token and Origin", lastLogout?.method === "POST" && !!lastLogout.csrf && lastLogout.origin === ORIGIN, JSON.stringify(lastLogout));
 check("E. header back to login link", await header.getByRole("link", { name: "GitHub 로그인" }).first().isVisible());
 
-// F. 승인된 사용자 -> 글 쓰기 메뉴 -> 준비 중
+// F. 승인된 사용자 -> 글 쓰기 메뉴 -> 글 쓰기 화면(#28)
 await setMock("nextLogin=approved");
 await page.goto(U("/"));
 await header.getByRole("link", { name: "GitHub 로그인" }).first().click();
@@ -149,7 +149,7 @@ check("F. approved user sees 글 쓰기 nav", true);
 check("F. approved user has no pending badge", (await header.getByText("승인 대기").count()) === 0);
 await header.getByRole("link", { name: "글 쓰기" }).first().click();
 await page.waitForURL(U("/write/"));
-check("F. /write/ shows 준비 중", (await page.locator("main").innerText()).includes("준비 중"));
+check("F. /write/ shows post writing (not 준비 중)", await appears(page.locator("main").getByRole("heading", { name: "글 쓰기" })));
 
 // G. callback 실패 코드
 await setMock("nextLogin=access_denied");

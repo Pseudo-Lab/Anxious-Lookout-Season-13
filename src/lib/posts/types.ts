@@ -89,3 +89,49 @@ export interface PostDocumentOption {
   version: number;
   latestVersionId: string;
 }
+
+/** 발행 전 미리보기(선택 버전 기준). previewToken은 이 상태(글·문서·이미지)에 묶여 발행 때 다시 검증된다. */
+export interface PostPublicationPreview extends PostText {
+  postId: string;
+  versionId: string;
+  expectedVersion: number;
+  previewToken: string;
+  publishable: boolean;
+  author: { login: string };
+  // 비공개 문서도 제목은 글에 공개된다(본문은 아님)
+  documents: PublicPostDocument[];
+  images: { id: string; url: string }[];
+  currentPublication: PublicPost | null;
+}
+
+export type PostProposalStatus = "pending" | "accepted" | "discarded";
+
+/** Codex 글 제안(#28 D1). 수락하기 전에는 글·초안을 바꾸지 않는다. 새 글 제안은 postId가 null이다. */
+export interface PostProposal extends Omit<PostText, "content"> {
+  id: string;
+  postId: string | null;
+  version: number;
+  basePostVersion: number | null;
+  baseVersionId: string | null;
+  // 사람이 작성 중이던 초안에 대한 제안이면 그 초안(새 글 제안은 수락 때 이 초안이 필요하다)
+  baseDraftId: string | null;
+  baseDraftRevision: number | null;
+  // 목록 응답에는 없다
+  content?: string;
+  status: PostProposalStatus;
+  acceptedPostId: string | null;
+  acceptedVersionId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 직접 올린 이미지(#28 D2). url은 `{BASE_PATH}/api/media/post-images/{id}` 그대로 본문·표지에 쓴다. */
+export interface PostImage {
+  id: string;
+  url: string;
+  mimeType: string;
+  size: number;
+  width: number;
+  height: number;
+  createdAt: string;
+}

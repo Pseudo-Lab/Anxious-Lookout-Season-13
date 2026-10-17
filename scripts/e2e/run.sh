@@ -60,7 +60,7 @@ if [ "$MODE" = node ]; then
     -e NODE_ENV=production -e NEXT_TELEMETRY_DISABLED=1 -e PORT=3000 -e HOSTNAME=0.0.0.0 -e BASE_PATH="$BASE" \
     -v "$WORK/app:/app:ro" -v "$E2E_DIR:/e2e:ro" -w /app "$NODE_IMAGE" \
     sh -c 'node server.js & exec node /e2e/mock-gateway.mjs' >/dev/null
-  SCRIPTS=${E2E_SCRIPTS:-"e2e.mjs e2e-research.mjs e2e-chat-layout.mjs e2e-runner.mjs"}
+  SCRIPTS=${E2E_SCRIPTS:-"e2e.mjs e2e-research.mjs e2e-chat-layout.mjs e2e-runner.mjs e2e-write.mjs"}
 else
   docker run -d --rm --name "$NAME" --read-only --user 1000:1000 -e OUT_DIR=/out -e PREFIX="$BASE" \
     -v "$WORK/app:/out:ro" -v "$E2E_DIR:/e2e:ro" "$NODE_IMAGE" node /e2e/pages-static.mjs >/dev/null

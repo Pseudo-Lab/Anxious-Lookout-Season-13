@@ -2,11 +2,12 @@
 
 import { useEffect } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, usePathname } from "next/navigation";
 import { API_ENABLED, SITE_NAME } from "@/lib/constants";
 import { getPublicPost } from "@/lib/posts/api";
 import { decodeSegment } from "@/lib/posts/format";
 import { useLoad } from "@/lib/research/hooks";
+import { useRegisterPage } from "@/lib/research/pageContext";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
 import PostArticle from "@/components/posts/PostArticle";
@@ -15,6 +16,8 @@ import { NO_API_POSTS } from "@/components/posts/PublicPostFeed";
 function Loaded({ slug }: { slug: string }) {
   const { result } = useLoad(`public-post:${slug}`, () => getPublicPost(slug));
   const title = result?.ok ? result.data.title : null;
+  // 대화창 문맥: 공개 글은 slug가 아니라 postId로 보낸다(#28 계약). 불러오기 전에는 알리지 않는다.
+  useRegisterPage(usePathname(), result?.ok ? { kind: "public_post", resourceId: result.data.postId } : null);
   // 서버 HTML에는 글이 없으므로 탭 제목은 불러온 뒤 정한다.
   useEffect(() => {
     if (title) document.title = `${title} | ${SITE_NAME}`;

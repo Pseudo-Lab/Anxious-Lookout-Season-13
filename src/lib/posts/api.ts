@@ -1,9 +1,13 @@
 import { apiUrl, fetchJson } from "@/lib/api/client";
+import { BASE_PATH } from "@/lib/constants";
 import { listQuery, mutate, parsePage, type MutationContext } from "@/lib/research/api";
 import type {
   Post,
   PostDocumentOption,
   PostDraft,
+  PostImage,
+  PostProposal,
+  PostPublicationPreview,
   PostTag,
   PostText,
   PostVersion,
@@ -206,6 +210,108 @@ function parseOption(v: unknown): PostDocumentOption | null {
   return { id: v.id, title: v.title, version: v.version, latestVersionId: v.latestVersionId };
 }
 
+function parsePreview(v: unknown): PostPublicationPreview | null {
+  if (
+    !isObj(v) ||
+    !isId(v.postId) ||
+    !isId(v.versionId) ||
+    !isInt(v.expectedVersion) ||
+    !isStr(v.previewToken) ||
+    typeof v.publishable !== "boolean" ||
+    !isStr(v.content) ||
+    !isObj(v.author) ||
+    !isStr(v.author.login) ||
+    !Array.isArray(v.documents) ||
+    !Array.isArray(v.images)
+  ) {
+    return null;
+  }
+  const meta = parseMeta(v);
+  const documents = v.documents.map(parseDocRef);
+  const images = v.images.map((i) => (isObj(i) && isId(i.id) && isStr(i.url) ? { id: i.id, url: i.url } : null));
+  if (!meta || documents.some((d) => d === null) || images.some((i) => i === null)) return null;
+  let currentPublication: PublicPost | null = null;
+  if (v.currentPublication !== null) {
+    currentPublication = parsePublicPostDetail(v.currentPublication);
+    if (!currentPublication) return null;
+  }
+  return {
+    postId: v.postId,
+    versionId: v.versionId,
+    expectedVersion: v.expectedVersion,
+    previewToken: v.previewToken,
+    publishable: v.publishable,
+    ...meta,
+    content: v.content,
+    author: { login: v.author.login },
+    documents: documents as PublicPostDocument[],
+    images: images as { id: string; url: string }[],
+    currentPublication,
+  };
+}
+
+function parseProposal(v: unknown): PostProposal | null {
+  if (
+    !isObj(v) ||
+    !isId(v.id) ||
+    (v.postId !== null && !isId(v.postId)) ||
+    !isInt(v.version) ||
+    (v.basePostVersion !== null && !isInt(v.basePostVersion)) ||
+    (v.baseVersionId !== null && !isId(v.baseVersionId)) ||
+    (v.baseDraftId !== null && !isId(v.baseDraftId)) ||
+    (v.baseDraftRevision !== null && !isInt(v.baseDraftRevision)) ||
+    (v.status !== "pending" && v.status !== "accepted" && v.status !== "discarded") ||
+    (v.acceptedPostId !== null && !isId(v.acceptedPostId)) ||
+    (v.acceptedVersionId !== null && !isId(v.acceptedVersionId)) ||
+    !isStr(v.createdAt) ||
+    !isStr(v.updatedAt)
+  ) {
+    return null;
+  }
+  const meta = parseMeta(v);
+  if (!meta) return null;
+  const out: PostProposal = {
+    id: v.id,
+    postId: v.postId,
+    version: v.version,
+    basePostVersion: v.basePostVersion,
+    baseVersionId: v.baseVersionId,
+    baseDraftId: v.baseDraftId,
+    baseDraftRevision: v.baseDraftRevision,
+    status: v.status,
+    acceptedPostId: v.acceptedPostId,
+    acceptedVersionId: v.acceptedVersionId,
+    createdAt: v.createdAt,
+    updatedAt: v.updatedAt,
+    ...meta,
+  };
+  if (isStr(v.content)) out.content = v.content;
+  return out;
+}
+
+const parseFullProposal = (v: unknown) => {
+  const p = parseProposal(v);
+  return p && p.content !== undefined ? p : null;
+};
+
+function parseAccept(v: unknown): { proposal: PostProposal; post: Post; draft: PostDraft | null } | null {
+  if (!isObj(v)) return null;
+  const proposal = parseProposal(v.proposal);
+  const post = parseFullPost(v.post);
+  const draft = v.draft === null ? null : parseDraft(v.draft);
+  return proposal && post && (v.draft === null || draft) ? { proposal, post, draft } : null;
+}
+
+function parseImage(v: unknown): PostImage | null {
+  if (!isObj(v) || !isId(v.id) || !isStr(v.url) || !isStr(v.mimeType) || !isInt(v.size) || !isInt(v.width) || !isInt(v.height) || !isStr(v.createdAt)) return null;
+  return { id: v.id, url: v.url, mimeType: v.mimeType, size: v.size, width: v.width, height: v.height, createdAt: v.createdAt };
+}
+
+function parseUnpublish(v: unknown): { id: string; version: number } | null {
+  if (!isObj(v) || !isId(v.id) || !isInt(v.version) || v.publication !== null) return null;
+  return { id: v.id, version: v.version };
+}
+
 // ---- 공개 (비로그인 조회) ----
 
 export const listPublicPosts = (cursor?: string | null, opts: { tag?: string; limit?: number } = {}) =>
@@ -258,3 +364,66 @@ export const commitPostDraft = (
   body: { expectedDraftRevision: number; expectedVersion?: number; resolvedBaseVersionId?: string },
   ctx: MutationContext
 ) => mutate(`/research/post-drafts/${enc(id)}/commit`, "POST", body, parseCommit, ctx);
+
+// ---- 발행 ----
+
+export const getPostPublicationPreview = (id: string, versionId: string) =>
+  fetchJson(apiUrl(`/research/posts/${enc(id)}/publication-preview?versionId=${enc(versionId)}`), parsePreview);
+/** 미리보기에 보인 버전·문서·이미지 상태로 발행한다. 그사이 바뀌었으면 409 preview_changed. */
+export const publishPost = (preview: PostPublicationPreview, ctx: MutationContext) =>
+  mutate(
+    `/research/posts/${enc(preview.postId)}/publications`,
+    "POST",
+    { expectedVersion: preview.expectedVersion, versionId: preview.versionId, previewToken: preview.previewToken },
+    parsePublicPostDetail,
+    ctx
+  );
+export const unpublishPost = (id: string, expectedVersion: number, ctx: MutationContext) =>
+  mutate(`/research/posts/${enc(id)}/publication`, "DELETE", { expectedVersion }, parseUnpublish, ctx);
+
+// ---- Codex 글 제안 ----
+
+/** postId를 주면 그 글의 제안, 생략하면 새 글 제안을 포함한 전체(모든 상태). */
+export const listPostProposals = (cursor?: string | null, postId?: string) =>
+  fetchJson(apiUrl(`/research/post-proposals${listQuery(cursor, postId ? { postId } : undefined)}`), parsePage(parseProposal));
+export const getPostProposal = (id: string) => fetchJson(apiUrl(`/research/post-proposals/${enc(id)}`), parseFullProposal);
+/** 사람이 비교한 최종 전체 내용으로 수락한다. 기존 글은 현재 version·snapshot, 초안이 걸려 있으면 그 초안의 현재 revision을 함께 보낸다. */
+export const acceptPostProposal = (
+  id: string,
+  body: PostText & {
+    expectedProposalVersion: number;
+    expectedVersion?: number;
+    resolvedBaseVersionId?: string;
+    draftId?: string;
+    expectedDraftRevision?: number;
+  },
+  ctx: MutationContext
+) => mutate(`/research/post-proposals/${enc(id)}/accept`, "POST", body, parseAccept, ctx);
+export const discardPostProposal = (id: string, expectedProposalVersion: number, ctx: MutationContext) =>
+  mutate(`/research/post-proposals/${enc(id)}/discard`, "POST", { expectedProposalVersion }, parseProposal, ctx);
+
+// ---- 이미지(D2) ----
+
+/** 자체 이미지의 정규 주소(계약 Q3). 서버 응답의 url과 같다. */
+export const ownImageUrl = (id: string) => `${BASE_PATH}/api/media/post-images/${id.toLowerCase()}`;
+
+export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;
+export const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const UPLOAD_TIMEOUT_MS = 60_000;
+
+/** 원본 바이트를 그대로 보낸다(multipart 아님). Content-Type은 파일의 실제 형식이며 서버가 다시 검사·재인코딩한다. */
+export const uploadPostImage = (file: Blob, ctx: MutationContext) =>
+  fetchJson(
+    apiUrl("/research/post-images"),
+    parseImage,
+    {
+      method: "POST",
+      headers: { "Content-Type": file.type, "X-CSRF-Token": ctx.csrfToken, "Idempotency-Key": ctx.idempotencyKey },
+      body: file,
+    },
+    UPLOAD_TIMEOUT_MS
+  );
+export const listPostImages = (cursor?: string | null) =>
+  fetchJson(apiUrl(`/research/post-images${listQuery(cursor)}`), parsePage(parseImage));
+export const deletePostImage = (id: string, ctx: MutationContext) =>
+  mutate(`/research/post-images/${enc(id)}`, "DELETE", {}, (v) => (isObj(v) && v.deleted === true ? { id } : null), ctx);

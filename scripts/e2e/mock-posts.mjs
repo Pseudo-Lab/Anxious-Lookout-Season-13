@@ -13,6 +13,7 @@ const conflict = (reason) => fail(409, "conflict", "The post, draft or proposal 
 const posts = new Map(); // id -> { id, owner, legacy, version, archived, createdAt, updatedAt, authorLogin, authorName, versions[], publication, slug }
 const drafts = new Map(); // id -> draft row(+owner)
 const images = new Map(); // id -> { id, owner, ... }
+const proposals = new Map(); // id -> post proposal row(+owner)
 const reservedSlugs = new Set();
 
 function page(list, url) {
@@ -56,9 +57,15 @@ function text(b) {
   return { title: b.title, content: b.content, description: b.description, slug: b.slug, tags, coverImageId: b.coverImageId, documentIds: [...b.documentIds] };
 }
 
-/** commit/accept/publish 재검증: 문서는 본인 활성, 표지는 본인 이미지. */
+const OWN_IMAGE = new RegExp(`\\]\\(${BASE.replace(/\./g, "\\.")}/api/media/post-images/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\\)`, "g");
+/** 본문의 자체 이미지 ID(정규 형태만, 모의 추출). */
+const contentImages = (content) => [...content.matchAll(OWN_IMAGE)].map((m) => m[1]);
+const imageIdsOf = (t) => [...new Set([...(t.coverImageId ? [t.coverImageId] : []), ...contentImages(t.content ?? "")])];
+
+/** commit/accept/publish 재검증: 문서는 본인 활성, 표지·본문 이미지는 본인 이미지. */
 function refsFields(owner, t, docs) {
   const f = [];
+  for (const id of contentImages(t.content ?? "")) if (images.get(id)?.owner !== owner) f.push({ path: "body.content", message: `unknown image: ${id}` });
   for (const id of t.documentIds) {
     const d = docs.get(owner, id);
     if (!d || d.archived) f.push({ path: "body.documentIds", message: `not an active document: ${id}` });
@@ -178,7 +185,7 @@ function previewOf(owner, p, v, docs) {
     const d = docs.get(owner, id);
     return { id, title: d?.title ?? "", publicUrl: d?.published ? `${BASE}/public/document/?id=${id}` : null };
   });
-  const imgs = v.coverImageId ? [{ id: v.coverImageId, url: imageUrl(v.coverImageId) }] : [];
+  const imgs = imageIdsOf(v).map((id) => ({ id, url: imageUrl(id) }));
   const publishable = !p.archived && refsFields(owner, v, docs).length === 0;
   const state = JSON.stringify([p.version, v.id, documents, imgs]);
   const previewToken = crypto.createHash("sha256").update(state).digest("hex").slice(0, 32);
@@ -217,6 +224,19 @@ export function handlePostRead(owner, path, url, docs) {
   if ((m = /^\/research\/post-drafts\/([^/]+)$/.exec(path))) {
     const d = drafts.get(m[1]);
     return d && d.owner === owner ? ok(200, draftView(d)) : notFound();
+  }
+  if (path === "/research/post-proposals") {
+    const postId = url.searchParams.get("postId");
+    if (postId && !ownedPost(owner, postId)) return notFound();
+    const list = [...proposals.values()]
+      .filter((p) => p.owner === owner && (!postId || p.postId === postId))
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+      .map((p) => draftView(p, false));
+    return ok(200, page(list, url));
+  }
+  if ((m = /^\/research\/post-proposals\/([^/]+)$/.exec(path))) {
+    const p = proposals.get(m[1]);
+    return p && p.owner === owner ? ok(200, draftView(p)) : notFound();
   }
   if ((m = /^\/research\/posts\/([^/]+)(\/draft|\/versions|\/versions\/([^/]+)|\/publication-preview)?$/.exec(path))) {
     const p = ownedPost(owner, m[1]);
@@ -305,6 +325,51 @@ export function handlePostMutation(owner, method, path, b, user, docs) {
       return ok(200, { draft: draftView(d), post: postView(post) });
     }
   }
+  if (method === "POST" && (m = /^\/research\/post-proposals\/([^/]+)\/(accept|discard)$/.exec(path))) {
+    const p = proposals.get(m[1]);
+    if (!p || p.owner !== owner) return notFound();
+    if (p.status !== "pending" || b.expectedProposalVersion !== p.version) return conflict("proposal_closed");
+    if (m[2] === "discard") {
+      Object.assign(p, { status: "discarded", version: p.version + 1, updatedAt: now() });
+      return ok(200, draftView(p));
+    }
+    const fields = textFields(b, true);
+    if (fields.length) return invalid(fields);
+    const refs = refsFields(owner, b, docs);
+    if (refs.length) return invalid(refs);
+    let post = p.postId ? ownedPost(owner, p.postId) : null;
+    let draft = null;
+    if (post) {
+      if (post.archived) return conflict("archived");
+      if (b.expectedVersion !== post.version) return conflict("post_version");
+      if (b.resolvedBaseVersionId !== latest(post).id) return conflict("base_changed");
+      if (b.slug !== post.slug) return invalid([{ path: "body.slug", message: "slug is fixed" }]);
+      draft = activeDraftOf(owner, post.id) ?? null;
+    } else {
+      if (b.expectedVersion !== undefined || b.resolvedBaseVersionId !== undefined) return invalid([{ path: "body", message: "new post proposal has no base" }]);
+      if (p.baseDraftId) draft = drafts.get(p.baseDraftId) ?? null;
+      else if (b.draftId) draft = drafts.get(b.draftId) ?? null;
+    }
+    if (draft) {
+      if (b.draftId !== draft.id || draft.postId !== (post ? post.id : null)) return conflict("draft_revision");
+      if (draft.state !== "active") return conflict("draft_closed");
+      if (b.expectedDraftRevision !== draft.revision) return conflict("draft_revision");
+    } else if (b.draftId !== undefined) return conflict("draft_closed");
+    const t = now();
+    if (!post) {
+      if (reservedSlugs.has(b.slug)) return conflict("slug_taken");
+      post = { id: uuid(), owner, legacy: false, version: 0, archived: false, createdAt: t, updatedAt: t, authorLogin: user.login, authorName: user.login, versions: [], publication: null, slug: b.slug };
+      posts.set(post.id, post);
+      reservedSlugs.add(b.slug);
+    }
+    const tx = text(b);
+    post.versions.push({ id: uuid(), number: post.versions.length + 1, ...tx, createdAt: t });
+    post.version++;
+    post.updatedAt = t;
+    if (draft) Object.assign(draft, { postId: post.id, state: "committed", revision: draft.revision + 1, updatedAt: t });
+    Object.assign(p, { status: "accepted", acceptedPostId: post.id, acceptedVersionId: latest(post).id, version: p.version + 1, updatedAt: t });
+    return ok(200, { proposal: draftView(p), post: postView(post), draft: draft ? draftView(draft) : null });
+  }
   if ((m = /^\/research\/posts\/([^/]+)(\/publications|\/publication)?$/.exec(path))) {
     const p = ownedPost(owner, m[1]);
     if (!p) return notFound();
@@ -331,6 +396,89 @@ export function handlePostMutation(owner, method, path, b, user, docs) {
     }
   }
   return null;
+}
+
+/** 모의 Codex의 research_post_propose: 제안만 만들고 글·초안은 바꾸지 않는다. 대상이 없으면 null.
+ *  target: { postId } 기존 글 / { draftId } 작성 중인 새 글 초안 / {} 새 글 */
+export function createPostProposal(owner, target, patch) {
+  const t = now();
+  let base = { postId: null, basePostVersion: null, baseVersionId: null, baseDraftId: null, baseDraftRevision: null };
+  let from = { title: "", content: "", description: "", slug: "", tags: [], coverImageId: null, documentIds: [] };
+  if (target.postId) {
+    const p = ownedPost(owner, target.postId);
+    if (!p || p.archived) return null;
+    base = { ...base, postId: p.id, basePostVersion: p.version, baseVersionId: latest(p).id };
+    const { title, content, description, slug, tags, coverImageId, documentIds } = latest(p);
+    from = { title, content, description, slug, tags, coverImageId, documentIds };
+  } else if (target.draftId) {
+    const d = drafts.get(target.draftId);
+    if (!d || d.owner !== owner || d.state !== "active" || d.postId !== null) return null;
+    base = { ...base, baseDraftId: d.id, baseDraftRevision: d.revision };
+    const { title, content, description, slug, tags, coverImageId, documentIds } = d;
+    from = { title, content, description, slug, tags, coverImageId, documentIds };
+  }
+  const row = { id: uuid(), owner, ...base, version: 1, ...from, ...patch(from), origin: "codex", status: "pending", acceptedPostId: null, acceptedVersionId: null, createdAt: t, updatedAt: t };
+  proposals.set(row.id, row);
+  return draftView(row, false);
+}
+
+/** 대화 페이지 문맥 확인용: 본인 활성 글 제목 / 현재 발행본 제목(postId 기준). 없으면 null. */
+export function postTitle(owner, id) {
+  const p = ownedPost(owner, id);
+  return p && !p.archived ? latest(p).title : null;
+}
+export function publicPostTitle(postId) {
+  const p = posts.get(postId);
+  return p?.publication ? p.versions.find((v) => v.id === p.publication.versionId).title : null;
+}
+export function newPostDraftOf(owner, draftId) {
+  const d = drafts.get(draftId);
+  return d && d.owner === owner && d.state === "active" && d.postId === null ? d : null;
+}
+
+// ---- 이미지(D2) ----
+
+// 1×1 투명 PNG(모의 원본). 실제 서버는 형식 검사·재인코딩한다.
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
+export const IMAGE_LIMIT = 5 * 1024 * 1024;
+
+/** POST /research/post-images(원본 바이트). 형식·크기는 호출 측이 읽은 bytes로 판단한다. */
+export function uploadImage(owner, type, bytes) {
+  if (!IMAGE_TYPES.includes(type)) return fail(415, "unsupported_media_type", "Unsupported image type");
+  if (bytes.length > IMAGE_LIMIT) return fail(413, "payload_too_large", "Image exceeds size limit");
+  if (bytes.length === 0) return fail(422, "validation_error", "Image could not be decoded");
+  const row = { id: uuid(), owner, mimeType: type, size: bytes.length, width: 1, height: 1, createdAt: now() };
+  images.set(row.id, row);
+  return ok(201, imageView(row));
+}
+const imageView = (r) => ({ id: r.id, url: imageUrl(r.id), mimeType: r.mimeType, size: r.size, width: r.width, height: r.height, createdAt: r.createdAt });
+const imageInUse = (id) =>
+  [...posts.values()].some((p) => p.versions.some((v) => imageIdsOf(v).includes(id))) ||
+  [...drafts.values()].some((d) => imageIdsOf(d).includes(id)) ||
+  [...proposals.values()].some((p) => imageIdsOf(p).includes(id));
+
+export function handleImageRead(owner, path, url) {
+  if (path !== "/research/post-images") return null;
+  const list = [...images.values()].filter((i) => i.owner === owner).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)).map(imageView);
+  return ok(200, page(list, url));
+}
+export function handleImageDelete(owner, path) {
+  const m = /^\/research\/post-images\/([^/]+)$/.exec(path);
+  if (!m) return null;
+  const img = images.get(m[1]);
+  if (!img || img.owner !== owner) return notFound();
+  if (imageInUse(img.id)) return conflict("image_in_use");
+  images.delete(img.id);
+  return ok(200, { id: img.id, deleted: true });
+}
+/** GET /media/post-images/{id}: 현재 발행본(본문·표지)에 쓰이면 누구나, 아니면 소유자만. 없으면 null(404). */
+export function mediaBytes(owner, id) {
+  const img = images.get(id);
+  if (!img) return null;
+  const isPublic = published().some((p) => imageIdsOf(p.versions.find((v) => v.id === p.publication.versionId)).includes(id));
+  if (!isPublic && img.owner !== owner) return null;
+  return { type: img.mimeType, bytes: PNG, isPublic };
 }
 
 export const postCounts = () => ({ posts: posts.size, postDrafts: drafts.size, published: published().length });
