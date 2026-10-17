@@ -1869,6 +1869,100 @@ let docEUrl;
   await page.context().close();
 }
 
+// W6. #22 리뷰 F4: 새 문서 초안 A→B→A 왕복에서도 주소·입력·저장 대상이 같다. 전환 뒤 늦은 자동 저장 응답이 주소를 되돌리지 않는다.
+{
+  const wctx = await newPage();
+  await login(wctx.page);
+  const page = wctx.page;
+  const main = page.locator("main");
+  const api = apiClient(page);
+  const body = () => main.getByLabel("본문");
+  const bodyIs = (text) =>
+    page.waitForFunction((t) => document.querySelector("main textarea")?.value === t, text, { timeout: 8000 }).then(() => true, () => false);
+  const idOf = () => new URL(page.url()).searchParams.get("draft");
+  const makeDraft = async (title, text) => {
+    await page.goto(U("/research/document/new/"));
+    await main.getByLabel("제목").fill(title);
+    await body().fill(text);
+    await page.waitForURL(/\?draft=/, { timeout: 8000 });
+    await main.getByText("초안 자동 저장됨").waitFor();
+    return idOf();
+  };
+  const a = await makeDraft("초안 A", "Body A");
+  const b = await makeDraft("초안 B", "Body B");
+  // B 화면에서 목록의 A → A 화면에서 목록의 B → 다시 A
+  await main.getByRole("link", { name: "초안 A" }).click();
+  check("W6. B→A: address and body are A", (await page.waitForURL(new RegExp(`draft=${a}`)).then(() => true, () => false)) && (await bodyIs("Body A")));
+  await main.getByRole("link", { name: "초안 B" }).click();
+  check("W6. A→B: address and body are B", (await page.waitForURL(new RegExp(`draft=${b}`)).then(() => true, () => false)) && (await bodyIs("Body B")));
+  await main.getByRole("link", { name: "초안 A" }).click();
+  check("W6. B→A again: address and body are A", (await page.waitForURL(new RegExp(`draft=${a}`)).then(() => true, () => false)) && (await bodyIs("Body A")));
+  await body().fill("Edit intended for A");
+  await main.getByText("초안 자동 저장됨").waitFor();
+  const da = await api.get(`/research/document-drafts/${a}`);
+  const db = await api.get(`/research/document-drafts/${b}`);
+  check("W6. edit saved to A only", da.content === "Edit intended for A" && db.content === "Body B" && db.revision === 1, JSON.stringify({ a: da.content, b: db.content, rb: db.revision }));
+
+  // A에서 입력 → A 저장 응답 보류 중 B로 전환 → 응답 해제: 주소는 B 그대로, A에는 마지막 입력이 저장됨
+  let release;
+  let seen;
+  const gate = new Promise((r) => (release = r));
+  const arrived = new Promise((r) => (seen = r));
+  const pattern = `**/api/research/document-drafts/${a}`;
+  await page.route(pattern, async (route) => {
+    if (route.request().method() !== "PUT") return route.continue();
+    const response = await route.fetch();
+    seen();
+    await gate;
+    return route.fulfill({ response });
+  });
+  await body().fill("Late A");
+  await arrived;
+  await main.getByRole("link", { name: "초안 B" }).click();
+  await page.waitForURL(new RegExp(`draft=${b}`));
+  release();
+  await page.waitForTimeout(1500);
+  await page.unroute(pattern);
+  check("W6. late A save does not move the address back", idOf() === b && (await bodyIs("Body B")), page.url());
+  check("W6. late A save landed on A", (await api.get(`/research/document-drafts/${a}`)).content === "Late A");
+  await page.context().close();
+}
+
+// W7. #22 리뷰 F5: 새 문서 초안 목록은 다음 페이지도 찾는다(30개 초과, 첫 페이지가 기존 문서 초안뿐인 경우).
+{
+  const wctx = await newPage();
+  await login(wctx.page);
+  const page = wctx.page;
+  const main = page.locator("main");
+  const api = apiClient(page);
+  const oldest = await api.send("POST", "/research/document-drafts", { title: "가장 오래된 새 초안", content: "x" });
+  for (let k = 0; k < 31; k++) {
+    const d = await api.send("POST", "/research/documents", { title: `기존 문서 ${k}`, content: "본문" });
+    await api.send("POST", "/research/document-drafts", {
+      title: `기존 문서 초안 ${k}`,
+      content: "y",
+      documentId: d.body.id,
+      baseDocumentVersion: d.body.version,
+      baseVersionId: d.body.latestVersion.id,
+    });
+  }
+  check("W7. setup: first API page has only existing-document drafts", oldest.status === 201 && (await api.get("/research/document-drafts")).items.every((d) => d.documentId !== null));
+  await page.goto(U("/research/document/new/"));
+  check("W7. new-document draft found beyond the first page", await appears(main.getByRole("link", { name: "가장 오래된 새 초안" }), 10000));
+  for (let k = 0; k < 31; k++) await api.send("POST", "/research/document-drafts", { title: `새 초안 ${k}`, content: "z" });
+  await page.goto(U("/research/document/new/"));
+  await main.getByRole("link", { name: "새 초안 30" }).waitFor();
+  const more = main.getByRole("button", { name: "초안 더 보기" });
+  check("W7. more than 30: show-more offered", await appears(more));
+  while (await more.isVisible().catch(() => false)) {
+    await more.click();
+    await page.waitForTimeout(300);
+  }
+  check("W7. oldest draft reachable via show-more", await appears(main.getByRole("link", { name: "가장 오래된 새 초안" })));
+  check("W7. only new-document drafts listed", (await main.getByRole("link", { name: /기존 문서 초안/ }).count()) === 0);
+  await page.context().close();
+}
+
 // R10. 다른 사용자: 타인 ID는 404로 숨김
 {
   const other = await newPage();

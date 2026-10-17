@@ -104,7 +104,8 @@ export function useDraftEditor({
   const setDraft = useCallback((d: Draft | null) => {
     draftRef.current = d;
     if (alive.current) setDraftState(d);
-    if (d) onDraftRef.current?.(d);
+    // 닫힌(언마운트된) 편집기의 늦은 저장 결과는 화면에 알리지 않는다(다른 편집기의 주소를 되돌리지 않게).
+    if (d && alive.current) onDraftRef.current?.(d);
   }, []);
 
   const clearTimers = useCallback(() => {
