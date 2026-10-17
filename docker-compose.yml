@@ -24,6 +24,7 @@ services:
         APP_GIT_SHA: ${RELEASE_SHA}
         APP_BUILT_AT: ${RELEASE_BUILT_AT:?Set RELEASE_BUILT_AT}
     environment:
+      POST_IMAGE_ROOT: /var/lib/posts/images/data
       DATABASE_URL_FILE: /run/secrets/api_database_url
       AUTH_TRANSACTION_KEY_FILE: /run/secrets/auth_transaction_key
       GITHUB_CLIENT_SECRET_FILE: /run/secrets/github_client_secret
@@ -33,6 +34,8 @@ services:
       APP_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-}
       ALLOW_INSECURE_LOOPBACK: ${ALLOW_INSECURE_LOOPBACK:-false}
       ALLOW_PUBLIC_IP_HTTP: ${ALLOW_PUBLIC_IP_HTTP:-false}
+    volumes:
+      - hosting-post-images:/var/lib/posts/images
     secrets: [api_database_url, auth_transaction_key, github_client_secret]
     ports: ["127.0.0.1:${API_PORT:-28080}:8080"]
     depends_on:
@@ -112,6 +115,7 @@ secrets:
   auth_transaction_key: {file: .local/hosting/auth-transaction-key}
   github_client_secret: {file: .local/hosting/github-client-secret}
 volumes:
+  hosting-post-images:
   hosting-db:
 networks:
   database:

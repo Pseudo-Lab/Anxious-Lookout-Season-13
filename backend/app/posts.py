@@ -142,15 +142,14 @@ def validate_content(store, value, commit=False):
     for identity in value['documentIds']:
         row = store.owned_item(identity, 'document', lock=True)
         if row.archived: fail('validation_error', 'Remove archived document references before saving', 422)
-    # No image URL becomes public before the separate image capability is ready.
-    if value['coverImageId'] is not None or '/api/media/post-images/' in value['content']:
-        fail('not_ready', 'Post image capability is not ready', 503)
+    from .post_images import validate
+    return validate(store, value)
 
 
 def create_draft(store, body):
     ready(store); store.graph_lock()
     value = payload(body)
-    validate_content(store, value)
+    image_ids = validate_content(store, value)
     if body.postId:
         row = owned(store, body.postId, active=True)
         if current_draft(store, row.id): conflict('active_draft_exists')
@@ -159,7 +158,7 @@ def create_draft(store, body):
         if value['slug'] != row.slug: fail('validation_error', 'A saved post slug cannot change', 422)
     row = PostDraft(owner_id=store.owner, post_id=parse_id(body.postId) if body.postId else None,
         base_post_version=body.basePostVersion, base_version_id=parse_id(body.baseVersionId) if body.baseVersionId else None,
-        payload=value)
+        payload=value, image_ids=image_ids)
     store.db.add(row); store.db.flush()
     return draft_value(row)
 
@@ -175,7 +174,7 @@ def change_draft(store, identity, body, discard=False):
         if row.post_id:
             post = owned(store, row.post_id, active=True)
             if value['slug'] != post.slug: fail('validation_error', 'A saved post slug cannot change', 422)
-        validate_content(store, value)
+        row.image_ids = validate_content(store, value)
         row.payload = value
         row.revision += 1
         row.updated_at = datetime.now(timezone.utc)
@@ -184,7 +183,7 @@ def change_draft(store, identity, body, discard=False):
 
 
 def save_version(store, value, post=None):
-    validate_content(store, value, commit=True)
+    image_ids = validate_content(store, value, commit=True)
     now = datetime.now(timezone.utc)
     if post is None:
         # Slug namespace crosses owners. Serialize reservation without leaking an owner.
@@ -197,7 +196,7 @@ def save_version(store, value, post=None):
         post.version += 1
         post.content_number += 1
         post.updated_at = now
-    snapshot = PostVersion(post_id=post.id, number=post.content_number, payload=value, created_at=now, updated_at=now)
+    snapshot = PostVersion(post_id=post.id, number=post.content_number, payload=value, image_ids=image_ids, created_at=now, updated_at=now)
     store.db.add(snapshot); store.db.flush()
     return post
 

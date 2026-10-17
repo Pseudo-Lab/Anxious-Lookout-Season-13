@@ -98,3 +98,26 @@ CREATE INDEX research_post_public_listing ON research.post_publications(updated_
 REVOKE ALL ON research.post_publications,research.post_publication_heads FROM PUBLIC;
 GRANT SELECT,INSERT ON research.post_publications TO anxious_api;
 GRANT SELECT,INSERT,UPDATE ON research.post_publication_heads TO anxious_api;
+
+CREATE TABLE research.post_images (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ owner_id uuid NOT NULL REFERENCES auth.accounts(id),
+ mime_type varchar(32) NOT NULL CHECK(mime_type IN ('image/png','image/jpeg','image/webp')),
+ size integer NOT NULL CHECK(size BETWEEN 1 AND 5242880),
+ width integer NOT NULL CHECK(width BETWEEN 1 AND 8192),
+ height integer NOT NULL CHECK(height BETWEEN 1 AND 8192),
+ sha256 varchar(64) NOT NULL CHECK(sha256 ~ '^[a-f0-9]{64}$'),
+ deleted boolean NOT NULL DEFAULT false,
+ purged boolean NOT NULL DEFAULT false,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ CHECK(width::bigint*height<=16000000),
+ CHECK(NOT purged OR deleted)
+);
+CREATE INDEX research_post_image_owner ON research.post_images(owner_id,updated_at DESC,id DESC);
+ALTER TABLE research.post_versions ADD COLUMN image_ids uuid[] NOT NULL DEFAULT '{}';
+ALTER TABLE research.post_drafts ADD COLUMN image_ids uuid[] NOT NULL DEFAULT '{}';
+ALTER TABLE research.post_proposals ADD COLUMN image_ids uuid[] NOT NULL DEFAULT '{}';
+ALTER TABLE research.post_publications ADD COLUMN image_ids uuid[] NOT NULL DEFAULT '{}';
+REVOKE ALL ON research.post_images FROM PUBLIC;
+GRANT SELECT,INSERT,UPDATE ON research.post_images TO anxious_api;

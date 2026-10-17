@@ -55,11 +55,13 @@ def preview(store, identity, version_id=None, base_path=''):
         evidence.append([str(document.id), document.version, document.archived, str(publication.id) if publication else None])
         publishable = publishable and not document.archived
     value = dict(version.payload)
-    posts.validate_content(store, {**value, 'documentIds': []}, commit=True)
+    image_ids = posts.validate_content(store, {**value, 'documentIds': []}, commit=True)
     previous = current(store.db, post_id=post.id)
     account = store.db.get(Account, store.owner)
     author = {'login': account.login, 'name': account.login}
-    images = []
+    from .post_images import value as image_value
+    from .post_models import PostImage
+    images = [image_value(store.db.get(PostImage, identity), base_path) for identity in image_ids]
     state = {'post': str(post.id), 'version': str(version.id), 'cas': post.version, 'documents': documents,
              'evidence': evidence, 'author': author, 'images': images}
     token = hashlib.sha256(json.dumps(state, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
@@ -76,8 +78,9 @@ def publish(store, identity, body, base_path):
     if not shown['publishable']: fail('validation_error', 'Remove archived document references before publishing', 422)
     identity, now = uuid.uuid4(), datetime.now(timezone.utc)
     snapshot = {key: shown[key] for key in ('postId', 'versionId', 'slug', 'title', 'description', 'content', 'tags', 'author', 'documents')}
-    snapshot.update(id=str(identity), coverImageUrl=None, publishedAt=stamp(now))
-    row = PostPublication(id=identity, post_id=post.id, version_id=parse_id(body.versionId), snapshot=snapshot,
+    from .post_images import url
+    snapshot.update(id=str(identity), coverImageUrl=url(shown['coverImageId'], base_path) if shown['coverImageId'] else None, publishedAt=stamp(now))
+    row = PostPublication(id=identity, post_id=post.id, version_id=parse_id(body.versionId), snapshot=snapshot, image_ids=[parse_id(image['id']) for image in shown['images']],
                           created_at=now, updated_at=now)
     store.db.add(row); store.db.flush()
     pointer = store.db.get(PostPublicationHead, post.id)

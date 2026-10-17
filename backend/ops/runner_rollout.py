@@ -144,15 +144,17 @@ def deployment(v, baseline, configmaps=()):
     retired = {'CODEX_USER_RUNNER_CONFIG_FILE', 'CODEX_USER_RUNNER_ACCOUNT_ID', 'CODEX_RUNNERS_FILE',
                'CODEX_USER_RUNNER_ALLOWLIST', 'CODEX_USER_RUNNER_POOL_CONFIG_FILE'}
     env = environment(v)
+    env['POST_IMAGE_ROOT'] = '/var/lib/posts/images/data'
     env['CODEX_USER_RUNNER_POOL_CONFIG_FILE'] = '/run/pool-private/private/pool.json'
     api['env'] = [e for e in inherited.values() if e['name'] not in retired | set(env)
                   and not e['name'].startswith('CODEX_PERSONAL_')]
     api['env'] += [{'name': k, 'value': val} for k, val in env.items()]
     api['image'], api['imagePullPolicy'] = v['runtimeImage'], 'Never'
-    old_volumes = {'runner-input', 'runner-private', 'runner-kube', 'pool-input', 'pool-private', 'owner-input'}
+    old_volumes = {'post-images', 'runner-input', 'runner-private', 'runner-kube', 'pool-input', 'pool-private', 'owner-input'}
     api['volumeMounts'] = [m for m in api.get('volumeMounts', []) if m['name'] not in old_volumes]
     api['volumeMounts'] += [{'name': n, 'mountPath': p, 'readOnly': True} for n, p in
                            [('pool-private', '/run/pool-private'), ('runner-kube', '/run/runner-kube')]]
+    api['volumeMounts'].append({'name': 'post-images', 'mountPath': '/var/lib/posts/images'})
     spec['initContainers'] = [c for c in spec.get('initContainers', [])
                               if c['name'] not in {'runner-private-input', 'runner-pool-input'}]
     require(not any(m['name'] in old_volumes for c in spec['initContainers'] for m in c.get('volumeMounts', [])))
@@ -164,10 +166,11 @@ def deployment(v, baseline, configmaps=()):
         'volumeMounts': [{'name': 'pool-input', 'mountPath': '/run/pool-input', 'readOnly': True},
                          {'name': 'pool-private', 'mountPath': '/run/pool-private'}]})
     spec['securityContext'] = {**spec.get('securityContext', {}), 'runAsUser': 10001, 'runAsGroup': 10001,
-                               'runAsNonRoot': True, 'fsGroup': 10001}
+                               'runAsNonRoot': True, 'fsGroup': 10001, 'fsGroupChangePolicy': 'OnRootMismatch'}
     spec['automountServiceAccountToken'] = False
     spec['volumes'] = [x for x in spec.get('volumes', []) if x['name'] not in old_volumes]
     spec['volumes'] += [
+        {'name': 'post-images', 'persistentVolumeClaim': {'claimName': 'hosting-post-images'}},
         {'name': 'pool-input', 'secret': {'secretName': 'hosting-runner-pool-v2', 'defaultMode': 288}},
         {'name': 'pool-private', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '1Mi'}},
         {'name': 'runner-kube', 'projected': {'defaultMode': 288, 'sources': [
@@ -300,7 +303,10 @@ def docker(v, role):
 def render(v, baseline, templates, configmaps=()):
     checked(v)
     candidate, patch = deployment(v, baseline, configmaps)
-    files = {'resources.json': resources(v), 'api-candidate.json': candidate, 'api-patch.json': patch}
+    files = {'resources.json': resources(v), 'api-candidate.json': candidate, 'api-patch.json': patch,
+             'post-images-pvc.json': {'apiVersion': 'v1', 'kind': 'PersistentVolumeClaim',
+                 'metadata': {'name': 'hosting-post-images', 'namespace': 'm2-hosting'},
+                 'spec': {'accessModes': ['ReadWriteOnce'], 'resources': {'requests': {'storage': '10Gi'}}}}}
     result = {key: json.dumps(value, indent=2)+'\n' for key, value in files.items()}
     for role, value in inputs(v).items():
         result[role+'-inputs.json'] = json.dumps(value, indent=2)+'\n'

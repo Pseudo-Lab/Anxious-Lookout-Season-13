@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime
 from sqlalchemy import Boolean, DateTime, Integer, String, text
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from .models import Base
 
@@ -28,6 +28,7 @@ class PostVersion(Base):
     post_id: Mapped[uuid.UUID] = mapped_column(UUID)
     number: Mapped[int] = mapped_column(Integer)
     payload: Mapped[dict] = mapped_column(JSONB)
+    image_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID), server_default=text("'{}'"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))
 
@@ -42,6 +43,7 @@ class PostDraft(Base):
     base_post_version: Mapped[int | None] = mapped_column(Integer)
     base_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
     payload: Mapped[dict] = mapped_column(JSONB)
+    image_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID), server_default=text("'{}'"))
     state: Mapped[str] = mapped_column(String(16), server_default='active')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))
@@ -59,6 +61,7 @@ class PostProposal(Base):
     base_draft_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
     base_draft_revision: Mapped[int | None] = mapped_column(Integer)
     payload: Mapped[dict] = mapped_column(JSONB)
+    image_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID), server_default=text("'{}'"))
     status: Mapped[str] = mapped_column(String(16), server_default='pending')
     accepted_post_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
     accepted_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
@@ -73,6 +76,7 @@ class PostPublication(Base):
     post_id: Mapped[uuid.UUID] = mapped_column(UUID)
     version_id: Mapped[uuid.UUID] = mapped_column(UUID)
     snapshot: Mapped[dict] = mapped_column(JSONB)
+    image_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID), server_default=text("'{}'"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))
 
@@ -82,3 +86,19 @@ class PostPublicationHead(Base):
     __table_args__ = {'schema': 'research'}
     post_id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True)
     publication_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
+
+
+class PostImage(Base):
+    __tablename__ = 'post_images'
+    __table_args__ = {'schema': 'research'}
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, server_default=text('gen_random_uuid()'))
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID)
+    mime_type: Mapped[str] = mapped_column(String(32))
+    size: Mapped[int] = mapped_column(Integer)
+    width: Mapped[int] = mapped_column(Integer)
+    height: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    deleted: Mapped[bool] = mapped_column(Boolean, server_default='false')
+    purged: Mapped[bool] = mapped_column(Boolean, server_default='false')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text('now()'))

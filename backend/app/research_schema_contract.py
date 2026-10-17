@@ -110,7 +110,7 @@ def validate_research(connection, check_privileges=True):
     if marker in {'0005_writing', '0006_posts'}:
         required.update(document_drafts={'SELECT', 'INSERT', 'UPDATE'}, document_proposals={'SELECT', 'INSERT', 'UPDATE'})
     if marker == '0006_posts':
-        required.update(posts={'SELECT', 'INSERT', 'UPDATE'}, post_drafts={'SELECT', 'INSERT', 'UPDATE'},
+        required.update(post_images={'SELECT', 'INSERT', 'UPDATE'}, posts={'SELECT', 'INSERT', 'UPDATE'}, post_drafts={'SELECT', 'INSERT', 'UPDATE'},
                         post_versions={'SELECT', 'INSERT'}, post_proposals={'SELECT', 'INSERT', 'UPDATE'},
                         post_publications={'SELECT', 'INSERT'}, post_publication_heads={'SELECT', 'INSERT', 'UPDATE'})
     # Check effective table AND column privileges (including inherited grants).

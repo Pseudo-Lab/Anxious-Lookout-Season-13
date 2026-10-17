@@ -70,7 +70,7 @@ def owned(store, identity):
 def create(store, body):
     posts.ready(store); store.graph_lock()
     payload = posts.payload(body)
-    posts.validate_content(store, payload, commit=True)
+    image_ids = posts.validate_content(store, payload, commit=True)
     post = posts.owned(store, body.postId, active=True) if body.postId else None
     if post:
         posts.expect(post, body.expectedVersion)
@@ -81,7 +81,7 @@ def create(store, body):
         if draft.post_id != (post.id if post else None): conflict('draft_revision')
     row = PostProposal(owner_id=store.owner, post_id=post.id if post else None,
         base_post_version=post.version if post else None, base_version_id=posts.head(store, post).id if post else None,
-        base_draft_id=parse_id(body.draftId) if body.draftId else None, base_draft_revision=body.expectedDraftRevision, payload=payload)
+        base_draft_id=parse_id(body.draftId) if body.draftId else None, base_draft_revision=body.expectedDraftRevision, payload=payload, image_ids=image_ids)
     store.db.add(row); store.db.flush()
     return value(row)
 
