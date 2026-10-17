@@ -112,7 +112,12 @@ def test_markdown_references_are_images_only():
     def refs(body): return post_images.references(content(content=body), '/base')
     assert refs('![alt]('+url+')') == [identity]
     assert refs('![ref][x]\n\n[x]: '+url) == [identity]
+    assert refs('[![linked]('+url+')](https://example.com)') == [identity]
     for body in [url, '[link]('+url+')', '`![a]('+url+')`', '```\n![a]('+url+')\n```',
+                 '[link](https://example.com "![hidden]('+url+')")',
+                 '    ![hidden]('+url+')',
+                 '![![hidden]('+url+')](https://example.com/outer.png)',
+                 '<img src="'+url+'">',
                  '![a](https://example.com'+url+')', '![a]('+url+'?x=1)', '![a]('+url+'#a)',
                  '![a]('+url.upper()+')', '![a]('+url.replace('/base', '/%62ase')+')']:
         assert refs(body) == [], body
@@ -181,3 +186,18 @@ def test_restored_volume_modes_are_private(tmp_path, monkeypatch):
     monkeypatch.setenv('POST_IMAGE_ROOT', str(directory))
     assert post_images.root() == directory
     assert directory.stat().st_mode & 0o077 == 0
+
+
+def test_nested_alt_does_not_publish_hidden_image(client, admin):
+    _, auth = identity(client, admin)
+    hidden = upload(client, auth).json()
+    visible = [upload(client, auth).json() for _ in range(3)]
+    body = (f"![![hidden]({hidden['url']})]({visible[0]['url']})\n\n"
+            f"[![linked]({visible[1]['url']})](https://example.com)\n\n"
+            f"![reference][ref]\n\n[ref]: {visible[2]['url']}")
+    post = commit(client, auth, make_draft(client, auth, content=body))
+    publish(client, auth, post)
+    client.cookies.clear()
+    # Alt descendants render as text, so they must never acquire public access.
+    assert client.get(hidden['url']).status_code == 404
+    assert all(client.get(image['url']).status_code == 200 for image in visible)

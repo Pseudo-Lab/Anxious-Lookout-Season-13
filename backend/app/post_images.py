@@ -68,7 +68,9 @@ def references(payload, prefix=None):
                         identity = uuid.UUID(source[len(start):])
                         if source == url(identity, prefix): found.add(identity)
                     except ValueError: pass
-            if token.children: walk(token.children)
+                # Image children form alt text, not rendered image elements.
+                # Descend through ordinary inline containers only.
+            elif token.children: walk(token.children)
     walk(MarkdownIt('commonmark').parse(payload['content']))
     return sorted(found, key=str)
 
