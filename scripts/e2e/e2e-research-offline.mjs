@@ -470,7 +470,9 @@ async function dropFirstSend(p) {
   await openAt(page, s1, U(`/research/document/?id=${id}`));
   await send(chat, `/fixture/document-update ${id} ${d.body.version}`);
   await settled(chat);
-  check("IW. chat shows proposal with review link", await appears(chat.getByRole("link", { name: "제안 검토" })));
+  // #28 D1 뒤로는 이전 research_document_save 차례에도 '제안 검토'(새 문서 제안) 링크가 있으므로 이 도구 항목의 링크를 기다린다.
+  const updLink = chat.locator("li", { hasText: "research_document_update" }).last().getByRole("link", { name: "제안 검토" });
+  check("IW. chat shows proposal with review link", await appears(updLink));
   const head = (await api.get(`/research/documents/${id}`)).body;
   const props = (await api.get(`/research/documents/${id}/proposals`)).body?.items ?? [];
   check(
@@ -478,7 +480,7 @@ async function dropFirstSend(p) {
     head.content === "제안 전 본문\n" && head.latestVersion.number === 1 && props.length === 1 && props[0].status === "pending",
     JSON.stringify({ n: head.latestVersion.number, props: props.map((p) => p.status) })
   );
-  await chat.getByRole("link", { name: "제안 검토" }).last().click();
+  await updLink.click();
   const box = main.locator("#proposals");
   check("IW. proposal diff shown", await appears(box.locator('[data-diff="add"]', { hasText: "Complete fixture proposal content" })));
   await box.getByRole("button", { name: "제안 수락" }).click();
@@ -628,10 +630,19 @@ async function dropFirstSend(p) {
   const ctxDraft = new URL(page.url()).searchParams.get("draft");
   await chat.getByLabel("메시지").waitFor();
   check("IP6. write workspace hint", await appears(chat.getByText("보고 있는 화면: 글 쓰기")));
+  const ip6Responses = [];
+  const onIp6 = async (r) => {
+    if (r.request().method() === "POST" && /\/api\/research\/sessions\/[^/]+\/messages$/.test(new URL(r.url()).pathname))
+      ip6Responses.push(`${r.status()} ${(await r.text().catch(() => "")).slice(0, 300)}`);
+  };
+  page.on("response", onIp6);
   await send(chat, "초안 문맥 질문");
   await settled(chat);
+  await page.waitForTimeout(1000);
+  page.off("response", onIp6);
+  console.log(`INFO IP6 message responses: ${ip6Responses.join(" | ")}`);
   check("IP6. page sent as post_workspace with draftId", bodies.at(-1)?.page?.kind === "post_workspace" && bodies.at(-1)?.page?.draftId === ctxDraft, JSON.stringify(bodies.at(-1)?.page));
-  check("IP6. server accepted the draft context", (await userMsgs(chat, "초안 문맥 질문").count()) >= 1);
+  check("IP6. server accepted the draft context", (await appears(userMsgs(chat, "초안 문맥 질문"))), `${ip6Responses.join(" | ")} || ${(await chat.innerText()).slice(-300)}`);
   await page.unroute("**/api/research/sessions/*/messages", record);
   const docProposalLink = chat.locator("li", { hasText: "research_document_save" }).last().getByRole("link", { name: "제안 검토" });
   const docProposalHref = await docProposalLink.getAttribute("href");
