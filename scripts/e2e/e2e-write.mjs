@@ -429,8 +429,24 @@ check("WP12. public post scope: bounded", await appears(chat.getByText("다음 �
 await page.goto(U(`/write/?id=${postId}`));
 await main.getByRole("button", { name: "내용 수정" }).click();
 const imgPanel = main.getByRole("region", { name: "이미지" });
+// 기존 글 편집 중 업로드: 응답을 기다리는 동안 '편집 닫기'도 잠긴다(F1 terminal action).
+let releaseSpare;
+const heldSpare = new Promise((r) => (releaseSpare = r));
+const holdSpare = async (route) => {
+  if (route.request().method() === "POST") await heldSpare;
+  return route.continue().catch(() => {});
+};
+await page.route("**/api/research/post-images", holdSpare);
 await imgPanel.getByLabel("이미지 파일").setInputFiles({ name: "spare.webp", mimeType: "image/webp", buffer: Buffer.from("RIFF0000WEBPVP8 ") });
+await main.getByText("이미지를 올리는 중입니다", { exact: false }).waitFor();
+check(
+  "WP12b. close/save locked while uploading in an existing post",
+  (await main.getByRole("button", { name: "편집 닫기(초안 보관)" }).isDisabled()) && (await main.getByRole("button", { name: "새 버전으로 저장" }).isDisabled())
+);
+releaseSpare();
 await imgPanel.getByText("올렸습니다", { exact: false }).waitFor();
+await page.unroute("**/api/research/post-images", holdSpare);
+check("WP12b. close unlocked after upload", !(await main.getByRole("button", { name: "편집 닫기(초안 보관)" }).isDisabled()));
 // 방금 넣은 이미지 줄은 본문에서 다시 빼서 쓰지 않는 이미지로 만든다
 const withSpare = await main.getByLabel("본문").inputValue();
 await main.getByLabel("본문").fill(withSpare.replace(/\n*!\[spare\]\([^)]*\)\n?/, "\n"));
