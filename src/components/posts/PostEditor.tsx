@@ -119,6 +119,14 @@ export default function PostEditor({
   const [resolving, setResolving] = useState(0);
   const [materialNote, setMaterialNote] = useState<React.ReactNode>(null);
   const alive = useRef(true);
+  // 자료 찾기 요청 번호와, 자료마다 '뺄 때 이미 보낸 마지막 요청 번호'. 그 요청(과 그 전 요청)의 늦은 응답은 뺀 자료를 다시 넣지 않는다.
+  // 뺀 뒤에 새로 연결한 문서의 요청은 번호가 더 커서 그 자료를 다시 담을 수 있다(리뷰 F1).
+  const resolveSeq = useRef(0);
+  const removedAt = useRef(new Map<string, number>());
+  function removeMaterial(id: string) {
+    removedAt.current.set(id, resolveSeq.current);
+    editor.update((v) => ({ ...v, materialIds: v.materialIds.filter((x) => x !== id) }));
+  }
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -134,6 +142,7 @@ export default function PostEditor({
       setMaterialNote(<p className="text-xs text-amber-800">로그인 상태를 확인하지 못해 연결 문서의 자료를 담지 못했습니다. 필요하면 자료를 직접 추가하세요.</p>);
       return;
     }
+    const seq = ++resolveSeq.current;
     setResolving((n) => n + 1);
     const res = await resolvePostMaterials(added, csrfToken);
     if (!alive.current) return;
@@ -150,9 +159,10 @@ export default function PostEditor({
     let full = 0;
     editor.update((v) => {
       const ids = [...v.materialIds];
-      // 기다리는 사이 연결을 해제한 문서의 자료는 담지 않는다
+      // 기다리는 사이 연결을 해제한 문서의 자료와, 이 요청을 보낸 뒤 사람이 뺀 자료는 담지 않는다
       for (const m of res.data.items) {
         if (ids.includes(m.id) || !m.documentIds.some((d) => v.documentIds.includes(d))) continue;
+        if ((removedAt.current.get(m.id) ?? 0) >= seq) continue;
         if (ids.length >= MATERIAL_MAX) full++;
         else ids.push(m.id);
       }
@@ -325,7 +335,7 @@ export default function PostEditor({
         ids={values.materialIds}
         sources={linkedSources}
         onAdd={(id) => editor.update((v) => (v.materialIds.includes(id) || v.materialIds.length >= MATERIAL_MAX ? v : { ...v, materialIds: [...v.materialIds, id] }))}
-        onRemove={(id) => editor.update((v) => ({ ...v, materialIds: v.materialIds.filter((x) => x !== id) }))}
+        onRemove={removeMaterial}
         notice={
           <>
             {resolving > 0 && (

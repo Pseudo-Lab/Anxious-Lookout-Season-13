@@ -285,6 +285,63 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   await anon.context().close();
 }
 
+// WP4b. 리뷰 F1: 자료 찾기 응답을 기다리는 동안(요청 2개가 겹쳐도) 사람이 뺀 자료는 늦은 응답이 다시 넣지 않는다.
+//       뺀 뒤에 새로 연결한 문서는 그 자료를 다시 담을 수 있다.
+{
+  const doc = async (title) => (await api.send("POST", "/research/documents", { title, content: title })).body;
+  const docC = await doc("경합 문서 C");
+  const docD = await doc("경합 문서 D");
+  const docE = await doc("경합 문서 E");
+  for (const d of [docC, docD, docE]) await relate(d.id, matA.id);
+  await page.goto(U("/write/new/"));
+  await main.getByLabel("제목").fill("자료 제거 경합");
+  await main.getByLabel("본문").fill("본문");
+  const box = main.getByRole("region", { name: "바탕이 된 자료" });
+  const row = box.locator("li", { hasText: "문서 A의 자료" });
+  await box.getByRole("button", { name: "자료 추가" }).click();
+  await box.getByLabel("추가할 자료 찾기").fill("문서 A의");
+  await box.getByRole("button", { name: "문서 A의 자료 추가" }).click();
+  await box.getByRole("button", { name: "찾기 닫기" }).click();
+  await row.waitFor();
+  let release;
+  const held = new Promise((r) => (release = r));
+  let holding = 0;
+  const hold = async (route) => {
+    holding++;
+    await held;
+    return route.continue().catch(() => {});
+  };
+  await page.route("**/api/research/post-material-options/resolve", hold);
+  const link = async (title) => {
+    await main.getByLabel("연결할 문서 찾기").fill(title);
+    await main.getByRole("button", { name: `${title} 연결` }).click();
+  };
+  await main.getByRole("button", { name: "문서 연결" }).click();
+  await link("경합 문서 C");
+  await link("경합 문서 D");
+  for (let i = 0; i < 50 && holding < 2; i++) await page.waitForTimeout(100);
+  check("WP4b. setup: two resolve requests pending", holding === 2, String(holding));
+  await row.getByRole("button", { name: "자료 빼기" }).click();
+  check("WP4b. removed while resolving", (await row.count()) === 0);
+  release();
+  await main.getByText("연결한 문서의 자료를 찾는 중입니다").waitFor({ state: "detached" });
+  await page.unroute("**/api/research/post-material-options/resolve", hold);
+  check("WP4b. F1: late (overlapping) responses keep the removal", (await row.count()) === 0);
+  let d = null;
+  for (let i = 0; i < 30; i++) {
+    const id = await draftParam();
+    d = id ? await api.get(`/research/post-drafts/${id}`) : null;
+    if (d && JSON.stringify(d.documentIds) === JSON.stringify([docC.id, docD.id])) break;
+    await page.waitForTimeout(300);
+  }
+  check("WP4b. F1: saved draft keeps the removal", !!d && JSON.stringify(d.documentIds) === JSON.stringify([docC.id, docD.id]) && d.materialIds.length === 0, JSON.stringify(d && { documentIds: d.documentIds, materialIds: d.materialIds }));
+  await link("경합 문서 E");
+  check("WP4b. F1: a document linked after the removal adds it again", await appears(row.getByText("문서에서 자동 포함", { exact: false })));
+  await main.getByRole("button", { name: "초안 버리기…" }).click();
+  await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+  await main.getByText("초안을 버렸습니다").waitFor();
+}
+
 // WP5. 기존 글 수정: 주소는 읽기 전용, 새 버전, 버전 비교에 글 정보 변경
 await page.goto(U(`/write/?id=${postId}`));
 await main.getByRole("button", { name: "내용 수정" }).click();
