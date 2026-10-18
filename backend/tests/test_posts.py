@@ -15,7 +15,7 @@ def posts_schema(schema):
 
 
 def content(**changes):
-    return {'title': 'Post', 'content': '# Text', 'description': 'Summary', 'slug': 'my-post',
+    return {'title': 'Post', 'content': '# Text', 'description': 'Summary', 'slug': '',
             'tags': ['one'], 'coverImageId': None, 'documentIds': [], **changes}
 
 
@@ -114,8 +114,9 @@ def test_cas_active_draft_concurrency_and_slug_reservation(client, admin):
     _, other = identity(client, admin, '222222')
     duplicate = make_draft(client, other)
     result = client.post(ROOT+'/'+duplicate['id']+'/commit', json={'expectedDraftRevision': 1}, headers=headers(other))
-    assert result.status_code == 409 and result.json()['error']['details']['reason'] == 'slug_taken'
-    assert client.get(ROOT+'/'+duplicate['id']).json()['state'] == 'active'
+    assert result.status_code == 200, result.text
+    assert result.json()['post']['latestVersion']['slug'] != post['latestVersion']['slug']
+    assert client.get(ROOT+'/'+duplicate['id']).json()['state'] == 'committed'
 
 
 def test_stale_base_explicit_resolution_and_transaction_rollback(client, admin, monkeypatch):
@@ -153,7 +154,7 @@ def test_stale_base_explicit_resolution_and_transaction_rollback(client, admin, 
 def test_bad_input_csrf_and_schema_grants(client, admin):
     _, auth = identity(client, admin)
     assert client.post(ROOT, json=content(), headers={'Idempotency-Key': str(uuid.uuid4())}).status_code == 403
-    for changes in ({'slug': '../bad'}, {'tags': ['\x00']}, {'documentIds': ['nope']}, {'ownerId': str(uuid.uuid4())}):
+    for changes in ({'tags': ['\x00']}, {'documentIds': ['nope']}, {'ownerId': str(uuid.uuid4())}):
         assert client.post(ROOT, json=content(**changes), headers=headers(auth)).status_code == 422
     assert client.get('/api/research/posts?limit=101').status_code == 422
     assert client.get('/api/research/posts?cursor=bad').status_code == 422

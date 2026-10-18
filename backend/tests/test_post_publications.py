@@ -38,7 +38,7 @@ def test_public_snapshot_edit_republish_cache_and_withdraw(client, admin):
     _, auth = identity(client, admin)
     post = commit(client, auth, make_draft(client, auth))
     release = publish(client, auth, post)
-    url = '/api/public/posts/my-post'
+    url = '/api/public/posts/'+post['latestVersion']['slug']
     first = client.get(url)
     assert first.json() == release
     assert first.headers['cache-control'] == 'public, max-age=0, must-revalidate'
@@ -77,7 +77,7 @@ def test_preview_staleness_and_private_reference_body_never_public(client, admin
     assert release['documents'][0]['title'] == 'Changed reference'
     assert 'DO NOT PUBLISH' not in json.dumps(release)
     client.request('DELETE', '/api/research/documents/'+doc['id'], json={'expectedVersion': 2}, headers=headers(auth))
-    assert client.get('/api/public/posts/my-post').json() == release
+    assert client.get('/api/public/posts/'+post['latestVersion']['slug']).json() == release
     assert preview(client, post)['publishable'] is False
     assert client.get('/api/public/posts?q=Post').json()['items'][0]['postId'] == post['id']
 
@@ -101,7 +101,7 @@ def test_concurrent_publish_archive_and_pagination(client, admin):
     assert client.get('/api/public/post-tags', params={'cursor': tags['nextCursor']}).json()['items'] == [{'tag':'b','count':2},{'tag':'c','count':1}]
     assert client.get('/api/public/post-tags?cursor=bad').status_code == 422
     assert client.request('DELETE', '/api/research/posts/'+first['id'], json={'expectedVersion': 2}, headers=headers(auth)).status_code == 200
-    assert client.get('/api/public/posts/my-post').status_code == 404
+    assert client.get('/api/public/posts/'+first['latestVersion']['slug']).status_code == 404
     assert len(client.get('/api/public/posts').json()['items']) == 1
 
 

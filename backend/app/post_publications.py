@@ -54,8 +54,16 @@ def preview(store, identity, version_id=None, base_path=''):
                           'publicUrl': base_path+'/public/document/?id='+str(document.id) if publication else None})
         evidence.append([str(document.id), document.version, document.archived, str(publication.id) if publication else None])
         publishable = publishable and not document.archived
-    value = dict(version.payload)
-    image_ids = posts.validate_content(store, {**value, 'documentIds': []}, commit=True)
+    value = posts.stored_payload(version.payload)
+    from .post_materials import current as material_version
+    materials = []
+    for identity in value['materialIds']:
+        material = store.owned_item(identity, 'material', lock=True)
+        content = material_version(store, material)
+        materials.append({'id': str(material.id), 'title': content.title, 'sourceUrl': content.source_url})
+        evidence.append(['material', str(material.id), material.version, material.archived])
+        publishable = publishable and not material.archived
+    image_ids = posts.validate_content(store, {**value, 'documentIds': [], 'materialIds': []}, commit=True)
     previous = current(store.db, post_id=post.id)
     account = store.db.get(Account, store.owner)
     author = {'login': account.login, 'name': account.login}
@@ -63,11 +71,11 @@ def preview(store, identity, version_id=None, base_path=''):
     from .post_models import PostImage
     images = [image_value(store.db.get(PostImage, identity), base_path) for identity in image_ids]
     state = {'post': str(post.id), 'version': str(version.id), 'cas': post.version, 'documents': documents,
-             'evidence': evidence, 'author': author, 'images': images}
+             'evidence': evidence, 'author': author, 'images': images, 'materials': materials}
     token = hashlib.sha256(json.dumps(state, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
     return {**value, 'postId': str(post.id), 'versionId': str(version.id), 'expectedVersion': post.version,
             'previewToken': token, 'publishable': publishable, 'author': author, 'documents': documents,
-            'images': images, 'currentPublication': previous.snapshot if previous else None}
+            'images': images, 'materials': materials, 'currentPublication': public_value(previous) if previous else None}
 
 
 def publish(store, identity, body, base_path):
@@ -75,9 +83,9 @@ def publish(store, identity, body, base_path):
     post = posts.owned(store, identity, active=True)
     posts.expect(post, body.expectedVersion)
     if not hmac.compare_digest(body.previewToken, shown['previewToken']): conflict('preview_changed')
-    if not shown['publishable']: fail('validation_error', 'Remove archived document references before publishing', 422)
+    if not shown['publishable']: fail('validation_error', 'Remove archived document or material references before publishing', 422)
     identity, now = uuid.uuid4(), datetime.now(timezone.utc)
-    snapshot = {key: shown[key] for key in ('postId', 'versionId', 'slug', 'title', 'description', 'content', 'tags', 'author', 'documents')}
+    snapshot = {key: shown[key] for key in ('postId', 'versionId', 'slug', 'title', 'description', 'content', 'tags', 'author', 'documents', 'materials')}
     from .post_images import url
     snapshot.update(id=str(identity), coverImageUrl=url(shown['coverImageId'], base_path) if shown['coverImageId'] else None, publishedAt=stamp(now))
     row = PostPublication(id=identity, post_id=post.id, version_id=parse_id(body.versionId), snapshot=snapshot, image_ids=[parse_id(image['id']) for image in shown['images']],
@@ -103,6 +111,10 @@ def withdraw(store, identity, body):
     post.updated_at = datetime.now(timezone.utc)
     store.db.flush()
     return {'id': str(post.id), 'version': post.version, 'publication': None}
+
+
+def public_value(row):
+    return {**row.snapshot, 'materials': row.snapshot.get('materials', [])}
 
 
 def public_response(request, value):
@@ -146,7 +158,7 @@ def register(app, authorized, sessions, settings, response, write):
                 query = query.where(PostPublication.snapshot['tags'].contains([tag]))
             query = posts.search(query, PostPublication.snapshot['title'].astext, q)
             rows = db.scalars(page_query(query, PostPublication, limit, cursor)).all()
-            value = {'items': [{key: value for key, value in row.snapshot.items() if key != 'content'} for row in rows[:limit]],
+            value = {'items': [{key: value for key, value in public_value(row).items() if key != 'content'} for row in rows[:limit]],
                      'nextCursor': encode_cursor(rows[limit-1]) if len(rows)>limit else None}
             return public_response(request, value)
 
@@ -156,7 +168,7 @@ def register(app, authorized, sessions, settings, response, write):
             ready(db)
             row = current(db, slug=slug)
             if row is None: fail('not_found', 'Not found', 404)
-            return public_response(request, row.snapshot)
+            return public_response(request, public_value(row))
 
     @app.get(public + '/post-tags')
     def tags(request: Request, limit: int = 30, cursor: str | None = None):

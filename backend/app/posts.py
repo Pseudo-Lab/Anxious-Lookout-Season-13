@@ -1,5 +1,5 @@
 """Owner-only post writing with retained snapshots and explicit CAS commits."""
-import re
+import uuid
 from datetime import datetime, timezone
 from uuid import UUID
 from fastapi import Request
@@ -17,17 +17,11 @@ class PostText(Input):
     title: str = Field(max_length=300)
     content: str = Field(max_length=200000)
     description: str = Field(max_length=1000)
-    slug: str = Field(max_length=100)
+    slug: str = Field(default='', max_length=100)
     tags: list[str] = Field(max_length=20)
     coverImageId: str | None
     documentIds: list[str] = Field(max_length=50)
-
-    @field_validator('slug')
-    @classmethod
-    def slug_format(cls, value):
-        if value and not re.fullmatch(r'[a-z0-9-]+', value):
-            raise ValueError('Use lowercase slug letters, numbers and hyphens')
-        return value
+    materialIds: list[str] | None = Field(default=None, max_length=50)
 
     @field_validator('tags')
     @classmethod
@@ -48,6 +42,11 @@ class PostText(Input):
         if len(set(values)) != len(values):
             raise ValueError('Duplicate document references')
         return values
+
+    @field_validator('materialIds')
+    @classmethod
+    def materials(cls, values):
+        return cls.documents(values) if values is not None else None
 
     @field_validator('coverImageId')
     @classmethod
@@ -102,7 +101,7 @@ def expect(row, expected):
 
 
 def version_value(row, content=True):
-    payload = dict(row.payload)
+    payload = stored_payload(row.payload)
     if not content: payload.pop('content', None)
     return {**payload, 'id': str(row.id), 'postId': str(row.post_id), 'number': row.number, 'createdAt': stamp(row.created_at)}
 
@@ -116,7 +115,7 @@ def post_value(store, row, content=True):
 
 
 def draft_value(row, content=True):
-    payload = dict(row.payload)
+    payload = stored_payload(row.payload)
     if not content: payload.pop('content', None)
     return {**payload, 'id': str(row.id), 'postId': str(row.post_id) if row.post_id else None,
             'revision': row.revision, 'basePostVersion': row.base_post_version,
@@ -139,14 +138,21 @@ def payload(body):
     return PostText.model_validate({key: getattr(body, key) for key in PostText.model_fields}).model_dump()
 
 
+def stored_payload(value):
+    return {**value, 'materialIds': value.get('materialIds', []), 'materialSources': value.get('materialSources', [])}
+
+
+def choose_slug(value, post=None):
+    if post and value['slug'] and value['slug'] != post.slug:
+        fail('validation_error', 'A saved post slug cannot change', 422)
+    value['slug'] = post.slug if post else ''
+
+
 def validate_content(store, value, commit=False):
-    if commit and any(not value[key].strip() for key in ('title', 'content', 'slug')):
-        fail('validation_error', 'Title, content and slug are required to save a version', 422)
-    if commit and not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', value['slug']):
-        fail('validation_error', 'A saved slug requires words joined with single hyphens', 422)
-    for identity in value['documentIds']:
-        row = store.owned_item(identity, 'document', lock=True)
-        if row.archived: fail('validation_error', 'Remove archived document references before saving', 422)
+    if commit and any(not value[key].strip() for key in ('title', 'content')):
+        fail('validation_error', 'Title and content are required to save a version', 422)
+    from .post_materials import select_sources
+    select_sources(store, value)
     from .post_images import validate
     return validate(store, value)
 
@@ -160,7 +166,8 @@ def create_draft(store, body):
         if current_draft(store, row.id): conflict('active_draft_exists')
         expect(row, body.basePostVersion)
         if head(store, row).id != parse_id(body.baseVersionId): conflict('base_changed')
-        if value['slug'] != row.slug: fail('validation_error', 'A saved post slug cannot change', 422)
+        choose_slug(value, row)
+    if not body.postId: choose_slug(value)
     row = PostDraft(owner_id=store.owner, post_id=parse_id(body.postId) if body.postId else None,
         base_post_version=body.basePostVersion, base_version_id=parse_id(body.baseVersionId) if body.baseVersionId else None,
         payload=value, image_ids=image_ids)
@@ -178,7 +185,9 @@ def change_draft(store, identity, body, discard=False):
         value = payload(body)
         if row.post_id:
             post = owned(store, row.post_id, active=True)
-            if value['slug'] != post.slug: fail('validation_error', 'A saved post slug cannot change', 422)
+            choose_slug(value, post)
+        else:
+            choose_slug(value)
         row.image_ids = validate_content(store, value)
         row.payload = value
         row.revision += 1
@@ -188,12 +197,18 @@ def change_draft(store, identity, body, discard=False):
 
 
 def save_version(store, value, post=None):
+    value = stored_payload(value)
+    choose_slug(value, post)
     image_ids = validate_content(store, value, commit=True)
     now = datetime.now(timezone.utc)
     if post is None:
-        # Slug namespace crosses owners. Serialize reservation without leaking an owner.
-        store.db.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:slug, 28006))'), {'slug': value['slug']})
-        if store.db.scalar(select(Post.id).where(Post.slug == value['slug'])): conflict('slug_taken')
+        # Global namespace: lock each random candidate before checking/reserving.
+        for _ in range(10):
+            value['slug'] = 'post-' + uuid.uuid4().hex
+            store.db.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:slug, 28006))'), {'slug': value['slug']})
+            if not store.db.scalar(select(Post.id).where(Post.slug == value['slug'])): break
+        else:
+            fail('not_ready', 'Unable to allocate a post address', 503)
         post = Post(owner_id=store.owner, slug=value['slug'], created_at=now, updated_at=now)
         store.db.add(post); store.db.flush()
     else:

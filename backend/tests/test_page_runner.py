@@ -191,7 +191,7 @@ def test_mapping_rejects_shared_or_ambiguous_bindings(tmp_path, monkeypatch, dam
 def test_offline_post_proposal_reads_current_source(tmp_path, monkeypatch, kind):
     from tests.test_posts import content
     identity = str(uuid.uuid4())
-    source = content(title='Human title', content='Human words', slug='human-slug', tags=['kept'])
+    source = content(title='Human title', content='Human words', slug='human-slug', tags=['kept'], materialIds=[str(uuid.uuid4())])
     page = {'kind': 'post', 'resourceId': identity} if kind in {'post', 'read-failure'} else (
         {'kind': 'post_workspace', 'draftId': identity} if kind == 'draft' else {'kind': 'post_workspace'})
     calls = []
@@ -230,7 +230,7 @@ def test_offline_post_proposal_reads_current_source(tmp_path, monkeypatch, kind)
             assert len(calls) == 1 and 'postId' not in args and 'draftId' not in args
         if kind in {'post','draft'}:
             assert args['content'].startswith('Human words') and args['slug'] == 'human-slug'
-            assert args['tags'] == ['kept']
+            assert args['tags'] == ['kept'] and args['materialIds'] == source['materialIds']
         tools = [item for item in record['record']['turns'][0]['items'] if item['type'] == 'dynamicToolCall']
         assert all(item['status'] == 'completed' for item in tools)
     finally:

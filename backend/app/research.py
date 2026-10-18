@@ -514,6 +514,8 @@ def register_research(app, sessions, settings, current_session, error):
     register_writing(app, authorized, settings, response, write)
     from .posts import register_posts
     register_posts(app, authorized, settings, response, write)
+    from .post_materials import register as register_post_materials
+    register_post_materials(app, authorized, settings, response)
     from .post_images import register as register_images
     register_images(app, authorized, sessions, settings, response, write)
     from .post_proposals import register as register_post_proposals

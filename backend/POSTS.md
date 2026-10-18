@@ -197,3 +197,28 @@ Without either hint it proposes a new post. Source metadata is retained and
 "Complete fixture post proposal" is appended to title/body. Read failure stops
 without a proposal. This creates a pending proposal only; acceptance remains the
 human HTTP action. The production native binary has no such fixture command.
+
+## #31 writing input update (W1/W3)
+
+The superseding contract is `agent-worktree-comm/api-contracts/issue31-write-ux.md`.
+New drafts/proposals do not reserve a slug: supplied values are ignored. The first
+human commit/accept allocates `post-` plus UUIDv4 hex under the global slug lock,
+retrying collisions. Existing/imported addresses remain permanent. Existing-post
+writes may omit slug, while an explicit different nonempty slug is rejected.
+
+PostText now accepts materialIds. Omission expands the chosen documents' active
+direct material relations once; an explicit array (including empty) is the final
+selection. The resolve endpoint lets the editor merge sources when a document is
+added; both automatic and direct sources can be removed. Stored materialSources
+records document origins for display. References are validated under the owner
+graph lock, bounded to50, and frozen with each version/proposal/draft. Relation
+changes never recompute a saved selection. Publication previews bind selected
+material versions/archive state; public snapshots include only id/title/sourceUrl,
+never material bodies, notes or relation descriptions.
+
+This update extends existing JSONB payloads, not database structure. No0007
+migration, rewrite of retained records, or change to imported addresses is needed.
+Old payloads/snapshots are read with empty material fields. Continue the existing
+0006 readiness and coordinated backup procedure when deploying the reviewed
+images. Old immutable public snapshots remain unchanged in storage. W4 is outside
+this backend change until a separate decision is delivered.

@@ -35,6 +35,7 @@ def post_candidate(source=None):
         'title': 'Fixture post', 'content': '', 'description': '',
         'slug': 'fixture-post-' + uuid.uuid4().hex[:12], 'tags': [],
         'coverImageId': None, 'documentIds': []}
+    result['materialIds'] = source.get('materialIds', []) if source else []
     result['title'] = (result['title'] + ' — Complete fixture post proposal')[-300:]
     result['content'] += '\n\nComplete fixture post proposal'
     if not result['slug']: result['slug'] = 'fixture-post-' + uuid.uuid4().hex[:12]

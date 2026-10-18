@@ -81,7 +81,7 @@ def test_posts_restore_retains_versions_and_drafts(admin, monkeypatch):
         with Session(candidate) as db, db.begin():
             owner = db.execute(text("INSERT INTO auth.accounts(github_id,login,is_approved,role) VALUES('444444','post-restore',true,'editor') RETURNING id")).scalar_one()
             store = Store(db, owner)
-            body = dict(title='Retained', content='Version', description='', slug='restored', tags=[], coverImageId=None, documentIds=[])
+            body = dict(title='Retained', content='Version', description='', slug='', tags=[], coverImageId=None, documentIds=[])
             initial = create_draft(store, CreateDraft(**body))
             post = commit_draft(store, initial['id'], DraftCommit(expectedDraftRevision=1))['post']
             body['content'] = 'Unsaved words'

@@ -72,7 +72,7 @@ TOOLS = {
     "research_relations": (Versions, "List both endpoints and directions of your own item's relations."),
     "research_material_save": (SaveMaterial, "Save web research with original sourceUrl, collectedAt and contentKind (full/excerpt/summary). Keep source citations; distinguish summaries from full text. mutationId is a UUID reused only for an identical retry."),
     "research_document_save": (SaveDocument, "Propose a new private Markdown document. No document or version exists until the user accepts in the editor. Preserve citations. mutationId is a UUID reused for identical retries."),
-    "research_post_propose": (ProposePost, "Propose a new post or a complete post revision. Read source documents and the human draft first. Never commits or publishes: the user must review the diff and accept."),
+    "research_post_propose": (ProposePost, "Propose a new post or a complete post revision. Read source documents/materials and the human draft first. Slug is optional and server-generated for new posts. materialIds is the explicit source selection; omission expands document sources once. Never commits or publishes: the user must review the diff and accept."),
     "research_post_draft_get": (DraftLookup, "Read your own current post draft using postId, or a specific draftId. Supply exactly one."),
     "research_material_update": (EditMaterial, "Append a material snapshot using expectedVersion; preserve previous content."),
     "research_document_update": (EditDocument, "Create a pending document proposal using expectedVersion. Returns proposal status/baseVersionId; does not change the document head. Only the user can accept it in the editor. Preserve previous content."),

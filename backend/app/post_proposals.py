@@ -50,7 +50,7 @@ class DraftLookup(Input):
 
 
 def value(row, content=True):
-    payload = dict(row.payload)
+    payload = posts.stored_payload(row.payload)
     if not content: payload.pop('content', None)
     return {**payload, 'id': str(row.id), 'postId': str(row.post_id) if row.post_id else None,
         'version': row.version, 'basePostVersion': row.base_post_version,
@@ -74,7 +74,7 @@ def create(store, body):
     post = posts.owned(store, body.postId, active=True) if body.postId else None
     if post:
         posts.expect(post, body.expectedVersion)
-        if payload['slug'] != post.slug: fail('validation_error', 'A saved post slug cannot change', 422)
+    posts.choose_slug(payload, post)
     if body.draftId:
         draft = posts.draft(store, body.draftId)
         check_draft(draft, body.expectedDraftRevision)
