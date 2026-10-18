@@ -1,4 +1,4 @@
-// #28 글(post) 모의 API(api-contracts/issue28-posts.md). mock-research.mjs가 문서 조회 함수를 넘겨 호출한다.
+// #28 글(post) 모의 API(api-contracts/issue28-posts.md, #31 issue31-write-ux.md). mock-research.mjs가 문서·자료 조회 함수를 넘겨 호출한다.
 // 실제 backend를 대체하지 않으며 front가 쓰는 계약 경로와 409/422 갈래만 흉내 낸다.
 import crypto from "node:crypto";
 
@@ -24,10 +24,12 @@ function page(list, url) {
 
 // ---- 검증 ----
 
-const DRAFT_SLUG = /^[a-z0-9-]*$/;
-const SLUG = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const REF_MAX = 50;
+const idList = (v) => Array.isArray(v) && v.length <= REF_MAX && new Set(v).size === v.length && v.every((x) => typeof x === "string");
+// #31 W1: 새 글 주소는 첫 commit/accept 때 서버가 정한다.
+const newSlug = () => `post-${uuid().replace(/-/g, "")}`;
 
-/** 초안·제안 공통 PostText 형식 검사. strict=true면 commit/accept 규칙(본문·제목·slug 필수, 엄격 slug). */
+/** 초안·제안 공통 PostText 형식 검사. strict=true면 commit/accept 규칙(본문·제목 필수). slug·materialIds는 선택. */
 function textFields(b, strict) {
   const f = [];
   const str = (k, max) => {
@@ -36,8 +38,9 @@ function textFields(b, strict) {
   str("title", 300);
   str("content", 200000);
   str("description", 1000);
-  if (typeof b.slug !== "string" || b.slug.length > 100 || !DRAFT_SLUG.test(b.slug)) f.push({ path: "body.slug", message: "[a-z0-9-]*<=100" });
-  else if (strict && !SLUG.test(b.slug)) f.push({ path: "body.slug", message: "slug" });
+  if (b.slug !== undefined && (typeof b.slug !== "string" || b.slug.length > 100)) f.push({ path: "body.slug", message: "string<=100" });
+  if (b.materialIds !== undefined && b.materialIds !== null && !idList(b.materialIds)) f.push({ path: "body.materialIds", message: "unique uuids<=50" });
+  if (b.materialSources !== undefined) f.push({ path: "body.materialSources", message: "output only" });
   if (!Array.isArray(b.tags) || b.tags.length > 20 || b.tags.some((t) => typeof t !== "string" || t.trim().length < 1 || t.trim().length > 50))
     f.push({ path: "body.tags", message: "<=20 tags, 1-50 chars" });
   if (b.coverImageId !== null && typeof b.coverImageId !== "string") f.push({ path: "body.coverImageId", message: "uuid|null" });
@@ -54,8 +57,39 @@ const invalid = (fields) => fail(422, "validation_error", "Invalid request", { f
 function text(b) {
   const tags = [];
   for (const t of b.tags) if (!tags.includes(t.trim())) tags.push(t.trim());
-  return { title: b.title, content: b.content, description: b.description, slug: b.slug, tags, coverImageId: b.coverImageId, documentIds: [...b.documentIds] };
+  return { title: b.title, content: b.content, description: b.description, tags, coverImageId: b.coverImageId, documentIds: [...b.documentIds] };
 }
+
+/**
+ * #31 W3 자료 선택. 생략·null이면 선택 문서의 활성 직접 관계를 한 번 펼친다(문서 순서 → 관계 순서, 보관 자료 제외).
+ * 명시 배열이면 그대로 최종 집합. 출처는 선택 문서의 현재 활성 관계로 계산해 함께 저장한다.
+ */
+function materialsOf(owner, documentIds, materialIds, docs) {
+  let ids = materialIds;
+  if (ids === undefined || ids === null) {
+    ids = [];
+    for (const d of documentIds)
+      for (const mid of docs.docMaterials(owner, d)) if (!ids.includes(mid) && docs.material(owner, mid) && !docs.material(owner, mid).archived) ids.push(mid);
+  }
+  const materialSources = ids.map((mid) => ({ materialId: mid, documentIds: documentIds.filter((d) => docs.docMaterials(owner, d).includes(mid)) }));
+  return { materialIds: [...ids], materialSources };
+}
+/** 초안·제안 저장 때 자료 검증: 남의 것·없는 것 404, 보관 422, 50개 초과 422(잘라내지 않는다). */
+function materialFailure(owner, ids, docs) {
+  if (ids.some((id) => !docs.material(owner, id))) return notFound();
+  const archived = ids.filter((id) => docs.material(owner, id).archived);
+  if (archived.length) return invalid(archived.map((id) => ({ path: "body.materialIds", message: `archived material: ${id}` })));
+  if (ids.length > REF_MAX) return invalid([{ path: "body.materialIds", message: "<=50" }]);
+  return null;
+}
+/** 입력 → 저장할 내용(자료 선택 확정 포함). 실패면 { failure }. */
+function textWith(owner, b, docs) {
+  const sel = materialsOf(owner, b.documentIds, b.materialIds, docs);
+  const failure = materialFailure(owner, sel.materialIds, docs);
+  return failure ? { failure } : { value: { ...text(b), ...sel } };
+}
+/** 기존 글: 빈 값·생략은 저장된 주소, 다른 값은 422. */
+const slugMismatch = (b, p) => typeof b.slug === "string" && b.slug !== "" && b.slug !== p.slug;
 
 const OWN_IMAGE = new RegExp(`\\]\\(${BASE.replace(/\./g, "\\.")}/api/media/post-images/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\\)`, "g");
 /** 본문의 자체 이미지 ID(정규 형태만, 모의 추출). */
@@ -71,6 +105,10 @@ function refsFields(owner, t, docs) {
     if (!d || d.archived) f.push({ path: "body.documentIds", message: `not an active document: ${id}` });
   }
   if (t.coverImageId !== null && images.get(t.coverImageId)?.owner !== owner) f.push({ path: "body.coverImageId", message: "unknown image" });
+  for (const id of t.materialIds ?? []) {
+    const m = docs.material(owner, id);
+    if (!m || m.archived) f.push({ path: "body.materialIds", message: `not an active material: ${id}` });
+  }
   return f;
 }
 
@@ -117,6 +155,7 @@ function publicView(p, withContent = true) {
     author: { login: pub.authorLogin, name: pub.authorName },
     publishedAt: pub.publishedAt,
     documents: pub.documents.map((d) => ({ ...d })),
+    materials: (pub.materials ?? []).map((m) => ({ ...m })),
   };
   if (!withContent) delete out.content;
   return out;
@@ -126,11 +165,11 @@ function publicView(p, withContent = true) {
 
 function seed(slug, title, description, date, author, tags, content) {
   const id = uuid();
-  const v = { id: uuid(), number: 1, title, content, description, slug, tags, coverImageId: null, documentIds: [], createdAt: `${date}T00:00:00Z` };
+  const v = { id: uuid(), number: 1, title, content, description, slug, tags, coverImageId: null, documentIds: [], materialIds: [], materialSources: [], createdAt: `${date}T00:00:00Z` };
   posts.set(id, {
     id, owner: null, legacy: true, version: 1, archived: false, createdAt: v.createdAt, updatedAt: v.createdAt,
     authorLogin: null, authorName: author, versions: [v], slug,
-    publication: { id: uuid(), versionId: v.id, publishedAt: v.createdAt, authorLogin: null, authorName: author, documents: [] },
+    publication: { id: uuid(), versionId: v.id, publishedAt: v.createdAt, authorLogin: null, authorName: author, documents: [], materials: [] },
   });
   reservedSlugs.add(slug);
 }
@@ -186,14 +225,16 @@ function previewOf(owner, p, v, docs) {
     return { id, title: d?.title ?? "", publicUrl: d?.published ? `${BASE}/public/document/?id=${id}` : null };
   });
   const imgs = imageIdsOf(v).map((id) => ({ id, url: imageUrl(id) }));
+  const mats = v.materialIds.map((id) => docs.material(owner, id));
+  const materials = v.materialIds.map((id, i) => ({ id, title: mats[i]?.title ?? "", sourceUrl: mats[i]?.sourceUrl ?? "" }));
   const publishable = !p.archived && refsFields(owner, v, docs).length === 0;
-  const state = JSON.stringify([p.version, v.id, documents, imgs]);
+  const state = JSON.stringify([p.version, v.id, documents, imgs, mats.map((m) => m && [m.id, m.latestVersionId, m.archived])]);
   const previewToken = crypto.createHash("sha256").update(state).digest("hex").slice(0, 32);
-  const { id: versionId, title, content, description, slug, tags, coverImageId, documentIds } = v;
+  const { id: versionId, title, content, description, slug, tags, coverImageId, documentIds, materialIds, materialSources } = v;
   return {
     postId: p.id, versionId, expectedVersion: p.version, previewToken, publishable,
-    title, content, description, slug, tags, coverImageId, documentIds,
-    author: { login: p.authorLogin }, documents, images: imgs,
+    title, content, description, slug, tags, coverImageId, documentIds, materialIds, materialSources,
+    author: { login: p.authorLogin }, documents, materials, images: imgs,
     currentPublication: p.publication ? publicView(p) : null,
   };
 }
@@ -219,6 +260,14 @@ export function handlePostRead(owner, path, url, docs) {
       .list(owner)
       .filter((d) => !d.archived && d.title.includes(q))
       .map((d) => ({ id: d.id, title: d.title, version: d.version, latestVersionId: d.latestVersionId }));
+    return ok(200, page(list, url));
+  }
+  if (path === "/research/post-material-options") {
+    const q = url.searchParams.get("q") ?? "";
+    const list = docs
+      .materials(owner)
+      .filter((x) => !x.archived && x.title.includes(q))
+      .map(({ id, title, sourceUrl, version, latestVersionId }) => ({ id, title, sourceUrl, version, latestVersionId }));
     return ok(200, page(list, url));
   }
   if ((m = /^\/research\/post-drafts\/([^/]+)$/.exec(path))) {
@@ -272,11 +321,14 @@ export function handlePostMutation(owner, method, path, b, user, docs) {
       if (activeDraftOf(owner, p.id)) return conflict("active_draft_exists");
       if (b.basePostVersion !== p.version) return conflict("post_version");
       if (b.baseVersionId !== latest(p).id) return conflict("base_changed");
-      if (b.slug !== p.slug) return invalid([{ path: "body.slug", message: "slug is fixed" }]);
+      if (slugMismatch(b, p)) return invalid([{ path: "body.slug", message: "slug is fixed" }]);
       base = { postId: p.id, basePostVersion: p.version, baseVersionId: latest(p).id };
     }
+    const tw = textWith(owner, b, docs);
+    if (tw.failure) return tw.failure;
     const t = now();
-    const d = { id: uuid(), owner, ...base, revision: 1, ...text(b), state: "active", createdAt: t, updatedAt: t };
+    const slug = base.postId ? posts.get(base.postId).slug : "";
+    const d = { id: uuid(), owner, ...base, revision: 1, ...tw.value, slug, state: "active", createdAt: t, updatedAt: t };
     drafts.set(d.id, d);
     return ok(201, draftView(d));
   }
@@ -293,12 +345,14 @@ export function handlePostMutation(owner, method, path, b, user, docs) {
     if (method === "PUT" && !m[2]) {
       const fields = textFields(b, false);
       if (fields.length) return invalid(fields);
-      if (p && b.slug !== p.slug) return invalid([{ path: "body.slug", message: "slug is fixed" }]);
-      Object.assign(d, text(b), { revision: d.revision + 1, updatedAt: now() });
+      if (p && slugMismatch(b, p)) return invalid([{ path: "body.slug", message: "slug is fixed" }]);
+      const tw = textWith(owner, b, docs);
+      if (tw.failure) return tw.failure;
+      Object.assign(d, tw.value, { revision: d.revision + 1, updatedAt: now() });
       return ok(200, draftView(d));
     }
     if (method === "POST" && m[2]) {
-      const fields = textFields(d, true);
+      const fields = textFields({ ...d, materialSources: undefined }, true);
       if (fields.length) return invalid(fields);
       const refs = refsFields(owner, d, docs);
       if (refs.length) return invalid(refs);
@@ -312,13 +366,15 @@ export function handlePostMutation(owner, method, path, b, user, docs) {
           return conflict("base_changed");
       } else {
         if (b.expectedVersion !== undefined || b.resolvedBaseVersionId !== undefined) return invalid([{ path: "body", message: "new drafts have no post base" }]);
-        if (reservedSlugs.has(d.slug)) return conflict("slug_taken");
-        post = { id: uuid(), owner, legacy: false, version: 0, archived: false, createdAt: t, updatedAt: t, authorLogin: user.login, authorName: user.login, versions: [], publication: null, slug: d.slug };
+        let slug = newSlug();
+        while (reservedSlugs.has(slug)) slug = newSlug();
+        post = { id: uuid(), owner, legacy: false, version: 0, archived: false, createdAt: t, updatedAt: t, authorLogin: user.login, authorName: user.login, versions: [], publication: null, slug };
         posts.set(post.id, post);
-        reservedSlugs.add(d.slug);
+        reservedSlugs.add(slug);
       }
-      const { title, content, description, slug, tags, coverImageId, documentIds } = d;
-      post.versions.push({ id: uuid(), number: post.versions.length + 1, title, content, description, slug, tags, coverImageId, documentIds: [...documentIds], createdAt: t });
+      const { title, content, description, tags, coverImageId, documentIds } = d;
+      const sel = materialsOf(owner, documentIds, d.materialIds, docs);
+      post.versions.push({ id: uuid(), number: post.versions.length + 1, title, content, description, slug: post.slug, tags, coverImageId, documentIds: [...documentIds], ...sel, createdAt: t });
       post.version++;
       post.updatedAt = t;
       Object.assign(d, { postId: post.id, state: "committed", revision: d.revision + 1, updatedAt: t });
@@ -335,7 +391,9 @@ export function handlePostMutation(owner, method, path, b, user, docs) {
     }
     const fields = textFields(b, true);
     if (fields.length) return invalid(fields);
-    const refs = refsFields(owner, b, docs);
+    const tw = textWith(owner, b, docs);
+    if (tw.failure) return tw.failure;
+    const refs = refsFields(owner, tw.value, docs);
     if (refs.length) return invalid(refs);
     let post = p.postId ? ownedPost(owner, p.postId) : null;
     let draft = null;
@@ -343,7 +401,7 @@ export function handlePostMutation(owner, method, path, b, user, docs) {
       if (post.archived) return conflict("archived");
       if (b.expectedVersion !== post.version) return conflict("post_version");
       if (b.resolvedBaseVersionId !== latest(post).id) return conflict("base_changed");
-      if (b.slug !== post.slug) return invalid([{ path: "body.slug", message: "slug is fixed" }]);
+      if (slugMismatch(b, post)) return invalid([{ path: "body.slug", message: "slug is fixed" }]);
       draft = activeDraftOf(owner, post.id) ?? null;
     } else {
       if (b.expectedVersion !== undefined || b.resolvedBaseVersionId !== undefined) return invalid([{ path: "body", message: "new post proposal has no base" }]);
@@ -357,13 +415,13 @@ export function handlePostMutation(owner, method, path, b, user, docs) {
     } else if (b.draftId !== undefined) return conflict("draft_closed");
     const t = now();
     if (!post) {
-      if (reservedSlugs.has(b.slug)) return conflict("slug_taken");
-      post = { id: uuid(), owner, legacy: false, version: 0, archived: false, createdAt: t, updatedAt: t, authorLogin: user.login, authorName: user.login, versions: [], publication: null, slug: b.slug };
+      let slug = newSlug();
+      while (reservedSlugs.has(slug)) slug = newSlug();
+      post = { id: uuid(), owner, legacy: false, version: 0, archived: false, createdAt: t, updatedAt: t, authorLogin: user.login, authorName: user.login, versions: [], publication: null, slug };
       posts.set(post.id, post);
-      reservedSlugs.add(b.slug);
+      reservedSlugs.add(slug);
     }
-    const tx = text(b);
-    post.versions.push({ id: uuid(), number: post.versions.length + 1, ...tx, createdAt: t });
+    post.versions.push({ id: uuid(), number: post.versions.length + 1, ...tw.value, slug: post.slug, createdAt: t });
     post.version++;
     post.updatedAt = t;
     if (draft) Object.assign(draft, { postId: post.id, state: "committed", revision: draft.revision + 1, updatedAt: t });
@@ -390,7 +448,7 @@ export function handlePostMutation(owner, method, path, b, user, docs) {
       if (b.previewToken !== preview.previewToken) return conflict("preview_changed");
       if (!preview.publishable) return invalid(refsFields(owner, v, docs));
       const t = now();
-      p.publication = { id: uuid(), versionId: v.id, publishedAt: t, authorLogin: p.authorLogin, authorName: p.authorName, documents: preview.documents };
+      p.publication = { id: uuid(), versionId: v.id, publishedAt: t, authorLogin: p.authorLogin, authorName: p.authorName, documents: preview.documents, materials: preview.materials };
       Object.assign(p, { version: p.version + 1, updatedAt: t });
       return ok(201, publicView(p));
     }
@@ -400,26 +458,55 @@ export function handlePostMutation(owner, method, path, b, user, docs) {
 
 /** 모의 Codex의 research_post_propose: 제안만 만들고 글·초안은 바꾸지 않는다. 대상이 없으면 null.
  *  target: { postId } 기존 글 / { draftId } 작성 중인 새 글 초안 / {} 새 글 */
-export function createPostProposal(owner, target, patch) {
+export function createPostProposal(owner, target, patch, docs) {
   const t = now();
   let base = { postId: null, basePostVersion: null, baseVersionId: null, baseDraftId: null, baseDraftRevision: null };
-  let from = { title: "", content: "", description: "", slug: "", tags: [], coverImageId: null, documentIds: [] };
+  let from = { title: "", content: "", description: "", tags: [], coverImageId: null, documentIds: [], materialIds: [] };
+  let slug = "";
+  const pick = ({ title, content, description, tags, coverImageId, documentIds, materialIds }) => ({ title, content, description, tags, coverImageId, documentIds, materialIds });
   if (target.postId) {
     const p = ownedPost(owner, target.postId);
     if (!p || p.archived) return null;
     base = { ...base, postId: p.id, basePostVersion: p.version, baseVersionId: latest(p).id };
-    const { title, content, description, slug, tags, coverImageId, documentIds } = latest(p);
-    from = { title, content, description, slug, tags, coverImageId, documentIds };
+    from = pick(latest(p));
+    slug = p.slug;
   } else if (target.draftId) {
     const d = drafts.get(target.draftId);
     if (!d || d.owner !== owner || d.state !== "active" || d.postId !== null) return null;
     base = { ...base, baseDraftId: d.id, baseDraftRevision: d.revision };
-    const { title, content, description, slug, tags, coverImageId, documentIds } = d;
-    from = { title, content, description, slug, tags, coverImageId, documentIds };
+    from = pick(d);
   }
-  const row = { id: uuid(), owner, ...base, version: 1, ...from, ...patch(from), origin: "codex", status: "pending", acceptedPostId: null, acceptedVersionId: null, createdAt: t, updatedAt: t };
+  // 새 글 제안의 slug는 보내도 무시한다(#31 W1)
+  const next = { ...from, ...patch(from) };
+  const sel = materialsOf(owner, next.documentIds, next.materialIds, docs);
+  const row = { id: uuid(), owner, ...base, version: 1, ...next, ...sel, slug, origin: "codex", status: "pending", acceptedPostId: null, acceptedVersionId: null, createdAt: t, updatedAt: t };
   proposals.set(row.id, row);
   return draftView(row, false);
+}
+
+/** POST /research/post-material-options/resolve: 연결 문서가 가리키는 자료(직접 관계만, 보관 자료는 excluded). 읽기 전용. */
+export function resolvePostMaterials(owner, b, docs) {
+  if (!b || !idList(b.documentIds)) return invalid([{ path: "body.documentIds", message: "unique uuids<=50" }]);
+  for (const id of b.documentIds) {
+    const d = docs.get(owner, id);
+    if (!d || d.archived) return notFound();
+  }
+  const items = [];
+  const excludedArchivedIds = [];
+  for (const docId of b.documentIds)
+    for (const mid of docs.docMaterials(owner, docId)) {
+      const m = docs.material(owner, mid);
+      if (!m) continue;
+      if (m.archived) {
+        if (!excludedArchivedIds.includes(mid)) excludedArchivedIds.push(mid);
+        continue;
+      }
+      let item = items.find((x) => x.id === mid);
+      if (!item) items.push((item = { id: m.id, title: m.title, sourceUrl: m.sourceUrl, version: m.version, latestVersionId: m.latestVersionId, documentIds: [] }));
+      if (!item.documentIds.includes(docId)) item.documentIds.push(docId);
+    }
+  if (items.length > REF_MAX) return invalid([{ path: "body.documentIds", message: "materials<=50" }]);
+  return ok(200, { items, excludedArchivedIds });
 }
 
 /** 대화 페이지 문맥 확인용: 본인 활성 글 제목 / 현재 발행본 제목(postId 기준). 없으면 null. */

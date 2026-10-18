@@ -2,8 +2,13 @@
 
 import type { PostText } from "@/lib/posts/types";
 import DocTitle from "./DocTitle";
+import { MaterialTitle } from "./MaterialLinks";
 
-type Meta = Pick<PostText, "description" | "slug" | "tags" | "coverImageId" | "documentIds">;
+type Meta = Pick<PostText, "description" | "tags" | "coverImageId" | "documentIds"> & {
+  // 공개본과 비교할 때는 ID 대신 공개될 제목(PublishPanel)
+  materialIds: string[];
+  materialTitles?: Record<string, string>;
+};
 
 const listDiff = (before: string[], after: string[]) => ({
   added: after.filter((x) => !before.includes(x)),
@@ -11,7 +16,7 @@ const listDiff = (before: string[], after: string[]) => ({
   reordered: before.length === after.length && before.every((x) => after.includes(x)) && before.some((x, i) => after[i] !== x),
 });
 
-/** 본문 외 글 메타(요약·주소·태그·표지·연결 문서)의 변경. 바뀐 것이 없으면 아무것도 그리지 않는다. 제목·본문은 TextDiff가 보인다. */
+/** 본문 외 글 메타(요약·태그·표지·연결 문서·자료)의 변경. 바뀐 것이 없으면 아무것도 그리지 않는다. 제목·본문은 TextDiff가 보인다. */
 export default function PostMetaDiff({ before, after }: { before: Meta; after: Meta }) {
   const rows: { label: string; node: React.ReactNode }[] = [];
   if (before.description !== after.description) {
@@ -21,17 +26,6 @@ export default function PostMetaDiff({ before, after }: { before: Meta; after: M
         <>
           <del className="bg-rose-100 text-rose-900">{before.description || "(없음)"}</del> →{" "}
           <ins className="bg-emerald-100 text-emerald-900 no-underline">{after.description || "(없음)"}</ins>
-        </>
-      ),
-    });
-  }
-  if (before.slug !== after.slug) {
-    rows.push({
-      label: "주소",
-      node: (
-        <>
-          <del className="bg-rose-100 font-mono text-rose-900">{before.slug || "(없음)"}</del> →{" "}
-          <ins className="bg-emerald-100 font-mono text-emerald-900 no-underline">{after.slug || "(없음)"}</ins>
         </>
       ),
     });
@@ -77,6 +71,28 @@ export default function PostMetaDiff({ before, after }: { before: Meta; after: M
             </del>
           ))}
           {docs.reordered && <span className="text-stone-500">순서만 바뀜</span>}
+        </span>
+      ),
+    });
+  }
+  const mats = listDiff(before.materialIds, after.materialIds);
+  const titleOf = (id: string, side: Meta) => (side.materialTitles ? side.materialTitles[id] || "(제목 없음)" : <MaterialTitle id={id} />);
+  if (mats.added.length || mats.removed.length || mats.reordered) {
+    rows.push({
+      label: "자료",
+      node: (
+        <span className="flex flex-col gap-0.5">
+          {mats.added.map((id) => (
+            <ins key={`+${id}`} className="bg-emerald-50 text-emerald-900 no-underline">
+              + {titleOf(id, after)}
+            </ins>
+          ))}
+          {mats.removed.map((id) => (
+            <del key={`-${id}`} className="bg-rose-50 text-rose-900">
+              − {titleOf(id, before)}
+            </del>
+          ))}
+          {mats.reordered && <span className="text-stone-500">순서만 바뀜</span>}
         </span>
       ),
     });

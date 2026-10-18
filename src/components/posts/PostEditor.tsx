@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { FetchFailure } from "@/lib/api/client";
-import { commitPostDraft, discardPostDraft, getPost, getPostDraft } from "@/lib/posts/api";
+import { useAuth } from "@/hooks/useAuth";
+import { commitPostDraft, discardPostDraft, getPost, getPostDraft, resolvePostMaterials } from "@/lib/posts/api";
 import { postErrorMessage } from "@/lib/posts/errors";
-import type { Post, PostDraft, PostText } from "@/lib/posts/types";
+import type { Post, PostDraft, PostMaterialSource, PostText } from "@/lib/posts/types";
 import { EMPTY_TEXT, textOf, usePostDraft } from "@/lib/posts/usePostDraft";
 import { useMutation } from "@/lib/research/hooks";
 import { formatDateTime } from "@/lib/research/format";
@@ -16,28 +17,49 @@ import Notice from "@/components/research/Notice";
 import TextDiff from "@/components/research/TextDiff";
 import DocumentLinks from "./DocumentLinks";
 import ImagePanel from "./ImagePanel";
+import MaterialLinks, { MATERIAL_MAX } from "./MaterialLinks";
 import PostMetaDiff from "./PostMetaDiff";
 import TagInput from "./TagInput";
 
 // #28 글 편집기: 서버 초안 자동 저장 + 명시 저장(새 버전). 초안·버전은 발행본을 바꾸지 않는다(발행은 따로).
+// #31: 주소(slug)는 입력하지 않는다(서버가 첫 저장 때 정함). 요약은 접어 둔 선택 입력, 바탕이 된 자료를 함께 고른다.
 
-export const SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 export const DESCRIPTION_MAX = 1000;
-const SLUG_MAX = 100;
-
-/** 주소 입력 정리: 소문자로 바꾸고 공백·밑줄은 하이픈으로, 그 밖의 허용되지 않는 문자는 뺀다(입력 중 끝·연속 하이픈은 둔다). */
-export const normalizeSlug = (raw: string) =>
-  raw
-    .toLowerCase()
-    .replace(/[\s_]+/g, "-")
-    .replace(/[^a-z0-9-]/g, "")
-    .slice(0, SLUG_MAX);
 
 /** 저장 전에 화면에서 확인할 것(서버가 최종 검증). 문제가 없으면 null. */
 export function textProblem(v: PostText): string | null {
   if (!v.title.trim() || !v.content.trim()) return "제목과 본문을 모두 입력해야 저장할 수 있습니다.";
-  if (!SLUG_RE.test(v.slug)) return "주소(slug)를 소문자 영문·숫자와 중간 하이픈으로 입력해야 저장할 수 있습니다(예: docker-basics).";
   return null;
+}
+
+const sourceMap = (list: PostMaterialSource[]) => Object.fromEntries(list.map((s) => [s.materialId, s.documentIds]));
+
+// 요약은 선택 입력이라 비어 있으면 접어 둔다(#31 W2). 비우면 글 목록 카드가 본문 앞부분을 대신 보인다.
+function DescriptionField({ value, onChange, readOnly }: { value: string; onChange: (v: string) => void; readOnly: boolean }) {
+  const [open, setOpen] = useState(false);
+  if (!open && !value) {
+    return (
+      <div className="text-sm">
+        <button type="button" onClick={() => setOpen(true)} disabled={readOnly} aria-expanded={false} className="font-medium text-indigo-600 hover:text-indigo-800 disabled:text-stone-400">
+          요약 추가(선택)
+        </button>
+        <span className="ml-2 text-xs text-stone-500">비워 두면 글 목록에 본문 앞부분이 보입니다.</span>
+      </div>
+    );
+  }
+  return (
+    <Field label="요약(선택)" hint={`글 목록과 글 머리에 보입니다. 비워 두면 목록에는 글 앞부분을 대신 보입니다. ${DESCRIPTION_MAX}자까지.`}>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        maxLength={DESCRIPTION_MAX}
+        rows={2}
+        readOnly={readOnly}
+        autoFocus={open && !value}
+        className={`${inputClass} read-only:bg-stone-50`}
+      />
+    </Field>
+  );
 }
 
 export default function PostEditor({
@@ -87,6 +109,61 @@ export default function PostEditor({
   }
   // 이미지 업로드 중에는 저장·닫기·버리기를 잠근다(완료 결과가 닫힌 편집기나 저장된 버전 밖에 남지 않게).
   const [uploading, setUploading] = useState(false);
+
+  // 바탕이 된 자료(#31 W3). 문서를 연결하면 그 문서가 가리키는 자료를 서버에 물어 선택에 더한다(선택은 언제나 명시 materialIds).
+  // 자료를 찾는 동안에도 저장·닫기·버리기를 잠근다(결과가 저장된 버전 밖에 남지 않게).
+  const { csrfToken } = useAuth();
+  const [sources, setSources] = useState<Record<string, string[]>>(() =>
+    sourceMap(resumeDraft?.materialSources ?? post?.latestVersion.materialSources ?? [])
+  );
+  const [resolving, setResolving] = useState(0);
+  const [materialNote, setMaterialNote] = useState<React.ReactNode>(null);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  async function linkDocuments(next: string[]) {
+    const added = next.filter((id) => !values.documentIds.includes(id));
+    set({ documentIds: next });
+    if (added.length === 0) return;
+    setMaterialNote(null);
+    if (!csrfToken) {
+      setMaterialNote(<p className="text-xs text-amber-800">로그인 상태를 확인하지 못해 연결 문서의 자료를 담지 못했습니다. 필요하면 자료를 직접 추가하세요.</p>);
+      return;
+    }
+    setResolving((n) => n + 1);
+    const res = await resolvePostMaterials(added, csrfToken);
+    if (!alive.current) return;
+    setResolving((n) => n - 1);
+    if (!res.ok) {
+      setMaterialNote(<ErrorNotice failure={res.failure} prefix="연결 문서의 자료를 담지 못했습니다. 필요하면 자료를 직접 추가하세요." describe={postErrorMessage} />);
+      return;
+    }
+    setSources((prev) => {
+      const out = { ...prev };
+      for (const m of res.data.items) out[m.id] = [...new Set([...(out[m.id] ?? []), ...m.documentIds])];
+      return out;
+    });
+    let full = 0;
+    editor.update((v) => {
+      const ids = [...v.materialIds];
+      // 기다리는 사이 연결을 해제한 문서의 자료는 담지 않는다
+      for (const m of res.data.items) {
+        if (ids.includes(m.id) || !m.documentIds.some((d) => v.documentIds.includes(d))) continue;
+        if (ids.length >= MATERIAL_MAX) full++;
+        else ids.push(m.id);
+      }
+      return { ...v, materialIds: ids };
+    });
+    const notes: string[] = [];
+    if (full > 0) notes.push(`자료가 ${MATERIAL_MAX}개를 넘어 ${full}개는 담지 못했습니다. 다른 자료를 뺀 뒤 직접 추가하세요.`);
+    if (res.data.excludedArchivedIds.length > 0) notes.push(`보관한 자료 ${res.data.excludedArchivedIds.length}개는 담지 않았습니다.`);
+    if (notes.length) setMaterialNote(<p className="text-xs text-amber-800">{notes.join(" ")}</p>);
+  }
+  const pending = uploading || resolving > 0;
   const { run, busy } = useMutation();
   const [failure, setFailure] = useState<FetchFailure | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -108,8 +185,7 @@ export default function PostEditor({
   useEffect(() => {
     if (seed && !seeded.current) {
       seeded.current = true;
-      // 주소는 기존 글에서 바꿀 수 없으므로 되돌리기 내용에서도 현재 주소를 쓴다.
-      editor.setValues(post ? { ...seed, slug: post.latestVersion.slug } : seed);
+      editor.setValues(seed);
     }
   }, [seed, editor, post]);
 
@@ -127,7 +203,7 @@ export default function PostEditor({
 
   const [finishing, setFinishing] = useState<null | "commit" | "close" | "discard">(null);
   async function finish(kind: "commit" | "close" | "discard", action: () => Promise<boolean>) {
-    if (finishing || uploading) return;
+    if (finishing || pending) return;
     setFinishing(kind);
     let done = false;
     try {
@@ -217,6 +293,10 @@ export default function PostEditor({
   const locked = finishing !== null;
   const stopped = status.kind === "stopped" ? status.failure : null;
   const fixedSlug = post ? post.latestVersion.slug : null;
+  // 연결이 남아 있는 문서만 출처로 보인다(문서를 해제해도 담긴 자료는 직접 빼기 전까지 남는다)
+  const linkedSources = Object.fromEntries(
+    values.materialIds.map((id) => [id, (sources[id] ?? []).filter((d) => values.documentIds.includes(d))])
+  );
   return (
     <div className="space-y-4">
       <p className="text-xs text-stone-500">
@@ -228,36 +308,36 @@ export default function PostEditor({
       </Field>
       <div className="grid gap-4 sm:grid-cols-2">
         {fixedSlug !== null ? (
-          <Field label="주소(slug)" hint="첫 저장 뒤에는 바꿀 수 없습니다(공개 주소 유지).">
-            <input value={fixedSlug} readOnly className={`${inputClass} bg-stone-50 font-mono`} />
+          <Field label="공개 주소" hint="처음 저장할 때 정해졌고 바꿀 수 없습니다.">
+            <input value={`/posts/${fixedSlug}/`} readOnly className={`${inputClass} bg-stone-50 font-mono`} />
           </Field>
         ) : (
-          <Field label="주소(slug)" hint={`공개 주소: /posts/${values.slug || "…"}/ · 소문자 영문·숫자·하이픈. 첫 저장 뒤에는 바꿀 수 없습니다.`}>
-            <input
-              value={values.slug}
-              onChange={(e) => set({ slug: normalizeSlug(e.target.value) })}
-              maxLength={SLUG_MAX}
-              readOnly={locked}
-              placeholder="예: docker-basics"
-              spellCheck={false}
-              autoCapitalize="none"
-              className={`${inputClass} font-mono read-only:bg-stone-50`}
-            />
-          </Field>
+          <div>
+            <span className="mb-1 block text-sm font-medium text-stone-700">공개 주소</span>
+            <p className="text-xs text-stone-500">처음 저장할 때 자동으로 정해지며 그 뒤에는 바뀌지 않습니다. 따로 입력하지 않습니다.</p>
+          </div>
         )}
         <TagInput tags={values.tags} onChange={(tags) => set({ tags })} readOnly={locked} />
       </div>
-      <Field label="요약" hint={`글 목록과 글 머리에 보입니다. ${DESCRIPTION_MAX}자까지.`}>
-        <textarea
-          value={values.description}
-          onChange={(e) => set({ description: e.target.value })}
-          maxLength={DESCRIPTION_MAX}
-          rows={2}
-          readOnly={locked}
-          className={`${inputClass} read-only:bg-stone-50`}
-        />
-      </Field>
-      <DocumentLinks ids={values.documentIds} onChange={(documentIds) => set({ documentIds })} readOnly={locked} />
+      <DescriptionField value={values.description} onChange={(description) => set({ description })} readOnly={locked} />
+      <DocumentLinks ids={values.documentIds} onChange={(documentIds) => void linkDocuments(documentIds)} readOnly={locked} />
+      <MaterialLinks
+        ids={values.materialIds}
+        sources={linkedSources}
+        onAdd={(id) => editor.update((v) => (v.materialIds.includes(id) || v.materialIds.length >= MATERIAL_MAX ? v : { ...v, materialIds: [...v.materialIds, id] }))}
+        onRemove={(id) => editor.update((v) => ({ ...v, materialIds: v.materialIds.filter((x) => x !== id) }))}
+        notice={
+          <>
+            {resolving > 0 && (
+              <p role="status" className="text-xs text-stone-600">
+                연결한 문서의 자료를 찾는 중입니다. 그동안 저장·닫기·버리기는 잠깁니다.
+              </p>
+            )}
+            {materialNote}
+          </>
+        }
+        readOnly={locked}
+      />
       <ImagePanel
         coverImageId={values.coverImageId}
         onInsert={insert}
@@ -365,20 +445,20 @@ export default function PostEditor({
         <button
           type="button"
           onClick={() => void finish("commit", commit)}
-          disabled={busy || locked || uploading || status.kind === "conflict"}
+          disabled={busy || locked || pending || status.kind === "conflict"}
           className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
         >
           {finishing === "commit" ? "저장 중..." : post ? (contentMoved && comparing ? "비교했고 이 내용으로 저장" : "새 버전으로 저장") : "글 저장"}
         </button>
         {onClose && (
-          <button type="button" onClick={() => void finish("close", close)} disabled={busy || locked || uploading} className="rounded-lg px-4 py-2 text-sm text-stone-600 hover:bg-stone-100">
+          <button type="button" onClick={() => void finish("close", close)} disabled={busy || locked || pending} className="rounded-lg px-4 py-2 text-sm text-stone-600 hover:bg-stone-100">
             편집 닫기(초안 보관)
           </button>
         )}
         {confirmDiscard ? (
           <span className="flex items-center gap-2 text-sm">
             <span className="text-stone-600">{post ? "초안을 버리고 저장된 글로 돌아갈까요?" : "이 초안을 버릴까요?"}</span>
-            <button type="button" onClick={() => void finish("discard", discard)} disabled={busy || locked || uploading} className="font-medium text-red-700 underline hover:no-underline">
+            <button type="button" onClick={() => void finish("discard", discard)} disabled={busy || locked || pending} className="font-medium text-red-700 underline hover:no-underline">
               초안 버리기
             </button>
             <button type="button" onClick={() => setConfirmDiscard(false)} className="text-stone-600 underline hover:no-underline">
@@ -386,7 +466,7 @@ export default function PostEditor({
             </button>
           </span>
         ) : (
-          <button type="button" onClick={() => setConfirmDiscard(true)} disabled={busy || locked || uploading} className="ml-auto text-sm text-stone-500 hover:text-red-700">
+          <button type="button" onClick={() => setConfirmDiscard(true)} disabled={busy || locked || pending} className="ml-auto text-sm text-stone-500 hover:text-red-700">
             초안 버리기…
           </button>
         )}

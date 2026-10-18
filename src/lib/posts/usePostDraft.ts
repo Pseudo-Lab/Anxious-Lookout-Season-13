@@ -14,28 +14,29 @@ export interface PostDraftBase {
   baseVersionId: string;
 }
 
+const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+
 export const sameText = (a: PostText, b: PostText) =>
   a.title === b.title &&
   a.content === b.content &&
   a.description === b.description &&
-  a.slug === b.slug &&
   a.coverImageId === b.coverImageId &&
-  a.tags.length === b.tags.length &&
-  a.tags.every((t, i) => t === b.tags[i]) &&
-  a.documentIds.length === b.documentIds.length &&
-  a.documentIds.every((d, i) => d === b.documentIds[i]);
+  sameList(a.tags, b.tags) &&
+  sameList(a.documentIds, b.documentIds) &&
+  sameList(a.materialIds, b.materialIds);
 
-export const textOf = (v: PostText & { content?: string }): PostText => ({
+/** 응답(초안·버전·제안·미리보기)에서 입력 모양만 고른다. 주소(slug)·자료 출처는 입력이 아니다. */
+export const textOf = (v: Omit<PostText, "content"> & { content?: string }): PostText => ({
   title: v.title,
   content: v.content ?? "",
   description: v.description,
-  slug: v.slug,
   tags: [...v.tags],
   coverImageId: v.coverImageId,
   documentIds: [...v.documentIds],
+  materialIds: [...v.materialIds],
 });
 
-export const EMPTY_TEXT: PostText = { title: "", content: "", description: "", slug: "", tags: [], coverImageId: null, documentIds: [] };
+export const EMPTY_TEXT: PostText = { title: "", content: "", description: "", tags: [], coverImageId: null, documentIds: [], materialIds: [] };
 
 const postDrafts: DraftAdapter<PostText, PostDraft, PostDraftBase> = {
   scope: "post-draft",

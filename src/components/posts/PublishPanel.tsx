@@ -41,6 +41,21 @@ function Preview({ preview }: { preview: PostPublicationPreview }) {
           </ul>
         </div>
       )}
+      {preview.materials.length > 0 && (
+        <div className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900 ring-1 ring-amber-200">
+          <p className="font-medium">함께 공개되는 자료 ({preview.materials.length})</p>
+          <p className="mt-1 text-xs">
+            바탕이 된 자료는 <strong>제목과 원본 주소</strong>만 공개 글의 ‘바탕이 된 자료’에 보입니다. 자료 본문·메모는 공개되지 않습니다.
+          </p>
+          <ul className="mt-2 space-y-0.5 text-xs">
+            {preview.materials.map((m) => (
+              <li key={m.id}>
+                · {m.title || "(제목 없음)"} — {m.sourceUrl || "원본 주소 없음"}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div role="group" aria-label="미리보기 방식" className="flex gap-1 text-xs">
         {cur && (
           <button type="button" aria-pressed={mode === "diff"} onClick={() => setMode("diff")} className={`rounded px-2 py-1 ${mode === "diff" ? "bg-indigo-100 font-medium text-indigo-800" : "text-stone-600"}`}>
@@ -54,7 +69,21 @@ function Preview({ preview }: { preview: PostPublicationPreview }) {
       {mode === "diff" && cur ? (
         <div className="space-y-2">
           <p className="text-xs text-stone-600">현재 공개본({formatDateTime(cur.publishedAt)} 발행)에서 이번 발행으로 바뀌는 내용입니다.</p>
-          <PostMetaDiff before={{ ...cur, coverImageId: cur.coverImageUrl, documentIds: cur.documents.map((d) => d.id) }} after={{ ...preview, coverImageId: preview.images.find((i) => i.id === preview.coverImageId)?.url ?? null }} />
+          <PostMetaDiff
+            before={{
+              ...cur,
+              coverImageId: cur.coverImageUrl,
+              documentIds: cur.documents.map((d) => d.id),
+              materialIds: cur.materials.map((m) => m.id),
+              materialTitles: Object.fromEntries(cur.materials.map((m) => [m.id, m.title])),
+            }}
+            after={{
+              ...preview,
+              coverImageId: preview.images.find((i) => i.id === preview.coverImageId)?.url ?? null,
+              materialIds: preview.materials.map((m) => m.id),
+              materialTitles: Object.fromEntries(preview.materials.map((m) => [m.id, m.title])),
+            }}
+          />
           <TextDiff before={cur.content ?? ""} after={preview.content} beforeTitle={cur.title} afterTitle={preview.title} />
         </div>
       ) : (
@@ -64,6 +93,7 @@ function Preview({ preview }: { preview: PostPublicationPreview }) {
               ...textOf(preview),
               coverImageUrl: preview.images.find((i) => i.id === preview.coverImageId)?.url ?? null,
               documents: preview.documents,
+              materials: preview.materials,
               author: { name: preview.author.login },
               publishedAt: null,
             }}

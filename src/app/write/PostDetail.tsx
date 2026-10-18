@@ -41,7 +41,7 @@ function ArchivePost({ post, onArchived }: { post: Post; onArchived: () => void 
 
 const versionMeta = (v: PostVersion) => (
   <p className="text-xs text-stone-500">
-    주소 /posts/{v.slug}/{v.tags.length > 0 && ` · 태그 ${v.tags.join(", ")}`} · 연결 문서 {v.documentIds.length}개
+    주소 /posts/{v.slug}/{v.tags.length > 0 && ` · 태그 ${v.tags.join(", ")}`} · 연결 문서 {v.documentIds.length}개 · 자료 {v.materialIds.length}개
     {v.description && <span className="mt-1 block text-stone-600">{v.description}</span>}
   </p>
 );

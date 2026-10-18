@@ -2,7 +2,7 @@
 // 계약의 소유권(타인 ID 404), Origin/CSRF, Idempotency-Key 재생, expectedVersion 충돌, 정책 대기 응답을 흉내 낸다.
 import crypto from "node:crypto";
 import {
-  IMAGE_LIMIT, createPostProposal, handleImageDelete, handleImageRead, handlePostMutation, handlePostRead, handlePublicPosts,
+  IMAGE_LIMIT, createPostProposal, resolvePostMaterials, handleImageDelete, handleImageRead, handlePostMutation, handlePostRead, handlePublicPosts,
   mediaBytes, newPostDraftOf, postTitle, publicPostTitle, uploadImage,
 } from "./mock-posts.mjs";
 
@@ -275,6 +275,19 @@ const postDocs = {
     return item ? docView(item) : null;
   },
   list: (owner) => [...items.values()].filter((i) => i.owner === owner && i.type === "document").sort(byUpdated).map(docView),
+  // #31 W3 자료(본인 것만)와 문서→자료 활성 직접 관계(관계 ID 순)
+  material: (owner, id) => {
+    const item = owned(id, owner, "material");
+    if (!item) return null;
+    const v = latest(item);
+    return { id: item.id, title: v.title, sourceUrl: v.sourceUrl, version: item.version, latestVersionId: v.id, archived: item.archived };
+  },
+  materials: (owner) => [...items.values()].filter((i) => i.owner === owner && i.type === "material").sort(byUpdated).map((i) => postDocs.material(owner, i.id)),
+  docMaterials: (owner, docId) =>
+    [...relations.values()]
+      .filter((r) => r.owner === owner && !r.archived && r.source.id === docId && r.target.type === "material")
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((r) => r.target.id),
 };
 const stale = (b, current) => !Number.isInteger(b.expectedVersion) || b.expectedVersion !== current;
 
@@ -698,8 +711,7 @@ function handleMutation(owner, method, path, b, user) {
             content: `${from.content ? `${from.content}\n` : ""}Codex가 덧붙인 문단`,
             description: from.description || "Codex 요약",
             tags: [...from.tags, "codex"].filter((t, i, a) => a.indexOf(t) === i),
-            slug: from.slug,
-          }));
+          }), postDocs);
           const input = { mutationId: uuid(), ...target };
           const output = p ? [{ type: "inputText", text: JSON.stringify(p) }] : { error: { code: "not_found" } };
           s.items.push({ id: uuid(), type: "tool_call", name: "research_post_propose", input, output, status: p ? "completed" : "failed", raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
@@ -1033,6 +1045,11 @@ export async function handleResearch(req, res, path, url, session) {
 
   if (req.headers.origin !== `http://${req.headers.host}`) return send(res, 403, { error: { code: "origin_not_allowed", message: "Origin not allowed" } });
   if (researchMode.csrf === "reject" || req.headers["x-csrf-token"] !== session.csrf) return send(res, 403, { error: { code: "csrf_invalid", message: "Invalid CSRF token" } });
+  // #31 W3 자료 찾기: 읽기 전용이라 Idempotency-Key를 요구하지 않는다(cookie+Origin/CSRF만).
+  if (req.method === "POST" && path === "/research/post-material-options/resolve") {
+    const r = resolvePostMaterials(owner, await readBody(req), postDocs);
+    return send(res, r.status, r.body);
+  }
   const key = req.headers["idempotency-key"];
   if (typeof key !== "string" || !UUID_RE.test(key)) {
     return send(res, 422, { error: { code: "validation_error", message: "Idempotency-Key required", fields: [{ path: "header.Idempotency-Key", message: "uuid" }] } });

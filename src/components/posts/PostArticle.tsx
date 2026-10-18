@@ -1,9 +1,10 @@
 import type { PublicPost } from "@/lib/posts/types";
 import SafeMarkdown, { isOwnImage } from "@/components/research/SafeMarkdown";
 import { formatDate } from "@/lib/posts/format";
+import { SourceLink } from "./MaterialLinks";
 import TagBadge from "./TagBadge";
 
-type ArticleData = Pick<PublicPost, "title" | "description" | "content" | "tags" | "coverImageUrl" | "documents"> & {
+type ArticleData = Pick<PublicPost, "title" | "description" | "content" | "tags" | "coverImageUrl" | "documents" | "materials"> & {
   author: { name: string };
   publishedAt: string | null;
 };
@@ -26,6 +27,24 @@ function BasedOn({ documents }: { documents: ArticleData["documents"] }) {
                 {d.title || "(제목 없음)"} <span className="text-xs text-stone-400">(공개되지 않은 문서)</span>
               </span>
             )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+// 바탕이 된 자료(#31 W3). 공개본에는 제목과 원본 주소만 있다(자료 본문·메모는 공개하지 않는다).
+function BasedOnMaterials({ materials }: { materials: ArticleData["materials"] }) {
+  if (materials.length === 0) return null;
+  return (
+    <section aria-label="바탕이 된 자료" className="mt-6 rounded-xl bg-stone-50 p-5 ring-1 ring-stone-200">
+      <h2 className="text-sm font-semibold text-stone-700">바탕이 된 자료</h2>
+      <ul className="mt-2 space-y-2 text-sm">
+        {materials.map((m) => (
+          <li key={m.id}>
+            <span className="block text-stone-700">{m.title || "(제목 없음)"}</span>
+            <SourceLink url={m.sourceUrl} className="text-xs" />
           </li>
         ))}
       </ul>
@@ -59,6 +78,7 @@ export default function PostArticle({ post }: { post: ArticleData }) {
       </header>
       <SafeMarkdown content={post.content ?? ""} ownImages />
       <BasedOn documents={post.documents} />
+      <BasedOnMaterials materials={post.materials} />
     </article>
   );
 }
