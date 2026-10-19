@@ -118,6 +118,19 @@ await waitFile("offline.ready");
 
 const page = A.page;
 const main = page.locator("main");
+// #32 글 본문은 블록 편집기다. (페이지의 role=alert는 Next route announcer에도 있으므로 본문 오류는 article 안에서만 찾는다) 전부 지우고 줄마다 입력한다("# " 제목 입력 규칙, 줄 사이 Enter = 새 문단).
+const bodyBox = () => main.locator(".ProseMirror");
+async function writeBody(lines) {
+  await bodyBox().waitFor({ timeout: 20000 });
+  await bodyBox().click();
+  await page.keyboard.press("Control+a");
+  await page.keyboard.press("Delete");
+  await page.keyboard.press("Control+Alt+0");
+  for (const [i, line] of lines.entries()) {
+    if (i) await page.keyboard.press("Enter");
+    await page.keyboard.type(line);
+  }
+}
 const chat = chatOf(page);
 const api = apiClient(page);
 // #28 D1: fixture의 research_document_save는 문서를 바로 만들지 않고 새 문서 제안을 남긴다. 도구 쓰기 횟수는 그 제안 수로 센다.
@@ -506,6 +519,15 @@ async function dropFirstSend(p) {
   await anon.locator("article h1").first().waitFor().catch(() => {});
   const legacy = await anon.locator("main").innerText();
   check("IP1. legacy post detail with original author", legacy.includes("Observatory에 오신 것을 환영합니다") && legacy.includes("관리자"), legacy.slice(0, 160));
+  {
+    const r = await anon.request.get(U("/api/public/posts/welcome-to-observatory"));
+    const body = r.ok() ? await r.json() : null;
+    check(
+      "IP1. #32: 0007 migrated legacy post to post-blocks; renderer shows it without a format error",
+      body?.content?.format === "post-blocks" && typeof body.textProjection === "string" && (await anon.locator("article [role=alert]").count()) === 0 && (await anon.locator("article .prose h2").count()) >= 1,
+      JSON.stringify({ format: body?.content?.format, projection: body?.textProjection?.slice(0, 60), articleAlerts: await anon.locator("article [role=alert]").allInnerTexts(), h2: await anon.locator("article .prose h2").count() })
+    );
+  }
   await anon.goto(U("/tags/AI/"));
   check("IP1. legacy tag page", await appears(anon.getByRole("link", { name: /Transformer 아키텍처 이해하기/ })));
 
@@ -532,7 +554,7 @@ async function dropFirstSend(p) {
   await matBox.getByLabel("추가할 자료 찾기").fill("직접 고른");
   await matBox.getByRole("button", { name: "직접 고른 오프라인 자료 추가" }).click();
   check("IP2. W3: material added directly", await appears(matBox.locator("li", { hasText: "직접 고른 오프라인 자료" }).getByText("직접 추가")));
-  await main.getByLabel("본문").fill("# 오프라인 본문\n\n첫 버전 문장");
+  await writeBody(["# 오프라인 본문", "첫 버전 문장"]);
   await main.getByText("초안 자동 저장됨").first().waitFor({ timeout: 20000 });
   await page.waitForURL(/[?&]draft=/, { timeout: 10000 }).catch(() => {});
   const draftId = new URL(page.url()).searchParams.get("draft");
@@ -546,6 +568,11 @@ async function dropFirstSend(p) {
       JSON.stringify(d.body.materialIds) === JSON.stringify([mat.body.id, mat2.body.id]) &&
       d.body.postId === null,
     JSON.stringify(d?.body ?? null).slice(0, 200)
+  );
+  check(
+    "IP2. #32: real API accepted the canonical block document (server projection matches)",
+    d?.body?.content?.format === "post-blocks" && d.body.content.blocks.map((b) => b.type).join(",") === "heading,paragraph" && d.body.textProjection === "오프라인 본문\n\n첫 버전 문장",
+    JSON.stringify({ types: d?.body?.content?.blocks?.map((b) => b.type), projection: d?.body?.textProjection })
   );
   await page.reload();
   await main.getByLabel("제목").waitFor();
@@ -595,14 +622,15 @@ async function dropFirstSend(p) {
 
   // 수정 → v2 → 현재 공개본 대비 diff → 재발행 → 발행 취소
   await main.getByRole("button", { name: "내용 수정" }).click();
-  await main.getByLabel("본문").fill("# 오프라인 본문\n\n두 번째 버전 문장\n");
+  await writeBody(["# 오프라인 본문", "두 번째 버전 문장"]);
   // 이미지(D2): 원본 바이트 업로드 → 본문에 삽입 → 표지 지정. 서버가 형식 검사·재인코딩한다.
   const imageBox = main.getByRole("region", { name: "이미지" });
   await imageBox.getByLabel("이미지 파일").setInputFiles({ name: "offline.png", mimeType: "image/png", buffer: PNG });
   check("IP4. image uploaded via real API", await appears(imageBox.getByText("올렸습니다", { exact: false })), (await imageBox.innerText()).slice(0, 200));
   const uploaded = (await api.get("/research/post-images")).body?.items?.[0];
   check("IP4. image url is canonical own path", !!uploaded && uploaded.url === `/api/media/post-images/${uploaded.id}` && uploaded.mimeType === "image/png", JSON.stringify(uploaded));
-  check("IP4. markdown inserted", (await main.getByLabel("본문").inputValue()).includes(`(/api/media/post-images/${uploaded?.id})`));
+  await bodyBox().locator("figure[data-type=post-image] img").first().waitFor({ timeout: 20000 }).catch(() => {});
+  check("IP4. #32: image block inserted by imageId", (await bodyBox().locator("figure[data-type=post-image] img").first().getAttribute("src").catch(() => null)) === uploaded?.url);
   await imageBox.getByRole("button", { name: "표지로" }).first().click();
   await main.getByText("초안 자동 저장됨").first().waitFor({ timeout: 20000 });
   await main.getByRole("button", { name: "새 버전으로 저장" }).click();

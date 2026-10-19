@@ -76,25 +76,26 @@ def test_posts_restore_retains_versions_and_drafts(admin, monkeypatch):
         control.execute(text('CREATE DATABASE ' + database))
     try:
         monkeypatch.setenv('ADMIN_DATABASE_URL', url.render_as_string(hide_password=False))
-        migrate('0006_posts')
+        migrate('0007_post_blocks')
         candidate = create_engine(url, hide_parameters=True)
         with Session(candidate) as db, db.begin():
             owner = db.execute(text("INSERT INTO auth.accounts(github_id,login,is_approved,role) VALUES('444444','post-restore',true,'editor') RETURNING id")).scalar_one()
             store = Store(db, owner)
-            body = dict(title='Retained', content='Version', description='', slug='', tags=[], coverImageId=None, documentIds=[])
+            from app.post_block_markdown import convert
+            body = dict(title='Retained', content=convert('Version','fixture')[0], description='', slug='', tags=[], coverImageId=None, documentIds=[])
             initial = create_draft(store, CreateDraft(**body))
             post = commit_draft(store, initial['id'], DraftCommit(expectedDraftRevision=1))['post']
-            body['content'] = 'Unsaved words'
+            body['content'] = convert('Unsaved words','fixture')[0]
             active = create_draft(store, CreateDraft(**body, postId=post['id'], basePostVersion=1, baseVersionId=post['latestVersion']['id']))
-            proposal = create_proposal(store, Propose(**body, postId=post['id'], expectedVersion=1, mutationId=str(uuid.uuid4())))
+            proposal = create_proposal(store, Propose(**{k:v for k,v in body.items() if k!='content'}, contentInput={'format':'markdown','text':'Unsaved words'}, postId=post['id'], expectedVersion=1, mutationId=str(uuid.uuid4())))
         with candidate.begin() as db:
             db.execute(text('REVOKE UPDATE ON research.post_drafts FROM anxious_api'))
-        assert restore_candidate(url.render_as_string(hide_password=False), os.environ['API_DATABASE_PASSWORD'], database) == '0006_posts'
+        assert restore_candidate(url.render_as_string(hide_password=False), os.environ['API_DATABASE_PASSWORD'], database) == '0007_post_blocks'
         with candidate.connect() as db:
-            assert validate_research(db) == '0006_posts'
-            assert db.execute(text("SELECT payload->>'content',state FROM research.post_drafts WHERE id=:id"), {'id': active['id']}).one() == ('Unsaved words', 'active')
-            assert db.execute(text("SELECT payload->>'content' FROM research.post_versions WHERE post_id=:id"), {'id': post['id']}).scalar_one() == 'Version'
-            assert db.execute(text("SELECT payload->>'content',status FROM research.post_proposals WHERE id=:id"), {'id': proposal['id']}).one() == ('Unsaved words', 'pending')
+            assert validate_research(db) == '0007_post_blocks'
+            assert db.execute(text("SELECT payload->>'textProjection',state FROM research.post_drafts WHERE id=:id"), {'id': active['id']}).one() == ('Unsaved words', 'active')
+            assert db.execute(text("SELECT payload->>'textProjection' FROM research.post_versions WHERE post_id=:id"), {'id': post['id']}).scalar_one() == 'Version'
+            assert db.execute(text("SELECT payload->>'textProjection',status FROM research.post_proposals WHERE id=:id"), {'id': proposal['id']}).one() == ('Unsaved words', 'pending')
     finally:
         if candidate is not None: candidate.dispose()
         with admin.connect().execution_options(isolation_level='AUTOCOMMIT') as control:

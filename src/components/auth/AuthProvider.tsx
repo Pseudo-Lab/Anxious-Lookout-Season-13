@@ -13,6 +13,7 @@ import { getMe, logout, type AuthUser, type LogoutResult, type MeResult } from "
 import type { FetchFailure } from "@/lib/api/client";
 import { API_ENABLED } from "@/lib/constants";
 import { clearAllRequests } from "@/lib/research/pendingStore";
+import { clearAllBodyBuffers, setBodyBufferOwner } from "@/lib/posts/bodyBuffer";
 
 // "disabled": API가 없는 배포(GitHub Pages 정적 export). 인증 조회를 하지 않는다.
 export type AuthStatus = "loading" | "authenticated" | "unauthenticated" | "error" | "disabled";
@@ -49,6 +50,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const applyMe = useCallback((me: MeResult) => {
     if (me.state === "authenticated") {
+      // 저장하지 못한 글 본문 버퍼(메모리)는 이 계정 것만 남긴다(#32)
+      setBodyBufferOwner(me.user.accountId);
       setUser(me.user);
       setCsrfToken(me.csrfToken);
       setFailure(null);
@@ -94,6 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (result.ok) {
       // 명시적 로그아웃: 이 탭에 남은 미확인 변경 요청(입력 내용 포함)도 지운다.
       clearAllRequests();
+      clearAllBodyBuffers();
       setUser(null);
       setCsrfToken(null);
       setFailure(null);

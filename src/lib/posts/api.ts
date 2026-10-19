@@ -1,6 +1,9 @@
 import { apiUrl, fetchJson } from "@/lib/api/client";
 import { BASE_PATH } from "@/lib/constants";
 import { listQuery, mutate, parsePage, type MutationContext } from "@/lib/research/api";
+import { parseBlockDocument } from "@/lib/blocks/document";
+import type { FormatChange } from "@/lib/blocks/projection";
+import type { BlockDocument } from "@/lib/blocks/types";
 import type {
   Post,
   PostDocumentOption,
@@ -10,6 +13,7 @@ import type {
   PostMaterialSource,
   PostMeta,
   PostProposal,
+  PostProposalComparison,
   PostPublicationPreview,
   PostTag,
   PostText,
@@ -30,6 +34,27 @@ const isId = (v: unknown): v is string => typeof v === "string" && v !== "";
 const isInt = (v: unknown): v is number => Number.isInteger(v);
 const isStrList = (v: unknown): v is string[] => Array.isArray(v) && v.every(isStr);
 const enc = encodeURIComponent;
+const optStr = (v: unknown) => v === undefined || isStr(v);
+
+/** 본문(#32 post-blocks). 없으면 undefined, 있으면 계약 검사·정규화한 문서, 계약과 다르면 null(응답 invalid). */
+function parseContent(v: unknown): BlockDocument | null | undefined {
+  if (v === undefined) return undefined;
+  const r = parseBlockDocument(v);
+  return r.ok ? r.doc : null;
+}
+
+const FORMAT_KINDS = new Set(["format-only", "layout", "moved", "added", "removed", "ambiguous"]);
+function parseFormatChange(v: unknown): FormatChange | null {
+  if (
+    !isObj(v) ||
+    (v.baseBlockId !== null && !isId(v.baseBlockId)) ||
+    (v.candidateBlockId !== null && !isId(v.candidateBlockId)) ||
+    !FORMAT_KINDS.has(v.kind as string) ||
+    !isStrList(v.changedProperties)
+  )
+    return null;
+  return { baseBlockId: v.baseBlockId, candidateBlockId: v.candidateBlockId, kind: v.kind as FormatChange["kind"], changedProperties: v.changedProperties };
+}
 
 function parseDocRef(v: unknown): PublicPostDocument | null {
   if (!isObj(v) || !isId(v.id) || !isStr(v.title) || (v.publicUrl !== null && !isStr(v.publicUrl))) return null;
@@ -63,7 +88,7 @@ function parsePublicPost(v: unknown): PublicPost | null {
     (v.author.login !== null && !isStr(v.author.login)) ||
     !isStr(v.author.name) ||
     !isStr(v.publishedAt) ||
-    (v.content !== undefined && !isStr(v.content))
+    !optStr(v.textProjection)
   ) {
     return null;
   }
@@ -84,7 +109,9 @@ function parsePublicPost(v: unknown): PublicPost | null {
     documents,
     materials,
   };
-  if (isStr(v.content)) post.content = v.content;
+  // 본문은 BlockRenderer가 그리기 전에 검사한다(모르는 형식이면 그 자리에 오류를 보인다)
+  if (v.content !== undefined) post.content = v.content;
+  if (isStr(v.textProjection)) post.textProjection = v.textProjection;
   return post;
 }
 
@@ -113,7 +140,7 @@ function parseMeta(v: Obj): PostMeta | null {
     (v.coverImageId !== null && !isStr(v.coverImageId)) ||
     !isStrList(v.documentIds) ||
     !isStrList(v.materialIds) ||
-    (v.content !== undefined && !isStr(v.content))
+    !optStr(v.textProjection)
   ) {
     return null;
   }
@@ -135,8 +162,11 @@ function parseVersion(v: unknown): PostVersion | null {
   if (!isObj(v) || !isId(v.id) || !isId(v.postId) || !isInt(v.number) || !isStr(v.createdAt)) return null;
   const meta = parseMeta(v);
   if (!meta) return null;
+  const content = parseContent(v.content);
+  if (content === null) return null;
   const out: PostVersion = { id: v.id, postId: v.postId, number: v.number, createdAt: v.createdAt, ...meta };
-  if (isStr(v.content)) out.content = v.content;
+  if (content) out.content = content;
+  if (isStr(v.textProjection)) out.textProjection = v.textProjection;
   return out;
 }
 
@@ -198,7 +228,8 @@ function parseDraft(v: unknown): PostDraft | null {
     return null;
   }
   const meta = parseMeta(v);
-  if (!meta) return null;
+  const content = parseContent(v.content);
+  if (!meta || content === null) return null;
   const out: PostDraft = {
     id: v.id,
     postId: v.postId,
@@ -210,7 +241,8 @@ function parseDraft(v: unknown): PostDraft | null {
     updatedAt: v.updatedAt,
     ...meta,
   };
-  if (isStr(v.content)) out.content = v.content;
+  if (content) out.content = content;
+  if (isStr(v.textProjection)) out.textProjection = v.textProjection;
   return out;
 }
 
@@ -261,7 +293,8 @@ function parsePreview(v: unknown): PostPublicationPreview | null {
     !isInt(v.expectedVersion) ||
     !isStr(v.previewToken) ||
     typeof v.publishable !== "boolean" ||
-    !isStr(v.content) ||
+    v.content === undefined ||
+    !isStr(v.textProjection) ||
     !isObj(v.author) ||
     !isStr(v.author.login)
   ) {
@@ -285,6 +318,7 @@ function parsePreview(v: unknown): PostPublicationPreview | null {
     publishable: v.publishable,
     ...meta,
     content: v.content,
+    textProjection: v.textProjection,
     author: { login: v.author.login },
     documents,
     materials,
@@ -307,12 +341,16 @@ function parseProposal(v: unknown): PostProposal | null {
     (v.acceptedPostId !== null && !isId(v.acceptedPostId)) ||
     (v.acceptedVersionId !== null && !isId(v.acceptedVersionId)) ||
     !isStr(v.createdAt) ||
-    !isStr(v.updatedAt)
+    !isStr(v.updatedAt) ||
+    !optStr(v.baseTextProjection)
   ) {
     return null;
   }
   const meta = parseMeta(v);
-  if (!meta) return null;
+  const content = parseContent(v.content);
+  const formatChanges = v.formatChanges === undefined ? undefined : parseAll(v.formatChanges, parseFormatChange);
+  const warnings = v.conversionWarnings === undefined ? undefined : parseAll(v.conversionWarnings, (w) => (isObj(w) && isStr(w.code) ? { code: w.code } : null));
+  if (!meta || content === null || formatChanges === null || warnings === null) return null;
   const out: PostProposal = {
     id: v.id,
     postId: v.postId,
@@ -328,8 +366,36 @@ function parseProposal(v: unknown): PostProposal | null {
     updatedAt: v.updatedAt,
     ...meta,
   };
-  if (isStr(v.content)) out.content = v.content;
+  if (content) out.content = content;
+  if (isStr(v.textProjection)) out.textProjection = v.textProjection;
+  if (isStr(v.baseTextProjection)) out.baseTextProjection = v.baseTextProjection;
+  if (formatChanges) out.formatChanges = formatChanges;
+  if (warnings) out.conversionWarnings = warnings;
   return out;
+}
+
+function parseComparison(v: unknown): PostProposalComparison | null {
+  if (
+    !isObj(v) ||
+    (v.baseVersionId !== null && !isId(v.baseVersionId)) ||
+    (v.baseDraftRevision !== null && !isInt(v.baseDraftRevision)) ||
+    !isStr(v.baseContentHash) ||
+    !isStr(v.candidateHash) ||
+    !isStr(v.baseTextProjection) ||
+    !isStr(v.textProjection)
+  )
+    return null;
+  const formatChanges = parseAll(v.formatChanges, parseFormatChange);
+  if (!formatChanges) return null;
+  return {
+    baseVersionId: v.baseVersionId,
+    baseDraftRevision: v.baseDraftRevision,
+    baseContentHash: v.baseContentHash,
+    candidateHash: v.candidateHash,
+    baseTextProjection: v.baseTextProjection,
+    textProjection: v.textProjection,
+    formatChanges,
+  };
 }
 
 const parseFullProposal = (v: unknown) => {
@@ -452,6 +518,16 @@ export const acceptPostProposal = (
   },
   ctx: MutationContext
 ) => mutate(`/research/post-proposals/${enc(id)}/accept`, "POST", body, parseAccept, ctx);
+/**
+ * 수락하려는 내용을 지금 기준(현재 글 head 또는 새 글 연결 초안)과 서버가 다시 비교한다(#32 §11).
+ * 저장하지 않는 읽기라 Idempotency-Key 없이 CSRF만 보낸다. 수락 CAS를 대신하지 않는다.
+ */
+export const comparePostProposal = (id: string, content: BlockDocument, csrfToken: string) =>
+  fetchJson(apiUrl(`/research/post-proposals/${enc(id)}/comparison`), parseComparison, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+    body: JSON.stringify({ content }),
+  });
 export const discardPostProposal = (id: string, expectedProposalVersion: number, ctx: MutationContext) =>
   mutate(`/research/post-proposals/${enc(id)}/discard`, "POST", { expectedProposalVersion }, parseProposal, ctx);
 

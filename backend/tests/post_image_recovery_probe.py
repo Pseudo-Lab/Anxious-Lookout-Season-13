@@ -34,13 +34,15 @@ def run(mode):
             db.execute(text('CREATE DATABASE restore_post_image_candidate'))
         os.environ['ADMIN_DATABASE_URL'] = source_url.render_as_string(hide_password=False)
         os.environ['POST_IMAGE_ROOT'] = '/recovery/source'
-        migrate('0006_posts')
+        migrate('0007_post_blocks')
         with Session(source) as db, db.begin():
             owner = db.execute(text("INSERT INTO auth.accounts(github_id,login,is_approved,role) VALUES('999999','image-recovery',true,'editor') RETURNING id")).scalar_one()
             store = Store(db, owner)
             output = io.BytesIO(); Image.new('RGB', (20,20), 'blue').save(output, format='PNG')
             image = upload(store, output.getvalue(), 'image/png', '')
-            draft = create_draft(store, CreateDraft(title='Restored', slug='image-restored', content='![image]('+image['url']+')', description='', tags=[], documentIds=[], coverImageId=image['id']))
+            from app.post_block_markdown import convert
+            document,_=convert('![image]('+image['url']+')','recovery-fixture')
+            draft = create_draft(store, CreateDraft(title='Restored', slug='image-restored', content=document, description='', tags=[], documentIds=[], coverImageId=image['id']))
             post = commit_draft(store, draft['id'], DraftCommit(expectedDraftRevision=1))['post']
             shown = preview(store, post['id'])
             publish(store, post['id'], Publish(**{key: shown[key] for key in ('expectedVersion','versionId','previewToken')}), '')
@@ -53,7 +55,7 @@ def run(mode):
         target = create_engine(target_url, hide_parameters=True)
         with source.connect() as original, target.connect() as restored:
             assert signature(original) == signature(restored)
-        assert restore_candidate(target_url, os.environ['API_DATABASE_PASSWORD'], 'restore_post_image_candidate') == '0006_posts'
+        assert restore_candidate(target_url, os.environ['API_DATABASE_PASSWORD'], 'restore_post_image_candidate') == '0007_post_blocks'
         shutil.copytree('/recovery/backup', '/recovery/restored')
         os.environ['POST_IMAGE_ROOT'] = '/recovery/restored'
         with Session(target) as db:

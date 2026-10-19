@@ -1,6 +1,7 @@
 """Codex can propose; only an authenticated human action creates a post version."""
 from datetime import datetime, timezone
 from uuid import UUID
+from typing import Literal
 from fastapi import Request
 from pydantic import Field, model_validator
 from sqlalchemy import select
@@ -21,7 +22,26 @@ class DraftPair(Input):
         return self
 
 
-class Propose(posts.PostText, DraftPair):
+class MarkdownInput(Input):
+    format: Literal['markdown']
+    text: str = Field(max_length=200000)
+
+    @model_validator(mode='before')
+    @classmethod
+    def safe_text_boundary(cls, value):
+        from .post_blocks import invalid
+        raw = value.get('text') if isinstance(value,dict) else None
+        if not isinstance(raw,str): invalid(('contentInput','text'),'unsupported_content')
+        try: size=len(raw.encode('utf-8'))
+        except UnicodeError: invalid(('contentInput','text'),'unsupported_content')
+        if size>1048576: invalid(('contentInput','text'),'payload_too_large',413)
+        if len(raw)>200000: invalid(('contentInput','text'),'content_limit_exceeded')
+        if '\x00' in raw: invalid(('contentInput','text'),'unsupported_content')
+        return value
+
+
+class Propose(posts.PostMetadata, DraftPair):
+    contentInput: MarkdownInput
     mutationId: str
     postId: str | None = None
     expectedVersion: int | None = Field(default=None, ge=1)
@@ -69,7 +89,12 @@ def owned(store, identity):
 
 def create(store, body):
     posts.ready(store); store.graph_lock()
-    payload = posts.payload(body)
+    from .post_block_markdown import convert
+    from .post_blocks import text_projection, format_changes, digest
+    import os
+    document, warnings = convert(body.contentInput.text, str(store.owner)+':'+body.mutationId, os.environ.get('APP_BASE_PATH',''))
+    payload = {key: getattr(body, key) for key in posts.PostMetadata.model_fields}
+    payload.update(content=document, conversionWarnings=warnings)
     image_ids = posts.validate_content(store, payload, commit=True)
     post = posts.owned(store, body.postId, active=True) if body.postId else None
     if post:
@@ -79,6 +104,9 @@ def create(store, body):
         draft = posts.draft(store, body.draftId)
         check_draft(draft, body.expectedDraftRevision)
         if draft.post_id != (post.id if post else None): conflict('draft_revision')
+    base = draft.payload['content'] if body.draftId else posts.head(store,post).payload['content'] if post else {'format':'post-blocks','version':1,'blocks':[]}
+    payload.update(textProjection=text_projection(document), baseTextProjection=text_projection(base),
+                   formatChanges=format_changes(base,document), candidateHash=digest(document), baseContentHash=digest(base))
     row = PostProposal(owner_id=store.owner, post_id=post.id if post else None,
         base_post_version=post.version if post else None, base_version_id=posts.head(store, post).id if post else None,
         base_draft_id=parse_id(body.draftId) if body.draftId else None, base_draft_revision=body.expectedDraftRevision, payload=payload, image_ids=image_ids)
@@ -133,6 +161,19 @@ def read_draft(store, body):
     return {'draft': posts.draft_value(row) if row else None}
 
 
+def comparison(store, row, content):
+    from .post_blocks import canonicalize, text_projection, format_changes, digest
+    candidate = canonicalize(content)
+    post = posts.owned(store, row.post_id) if row.post_id else None
+    latest = posts.head(store,post) if post else None
+    draft = posts.draft(store,row.base_draft_id) if not post and row.base_draft_id else None
+    base = latest.payload['content'] if latest else draft.payload['content'] if draft else {'format':'post-blocks','version':1,'blocks':[]}
+    return {'baseVersionId':str(latest.id) if latest else None, 'baseDraftRevision':draft.revision if draft else None,
+            'baseContentHash':digest(base), 'candidateHash':digest(candidate),
+            'baseTextProjection':text_projection(base), 'textProjection':text_projection(candidate),
+            'formatChanges':format_changes(base,candidate)}
+
+
 def register(app, authorized, settings, response, write):
     root = settings.base_path + '/api/research/post-proposals'
 
@@ -157,6 +198,14 @@ def register(app, authorized, settings, response, write):
         with authorized(request, True) as store:
             posts.ready(store)
             return write(store, request, Accept, body, lambda parsed: resolve(store, identity, parsed))
+
+    @app.post(root + '/{identity}/comparison')
+    def compare(identity: UUID, body: dict, request: Request):
+        with authorized(request) as store:
+            posts.ready(store)
+            row = owned(store, identity)
+            if set(body) != {'content'}: fail('validation_error', 'Only content is accepted', 422)
+            return response(comparison(store, row, body['content']))
 
     @app.post(root + '/{identity}/discard')
     def discard(identity: UUID, body: dict, request: Request):

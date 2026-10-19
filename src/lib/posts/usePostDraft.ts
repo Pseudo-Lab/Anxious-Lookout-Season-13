@@ -4,6 +4,9 @@
 
 import { createPostDraft, getPostDraft, getPostDraftOf, savePostDraft } from "@/lib/posts/api";
 import type { PostDraft, PostText } from "@/lib/posts/types";
+import { canonicalJson } from "@/lib/blocks/document";
+import { emptyDocument } from "@/lib/blocks/types";
+import type { BlockDocument } from "@/lib/blocks/types";
 import { useServerDraft, type DraftAdapter, type SaveStatus } from "@/lib/research/useServerDraft";
 
 export type PostSaveStatus = SaveStatus<PostDraft>;
@@ -18,7 +21,7 @@ const sameList = (a: string[], b: string[]) => a.length === b.length && a.every(
 
 export const sameText = (a: PostText, b: PostText) =>
   a.title === b.title &&
-  a.content === b.content &&
+  canonicalJson(a.content) === canonicalJson(b.content) &&
   a.description === b.description &&
   a.coverImageId === b.coverImageId &&
   sameList(a.tags, b.tags) &&
@@ -26,9 +29,10 @@ export const sameText = (a: PostText, b: PostText) =>
   sameList(a.materialIds, b.materialIds);
 
 /** 응답(초안·버전·제안·미리보기)에서 입력 모양만 고른다. 주소(slug)·자료 출처는 입력이 아니다. */
-export const textOf = (v: Omit<PostText, "content"> & { content?: string }): PostText => ({
+export const textOf = (v: Omit<PostText, "content"> & { content?: BlockDocument }): PostText => ({
   title: v.title,
-  content: v.content ?? "",
+  // 본문이 없는 응답(목록)에서 만들 일은 없다. 그래도 빈 문서로 둔다.
+  content: v.content ?? EMPTY_TEXT.content,
   description: v.description,
   tags: [...v.tags],
   coverImageId: v.coverImageId,
@@ -36,13 +40,13 @@ export const textOf = (v: Omit<PostText, "content"> & { content?: string }): Pos
   materialIds: [...v.materialIds],
 });
 
-export const EMPTY_TEXT: PostText = { title: "", content: "", description: "", tags: [], coverImageId: null, documentIds: [], materialIds: [] };
+export const EMPTY_TEXT: PostText = { title: "", content: emptyDocument(), description: "", tags: [], coverImageId: null, documentIds: [], materialIds: [] };
 
 const postDrafts: DraftAdapter<PostText, PostDraft, PostDraftBase> = {
   scope: "post-draft",
   same: sameText,
   fingerprint: (v) => JSON.stringify(v),
-  fromDraft: (d) => textOf({ ...d, content: d.content ?? "" }),
+  fromDraft: (d) => textOf(d),
   target: (base) => base?.postId ?? "new",
   create: (v, base, ctx) => createPostDraft(base ? { ...v, ...base } : v, ctx),
   save: (d, v, ctx) => savePostDraft(d.id, v, d.revision, ctx),

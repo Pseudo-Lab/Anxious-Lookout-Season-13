@@ -14,14 +14,14 @@ const summaryClass = "mt-2 line-clamp-2 text-stone-500";
 // 읽지 못하면 아무것도 보이지 않는다(제목·날짜만으로도 카드는 성립한다).
 function BodyExcerpt({ post }: { post: PublicPost }) {
   const { result } = useLoad(`public-post-excerpt:${post.slug}:${post.versionId}`, () => getPublicPost(post.slug));
-  const text = result?.ok ? excerpt(result.data.content ?? "") : "";
+  const text = result?.ok ? excerpt(result.data.textProjection ?? "") : "";
   return text ? <p className={summaryClass}>{text}</p> : null;
 }
 
 function Summary({ post }: { post: PublicPost }) {
   if (post.description) return <p className={summaryClass}>{post.description}</p>;
-  if (post.content !== undefined) {
-    const text = excerpt(post.content);
+  if (post.textProjection !== undefined) {
+    const text = excerpt(post.textProjection);
     return text ? <p className={summaryClass}>{text}</p> : null;
   }
   return <BodyExcerpt post={post} />;

@@ -192,6 +192,7 @@ def test_offline_post_proposal_reads_current_source(tmp_path, monkeypatch, kind)
     from tests.test_posts import content
     identity = str(uuid.uuid4())
     source = content(title='Human title', content='Human words', slug='human-slug', tags=['kept'], materialIds=[str(uuid.uuid4())])
+    source.update(textProjection='Human words', markdownProjection='Human words')
     page = {'kind': 'post', 'resourceId': identity} if kind in {'post', 'read-failure'} else (
         {'kind': 'post_workspace', 'draftId': identity} if kind == 'draft' else {'kind': 'post_workspace'})
     calls = []
@@ -218,7 +219,7 @@ def test_offline_post_proposal_reads_current_source(tmp_path, monkeypatch, kind)
         assert proposal['name'] == 'research_post_propose'
         args = proposal['arguments']
         assert 'Complete fixture post proposal' in args['title']
-        assert args['content'].endswith('Complete fixture post proposal')
+        assert args['contentInput']['text'].endswith('Complete fixture post proposal')
         if kind == 'post':
             assert calls[0]['arguments'] == {'type':'post', 'id':identity}
             assert args['postId'] == identity and args['expectedVersion'] == 7
@@ -229,7 +230,7 @@ def test_offline_post_proposal_reads_current_source(tmp_path, monkeypatch, kind)
         else:
             assert len(calls) == 1 and 'postId' not in args and 'draftId' not in args
         if kind in {'post','draft'}:
-            assert args['content'].startswith('Human words') and args['slug'] == 'human-slug'
+            assert args['contentInput']['text'].startswith('Human words') and args['slug'] == 'human-slug'
             assert args['tags'] == ['kept'] and args['materialIds'] == source['materialIds']
         tools = [item for item in record['record']['turns'][0]['items'] if item['type'] == 'dynamicToolCall']
         assert all(item['status'] == 'completed' for item in tools)

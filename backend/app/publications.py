@@ -25,7 +25,7 @@ def require_publication_schema(db):
         marker = validate_research(db.connection())
     except RuntimeError:
         fail("not_ready", "Publication schema or authority is not ready", 503)
-    if marker not in {"0004_publication", "0005_writing", "0006_posts"}:
+    if marker not in {"0004_publication", "0005_writing", "0006_posts", "0007_post_blocks"}:
         fail("not_ready", "Publication capability is not ready", 503)
 
 
@@ -47,7 +47,7 @@ def owned_publication_info(store, item):
     # Storage-only0002/0003 remains readable before the explicit new migration.
     from sqlalchemy import text
     marker = store.db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one()
-    if marker not in {"0004_publication", "0005_writing", "0006_posts"}:
+    if marker not in {"0004_publication", "0005_writing", "0006_posts", "0007_post_blocks"}:
         return None
     row = store.db.scalar(select(Publication).join(PublicationHead, PublicationHead.publication_id == Publication.id)
                            .where(Publication.document_id == item.id, Publication.owner_id == store.owner))

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { Editor } from "@tiptap/react";
 import type { FetchFailure } from "@/lib/api/client";
 import { useAuth } from "@/hooks/useAuth";
 import { commitPostDraft, discardPostDraft, getPost, getPostDraft, resolvePostMaterials } from "@/lib/posts/api";
@@ -12,9 +13,12 @@ import { formatDateTime } from "@/lib/research/format";
 import { LIMITS } from "@/lib/research/types";
 import { StatusLine, isReason } from "@/components/research/DocumentEditor";
 import ErrorNotice from "@/components/research/ErrorNotice";
-import { Field, MarkdownEditor, inputClass } from "@/components/research/ItemForms";
+import { hasVisibleContent } from "@/lib/blocks/projection";
+import BodyDiff from "@/components/blocks/BodyDiff";
+import PostBodyEditor, { blockProblemText, type BodyProblem } from "@/components/blocks/PostBodyEditor";
+import { bufferTarget, clearBodyBuffer, loadBodyBuffer, saveBodyBuffer } from "@/lib/posts/bodyBuffer";
+import { Field, inputClass } from "@/components/research/ItemForms";
 import Notice from "@/components/research/Notice";
-import TextDiff from "@/components/research/TextDiff";
 import DocumentLinks from "./DocumentLinks";
 import ImagePanel from "./ImagePanel";
 import MaterialLinks, { MATERIAL_MAX } from "./MaterialLinks";
@@ -23,12 +27,13 @@ import TagInput from "./TagInput";
 
 // #28 글 편집기: 서버 초안 자동 저장 + 명시 저장(새 버전). 초안·버전은 발행본을 바꾸지 않는다(발행은 따로).
 // #31: 주소(slug)는 입력하지 않는다(서버가 첫 저장 때 정함). 요약은 접어 둔 선택 입력, 바탕이 된 자료를 함께 고른다.
+// #32: 본문은 블록 편집기(post-blocks v1)다. 이미지는 imageId로 넣고, 비교는 글자(projection)와 서식·배치를 따로 보인다.
 
 export const DESCRIPTION_MAX = 1000;
 
 /** 저장 전에 화면에서 확인할 것(서버가 최종 검증). 문제가 없으면 null. */
 export function textProblem(v: PostText): string | null {
-  if (!v.title.trim() || !v.content.trim()) return "제목과 본문을 모두 입력해야 저장할 수 있습니다.";
+  if (!v.title.trim() || !hasVisibleContent(v.content)) return "제목과 본문을 모두 입력해야 저장할 수 있습니다.";
   return null;
 }
 
@@ -83,7 +88,7 @@ export default function PostEditor({
   onDiscarded: () => void;
   onReloadPost?: () => Promise<void>;
 }) {
-  const head = post ? textOf({ ...post.latestVersion, content: post.latestVersion.content ?? "" }) : EMPTY_TEXT;
+  const head = post ? textOf(post.latestVersion) : EMPTY_TEXT;
   const editor = usePostDraft({
     initial: head,
     draft: resumeDraft,
@@ -93,26 +98,59 @@ export default function PostEditor({
   const { values, status } = editor;
   // 모든 변경은 최신 입력에 덧붙인다(렌더 시점 값을 캡처하지 않는다).
   const set = (patch: Partial<PostText>) => editor.update((v) => ({ ...v, ...patch }));
-  // 이미지 Markdown을 본문 커서 위치에 넣는다(커서가 없으면 끝에). 앞뒤를 빈 줄로 띄운다.
-  const body = useRef<HTMLTextAreaElement>(null);
-  function insert(markdown: string) {
-    editor.update((v) => {
-      const el = body.current;
-      const text = v.content;
-      // 입력란이 초점을 잃어도 마지막 선택 위치는 남아 있다(업로드를 기다리는 동안 바뀐 본문 기준)
-      const at = Math.min(el?.selectionEnd ?? text.length, text.length);
-      const before = text.slice(0, at);
-      const after = text.slice(at);
-      const piece = `${before && !before.endsWith("\n\n") ? (before.endsWith("\n") ? "\n" : "\n\n") : ""}${markdown}${after.startsWith("\n") ? "" : "\n"}`;
-      return { ...v, content: before + piece + after };
-    });
+  // 이미지 패널의 이미지를 본문 커서 위치에 블록으로 넣는다(편집기가 아직 없으면 넣지 않는다)
+  const bodyEditor = useRef<Editor | null>(null);
+  function insertImage(image: { id: string; alt: string }) {
+    bodyEditor.current?.chain().focus().insertPostImage({ imageId: image.id, alt: image.alt }).run();
   }
   // 이미지 업로드 중에는 저장·닫기·버리기를 잠근다(완료 결과가 닫힌 편집기나 저장된 버전 밖에 남지 않게).
-  const [uploading, setUploading] = useState(false);
+  // 이미지 패널과 본문 편집기(붙여넣기·끌어놓기)의 업로드를 함께 센다.
+  const [panelUploading, setPanelUploading] = useState(false);
+  const [bodyUploading, setBodyUploading] = useState(false);
+  const uploading = panelUploading || bodyUploading;
+  // 화면의 본문이 계약을 넘어(상한 등) 마지막 유효 본문만 저장된 상태. 고칠 때까지 새 버전 저장·보관 닫기를 막는다(리뷰 M1).
+  // 그 편집기 내용은 이 탭의 메모리에 보관해 두고(bodyBuffer), 화면 이동·뒤로가기 뒤 같은 초안을 다시 열면 되살린다.
+  // 새로고침·탭 닫기는 떠날 때 확인으로 막는다(본문을 브라우저 저장소에 남기지 않는다).
+  const { user, csrfToken } = useAuth();
+  const accountId = user?.accountId ?? null;
+  const buffer = bufferTarget(editor.draft?.id ?? resumeDraft?.id, post?.id);
+  const [restored] = useState(() => {
+    if (!accountId) return null;
+    const target = bufferTarget(resumeDraft?.id, post?.id);
+    const b = loadBodyBuffer(accountId, target);
+    if (!b) return null;
+    // 그 뒤 서버 초안이 바뀌었으면(다른 탭·기기) 오래된 버퍼로 덮지 않는다
+    if (b.revision !== (resumeDraft?.revision ?? null)) {
+      clearBodyBuffer(accountId, target);
+      return null;
+    }
+    return b.editor;
+  });
+  const [bodyProblemState, setBodyProblemState] = useState<BodyProblem | null>(null);
+  const bodyProblem = bodyProblemState?.error ?? null;
+  function onBodyProblem(p: BodyProblem | null) {
+    setBodyProblemState(p);
+    if (!p && accountId) clearBodyBuffer(accountId, buffer);
+  }
+  // 문제가 있는 동안 버퍼를 지금 초안(마지막 유효 본문의 자동 저장이 늦게 끝나 revision·ID가 바뀌어도 그 기준)에 맞춰 둔다
+  const draftRevision = editor.draft?.revision ?? null;
+  const savedTarget = useRef<string | null>(null);
+  useEffect(() => {
+    if (!accountId || !bodyProblemState) return;
+    if (savedTarget.current && savedTarget.current !== buffer) clearBodyBuffer(accountId, savedTarget.current);
+    savedTarget.current = buffer;
+    saveBodyBuffer(accountId, buffer, { revision: draftRevision, editor: bodyProblemState.editor });
+  }, [accountId, buffer, bodyProblemState, draftRevision]);
+  useEffect(() => {
+    if (!bodyProblem) return;
+    // 떠나면 화면의 입력(저장되지 않은 본문)을 잃으므로 브라우저 확인을 띄운다
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [bodyProblem]);
 
   // 바탕이 된 자료(#31 W3). 문서를 연결하면 그 문서가 가리키는 자료를 서버에 물어 선택에 더한다(선택은 언제나 명시 materialIds).
   // 자료를 찾는 동안에도 저장·닫기·버리기를 잠근다(결과가 저장된 버전 밖에 남지 않게).
-  const { csrfToken } = useAuth();
   const [sources, setSources] = useState<Record<string, string[]>>(() =>
     sourceMap(resumeDraft?.materialSources ?? post?.latestVersion.materialSources ?? [])
   );
@@ -226,6 +264,10 @@ export default function PostEditor({
   async function commit(): Promise<boolean> {
     setFailure(null);
     setNote(null);
+    if (bodyProblem) {
+      setNote(`본문을 고친 뒤 저장하세요. ${blockProblemText(bodyProblem)}`);
+      return false;
+    }
     const problem = textProblem(values);
     if (problem) {
       setNote(problem);
@@ -277,12 +319,15 @@ export default function PostEditor({
     setFailure(null);
     const flushed = await editor.flush();
     const d = flushed.draft;
+    // 초안을 버리면 이 탭에 보관한 저장 못 한 본문도 함께 버린다(명시적 폐기)
     if (!d) {
+      if (accountId) clearBodyBuffer(accountId, buffer);
       onDiscarded();
       return true;
     }
     const res = await run(`post-draft:discard:${d.id}:${d.revision}`, (ctx) => discardPostDraft(d.id, d.revision, ctx));
     if (res.ok || isReason(res.failure, "draft_closed")) {
+      if (accountId) clearBodyBuffer(accountId, buffer);
       onDiscarded();
       return true;
     }
@@ -291,6 +336,10 @@ export default function PostEditor({
   }
 
   async function close(): Promise<boolean> {
+    if (bodyProblem) {
+      setNote("저장할 수 없는 본문이 화면에 있어 닫지 않았습니다. 본문을 고치거나 초안을 버리세요.");
+      return false;
+    }
     const flushed = await editor.flush();
     if (flushed.ok) {
       onClose?.();
@@ -350,12 +399,22 @@ export default function PostEditor({
       />
       <ImagePanel
         coverImageId={values.coverImageId}
-        onInsert={insert}
+        onInsert={insertImage}
         onCover={(coverImageId) => set({ coverImageId })}
-        onUploading={setUploading}
+        onUploading={setPanelUploading}
         readOnly={locked}
       />
-      <MarkdownEditor value={values.content} onChange={(content) => set({ content })} readOnly={locked} ownImages textareaRef={body} />
+      <PostBodyEditor
+        value={values.content}
+        onChange={(content) => set({ content })}
+        onEditor={(e) => {
+          bodyEditor.current = e;
+        }}
+        onUploading={setBodyUploading}
+        onProblem={onBodyProblem}
+        restore={restored}
+        readOnly={locked}
+      />
       {locked && (
         <p role="status" className="text-xs text-stone-600">
           {finishing === "commit" ? "저장하는 중에는 입력을 고칠 수 없습니다." : finishing === "discard" ? "초안을 버리는 중입니다." : "초안을 저장하고 닫는 중입니다."}
@@ -364,7 +423,7 @@ export default function PostEditor({
       <StatusLine status={status} onRetry={() => void editor.flush()} />
       {uploading && (
         <p role="status" className="text-xs text-stone-600">
-          이미지를 올리는 중입니다. 끝나면 본문 커서 위치에 넣으며, 그동안 저장·닫기·버리기는 잠깁니다. 입력은 계속할 수 있습니다.
+          이미지를 올리는 중입니다. 끝나면 본문에 넣으며, 그동안 저장·닫기·버리기는 잠깁니다. 입력은 계속할 수 있습니다.
         </p>
       )}
 
@@ -399,8 +458,8 @@ export default function PostEditor({
       )}
       {status.kind === "conflict" && status.server && showServerDiff && (
         <div className="space-y-2">
-          <PostMetaDiff before={textOf({ ...status.server, content: status.server.content ?? "" })} after={values} />
-          <TextDiff before={status.server.content ?? ""} after={values.content} beforeTitle={status.server.title} afterTitle={values.title} />
+          <PostMetaDiff before={textOf(status.server)} after={values} />
+          <BodyDiff before={textOf(status.server).content} after={values.content} beforeTitle={status.server.title} afterTitle={values.title} />
         </div>
       )}
 
@@ -444,7 +503,7 @@ export default function PostEditor({
         <div className="space-y-2 rounded-lg p-3 ring-1 ring-indigo-200">
           <p className="text-xs text-stone-600">현재 글(v{post.latestVersion.number})에서 내 초안으로 바뀌는 내용입니다.</p>
           <PostMetaDiff before={head} after={values} />
-          <TextDiff before={head.content} after={values.content} beforeTitle={head.title} afterTitle={values.title} />
+          <BodyDiff before={head.content} after={values.content} beforeTitle={head.title} afterTitle={values.title} />
         </div>
       )}
 
@@ -455,13 +514,13 @@ export default function PostEditor({
         <button
           type="button"
           onClick={() => void finish("commit", commit)}
-          disabled={busy || locked || pending || status.kind === "conflict"}
+          disabled={busy || locked || pending || !!bodyProblem || status.kind === "conflict"}
           className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
         >
           {finishing === "commit" ? "저장 중..." : post ? (contentMoved && comparing ? "비교했고 이 내용으로 저장" : "새 버전으로 저장") : "글 저장"}
         </button>
         {onClose && (
-          <button type="button" onClick={() => void finish("close", close)} disabled={busy || locked || pending} className="rounded-lg px-4 py-2 text-sm text-stone-600 hover:bg-stone-100">
+          <button type="button" onClick={() => void finish("close", close)} disabled={busy || locked || pending || !!bodyProblem} className="rounded-lg px-4 py-2 text-sm text-stone-600 hover:bg-stone-100">
             편집 닫기(초안 보관)
           </button>
         )}

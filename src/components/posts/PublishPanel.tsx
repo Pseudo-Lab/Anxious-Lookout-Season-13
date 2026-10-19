@@ -5,8 +5,8 @@ import Link from "next/link";
 import type { FetchFailure } from "@/lib/api/client";
 import { getPostPublicationPreview, listPostVersions, publishPost, unpublishPost } from "@/lib/posts/api";
 import { postErrorMessage } from "@/lib/posts/errors";
-import type { Post, PostPublicationPreview } from "@/lib/posts/types";
-import { textOf } from "@/lib/posts/usePostDraft";
+import type { Post, PostPublicationPreview, PublicPost } from "@/lib/posts/types";
+import { parseBlockDocument } from "@/lib/blocks/document";
 import { useMutation } from "@/lib/research/hooks";
 import { usePagedList } from "@/lib/research/usePagedList";
 import { formatDateTime } from "@/lib/research/format";
@@ -14,6 +14,7 @@ import { isReason } from "@/components/research/DocumentEditor";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
 import TextDiff from "@/components/research/TextDiff";
+import BodyDiff from "@/components/blocks/BodyDiff";
 import PostArticle from "./PostArticle";
 import PostMetaDiff from "./PostMetaDiff";
 
@@ -84,13 +85,16 @@ function Preview({ preview }: { preview: PostPublicationPreview }) {
               materialTitles: Object.fromEntries(preview.materials.map((m) => [m.id, m.title])),
             }}
           />
-          <TextDiff before={cur.content ?? ""} after={preview.content} beforeTitle={cur.title} afterTitle={preview.title} />
+          <PublishedBodyDiff current={cur} preview={preview} />
         </div>
       ) : (
         <div className="max-h-[70vh] overflow-auto rounded-lg bg-white p-4 ring-1 ring-stone-200">
           <PostArticle
             post={{
-              ...textOf(preview),
+              title: preview.title,
+              description: preview.description,
+              content: preview.content,
+              tags: preview.tags,
               coverImageUrl: preview.images.find((i) => i.id === preview.coverImageId)?.url ?? null,
               documents: preview.documents,
               materials: preview.materials,
@@ -102,6 +106,14 @@ function Preview({ preview }: { preview: PostPublicationPreview }) {
       )}
     </div>
   );
+}
+
+// 현재 공개본 → 이번 발행 본문 비교. 둘 다 블록 문서로 읽히면 서식 변화까지, 아니면 서버 projection 글자만 비교한다.
+function PublishedBodyDiff({ current, preview }: { current: PublicPost; preview: PostPublicationPreview }) {
+  const before = parseBlockDocument(current.content);
+  const after = parseBlockDocument(preview.content);
+  if (before.ok && after.ok) return <BodyDiff before={before.doc} after={after.doc} beforeTitle={current.title} afterTitle={preview.title} />;
+  return <TextDiff before={current.textProjection ?? ""} after={preview.textProjection} beforeTitle={current.title} afterTitle={preview.title} />;
 }
 
 export default function PublishPanel({ post, onChanged }: { post: Post; onChanged: () => Promise<void> | void }) {

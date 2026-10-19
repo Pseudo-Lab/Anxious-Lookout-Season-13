@@ -11,7 +11,8 @@ import { useLoad, useMutation } from "@/lib/research/hooks";
 import { formatDateTime } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
-import SafeMarkdown from "@/components/research/SafeMarkdown";
+import BlockRenderer from "@/components/blocks/BlockRenderer";
+import BodyDiff from "@/components/blocks/BodyDiff";
 import { VersionHistoryView, type VersionSource } from "@/components/research/VersionHistory";
 import PostEditor from "@/components/posts/PostEditor";
 import PostMetaDiff from "@/components/posts/PostMetaDiff";
@@ -77,6 +78,8 @@ export default function PostDetail({ id }: { id: string }) {
     meta: versionMeta,
     metaDiff: (before, after) => <PostMetaDiff before={before} after={after} />,
     ownImages: true,
+    body: (version) => <BlockRenderer content={version.content} />,
+    bodyDiff: (before, after) => <BodyDiff before={textOf(before).content} after={textOf(after).content} beforeTitle={before.title} afterTitle={after.title} />,
   };
 
   return (
@@ -130,7 +133,7 @@ export default function PostDetail({ id }: { id: string }) {
               ))}
             </div>
           )}
-          <SafeMarkdown content={v.content ?? ""} ownImages />
+          <BlockRenderer content={v.content} />
         </section>
       )}
 
@@ -139,7 +142,7 @@ export default function PostDetail({ id }: { id: string }) {
       <VersionHistoryView
         source={source}
         latestVersionId={v.id}
-        onRestore={!p.archived && !editing ? (old) => void openEditor(textOf({ ...old, content: old.content ?? "" })) : undefined}
+        onRestore={!p.archived && !editing ? (old) => void openEditor(textOf(old)) : undefined}
       />
     </article>
   );

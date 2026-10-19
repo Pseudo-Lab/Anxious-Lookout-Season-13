@@ -27,7 +27,22 @@ const pageErrors = [];
 const context = await browser.newContext();
 const page = await context.newPage();
 page.on("pageerror", (e) => pageErrors.push(e.message));
-page.on("dialog", (d) => void d.accept());
+// 대화상자는 기본으로 수락한다. dismissNext면 다음 하나만 취소한다(떠날 때 확인에서 "머무르기" 선택).
+let dismissNext = false;
+const dialogsSeen = [];
+page.on("dialog", (d) => {
+  dialogsSeen.push(d.type());
+  if (dismissNext) {
+    dismissNext = false;
+    void d.dismiss();
+  } else void d.accept();
+});
+const leaveGuarded = () =>
+  page.evaluate(() => {
+    const e = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  });
 const main = page.locator("main");
 const chat = page.locator("#chat-panel");
 
@@ -54,6 +69,28 @@ const draftParam = async () => {
 };
 const idParam = () => new URL(page.url()).searchParams.get("id");
 const saved = () => main.getByText("초안 자동 저장됨").first().waitFor({ timeout: 10000 });
+// #32 본문은 블록 편집기다. 전부 지우고 줄마다 입력한다(입력 규칙: "# " 제목, **굵게**, `코드`). 줄 사이는 Enter(새 문단).
+const bodyBox = () => main.locator(".ProseMirror");
+async function writeBody(lines) {
+  await bodyBox().waitFor({ timeout: 15000 });
+  await bodyBox().click();
+  await page.keyboard.press("Control+a");
+  await page.keyboard.press("Delete");
+  await page.keyboard.press("Control+Alt+0");
+  for (const [i, line] of lines.entries()) {
+    if (i) await page.keyboard.press("Enter");
+    await page.keyboard.type(line);
+  }
+}
+async function pasteHtml(html) {
+  await bodyBox().evaluate((el, h) => {
+    const dt = new DataTransfer();
+    dt.setData("text/html", h);
+    dt.setData("text/plain", "");
+    el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  }, html);
+}
+const blockTypes = (content) => (content?.blocks ?? []).map((b) => b.type);
 async function send(text) {
   await chat.getByLabel("메시지").fill(text);
   await chat.getByRole("button", { name: "보내기" }).click();
@@ -133,22 +170,23 @@ check("WP3. W3: material added directly", await appears(mats.locator("li", { has
 check("WP3. W3: source URL shown", await appears(mats.getByRole("link", { name: "https://example.com/source-a" })));
 await links.getByRole("button", { name: "열람" }).click();
 check("WP3. linked document body readable", await appears(links.getByText("문서 A 본문 비밀 문장")));
-const FAKE = "0f0e0d0c-0b0a-4908-8706-050403020100";
-await main.getByLabel("본문").fill(`# 첫 글 본문\n\n![외부](https://example.com/x.png)\n\n![대문자](${BASE}/api/media/post-images/${FAKE.toUpperCase()})\n`);
-// 이미지 올리기: 원본 바이트 POST → 본문 커서 위치에 Markdown 삽입
+await writeBody(["# 첫 글 본문"]);
+await page.keyboard.press("Enter");
+// 외부 이미지·iframe이 섞인 HTML을 붙여 넣어도 글자만 들어온다(이미지는 자체 업로드 imageId로만)
+await pasteHtml('<p>붙인 글<img src="https://example.com/x.png"></p><iframe src="https://example.com/frame"></iframe>');
+// 이미지 올리기: 원본 바이트 POST → 본문 커서 위치에 이미지 블록(imageId) 삽입
 const imageBox = main.getByRole("region", { name: "이미지" });
 await imageBox.getByLabel("이미지 파일").setInputFiles({ name: "그림 (1).png", mimeType: "image/png", buffer: PNG });
 check("WP3. upload inserted note", await appears(imageBox.getByText("올렸습니다", { exact: false })));
 const uploads = await api.get("/research/post-images");
 const IMG = uploads.items[0]?.id;
 check("WP3. upload stored (raw bytes, own image)", uploads.items.length === 1 && uploads.items[0].url === `${BASE}/api/media/post-images/${IMG}`, JSON.stringify(uploads.items));
-check("WP3. markdown inserted with sanitized alt", (await main.getByLabel("본문").inputValue()).includes(`![그림  1](${BASE}/api/media/post-images/${IMG})`), await main.getByLabel("본문").inputValue());
-const preview = main.getByRole("region", { name: "미리보기" });
-await preview.getByRole("heading", { name: "첫 글 본문" }).waitFor();
-await preview.locator("img").first().waitFor();
-const imgs = await preview.locator("img").evaluateAll((els) => els.map((e) => [e.getAttribute("src"), e.naturalWidth]));
-check("WP3. preview shows only exact own-image path as <img> (loads for owner)", imgs.length === 1 && imgs[0][0] === `${BASE}/api/media/post-images/${IMG}` && imgs[0][1] > 0, JSON.stringify(imgs));
-check("WP3. external image stays a link", (await preview.getByRole("link", { name: "[이미지: 외부]" }).count()) === 1);
+const figure = bodyBox().locator("figure[data-type=post-image]");
+await figure.locator("img").first().waitFor();
+const imgs = await bodyBox().locator("img").evaluateAll((els) => els.map((e) => [e.getAttribute("src"), e.naturalWidth]));
+check("WP3. #32: image block inserted by imageId (own image loads for owner)", imgs.length === 1 && imgs[0][0] === `${BASE}/api/media/post-images/${IMG}` && imgs[0][1] > 0, JSON.stringify(imgs));
+check("WP3. #32: alt text taken from the file name", (await figure.getByLabel("대체 텍스트").inputValue()) === "그림 (1)");
+check("WP3. #32: pasted external image/iframe not inserted, text kept", (await bodyBox().locator("iframe").count()) === 0 && (await bodyBox().innerText()).includes("붙인 글"));
 await imageBox.getByRole("button", { name: "표지로" }).first().click();
 check("WP3. cover set from my images", await appears(imageBox.locator('img[alt="표지"]')));
 // 올릴 수 없는 형식은 보내기 전에 막는다
@@ -159,6 +197,14 @@ await saved();
 const draftId = await draftParam();
 check("WP3. autosave: address bound to draft", !!draftId);
 const d1 = await api.get(`/research/post-drafts/${draftId}`);
+check(
+  "WP3. #32: draft content is a post-blocks document (heading, pasted text, image by id)",
+  d1.content?.format === "post-blocks" &&
+    blockTypes(d1.content).join(",") === "heading,paragraph,image" &&
+    d1.content.blocks[2].imageId === IMG &&
+    d1.textProjection.startsWith("첫 글 본문\n\n붙인 글"),
+  JSON.stringify({ types: blockTypes(d1.content), projection: d1.textProjection })
+);
 check(
   "WP3. autosave: all post fields in draft (no slug, explicit materials)",
   d1.slug === "" &&
@@ -176,6 +222,7 @@ check(
   "WP3. reload restores draft (title, summary, tags, documents, materials)",
   (await main.getByLabel("제목").inputValue()) === "첫 글" &&
     (await main.getByLabel("요약").inputValue()) === "첫 글 요약" &&
+    (await appears(bodyBox().getByRole("heading", { name: "첫 글 본문" }))) &&
     (await main.getByRole("button", { name: "태그 테스트 빼기" }).count()) === 1 &&
     (await appears(links.getByText("바탕 문서 A"))) &&
     (await appears(mats.locator("li", { hasText: "문서 A의 자료" }).getByText("문서에서 자동 포함", { exact: false }))) &&
@@ -201,7 +248,7 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
 {
   await page.goto(U("/write/new/"));
   await main.getByLabel("제목").fill("업로드 전 제목");
-  await main.getByLabel("본문").fill("업로드 전 본문");
+  await writeBody(["업로드 전 본문"]);
   let release;
   const held = new Promise((r) => (release = r));
   const hold = async (route) => {
@@ -214,7 +261,7 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   await main.getByText("이미지를 올리는 중입니다", { exact: false }).waitFor();
   check("WP3b. save/discard locked during upload", (await main.getByRole("button", { name: "글 저장" }).isDisabled()) && (await main.getByRole("button", { name: "초안 버리기…" }).isDisabled()));
   await main.getByLabel("제목").fill("업로드 중 바꾼 제목");
-  await main.getByLabel("본문").fill("업로드 중 바꾼 본문");
+  await writeBody(["업로드 중 바꾼 본문"]);
   await main.getByRole("button", { name: "요약 추가(선택)" }).click();
   await main.getByLabel("요약").fill("업로드 중 요약");
   await main.getByLabel("태그", { exact: true }).fill("업로드중");
@@ -222,12 +269,12 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   release();
   await box.getByText("올렸습니다", { exact: false }).waitFor();
   await page.unroute("**/api/research/post-images", hold);
-  const body = await main.getByLabel("본문").inputValue();
+  const body = await bodyBox().innerText();
   check(
-    "WP3b. latest title/body/meta kept, image appended",
+    "WP3b. latest title/body/meta kept, image inserted",
     (await main.getByLabel("제목").inputValue()) === "업로드 중 바꾼 제목" &&
       body.startsWith("업로드 중 바꾼 본문") &&
-      /!\[slow\]\([^)]+post-images\/[0-9a-f-]+\)/.test(body) &&
+      (await bodyBox().locator("figure[data-type=post-image]").getByLabel("대체 텍스트").inputValue()) === "slow" &&
       (await main.getByLabel("요약").inputValue()) === "업로드 중 요약" &&
       (await main.getByRole("button", { name: "태그 업로드중 빼기" }).count()) === 1,
     JSON.stringify(body)
@@ -235,10 +282,102 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   check("WP3b. save unlocked after upload", !(await main.getByRole("button", { name: "글 저장" }).isDisabled()));
   await saved();
   const d = await api.get(`/research/post-drafts/${await draftParam()}`);
-  check("WP3b. server draft has the latest input", d.title === "업로드 중 바꾼 제목" && d.description === "업로드 중 요약" && d.content.startsWith("업로드 중 바꾼 본문"));
+  check(
+    "WP3b. server draft has the latest input",
+    d.title === "업로드 중 바꾼 제목" && d.description === "업로드 중 요약" && d.textProjection.startsWith("업로드 중 바꾼 본문") && blockTypes(d.content).includes("image"),
+    JSON.stringify({ projection: d.textProjection, types: blockTypes(d.content) })
+  );
   await main.getByRole("button", { name: "초안 버리기…" }).click();
   await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
   await main.getByText("초안을 버렸습니다").waitFor();
+}
+
+// WP3c. 리뷰 M1: 상한을 넘은 본문(화면 입력 ≠ 저장 가능한 본문)은 고칠 때까지 새 글 저장을 막고, 떠날 때 확인한다.
+//        서버 초안은 마지막 유효 본문이며, 고친 뒤 저장한 버전은 화면에 보이던 본문과 같다.
+{
+  await page.goto(U("/write/new/"));
+  await main.getByLabel("제목").fill("상한 회귀");
+  await writeBody(["kept-valid"]);
+  await saved();
+  const validDraft = await draftParam();
+  // 본문에 표식 문장을 넣어 브라우저 저장소에 본문이 남지 않는지도 확인한다(리뷰 round3 M3)
+  await page.keyboard.insertText("민감한표식" + "x".repeat(20001));
+  const reason = main.getByText("저장할 수 있는 크기·개수 상한을 넘었습니다", { exact: false });
+  check("WP3c. M1: over-limit body shows the reason", await appears(reason));
+  check("WP3c. M1: save blocked while the body is invalid", await main.getByRole("button", { name: "글 저장" }).isDisabled());
+  check("WP3c. M1: explicit discard stays available", !(await main.getByRole("button", { name: "초안 버리기…" }).isDisabled()));
+  const prevented = await page.evaluate(() => {
+    const e = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  });
+  check("WP3c. M1: leaving the page asks for confirmation", prevented);
+  const kept = await api.get(`/research/post-drafts/${validDraft}`);
+  check("WP3c. M1: server draft keeps the last valid body (not the over-limit input)", kept.textProjection === "kept-valid", JSON.stringify(kept.textProjection?.slice(0, 40)));
+  // round2: 실제 내부 Link 이동 → 뒤로가기, 그리고 새로고침 뒤에도 저장 못 한 본문을 경고와 함께 되살린다
+  const restoredOk = async () =>
+    (await appears(reason)) &&
+    (await bodyBox().innerText()).includes("kept-valid민감한표식" + "x".repeat(100)) &&
+    (await main.getByRole("button", { name: "글 저장" }).isDisabled());
+  // round3 M1: 브라우저 저장소가 가득 차 쓰기가 실패해도(QuotaExceededError) 내부 이동 뒤 입력을 잃지 않는다
+  await page.evaluate(() => {
+    window.__setItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function () {
+      throw new DOMException("quota", "QuotaExceededError");
+    };
+  });
+  await main.getByRole("link", { name: "← 내 글" }).click();
+  await page.waitForURL(U("/write/"));
+  await page.goBack();
+  await page.waitForURL(/\/write\/new\/\?draft=/);
+  check("WP3c. M1: after an in-app Link and Back, the unsaved body is restored with the warning and save stays blocked", await restoredOk());
+  check("WP3c. M1: restore notice shown", await appears(main.getByText("저장하지 못하고 떠났던 본문을 되살렸습니다", { exact: false })));
+  await page.evaluate(() => {
+    Storage.prototype.setItem = window.__setItem;
+  });
+  const atRest = await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }));
+  check("WP3c. M3: the unsaved body is never written to browser storage", !atRest.includes("민감한표식"));
+  check("WP3c. M1: server draft still the last valid body after leaving", (await api.get(`/research/post-drafts/${validDraft}`)).textProjection === "kept-valid");
+  // round4: 편집기를 떠난 글 목록에서도(편집기 unmount) 버퍼가 남아 있는 동안 새로고침·닫기 전에 확인한다
+  await main.getByRole("link", { name: "← 내 글" }).click();
+  await page.waitForURL(U("/write/"));
+  await bodyBox().waitFor({ state: "detached" });
+  check("WP3c. round4: on the post list (editor gone) leaving still asks while the buffer exists", await leaveGuarded());
+  // 실제 새로고침에서 "머무르기"를 고르면 이동하지 않고 버퍼가 남는다
+  const before = dialogsSeen.length;
+  dismissNext = true;
+  await page.reload({ timeout: 5000 }).catch(() => {});
+  dismissNext = false;
+  check("WP3c. round4: real reload shows the leave dialog", dialogsSeen.slice(before).includes("beforeunload"), JSON.stringify(dialogsSeen.slice(before)));
+  await page.goBack();
+  await page.waitForURL(/\/write\/new\/\?draft=/);
+  check("WP3c. round4: after cancelling the leave, the unsaved body is still restored", await restoredOk());
+  await writeBody(["kept-valid 고침"]);
+  check("WP3c. M1: fixing the body lifts the block", (await reason.count()) === 0 && !(await main.getByRole("button", { name: "글 저장" }).isDisabled()));
+  await main.getByRole("button", { name: "글 저장" }).click();
+  await page.waitForURL(/\/write\/\?id=/);
+  const fixed = await api.get(`/research/posts/${idParam()}`);
+  check("WP3c. M1: saved version equals what the screen showed", fixed.latestVersion.textProjection === "kept-valid 고침", JSON.stringify(fixed.latestVersion.textProjection));
+  check("WP3c. round4: after fixing and saving, leaving no longer asks", !(await leaveGuarded()));
+}
+
+// WP3d. round4: 저장 못 한 본문을 남긴 채 떠났다가 돌아와 초안을 버리면(명시적 폐기) 떠날 때 확인도 풀린다
+{
+  await page.goto(U("/write/new/"));
+  await main.getByLabel("제목").fill("버릴 상한 초안");
+  await writeBody(["discard-base"]);
+  await saved();
+  await page.keyboard.insertText("x".repeat(20001));
+  await main.getByText("저장할 수 있는 크기·개수 상한을 넘었습니다", { exact: false }).waitFor();
+  await main.getByRole("link", { name: "← 내 글" }).click();
+  await page.waitForURL(U("/write/"));
+  await page.goBack();
+  await page.waitForURL(/\/write\/new\/\?draft=/);
+  await main.getByText("저장할 수 있는 크기·개수 상한을 넘었습니다", { exact: false }).waitFor();
+  await main.getByRole("button", { name: "초안 버리기…" }).click();
+  await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+  await main.getByText("초안을 버렸습니다").waitFor();
+  check("WP3d. round4: explicit discard releases the leave confirmation", !(await leaveGuarded()));
 }
 
 // WP4. #31: 자료만 바탕으로 한 글, 보관 자료 제외, 문서 해제 뒤에도 자료 유지, 요약 없는 글의 목록 발췌(W2)
@@ -250,7 +389,7 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   await api.send("DELETE", `/research/materials/${matOld.id}`, { expectedVersion: matOld.version });
   await page.goto(U("/write/new/"));
   await main.getByLabel("제목").fill("자료만 쓴 글");
-  await main.getByLabel("본문").fill("## 소제목\n\n**굵은** 첫 문장과 [링크](https://example.com) 그리고 `코드`.\n\n![그림](https://example.com/x.png)\n\n둘째 문단");
+  await writeBody(["## 소제목", "**굵은** 첫 문장과 링크 그리고 `코드`.", "둘째 문단"]);
   await main.getByRole("button", { name: "문서 연결" }).click();
   await main.getByLabel("연결할 문서 찾기").fill("바탕 문서 B");
   await main.getByRole("button", { name: "바탕 문서 B 연결" }).click();
@@ -295,7 +434,7 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   for (const d of [docC, docD, docE]) await relate(d.id, matA.id);
   await page.goto(U("/write/new/"));
   await main.getByLabel("제목").fill("자료 제거 경합");
-  await main.getByLabel("본문").fill("본문");
+  await writeBody(["본문"]);
   const box = main.getByRole("region", { name: "바탕이 된 자료" });
   const row = box.locator("li", { hasText: "문서 A의 자료" });
   await box.getByRole("button", { name: "자료 추가" }).click();
@@ -348,7 +487,7 @@ await main.getByRole("button", { name: "내용 수정" }).click();
 check("WP5. W1: public address read-only for saved post", (await main.getByLabel("공개 주소").inputValue()) === `/posts/${slug1}/` && (await main.getByLabel("공개 주소").getAttribute("readonly")) !== null);
 // 직접 추가한 자료를 빼면 다음 버전에서 빠진다(자동 포함 자료도 같은 방식으로 뺄 수 있다)
 await main.getByRole("region", { name: "바탕이 된 자료" }).locator("li", { hasText: "직접 고른 자료" }).getByRole("button", { name: "자료 빼기" }).click();
-await main.getByLabel("본문").fill("# 첫 글 본문\n\n두 번째 버전 문장");
+await writeBody(["# 첫 글 본문", "두 번째 버전 문장"]);
 await main.getByLabel("태그", { exact: true }).fill("v2");
 await main.getByLabel("태그", { exact: true }).press("Enter");
 await saved();
@@ -447,7 +586,7 @@ check("WP8. accepted: publication unchanged", after8.publication?.versionId === 
 // WP9. 작성 중인 새 글 초안에 대한 Codex 제안 → 주소 정하고 수락 → 새 글, 초안 닫힘
 await page.goto(U("/write/new/"));
 await main.getByLabel("제목").fill("초안 글");
-await main.getByLabel("본문").fill("사람이 쓴 첫 문단");
+await writeBody(["사람이 쓴 첫 문단"]);
 await saved();
 const draft9 = await draftParam();
 await openChat("글 대화");
@@ -586,9 +725,9 @@ releaseSpare();
 await imgPanel.getByText("올렸습니다", { exact: false }).waitFor();
 await page.unroute("**/api/research/post-images", holdSpare);
 check("WP12b. close unlocked after upload", !(await main.getByRole("button", { name: "편집 닫기(초안 보관)" }).isDisabled()));
-// 방금 넣은 이미지 줄은 본문에서 다시 빼서 쓰지 않는 이미지로 만든다
-const withSpare = await main.getByLabel("본문").inputValue();
-await main.getByLabel("본문").fill(withSpare.replace(/\n*!\[spare\]\([^)]*\)\n?/, "\n"));
+// 방금 넣은 이미지 블록은 본문에서 다시 빼서 쓰지 않는 이미지로 만든다(본문을 새로 쓴다)
+check("WP12b. spare image block inserted", (await bodyBox().locator("figure[data-type=post-image]").count()) === 1);
+await writeBody(["두 번째 버전 문장"]);
 await saved();
 const spare = (await api.get("/research/post-images")).items.find((i) => i.mimeType === "image/webp");
 await imgPanel.locator("li").filter({ has: page.locator(`img[src$="${IMG}"]`) }).getByRole("button", { name: "지우기" }).click();

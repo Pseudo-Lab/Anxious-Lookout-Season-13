@@ -15,29 +15,9 @@ export function decodeSegment(value: string): string {
   }
 }
 
-/**
- * 글 목록 카드의 본문 발췌(#31 W2, 요약이 빈 글). Markdown 기호·코드 블록·이미지·HTML을 걷어 낸 평문 앞부분.
- * 표시용 근사치이며 본문 렌더 규칙(SafeMarkdown)과 무관하다.
- */
-export function excerpt(markdown: string, max = 160): string {
-  const text = markdown
-    .replace(/^(```|~~~)[^\n]*\n[\s\S]*?(^\1[^\n]*$|(?![\s\S]))/gm, " ")
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<[^>\n]+>/g, " ")
-    .replace(/!\[[^\]\n]*\]\([^)\n]*\)/g, " ")
-    .replace(/\[([^\]\n]*)\]\([^)\n]*\)/g, "$1")
-    .replace(/\[([^\]\n]*)\]\[[^\]\n]*\]/g, "$1")
-    .replace(/^\s*\[[^\]\n]+\]:\s*\S+.*$/gm, " ")
-    .replace(/^\s*\|?(\s*:?-+:?\s*\|)+\s*:?-*:?\s*\|?\s*$/gm, " ")
-    .replace(/^\s*([-*_]\s*){3,}$/gm, " ")
-    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
-    .replace(/^\s*(>\s?)+/gm, "")
-    .replace(/^\s*([-*+]|\d+[.)])\s+(\[[ xX]\]\s+)?/gm, "")
-    .replace(/`([^`\n]*)`/g, "$1")
-    .replace(/(\*{1,3}|_{1,3}|~~)(\S(?:[^\n]*?\S)?)\1/g, "$2")
-    .replace(/\|/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  const chars = Array.from(text);
-  return chars.length <= max ? text : `${chars.slice(0, max).join("").trimEnd()}…`;
+/** 글 목록 카드의 본문 발췌(#31 W2, 요약이 빈 글). #32: 서버 textProjection(평문)의 앞부분이다. */
+export function excerpt(text: string, max = 160): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  const chars = Array.from(flat);
+  return chars.length <= max ? flat : `${chars.slice(0, max).join("").trimEnd()}…`;
 }

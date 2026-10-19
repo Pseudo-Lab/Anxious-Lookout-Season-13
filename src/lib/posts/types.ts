@@ -1,4 +1,8 @@
 // #28 글(post) 계약 타입(api-contracts/issue28-posts.md, #31 개정 issue31-write-ux.md). 문서(research items)와 별도 모델이다.
+// #32: 본문(content)은 post-blocks v1 문서다(api-contracts/issue32-blocks-draft.md §11). textProjection은 서버가 계산한 읽기 투영.
+
+import type { BlockDocument } from "@/lib/blocks/types";
+import type { FormatChange } from "@/lib/blocks/projection";
 
 export interface PublicPostDocument {
   id: string;
@@ -22,7 +26,9 @@ export interface PublicPost {
   slug: string;
   title: string;
   description: string;
-  content?: string;
+  // 공개 본문(post-blocks). renderer가 그리기 전에 다시 검사하므로 모르는 형식도 여기서는 그대로 둔다.
+  content?: unknown;
+  textProjection?: string;
   tags: string[];
   coverImageUrl: string | null;
   // 이관된 MDX 글은 login이 null이고 원 작성자 이름만 있다
@@ -43,7 +49,7 @@ export interface PostTag {
  */
 export interface PostText {
   title: string;
-  content: string;
+  content: BlockDocument;
   description: string;
   tags: string[];
   coverImageId: string | null;
@@ -68,7 +74,8 @@ export interface PostVersion extends PostMeta {
   postId: string;
   number: number;
   // 목록 응답에는 없다
-  content?: string;
+  content?: BlockDocument;
+  textProjection?: string;
   createdAt: string;
 }
 
@@ -100,7 +107,8 @@ export interface PostDraft extends PostMeta {
   basePostVersion: number | null;
   baseVersionId: string | null;
   // 목록 응답에는 없다
-  content?: string;
+  content?: BlockDocument;
+  textProjection?: string;
   state: PostDraftState;
   createdAt: string;
   updatedAt: string;
@@ -124,7 +132,8 @@ export interface ResolvedPostMaterial extends PostMaterialOption {
 
 /** 발행 전 미리보기(선택 버전 기준). previewToken은 이 상태(글·문서·이미지)에 묶여 발행 때 다시 검증된다. */
 export interface PostPublicationPreview extends PostMeta {
-  content: string;
+  content: unknown;
+  textProjection: string;
   postId: string;
   versionId: string;
   expectedVersion: number;
@@ -152,7 +161,13 @@ export interface PostProposal extends PostMeta {
   baseDraftId: string | null;
   baseDraftRevision: number | null;
   // 목록 응답에는 없다
-  content?: string;
+  content?: BlockDocument;
+  textProjection?: string;
+  // 제안 생성 때 서버가 계산한 기준 대비 비교(수락 화면은 comparison API로 다시 계산한다)
+  baseTextProjection?: string;
+  formatChanges?: FormatChange[];
+  // Markdown → 블록 변환 안내(예: code_language_downgraded)
+  conversionWarnings?: { code: string }[];
   status: PostProposalStatus;
   acceptedPostId: string | null;
   acceptedVersionId: string | null;
@@ -169,4 +184,15 @@ export interface PostImage {
   width: number;
   height: number;
   createdAt: string;
+}
+
+/** POST /post-proposals/{id}/comparison: 지금 기준(현재 글 head 또는 새 글 연결 초안) 대비 후보 비교. 저장하지 않는다. */
+export interface PostProposalComparison {
+  baseVersionId: string | null;
+  baseDraftRevision: number | null;
+  baseContentHash: string;
+  candidateHash: string;
+  baseTextProjection: string;
+  textProjection: string;
+  formatChanges: FormatChange[];
 }

@@ -10,7 +10,7 @@ from app.research_schema_contract import validate_research
 
 
 def inventory(db):
-    if validate_research(db.connection()) != '0006_posts': raise RuntimeError('Posts schema required')
+    if validate_research(db.connection()) not in ('0006_posts', '0007_post_blocks'): raise RuntimeError('Posts schema required')
     rows = db.scalars(select(PostImage).order_by(PostImage.id)).all()
     active = {row.id for row in rows if not row.deleted}
     for model in (PostDraft, PostVersion, PostProposal, PostPublication):

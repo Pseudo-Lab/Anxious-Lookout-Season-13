@@ -19,13 +19,15 @@ TABLES = ("auth.accounts", "auth.permission_audit", "research.items", "research.
 def signature(connection, revoked_grants=False):
     tables = TABLES
     marker = connection.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one()
-    if marker in {"0004_publication", "0005_writing", "0006_posts"}:
+    if marker in {"0004_publication", "0005_writing", "0006_posts", "0007_post_blocks"}:
         tables += ("research.publications", "research.publication_heads")
-    if marker in {'0005_writing', '0006_posts'}:
+    if marker in {'0005_writing', '0006_posts', '0007_post_blocks'}:
         tables += ('research.document_drafts', 'research.document_proposals')
-    if marker == '0006_posts':
+    if marker in {'0006_posts', '0007_post_blocks'}:
         tables += ('research.posts', 'research.post_versions', 'research.post_drafts', 'research.post_proposals')
         tables += ('research.post_publications', 'research.post_publication_heads', 'research.post_images')
+    if marker == '0007_post_blocks':
+        tables += ('research.post_markdown_backups',)
     def rows(name):
         values = [dict(row._mapping) for row in connection.execute(text("SELECT * FROM " + name))]
         if name == "research.conversations" and revoked_grants:
@@ -47,7 +49,7 @@ def run(mode):
             version = client.get("http://m2-api:8080/api/version").json()
             assert version["sha"] == os.environ["M2_BASELINE_SHA"]
         with source.connect() as db:
-            assert validate_research(db) in {"0003_sessions", "0004_publication", "0005_writing", "0006_posts"}
+            assert validate_research(db) in {"0003_sessions", "0004_publication", "0005_writing", "0006_posts", "0007_post_blocks"}
             assert db.execute(text("SELECT count(*) FROM research.versions")).scalar_one() >= 3
             assert db.execute(text("SELECT count(*) FROM research.relations")).scalar_one() >= 1
             assert db.execute(text("SELECT count(*) FROM research.conversations")).scalar_one() >= 1

@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { FetchFailure } from "@/lib/api/client";
-import { acceptPostProposal, discardPostProposal, getPostDraft, getPostProposal, listPostProposals } from "@/lib/posts/api";
+import { useAuth } from "@/hooks/useAuth";
+import { acceptPostProposal, comparePostProposal, discardPostProposal, getPostDraft, getPostProposal, listPostProposals } from "@/lib/posts/api";
 import { postErrorMessage } from "@/lib/posts/errors";
 import type { Post, PostDraft, PostProposal, PostText } from "@/lib/posts/types";
 import { EMPTY_TEXT, textOf } from "@/lib/posts/usePostDraft";
@@ -12,11 +13,13 @@ import { usePagedList } from "@/lib/research/usePagedList";
 import { formatDateTime } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
-import TextDiff from "@/components/research/TextDiff";
+import BodyDiff from "@/components/blocks/BodyDiff";
 import PostMetaDiff from "./PostMetaDiff";
 
 // #28 Codex 글 제안(D1: 언제나 제안 → 사람의 수락). 수락하기 전에는 글·초안이 바뀌지 않으며, 수락하면 새 버전 하나가 된다.
 // 새 글 제안은 수락할 때 처음 글이 만들어진다.
+// #32: 본문 비교는 글자(projection)와 서식·배치를 따로 보인다. 현재 글(또는 새 글 연결 초안)과 비교할 때는
+// 서버 comparison API로 지금 기준에서 다시 계산한 서식 변화를 쓴다(수락 CAS는 그대로).
 
 export const NEW_PROPOSAL_PATH = "/write/new/";
 export const newProposalHref = (id: string) => `${NEW_PROPOSAL_PATH}?proposal=${encodeURIComponent(id)}`;
@@ -36,6 +39,35 @@ function useBaseDraft(p: PostProposal | null) {
     id ? getPostDraft(id) : Promise.resolve({ ok: true as const, status: 200, data: null as PostDraft | null })
   );
   return load.result;
+}
+
+const WARNING_TEXT: Record<string, string> = {
+  code_language_downgraded: "코드 언어 표기를 알아보지 못한 코드 블록은 일반 텍스트(plain)로 바꿨습니다. 코드 내용은 그대로입니다.",
+};
+
+/** 제안 본문 비교. serverBase면(현재 글 head·새 글 연결 초안 기준) 서버 비교의 서식 변화를 쓴다. */
+function ProposalBody({ p, before, proposed, serverBase }: { p: PostProposal; before: PostText; proposed: PostText; serverBase: string | null }) {
+  const { csrfToken } = useAuth();
+  const key = serverBase && csrfToken ? `post-proposal-comparison:${p.id}:${p.version}:${serverBase}` : "post-proposal-comparison:none";
+  const { result } = useLoad(key, () =>
+    serverBase && csrfToken
+      ? comparePostProposal(p.id, proposed.content, csrfToken)
+      : Promise.resolve({ ok: true as const, status: 200, data: null })
+  );
+  const server = result?.ok ? result.data : null;
+  return (
+    <div className="space-y-2">
+      {(p.conversionWarnings ?? []).map((w) => (
+        <p key={w.code} className="text-xs text-amber-800">
+          {WARNING_TEXT[w.code] ?? "제안을 블록으로 바꾸며 일부 표기를 바꿨습니다."}
+        </p>
+      ))}
+      {serverBase && result && !result.ok && (
+        <p className="text-xs text-amber-800">서버 비교를 불러오지 못해 화면에서 같은 규칙으로 계산한 서식 변화를 보입니다.</p>
+      )}
+      <BodyDiff before={before.content} after={proposed.content} beforeTitle={before.title} afterTitle={proposed.title} changes={server?.formatChanges} />
+    </div>
+  );
 }
 
 export function ProposalReview({
@@ -59,7 +91,7 @@ export function ProposalReview({
   if (!result) return <p className="text-sm text-stone-500">제안을 불러오는 중...</p>;
   if (!result.ok || !p) return <ErrorNotice failure={result.ok ? { kind: "invalid", status: 200 } : result.failure} prefix="제안을 불러오지 못했습니다." describe={postErrorMessage} />;
   const pending = p.status === "pending";
-  const proposed = textOf({ ...p, content: p.content ?? "" });
+  const proposed = textOf(p);
 
   // 새 글: 묶인 초안이 있으면 그 초안의 현재 내용과, 없으면 빈 글과 비교한다.
   let baseDraft: PostDraft | null = null;
@@ -70,9 +102,9 @@ export function ProposalReview({
     else baseClosed = true;
   }
   const headText: PostText =
-    target.kind === "post" ? textOf({ ...target.post.latestVersion, content: target.post.latestVersion.content ?? "" }) : EMPTY_TEXT;
+    target.kind === "post" ? textOf(target.post.latestVersion) : EMPTY_TEXT;
   const useDraft = target.kind === "post" && against === "draft" && !!draft;
-  const before: PostText = useDraft ? textOf({ ...draft!, content: draft!.content ?? "" }) : baseDraft ? textOf({ ...baseDraft, content: baseDraft.content ?? "" }) : headText;
+  const before: PostText = useDraft ? textOf(draft!) : baseDraft ? textOf(baseDraft) : headText;
   const stale = target.kind === "post" && p.baseVersionId !== target.post.latestVersion.id;
 
   async function accept() {
@@ -132,7 +164,21 @@ export function ProposalReview({
         </p>
       )}
       <PostMetaDiff before={before} after={proposed} />
-      <TextDiff key={`${p.id}:${against}`} before={before.content} after={proposed.content} beforeTitle={before.title} afterTitle={proposed.title} />
+      <ProposalBody
+        key={`${p.id}:${against}`}
+        p={p}
+        before={before}
+        proposed={proposed}
+        serverBase={
+          !pending || useDraft
+            ? null
+            : target.kind === "post"
+              ? `post:${target.post.version}:${target.post.latestVersion.id}`
+              : baseDraft
+                ? `draft:${baseDraft.id}:${baseDraft.revision}`
+                : "new"
+        }
+      />
       {failure && <ErrorNotice failure={failure} prefix="처리하지 못했습니다." describe={postErrorMessage} />}
       {pending &&
         (editing ? (

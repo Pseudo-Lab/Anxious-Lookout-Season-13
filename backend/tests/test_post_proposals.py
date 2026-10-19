@@ -7,12 +7,12 @@ from app.migrate import migrate
 from tests.test_research import identity, headers, create
 from tests.test_conversations import create_session
 from tests.test_page_chat import HeldRunner, callback
-from tests.test_posts import content, make_draft, commit, ROOT
+from tests.test_posts import proposal_content, content, make_draft, commit, ROOT
 
 
 @pytest.fixture(scope='module', autouse=True)
 def proposal_schema(schema):
-    migrate('0006_posts')
+    migrate('0007_post_blocks')
 
 
 def turn(client, auth, owner, page=None):
@@ -30,16 +30,16 @@ def test_new_post_proposal_reads_sources_and_draft_but_creates_no_version(client
     draft = make_draft(client, auth, content='Human original', documentIds=[doc['id']])
     session, runner = turn(client, auth, owner)
     result = callback(client, session, runner, 'research_post_draft_get', {'draftId': draft['id']})
-    assert result.json()['draft']['content'] == 'Human original'
+    assert result.json()['draft']['textProjection'] == 'Human original'
     assert callback(client, session, runner, 'research_get', {'type': 'document', 'id': doc['id']}).json()['content'] == doc['content']
-    args = {**content(documentIds=[doc['id']]), 'mutationId': str(uuid.uuid4()), 'draftId': draft['id'], 'expectedDraftRevision': 1}
+    args = {**proposal_content(documentIds=[doc['id']]), 'mutationId': str(uuid.uuid4()), 'draftId': draft['id'], 'expectedDraftRevision': 1}
     proposal = callback(client, session, runner, 'research_post_propose', args)
     assert proposal.status_code == 200, proposal.text
     assert callback(client, session, runner, 'research_post_propose', args).json() == proposal.json()
     proposal = proposal.json()
     assert proposal['postId'] is None and proposal['status'] == 'pending'
     assert client.get('/api/research/posts').json()['items'] == []
-    assert client.get(ROOT+'/'+draft['id']).json()['content'] == 'Human original'
+    assert client.get(ROOT+'/'+draft['id']).json()['textProjection'] == 'Human original'
     path = '/api/research/post-proposals/'+proposal['id']+'/accept'
     body = {**content(), 'expectedProposalVersion': 1}
     assert client.post(path, json=body, headers=headers(auth)).status_code == 409
@@ -50,7 +50,7 @@ def test_new_post_proposal_reads_sources_and_draft_but_creates_no_version(client
     assert client.post(path, json=body, headers=headers(auth, key)).json() == result.json()
     assert result.json()['post']['latestVersion']['number'] == 1
     assert result.json()['proposal']['acceptedPostId'] == result.json()['post']['id']
-    assert result.json()['draft']['content'] == 'Human original'
+    assert result.json()['draft']['textProjection'] == 'Human original'
     assert callback(client, session, runner, 'research_post_propose', {**args, 'mutationId': str(uuid.uuid4())}).status_code == 409
     assert client.post(path, json=body, headers=headers(auth)).status_code == 409
 
@@ -60,10 +60,10 @@ def test_existing_post_proposal_atomic_cas_and_concurrent_accept(client, admin):
     post = commit(client, auth, make_draft(client, auth))
     draft = make_draft(client, auth, post, content='Human changes')
     session, runner = turn(client, auth, owner, {'kind': 'post', 'resourceId': post['id']})
-    args = {**content(content='Codex changes'), 'postId': post['id'], 'expectedVersion': 1, 'mutationId': str(uuid.uuid4())}
+    args = {**proposal_content(content='Codex changes'), 'postId': post['id'], 'expectedVersion': 1, 'mutationId': str(uuid.uuid4())}
     proposal = callback(client, session, runner, 'research_post_propose', args).json()
     assert proposal['status'] == 'pending'
-    assert callback(client, session, runner, 'research_get', {'type': 'post', 'id': post['id']}).json()['latestVersion']['content'] == '# Text'
+    assert callback(client, session, runner, 'research_get', {'type': 'post', 'id': post['id']}).json()['latestVersion']['textProjection'] == 'Text'
     assert client.put(ROOT+'/'+draft['id'], json={**content(content='New human changes'), 'expectedDraftRevision': 1}, headers=headers(auth)).status_code == 200
     body = {**content(content='Reviewed merge'), 'expectedVersion': 1, 'resolvedBaseVersionId': post['latestVersion']['id'],
         'expectedProposalVersion': 1, 'draftId': draft['id'], 'expectedDraftRevision': 1}
@@ -75,8 +75,8 @@ def test_existing_post_proposal_atomic_cas_and_concurrent_accept(client, admin):
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert sorted(pool.map(accept, [1, 2])) == [200, 409]
     assert len(client.get('/api/research/posts/'+post['id']+'/versions').json()['items']) == 2
-    assert client.get('/api/research/post-proposals/'+proposal['id']).json()['content'] == 'Codex changes'
-    assert client.get(ROOT+'/'+draft['id']).json()['content'] == 'New human changes'
+    assert client.get('/api/research/post-proposals/'+proposal['id']).json()['textProjection'] == 'Codex changes'
+    assert client.get(ROOT+'/'+draft['id']).json()['textProjection'] == 'New human changes'
     assert callback(client, session, runner, 'research_archive', {'type': 'post', 'id': post['id'], 'expectedVersion': 2, 'mutationId': str(uuid.uuid4())}).status_code == 422
 
 
@@ -109,7 +109,7 @@ def test_foreign_draft_and_discard_do_not_mutate_head(client, admin):
     draft = make_draft(client, auth)
     owner_cookie = client.cookies.get('anxious_session')
     session, runner = turn(client, auth, owner)
-    args = {**content(), 'mutationId': str(uuid.uuid4())}
+    args = {**proposal_content(), 'mutationId': str(uuid.uuid4())}
     proposal = callback(client, session, runner, 'research_post_propose', args).json()
     other, other_auth = identity(client, admin, '222222')
     other_session, other_runner = turn(client, other_auth, other)

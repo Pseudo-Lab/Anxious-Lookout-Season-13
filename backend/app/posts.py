@@ -13,9 +13,8 @@ from .research_models import Item, ContentVersion
 from .writing import DraftExpected, DraftCommit, check_draft, finish_draft, conflict
 
 
-class PostText(Input):
+class PostMetadata(Input):
     title: str = Field(max_length=300)
-    content: str = Field(max_length=200000)
     description: str = Field(max_length=1000)
     slug: str = Field(default='', max_length=100)
     tags: list[str] = Field(max_length=20)
@@ -54,6 +53,16 @@ class PostText(Input):
         return str(UUID(value)) if value is not None else None
 
 
+class PostText(PostMetadata):
+    content: dict
+
+    @field_validator('content', mode='before')
+    @classmethod
+    def blocks(cls, value):
+        from .post_blocks import canonicalize
+        return canonicalize(value)
+
+
 class CreateDraft(PostText):
     postId: str | None = None
     basePostVersion: int | None = Field(default=None, ge=1)
@@ -79,7 +88,7 @@ class ChangeDraft(PostText, DraftExpected):
 
 
 def ready(store):
-    if store.db.execute(text('SELECT version_num FROM research.alembic_version')).scalar_one() != '0006_posts':
+    if store.db.execute(text('SELECT version_num FROM research.alembic_version')).scalar_one() != '0007_post_blocks':
         fail('not_ready', 'Posts schema is not ready', 503)
 
 
@@ -139,7 +148,11 @@ def payload(body):
 
 
 def stored_payload(value):
-    return {**value, 'materialIds': value.get('materialIds', []), 'materialSources': value.get('materialSources', [])}
+    from .post_blocks import text_projection, markdown_projection, format_summary
+    from .post_images import base_path
+    return {**value, 'textProjection': text_projection(value['content']),
+            'markdownProjection': markdown_projection(value['content'], base_path()), 'formatSummary': format_summary(value['content']),
+            'materialIds': value.get('materialIds', []), 'materialSources': value.get('materialSources', [])}
 
 
 def choose_slug(value, post=None):
@@ -149,7 +162,11 @@ def choose_slug(value, post=None):
 
 
 def validate_content(store, value, commit=False):
-    if commit and any(not value[key].strip() for key in ('title', 'content')):
+    from .post_blocks import canonicalize, text_projection, nodes
+    value['content'] = canonicalize(value['content'])
+    value['textProjection'] = text_projection(value['content'])
+    visible = value['textProjection'].strip() or any(n.get('type') in ('image','embed') for n in nodes(value['content']))
+    if commit and (not value['title'].strip() or not visible):
         fail('validation_error', 'Title and content are required to save a version', 422)
     from .post_materials import select_sources
     select_sources(store, value)
@@ -364,3 +381,33 @@ def register_posts(app, authorized, settings, response, write):
         with authorized(request, True) as store:
             ready(store)
             return write(store, request, DraftCommit, body, lambda parsed: commit_draft(store, identity, parsed))
+
+
+def validate_retry_encoding(body, model):
+    """Invalid UTF-8 cannot have a stored fingerprint; keep model error paths."""
+    import json
+    try:
+        json.dumps(body, ensure_ascii=False).encode('utf-8')
+    except UnicodeError:
+        model.model_validate(body)
+        fail('validation_error', 'Valid UTF-8 text is required', 422)
+
+
+def replay_response(value):
+    """Adapt pre-0007 cached post responses without replaying a mutation.
+
+Only called for post routes after their 0007 readiness/authorization checks.
+Research document content and stored fingerprints are not changed.
+"""
+    from .post_block_markdown import convert
+    from .post_blocks import text_projection
+    import os
+    if isinstance(value,list): return [replay_response(v) for v in value]
+    if not isinstance(value,dict): return value
+    result={key:replay_response(v) for key,v in value.items()}
+    if 'slug' in result and isinstance(result.get('content'),str):
+        seed=result.get('versionId') or result.get('id')
+        if not seed: fail('not_ready','Legacy cached post response cannot be converted',503)
+        document,warnings=convert(result['content'],str(seed),os.environ.get('APP_BASE_PATH',''))
+        result.update(content=document,textProjection=text_projection(document),conversionWarnings=warnings)
+    return result

@@ -1,0 +1,43 @@
+{
+  "post_markdown_backups": {
+    "columns": {
+      "storage_table": [
+        "VARCHAR(32)",
+        false,
+        null
+      ],
+      "row_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "markdown": [
+        "TEXT",
+        false,
+        null
+      ],
+      "markdown_sha256": [
+        "VARCHAR(64)",
+        false,
+        null
+      ],
+      "canonical_sha256": [
+        "VARCHAR(64)",
+        false,
+        null
+      ]
+    },
+    "primary": [
+      "storage_table",
+      "row_id"
+    ],
+    "checks": {
+      "post_markdown_backups_canonical_sha256_check": "canonical_sha256::text ~ '^[a-f0-9]{64}$'::text",
+      "post_markdown_backups_markdown_sha256_check": "markdown_sha256::text ~ '^[a-f0-9]{64}$'::text",
+      "post_markdown_backups_storage_table_check": "storage_table::text = ANY (ARRAY['post_versions'::character varying, 'post_drafts'::character varying, 'post_proposals'::character varying, 'post_publications'::character varying]::text[])"
+    },
+    "foreign": [],
+    "unique": {},
+    "indexes": {}
+  }
+}

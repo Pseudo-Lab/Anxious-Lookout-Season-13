@@ -253,3 +253,88 @@ html[data-chat-resizing] body {
 .prose-compact td {
   padding: 0.375em 0.625em;
 }
+
+/* #32 블록 편집기(Tiptap). 공개 renderer와 같은 배치를 쓰도록 클래스 이름(pb-*)을 맞춘다. */
+.pb-editor p.is-editor-empty:first-child::before,
+.pb-caption:empty::before {
+  content: attr(data-placeholder);
+  color: #a8a29e;
+  pointer-events: none;
+}
+.pb-editor p.is-editor-empty:first-child::before {
+  float: left;
+  height: 0;
+}
+.pb-editor p,
+.pb-editor h1,
+.pb-editor h2,
+.pb-editor h3,
+.pb-editor h4 {
+  white-space: pre-wrap;
+}
+.pb-editor [data-align="center"],
+.pb-editor [style*="text-align: center"] {
+  text-align: center;
+}
+.pb-editor [style*="text-align: right"] {
+  text-align: right;
+}
+.pb-columns {
+  display: flex;
+  gap: 1rem;
+  margin: 1rem 0;
+}
+.pb-column {
+  flex-basis: 0;
+  min-width: 0;
+}
+.pb-editor .pb-column {
+  border: 1px dashed var(--color-card-border);
+  border-radius: 0.5rem;
+  padding: 0 0.75rem;
+}
+/* 모바일은 배열 순서대로 세로로 쌓는다 */
+@media (max-width: 639px) {
+  .pb-columns {
+    flex-direction: column;
+  }
+}
+.pb-editor table {
+  border-collapse: collapse;
+  width: 100%;
+  table-layout: fixed;
+}
+.pb-editor th,
+.pb-editor td {
+  border: 1px solid var(--color-card-border);
+  padding: 0.25rem 0.5rem;
+  vertical-align: top;
+  position: relative;
+}
+.pb-editor th p,
+.pb-editor td p {
+  margin: 0;
+}
+.pb-editor td[data-align="center"],
+.pb-editor th[data-align="center"] {
+  text-align: center;
+}
+.pb-editor td[data-align="right"],
+.pb-editor th[data-align="right"] {
+  text-align: right;
+}
+.pb-editor .selectedCell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(99, 102, 241, 0.12);
+  pointer-events: none;
+}
+.pb-editor ul {
+  list-style: disc;
+  padding-left: 1.5rem;
+}
+.pb-editor ol {
+  list-style: decimal;
+  padding-left: 1.5rem;
+}
