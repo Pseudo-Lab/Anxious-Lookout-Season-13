@@ -68,6 +68,7 @@ export function usePostDraft(opts: {
   draft: PostDraft | null;
   base: PostDraftBase | null;
   onDraft?: (draft: PostDraft) => void;
+  start?: PostText | null;
 }) {
   return useServerDraft({ adapter: postDrafts, ...opts });
 }

@@ -58,6 +58,7 @@ export function useServerDraft<V, D extends DraftLike, B>({
   draft: initialDraft,
   base,
   onDraft,
+  start: restoredStart,
 }: {
   adapter: DraftAdapter<V, D, B>;
   // 초안이 없을 때의 시작 내용(기존 대상 본문 또는 빈 새 내용)
@@ -68,19 +69,25 @@ export function useServerDraft<V, D extends DraftLike, B>({
   base: B | null;
   // 서버 초안이 만들어지거나 바뀔 때마다
   onDraft?: (draft: D) => void;
+  // 저장하지 못하고 떠났다가 되살린 입력(#36 리뷰 M1). 화면은 이것으로 시작하고, 서버 기준은 초안(또는 initial) 그대로 두어 다시 저장한다.
+  start?: V | null;
 }) {
   const A = adapter;
   const same = (a: V | null, b: V) => !!a && A.same(a, b);
-  const start: V = initialDraft ? A.fromDraft(initialDraft) : initial;
+  const saved: V = initialDraft ? A.fromDraft(initialDraft) : initial;
+  const start: V = restoredStart ?? saved;
+  const startsDirty = !A.same(saved, start);
   const [values, setValuesState] = useState<V>(start);
   const [draft, setDraftState] = useState<D | null>(initialDraft);
-  const [status, setStatusState] = useState<SaveStatus<D>>(initialDraft ? { kind: "saved", at: initialDraft.updatedAt } : { kind: "clean" });
+  const [status, setStatusState] = useState<SaveStatus<D>>(
+    startsDirty ? { kind: "dirty" } : initialDraft ? { kind: "saved", at: initialDraft.updatedAt } : { kind: "clean" }
+  );
   const { run } = useMutation();
 
   const valuesRef = useRef(start);
   const draftRef = useRef(initialDraft);
   // 서버에 있는 것으로 확인된 내용(초안이 없으면 시작 내용)
-  const savedRef = useRef<V>(start);
+  const savedRef = useRef<V>(saved);
   // 결과를 모르는 요청의 내용. 다음 저장은 이것부터 같은 key로 다시 보낸다
   const pendingRef = useRef<V | null>(null);
   const statusRef = useRef<SaveStatus<D>>(status);
@@ -289,6 +296,8 @@ export function useServerDraft<V, D extends DraftLike, B>({
       }
     };
     window.addEventListener("beforeunload", warn);
+    // 되살린 입력으로 시작했으면 바로 저장을 예약한다
+    if (startsDirty) schedule();
     return () => {
       window.removeEventListener("beforeunload", warn);
       alive.current = false;

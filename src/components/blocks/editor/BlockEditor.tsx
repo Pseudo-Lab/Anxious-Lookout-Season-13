@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { EditorContent, useEditor, useEditorState, type Editor, type JSONContent } from "@tiptap/react";
 import { uploadPostImage } from "@/lib/posts/api";
 import { postErrorMessage } from "@/lib/posts/errors";
 import { useMutation } from "@/lib/research/hooks";
 import { uuidV4 } from "@/lib/research/idempotency";
-import { CODE_LANGUAGES, type Align } from "@/lib/blocks/types";
+import { TextSelection } from "@tiptap/pm/state";
+import { CODE_LANGUAGES, FONT_SIZES, type Align } from "@/lib/blocks/types";
 import { blockExtensions, isAllowedLink, youtubeIdFrom } from "./schema";
 import { EmbedWithView, PostImageWithView } from "./nodeViews";
 import { ImageUploads, endUpload, setUploadHandler, imageFileProblem, pendingUploads, startUpload, uploadPosition } from "./uploads";
@@ -55,17 +56,161 @@ function Btn({ label, onClick, active, disabled, children }: { label: string; on
 
 const Sep = () => <span aria-hidden className="mx-1 h-5 w-px bg-stone-200" />;
 
-function Toolbar({ editor, onPickImage, uploading }: { editor: Editor; onPickImage: () => void; uploading: boolean }) {
+/**
+ * 글자 서식(굵게·기울임·밑줄·취소선·코드·링크·글자 색·글자 크기). 고정 툴바와 선택 툴바(F1)가 같은 버튼을 쓴다.
+ * 코드 블록 안에서는 서식을 쓸 수 없고, 이미지·영상 설명에는 링크를 걸 수 없다(계약).
+ */
+function FormatButtons({ editor, compact }: { editor: Editor; compact?: boolean }) {
   const s = useEditorState({
     editor,
     selector: ({ editor: e }) => ({
-      block: e.isActive("heading", { level: 2 }) ? "h2" : e.isActive("heading", { level: 3 }) ? "h3" : e.isActive("heading", { level: 4 }) ? "h4" : e.isActive("heading") ? "h" : e.isActive("codeBlock") ? "code" : "p",
       bold: e.isActive("bold"),
       italic: e.isActive("italic"),
       underline: e.isActive("underline"),
       strike: e.isActive("strike"),
       code: e.isActive("code"),
       link: e.isActive("link"),
+      inCode: e.isActive("codeBlock"),
+      inCaption: e.isActive("postImage") || e.isActive("embed"),
+      fontSize: (e.getAttributes("textStyle").fontSize as number | null | undefined) ?? null,
+    }),
+  });
+  const c = () => editor.chain().focus();
+  function setLink() {
+    if (s.link) {
+      c().unsetLink().run();
+      return;
+    }
+    const url = window.prompt("링크 주소 (http, https, mailto 또는 #앵커)");
+    if (url === null) return;
+    if (!isAllowedLink(url.trim())) {
+      window.alert("쓸 수 없는 주소입니다. http, https, mailto 주소나 #앵커만 링크할 수 있습니다.");
+      return;
+    }
+    c().setLink({ href: url.trim() }).run();
+  }
+  const off = s.inCode;
+  return (
+    <>
+      <Btn label="굵게" active={s.bold} disabled={off} onClick={() => c().toggleBold().run()}><b>B</b></Btn>
+      <Btn label="기울임" active={s.italic} disabled={off} onClick={() => c().toggleItalic().run()}><i>I</i></Btn>
+      <Btn label="밑줄" active={s.underline} disabled={off} onClick={() => c().toggleUnderline().run()}><u>U</u></Btn>
+      <Btn label="취소선" active={s.strike} disabled={off} onClick={() => c().toggleStrike().run()}><s>S</s></Btn>
+      <Btn label="인라인 코드" active={s.code} disabled={off} onClick={() => c().toggleCode().run()}><code>{"<>"}</code></Btn>
+      <Btn label={s.link ? "링크 해제" : "링크"} active={s.link} disabled={off || s.inCaption} onClick={setLink}>🔗</Btn>
+      <select
+        aria-label="글자 크기"
+        value={s.fontSize ?? ""}
+        disabled={off}
+        // 목록을 열어도 편집기 선택이 남는다(select는 포커스를 가져가지만 선택은 state에 남고 focus()로 돌아온다)
+        onChange={(e) => (e.target.value ? c().setTextSize(Number(e.target.value)).run() : c().unsetTextSize().run())}
+        className="rounded border border-stone-300 px-1 py-1 text-sm"
+      >
+        <option value="">크기 기본</option>
+        {FONT_SIZES.map((pt) => (
+          <option key={pt} value={pt}>
+            {pt}pt
+          </option>
+        ))}
+      </select>
+      <span className="flex items-center gap-0.5 px-1" role="group" aria-label="글자 색">
+        {(compact ? COLORS.slice(0, 5) : COLORS).map((hex) => (
+          <button
+            key={hex}
+            type="button"
+            aria-label={`글자 색 ${hex}`}
+            disabled={off}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => c().setTextColor(hex).run()}
+            className="h-4 w-4 rounded-full ring-1 ring-stone-300 disabled:opacity-40"
+            style={{ backgroundColor: hex }}
+          />
+        ))}
+        <Btn label="글자 색 지우기" disabled={off} onClick={() => c().unsetTextColor().run()}>⌀</Btn>
+      </span>
+    </>
+  );
+}
+
+/**
+ * #36 F1 선택 툴바: 글자를 끌어 선택하면 선택 영역 위(자리가 없으면 아래)에 서식 메뉴를 띄운다.
+ * 손가락 입력(모바일)에서는 띄우지 않고 고정 툴바를 쓴다(OS 선택 메뉴와 겹치지 않게).
+ * 마우스를 누르고 있는 동안(끄는 중)에는 숨기고, 놓은 뒤에 보인다.
+ */
+function SelectionMenu({ editor }: { editor: Editor }) {
+  const menu = useRef<HTMLDivElement>(null);
+  const [pressing, setPressing] = useState(false);
+  const [coarse] = useState(coarsePointer);
+  const range = useEditorState({
+    editor,
+    selector: ({ editor: e }) => {
+      const sel = e.state.selection;
+      const text = sel instanceof TextSelection && !sel.empty && e.isFocused && e.isEditable;
+      return text ? { from: sel.from, to: sel.to } : null;
+    },
+    equalityFn: (a, b) => a?.from === b?.from && a?.to === b?.to,
+  });
+
+  useEffect(() => {
+    const dom = editor.view.dom;
+    const down = () => setPressing(true);
+    const up = () => setPressing(false);
+    dom.addEventListener("mousedown", down);
+    window.addEventListener("mouseup", up);
+    return () => {
+      dom.removeEventListener("mousedown", down);
+      window.removeEventListener("mouseup", up);
+    };
+  }, [editor]);
+
+  // 화면 위치는 DOM에 직접 쓴다(스크롤마다 다시 그리지 않는다)
+  useLayoutEffect(() => {
+    const el = menu.current;
+    if (!range || !el) return;
+    const place = () => {
+      const start = editor.view.coordsAtPos(range.from);
+      const end = editor.view.coordsAtPos(range.to);
+      const above = start.top - el.offsetHeight - 8;
+      const top = above >= 8 ? above : end.bottom + 8;
+      const mid = (Math.min(start.left, end.left) + Math.max(start.right, end.right)) / 2;
+      el.style.top = `${top}px`;
+      el.style.left = `${Math.max(8, Math.min(mid - el.offsetWidth / 2, window.innerWidth - el.offsetWidth - 8))}px`;
+      el.style.visibility = "visible";
+    };
+    place();
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [editor, range, pressing]);
+
+  if (!range || pressing || coarse) return null;
+  return (
+    <div
+      ref={menu}
+      role="toolbar"
+      aria-label="선택한 글자 서식"
+      // 메뉴 안을 눌러도 편집기 선택이 풀리지 않게 한다(select는 예외: 목록을 열어야 한다)
+      onMouseDown={(e) => {
+        if (!(e.target instanceof HTMLSelectElement)) e.preventDefault();
+      }}
+      className="fixed z-30 flex max-w-[calc(100vw-1rem)] flex-wrap items-center gap-0.5 rounded-lg bg-white p-1 shadow-lg ring-1 ring-stone-300"
+      style={{ visibility: "hidden", top: 0, left: 0 }}
+    >
+      <FormatButtons editor={editor} compact />
+    </div>
+  );
+}
+
+const coarsePointer = () => typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches && !window.matchMedia("(pointer: fine)").matches;
+
+function Toolbar({ editor, onPickImage, uploading }: { editor: Editor; onPickImage: () => void; uploading: boolean }) {
+  const s = useEditorState({
+    editor,
+    selector: ({ editor: e }) => ({
+      block: e.isActive("heading", { level: 2 }) ? "h2" : e.isActive("heading", { level: 3 }) ? "h3" : e.isActive("heading", { level: 4 }) ? "h4" : e.isActive("heading") ? "h" : e.isActive("codeBlock") ? "code" : "p",
       bullet: e.isActive("bulletList"),
       ordered: e.isActive("orderedList"),
       quote: e.isActive("blockquote"),
@@ -95,19 +240,6 @@ function Toolbar({ editor, onPickImage, uploading }: { editor: Editor; onPickIma
   function setAlign(a: Align) {
     if (s.inCell) c().setCellAttribute("align", a).run();
     else c().setTextAlign(a).run();
-  }
-  function setLink() {
-    if (s.link) {
-      c().unsetLink().run();
-      return;
-    }
-    const url = window.prompt("링크 주소 (http, https, mailto 또는 #앵커)");
-    if (url === null) return;
-    if (!isAllowedLink(url.trim())) {
-      window.alert("쓸 수 없는 주소입니다. http, https, mailto 주소나 #앵커만 링크할 수 있습니다.");
-      return;
-    }
-    c().setLink({ href: url.trim() }).run();
   }
   function insertYouTube() {
     const input = window.prompt("YouTube 주소 또는 영상 ID");
@@ -140,18 +272,7 @@ function Toolbar({ editor, onPickImage, uploading }: { editor: Editor; onPickIma
         </select>
       )}
       <Sep />
-      <Btn label="굵게" active={s.bold} onClick={() => c().toggleBold().run()}><b>B</b></Btn>
-      <Btn label="기울임" active={s.italic} onClick={() => c().toggleItalic().run()}><i>I</i></Btn>
-      <Btn label="밑줄" active={s.underline} onClick={() => c().toggleUnderline().run()}><u>U</u></Btn>
-      <Btn label="취소선" active={s.strike} onClick={() => c().toggleStrike().run()}><s>S</s></Btn>
-      <Btn label="인라인 코드" active={s.code} onClick={() => c().toggleCode().run()}><code>{"<>"}</code></Btn>
-      <Btn label={s.link ? "링크 해제" : "링크"} active={s.link} onClick={setLink}>🔗</Btn>
-      <span className="flex items-center gap-0.5 px-1" role="group" aria-label="글자 색">
-        {COLORS.map((hex) => (
-          <button key={hex} type="button" aria-label={`글자 색 ${hex}`} onMouseDown={(e) => e.preventDefault()} onClick={() => c().setTextColor(hex).run()} className="h-4 w-4 rounded-full ring-1 ring-stone-300" style={{ backgroundColor: hex }} />
-        ))}
-        <Btn label="글자 색 지우기" onClick={() => c().unsetTextColor().run()}>⌀</Btn>
-      </span>
+      <FormatButtons editor={editor} />
       <Sep />
       {(["left", "center", "right"] as Align[]).map((a) => (
         <Btn key={a} label={`${ALIGN_TEXT[a]} 정렬`} active={s.align === a} onClick={() => setAlign(a)}>
@@ -322,6 +443,7 @@ export default function BlockEditor({ initialContent, onChange, onUploading, onR
         </p>
       )}
       <EditorContent editor={editor} />
+      {!readOnly && <SelectionMenu editor={editor} />}
     </div>
   );
 }

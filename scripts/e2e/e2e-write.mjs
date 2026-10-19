@@ -57,7 +57,8 @@ const api = {
     const r = await page.request.fetch(U(`/api${path}`), {
       method,
       data,
-      headers: { Origin: ORIGIN, "X-CSRF-Token": await csrf(), "Idempotency-Key": crypto.randomUUID() },
+      // #36 본문 쓰기는 계약 revision을 밝힌다(다른 요청에는 영향 없음)
+      headers: { Origin: ORIGIN, "X-CSRF-Token": await csrf(), "Idempotency-Key": crypto.randomUUID(), "X-Post-Contract-Revision": "1.1" },
     });
     return { status: r.status(), body: await r.json() };
   },
@@ -378,6 +379,91 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
   await main.getByText("초안을 버렸습니다").waitFor();
   check("WP3d. round4: explicit discard releases the leave confirmation", !(await leaveGuarded()));
+}
+
+// WP3e. #36 리뷰 M1: 서버가 새 문서 계약을 요구해 저장을 거절한 동안의 입력(제목·본문·글 정보)은 앱 안 이동·뒤로가기 뒤에도
+// 되살아나고, 새로고침·닫기는 확인으로 막는다. 서버가 다시 받으면 저장되고 확인이 풀린다. 새 글·기존 초안 모두.
+{
+  const upgrade = () => main.getByText("새 버전의 편집기가 있습니다", { exact: false });
+  const notice = () => main.getByText("저장하지 못하고 떠났던 입력", { exact: false });
+  const bodyText = async () => (await bodyBox().innerText()).replace(/\s+/g, " ").trim();
+  const viaHome = async () => {
+    const before = dialogsSeen.length;
+    await page.locator("header").getByRole("link").first().click();
+    await page.waitForURL(U("/"));
+    const asked = dialogsSeen.length !== before;
+    const guarded = await leaveGuarded();
+    await page.goBack();
+    await bodyBox().waitFor({ timeout: 15000 });
+    return { asked, guarded };
+  };
+  await setMock("postRevision=1.2");
+  try {
+    // 새 글
+    await page.goto(U("/write/new/"));
+    await main.getByLabel("제목").fill("거절 제목");
+    await writeBody(["거절 본문"]);
+    await upgrade().waitFor({ timeout: 15000 });
+    await main.getByLabel("제목").fill("거절 제목 고침");
+    await main.getByLabel("태그", { exact: true }).fill("보존태그");
+    await main.getByLabel("태그", { exact: true }).press("Enter");
+    await bodyBox().click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type(" 추가");
+    await page.waitForTimeout(300);
+    const nav = await viaHome();
+    check("WP3e. new post: in-app link leaves without a dialog; leaving the site from there still asks", !nav.asked && nav.guarded, JSON.stringify(nav));
+    check(
+      "WP3e. new post: title, body and tags are restored after Back, with a notice",
+      (await main.getByLabel("제목").inputValue()) === "거절 제목 고침" && (await bodyText()) === "거절 본문 추가" && (await main.getByText("보존태그").count()) > 0 && (await notice().count()) === 1,
+      `${await main.getByLabel("제목").inputValue()} | ${await bodyText()}`
+    );
+    await upgrade().waitFor({ timeout: 15000 });
+    const before = dialogsSeen.length;
+    dismissNext = true;
+    await page.reload({ timeout: 5000 }).catch(() => {});
+    dismissNext = false;
+    check("WP3e. new post: cancelling a reload asks and keeps the input", dialogsSeen.slice(before).includes("beforeunload") && (await main.getByLabel("제목").inputValue()) === "거절 제목 고침");
+    // 서버가 다시 받으면: 다시 열 때 되살린 입력이 저장되고 버퍼·떠날 때 확인이 풀린다
+    await setMock("postRevision=1.1");
+    await viaHome();
+    await page.waitForURL(/[?&]draft=/, { timeout: 15000 }).catch(() => {});
+    await saved();
+    const made = await api.get(`/research/post-drafts/${await draftParam()}`);
+    check("WP3e. new post: once accepted, the restored input is what the server saved", made.title === "거절 제목 고침" && made.textProjection === "거절 본문 추가" && made.tags.includes("보존태그"), JSON.stringify({ t: made.title, p: made.textProjection, tags: made.tags }));
+    check("WP3e. new post: after saving, leaving no longer asks", !(await leaveGuarded()));
+    await main.getByRole("button", { name: "초안 버리기…" }).click();
+    await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+    await main.getByText("초안을 버렸습니다").waitFor();
+
+    // 기존 초안
+    const content = { format: "post-blocks", version: 1, blocks: [{ id: crypto.randomUUID(), type: "paragraph", runs: [{ text: "초안 기준", marks: [] }], align: "left" }] };
+    const base = await api.send("POST", "/research/post-drafts", { title: "기존 초안", content, description: "", tags: [], coverImageId: null, documentIds: [] });
+    check("WP3e. existing draft: setup", base.status === 201, String(base.status));
+    await page.goto(U(`/write/new/?draft=${base.body.id}`));
+    await bodyBox().waitFor({ timeout: 15000 });
+    await setMock("postRevision=1.2");
+    await main.getByLabel("제목").fill("기존 초안 고침");
+    await bodyBox().click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type(" 거절됨");
+    await upgrade().waitFor({ timeout: 15000 });
+    const nav2 = await viaHome();
+    check(
+      "WP3e. existing draft: after an in-app link and Back, the rejected edits are restored over the saved draft",
+      !nav2.asked && nav2.guarded && (await main.getByLabel("제목").inputValue()) === "기존 초안 고침" && (await bodyText()) === "초안 기준 거절됨",
+      `${JSON.stringify(nav2)} ${await bodyText()}`
+    );
+    check("WP3e. existing draft: the server draft is unchanged while rejected", (await api.get(`/research/post-drafts/${base.body.id}`)).title === "기존 초안");
+    await upgrade().waitFor({ timeout: 15000 });
+    // 명시적으로 버리면 버퍼와 떠날 때 확인도 풀린다
+    await main.getByRole("button", { name: "초안 버리기…" }).click();
+    await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+    await main.getByText("초안을 버렸습니다").waitFor();
+    check("WP3e. existing draft: discarding releases the leave confirmation", !(await leaveGuarded()));
+  } finally {
+    await setMock("postRevision=1.1");
+  }
 }
 
 // WP4. #31: 자료만 바탕으로 한 글, 보관 자료 제외, 문서 해제 뒤에도 자료 유지, 요약 없는 글의 목록 발췌(W2)

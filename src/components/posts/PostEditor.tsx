@@ -89,11 +89,29 @@ export default function PostEditor({
   onReloadPost?: () => Promise<void>;
 }) {
   const head = post ? textOf(post.latestVersion) : EMPTY_TEXT;
+  // 화면의 본문이 계약을 넘어(상한 등) 마지막 유효 본문만 저장된 상태(리뷰 M1), 또는 서버가 새 문서 계약을 요구해 저장을
+  // 거절한 상태(#36 리뷰 M1)에서는 저장하지 못한 입력을 이 탭의 메모리에 보관해 두고(bodyBuffer), 화면 이동·뒤로가기 뒤
+  // 같은 초안을 다시 열면 되살린다. 새로고침·탭 닫기는 떠날 때 확인으로 막는다(브라우저 저장소에 남기지 않는다).
+  const { user, csrfToken } = useAuth();
+  const accountId = user?.accountId ?? null;
+  const [restored] = useState(() => {
+    if (!accountId) return null;
+    const target = bufferTarget(resumeDraft?.id, post?.id);
+    const b = loadBodyBuffer(accountId, target);
+    if (!b) return null;
+    // 그 뒤 서버 초안이 바뀌었으면(다른 탭·기기) 오래된 버퍼로 덮지 않는다
+    if (b.revision !== (resumeDraft?.revision ?? null)) {
+      clearBodyBuffer(accountId, target);
+      return null;
+    }
+    return { target, body: b.editor, input: b.input ?? null };
+  });
   const editor = usePostDraft({
     initial: head,
     draft: resumeDraft,
     base: post ? { postId: post.id, basePostVersion: post.version, baseVersionId: post.latestVersion.id } : null,
     onDraft,
+    start: restored?.input,
   });
   const { values, status } = editor;
   // 모든 변경은 최신 입력에 덧붙인다(렌더 시점 값을 캡처하지 않는다).
@@ -108,41 +126,33 @@ export default function PostEditor({
   const [panelUploading, setPanelUploading] = useState(false);
   const [bodyUploading, setBodyUploading] = useState(false);
   const uploading = panelUploading || bodyUploading;
-  // 화면의 본문이 계약을 넘어(상한 등) 마지막 유효 본문만 저장된 상태. 고칠 때까지 새 버전 저장·보관 닫기를 막는다(리뷰 M1).
-  // 그 편집기 내용은 이 탭의 메모리에 보관해 두고(bodyBuffer), 화면 이동·뒤로가기 뒤 같은 초안을 다시 열면 되살린다.
-  // 새로고침·탭 닫기는 떠날 때 확인으로 막는다(본문을 브라우저 저장소에 남기지 않는다).
-  const { user, csrfToken } = useAuth();
-  const accountId = user?.accountId ?? null;
+  // 본문 문제가 있는 동안 새 버전 저장·닫기를 막는다(리뷰 M1).
   const buffer = bufferTarget(editor.draft?.id ?? resumeDraft?.id, post?.id);
-  const [restored] = useState(() => {
-    if (!accountId) return null;
-    const target = bufferTarget(resumeDraft?.id, post?.id);
-    const b = loadBodyBuffer(accountId, target);
-    if (!b) return null;
-    // 그 뒤 서버 초안이 바뀌었으면(다른 탭·기기) 오래된 버퍼로 덮지 않는다
-    if (b.revision !== (resumeDraft?.revision ?? null)) {
-      clearBodyBuffer(accountId, target);
-      return null;
-    }
-    return b.editor;
-  });
   const [bodyProblemState, setBodyProblemState] = useState<BodyProblem | null>(null);
   const bodyProblem = bodyProblemState?.error ?? null;
   function onBodyProblem(p: BodyProblem | null) {
     setBodyProblemState(p);
     if (!p && accountId) clearBodyBuffer(accountId, buffer);
   }
-  // 문제가 있는 동안 버퍼를 지금 초안(마지막 유효 본문의 자동 저장이 늦게 끝나 revision·ID가 바뀌어도 그 기준)에 맞춰 둔다
+  // #36: 서버가 이 화면보다 새 문서 계약을 요구해 저장을 거절했다. 저장·닫기를 막고 새로고침을 안내한다(입력은 화면과 버퍼에 남는다).
+  const upgradeRequired = status.kind === "stopped" && status.failure.kind === "http" && status.failure.code === "post_contract_upgrade_required";
+  // 문제가 있는 동안 버퍼를 지금 초안(마지막 유효 본문의 자동 저장이 늦게 끝나 revision·ID가 바뀌어도 그 기준)과 지금 입력에 맞춰 둔다
   const draftRevision = editor.draft?.revision ?? null;
-  const savedTarget = useRef<string | null>(null);
+  // 이 화면이 버퍼를 둔 대상. 되살려 열었으면 그 대상이다(다시 저장되면 지운다).
+  const savedTarget = useRef<string | null>(restored?.target ?? null);
   useEffect(() => {
-    if (!accountId || !bodyProblemState) return;
+    if (!accountId || (!bodyProblemState && !upgradeRequired)) return;
     if (savedTarget.current && savedTarget.current !== buffer) clearBodyBuffer(accountId, savedTarget.current);
     savedTarget.current = buffer;
-    saveBodyBuffer(accountId, buffer, { revision: draftRevision, editor: bodyProblemState.editor });
-  }, [accountId, buffer, bodyProblemState, draftRevision]);
-  // #36: 서버가 이 화면보다 새 문서 계약을 요구해 저장을 거절했다. 저장·닫기를 막고 새로고침을 안내한다(입력은 화면에 남는다).
-  const upgradeRequired = status.kind === "stopped" && status.failure.kind === "http" && status.failure.code === "post_contract_upgrade_required";
+    saveBodyBuffer(accountId, buffer, { revision: draftRevision, editor: bodyProblemState?.editor ?? null, ...(upgradeRequired ? { input: values } : {}) });
+  }, [accountId, buffer, bodyProblemState, draftRevision, upgradeRequired, values]);
+  // 보관했던 입력이 서버에 저장되면(문제가 풀리고 저장 완료) 버퍼를 지운다
+  useEffect(() => {
+    if (!accountId || bodyProblemState || upgradeRequired || !savedTarget.current) return;
+    if (status.kind !== "saved" && status.kind !== "clean") return;
+    clearBodyBuffer(accountId, savedTarget.current);
+    savedTarget.current = null;
+  }, [accountId, bodyProblemState, upgradeRequired, status]);
   useEffect(() => {
     if (!bodyProblem && !upgradeRequired) return;
     // 떠나면 화면의 입력(저장되지 않은 본문)을 잃으므로 브라우저 확인을 띄운다
@@ -414,7 +424,7 @@ export default function PostEditor({
         }}
         onUploading={setBodyUploading}
         onProblem={onBodyProblem}
-        restore={restored}
+        restore={restored?.body ?? null}
         readOnly={locked}
       />
       {locked && (
@@ -423,6 +433,9 @@ export default function PostEditor({
         </p>
       )}
       <StatusLine status={status} onRetry={() => void editor.flush()} />
+      {restored?.input && status.kind !== "saved" && status.kind !== "clean" && (
+        <Notice tone="info">저장하지 못하고 떠났던 입력(제목·본문·글 정보)을 되살렸습니다. 이 탭에만 있던 내용이며, 저장되면 이 안내는 사라집니다.</Notice>
+      )}
       {uploading && (
         <p role="status" className="text-xs text-stone-600">
           이미지를 올리는 중입니다. 끝나면 본문에 넣으며, 그동안 저장·닫기·버리기는 잠깁니다. 입력은 계속할 수 있습니다.

@@ -64,7 +64,7 @@ async function login(page) {
 function harness(page) {
   const main = page.locator("main");
   const editor = main.locator(".ProseMirror");
-  const tb = main.getByRole("toolbar", { name: "서식" });
+  const tb = main.getByRole("toolbar", { name: "서식", exact: true });
   return {
     main,
     editor,
@@ -157,10 +157,18 @@ async function editingRegressions(p, h, tag) {
   await kb.type("c");
   await kb.press("ArrowUp");
   await kb.press("Home");
+  // 브라우저가 옮긴 caret을 편집기가 읽을 때까지 기다린다(selectionchange는 비동기)
+  const caret = () => h.editor.evaluate((el) => `${el.editor.state.selection.$from.parent.textContent}@${el.editor.state.selection.$from.parentOffset}`);
+  // 무거운 실행에서 Chromium이 Home을 놓치는 일이 있어(caret이 줄 끝에 남음) 줄 처음이 될 때까지 Home을 다시 누른다
+  for (let i = 0; i < 20 && (await caret()) !== "b@0"; i++) {
+    await p.waitForTimeout(50);
+    if (i % 5 === 4) await kb.press("Home");
+  }
+  const at = await caret();
   await kb.press("Backspace");
   const split = await shape();
   await kb.press("Backspace");
-  check(`B1c. ${tag}: middle item lifts out, then joins back into one list`, split === "ul[a],p(b),ul[c]" && (await shape()) === "ul[ab,c]", `${split} → ${await shape()}`);
+  check(`B1c. ${tag}: middle item lifts out, then joins back into one list`, split === "ul[a],p(b),ul[c]" && (await shape()) === "ul[ab,c]", `caret=${at} ${split} → ${await shape()}`);
   // B1d. 중첩 항목: 한 단계씩 올라간 뒤 문단이 되고, 마지막에는 가장 깊은 마지막 항목에 합친다
   await h.fresh();
   await kb.type("- a");
@@ -628,11 +636,70 @@ await editingRegressions(page, H, "chromium");
     await setMock("postRevision=1.1");
   }
 }
+// F1·F2. 선택 툴바: 글자를 선택하면 선택 영역 위에 서식 메뉴가 뜨고, 굵게·글자 크기(pt)가 선택한 글자에만 적용된다.
+// 커서를 옮겨 선택이 풀리면 사라진다. 손가락 입력(모바일)에서는 띄우지 않고 고정 툴바의 글자 크기를 쓴다.
+{
+  await H.fresh();
+  await page.keyboard.type("hello world");
+  const menu = H.main.getByRole("toolbar", { name: "선택한 글자 서식" });
+  check("F1. no selection menu without a selection", (await menu.count()) === 0);
+  // 고정(sticky) 툴바 아래에 가리지 않게 줄을 화면 가운데로 옮긴 뒤 누른다
+  await H.editor.getByText("hello world").evaluate((el) => el.scrollIntoView({ block: "center" }));
+  // 문단 상자는 편집기 폭 전체라 글자 자체("world")의 위치를 Range로 잰다
+  const word = await H.editor.getByText("hello world").evaluate((el) => {
+    const t = el.firstChild;
+    const r = document.createRange();
+    r.setStart(t, 6);
+    r.setEnd(t, 11);
+    const b = r.getBoundingClientRect();
+    return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+  });
+  await page.mouse.dblclick(word.x, word.y);
+  await menu.waitFor({ timeout: 5000 }).catch(() => {});
+  const selRect = await page.evaluate(() => {
+    const r = window.getSelection().getRangeAt(0).getBoundingClientRect();
+    return { top: r.top, bottom: r.bottom, text: window.getSelection().toString() };
+  });
+  const mb = await menu.boundingBox().catch(() => null);
+  check("F1. double-click selection shows the menu right above the selection", selRect.text === "world" && !!mb && mb.y + mb.height <= selRect.top + 1 && mb.y + mb.height >= selRect.top - 40, `${JSON.stringify(selRect)} ${JSON.stringify(mb)}`);
+  await menu.getByRole("button", { name: "굵게" }).click();
+  await menu.getByLabel("글자 크기").selectOption("18");
+  const runs = (await H.doc()).content[0].content;
+  const w = runs.find((n) => n.text === "world");
+  const h = runs.find((n) => n.text === "hello ");
+  check("F1·F2. bold and 18pt apply to the selected word only", !!w && w.marks?.some((m) => m.type === "bold") && w.marks?.some((m) => m.type === "textStyle" && m.attrs.fontSize === 18) && !h?.marks?.length, JSON.stringify(runs));
+  check("F1. the menu stays while the text is still selected", (await menu.count()) === 1);
+  await page.keyboard.press("ArrowRight");
+  check("F1. collapsing the selection hides the menu", (await menu.count()) === 0);
+  const saved = await H.blocks();
+  const sr = saved.doc?.blocks?.[0]?.runs ?? [];
+  check("F2. saved run carries the contract mark {fontSize: 18} after bold", saved.problem === 0 && JSON.stringify(sr) === JSON.stringify([{ text: "hello ", marks: [] }, { text: "world", marks: ["bold", { fontSize: 18 }] }]), JSON.stringify(sr));
+  check("F2. editor shows 18pt as 24px", (await H.editor.locator('[data-font-size="18"]').evaluate((el) => getComputedStyle(el).fontSize).catch(() => "")) === "24px");
+
+  const mctx = await browser.newContext({ isMobile: true, hasTouch: true, viewport: { width: 390, height: 844 } });
+  const mp = await mctx.newPage();
+  // 좁은 화면에서는 계정 이름이 메뉴 안에 숨어 있어 session 응답으로 로그인을 확인한다
+  await mp.goto(U("/api/auth/github/start"), { waitUntil: "domcontentloaded" });
+  for (let i = 0; i < 50; i++) {
+    const me = await (await mp.request.get(U("/api/auth/me"))).json().catch(() => null);
+    if (me?.user) break;
+    await mp.waitForTimeout(200);
+  }
+  const mh = harness(mp);
+  await mh.fresh();
+  await mp.keyboard.type("touch text");
+  await mp.keyboard.press("Shift+Home");
+  await mp.waitForTimeout(300);
+  check("F1. touch device: no floating menu, the fixed toolbar keeps font size", (await mh.main.getByRole("toolbar", { name: "선택한 글자 서식" }).count()) === 0 && (await mh.tb.getByLabel("글자 크기").count()) === 1);
+  await mctx.close();
+}
+
 // R1. renderer(저장한 글 화면의 최신 버전): 서식·영상 카드. 누르기 전에는 YouTube 요청 0, 누르면 nocookie 주소의 고정 sandbox iframe
 await H.fresh();
 await page.keyboard.type("굵은 ");
 await page.keyboard.press("Shift+Home");
 await H.tb.getByRole("button", { name: "굵게" }).click();
+await H.tb.getByLabel("글자 크기").selectOption("18");
 await page.keyboard.press("End");
 nextPrompt = ["https://youtu.be/dQw4w9WgXcQ"];
 await H.tb.getByRole("button", { name: "YouTube 영상" }).click();
@@ -643,6 +710,7 @@ const preview = H.main.locator(".prose").first();
 await preview.waitFor({ timeout: 15000 });
 check("R1. saved post renders bold as <strong> and the inactive YouTube card", (await preview.locator("strong").first().innerText().catch(() => "")).trim() === "굵은" && (await preview.getByRole("button", { name: /눌러서 재생/ }).count()) === 1);
 check("R1. no YouTube request before activation (editor + rendered post)", external.length === 0, external.slice(0, 3).join(" "));
+check("F2. renderer draws 18pt as exactly 24px", (await preview.locator("strong span").first().evaluate((el) => el.style.fontSize).catch(() => "")) === "24px");
 const firstYt = page.waitForRequest((r) => YT_HOSTS.test(new URL(r.url()).hostname), { timeout: 5000 }).catch(() => null);
 await preview.getByRole("button", { name: /눌러서 재생/ }).click();
 const frame = preview.locator("iframe");
