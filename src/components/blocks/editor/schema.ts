@@ -16,13 +16,14 @@ import HorizontalRule from "@tiptap/extension-horizontal-rule";
 import HardBreak from "@tiptap/extension-hard-break";
 import Link from "@tiptap/extension-link";
 import { BulletList, ListItem, ListKeymap, OrderedList } from "@tiptap/extension-list";
-import { Dropcursor, Gapcursor, Placeholder, TrailingNode, UndoRedo } from "@tiptap/extensions";
+import { Dropcursor, Gapcursor, Placeholder, UndoRedo } from "@tiptap/extensions";
 import { TextStyle } from "@tiptap/extension-text-style";
 import TextAlign from "@tiptap/extension-text-align";
 import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
 import UniqueID from "@tiptap/extension-unique-id";
 import { uuidV4 } from "@/lib/research/idempotency";
 import { CODE_LANGUAGES, IMAGE_WIDTHS, LIMITS, YOUTUBE_ID, type Align } from "@/lib/blocks/types";
+import { isAllowedLink } from "@/lib/blocks/document";
 import { ownImageUrl } from "@/lib/posts/api";
 
 // #32 편집기 스키마. 저장 계약(post-blocks v1)이 허용하는 구조만 편집기 안에서도 만들 수 있게 노드 content 식으로 제한한다.
@@ -33,6 +34,7 @@ import { ownImageUrl } from "@/lib/posts/api";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ALIGNS: Align[] = ["left", "center", "right"];
 const LIST_TYPES = new Set(["bulletList", "orderedList"]);
+const CELL_TYPES = new Set(["tableCell", "tableHeader"]);
 
 /** 계약 색상(#RRGGBB 대문자). 붙여 넣은 rgb()도 같은 값이면 받아들이고 나머지 CSS 값은 버린다. */
 export function normalizeHex(value: string | null | undefined): string | null {
@@ -46,18 +48,7 @@ export function normalizeHex(value: string | null | undefined): string | null {
   return `#${parts.map((n) => n.toString(16).padStart(2, "0")).join("").toUpperCase()}`;
 }
 
-/** 계약 링크 정책: http/https/mailto 절대 주소와 #앵커. 제어문자·계정정보(user:pass@)가 있으면 거절한다. */
-export function isAllowedLink(url: string): boolean {
-  if (/[\u0000-\u001f\u007f-\u009f]/.test(url)) return false;
-  if (url.startsWith("#")) return url.length > 1;
-  try {
-    const u = new URL(url);
-    if (!["http:", "https:", "mailto:"].includes(u.protocol)) return false;
-    return u.username === "" && u.password === "";
-  } catch {
-    return false;
-  }
-}
+export { isAllowedLink };
 
 /** watch?v=, youtu.be/, shorts/, embed/ 주소나 ID 자체에서 11자 영상 ID만 꺼낸다. 시작 시각 등 나머지는 버린다(v1 미지원). */
 export function youtubeIdFrom(input: string): string | null {
@@ -366,6 +357,18 @@ const ContractGuard = Extension.create<{ onReject: (reason: string) => void }>({
           if (reason) onReject(reason);
           return reason === null;
         },
+        // 표 칸 안 문단 정렬은 계약에 없다(cell.align만 쓴다). 붙여넣기·단축키로 생긴 문단 정렬은 기본값으로 되돌린다.
+        appendTransaction: (trs, _old, state) => {
+          if (!trs.some((t) => t.docChanged)) return null;
+          const tr = state.tr;
+          state.doc.descendants((node, pos, parent) => {
+            if (node.type.name === "paragraph" && parent && CELL_TYPES.has(parent.type.name) && node.attrs.textAlign !== "left") {
+              tr.setNodeMarkup(pos, undefined, { ...node.attrs, textAlign: "left" });
+            }
+            return node.type.name !== "paragraph";
+          });
+          return tr.docChanged ? tr : null;
+        },
       }),
     ];
   },
@@ -493,8 +496,8 @@ export function blockExtensions({ placeholder = "", onReject }: SchemaOptions = 
     UniqueID.configure({ types: ID_TYPES, attributeName: "id", generateID: () => uuidV4() }),
     UndoRedo,
     Dropcursor,
+    // 표·단·이미지 뒤 빈 자리는 gapcursor로 들어간다(TrailingNode는 열기만 해도 빈 문단을 더해 저장본을 바꾸므로 쓰지 않는다)
     Gapcursor,
-    TrailingNode,
     Placeholder.configure({ placeholder }),
     ContractGuard.configure({ onReject: onReject ?? (() => {}) }),
     MoveBlock,
