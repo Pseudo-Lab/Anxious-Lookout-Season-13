@@ -154,6 +154,11 @@ describe("links and visible content", () => {
     expect(hasVisibleContent(canonical(doc([{ id: nextId(), type: "image", imageId: ID(900) }])))).toBe(true);
   });
 
+  it("children of a parent matched by content (new ids) are not reported as reparented", () => {
+    const list = (seed: number) => ({ id: ID(seed), type: "list", ordered: false, items: [{ id: ID(seed + 1), blocks: [{ id: ID(seed + 2), type: "paragraph", runs: [{ text: "a", marks: [] }] }] }] });
+    expect(formatChanges(canonical(doc([list(100)])), canonical(doc([list(200)])))).toEqual([]);
+  });
+
   it("moving a block keeps its id and reports a move, not remove+add", () => {
     const a = para([{ text: "A", marks: [] }]);
     const b = para([{ text: "B", marks: [] }]);

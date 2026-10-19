@@ -101,6 +101,9 @@ export function formatChanges(base: BlockDocument, candidate: BlockDocument): Fo
   const oldLoc = locations(base);
   const newLoc = locations(candidate);
 
+  // 1단계: 후보 노드마다 기준 노드를 정한다(같은 id 우선, 아니면 종류+텍스트 순서 대응)
+  const pairs: [AnyNode, AnyNode | undefined, boolean][] = [];
+  const matched = new Map<string, string>();
   for (const n of right) {
     let old = !used.has(n.id) ? byId.get(n.id) : undefined;
     let ambiguous = false;
@@ -112,17 +115,25 @@ export function formatChanges(base: BlockDocument, candidate: BlockDocument): Fo
         ambiguous = matches.length > 1 || (rightCounts.get(key) ?? 0) > 1;
       }
     }
+    pairs.push([n, old, ambiguous]);
+    if (old) {
+      used.add(old.id);
+      matched.set(n.id, old.id);
+    }
+  }
+  // 2단계: 속성·위치 비교. 부모는 대응된 기준 id로 바꿔 비교한다(내용으로 대응된 부모의 id만 바뀐 경우는 이동이 아니다)
+  for (const [n, old, ambiguous] of pairs) {
     if (!old) {
       changes.push({ baseBlockId: null, candidateBlockId: n.id, kind: "added", changedProperties: ["structure"] });
       continue;
     }
-    used.add(old.id);
     const a = local(old);
     const b = local(n);
     const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => !same(sortKeys(a[k]), sortKeys(b[k]))).sort();
     const [op, of, oi] = oldLoc.get(old.id)!;
     const [np, nf, ni] = newLoc.get(n.id)!;
-    const reparented = op !== np || of !== nf;
+    const newParent = np === null ? null : (matched.get(np) ?? np);
+    const reparented = op !== newParent || of !== nf;
     const moved = oi !== ni;
     if (reparented) keys.push("parent");
     if (moved) keys.push("position");
