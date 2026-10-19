@@ -13,7 +13,7 @@ from tests.test_page_chat import callback
 
 @pytest.fixture(scope='module', autouse=True)
 def source_schema(schema):
-    migrate('0006_posts')
+    migrate('0007_post_blocks')
 
 
 def relate(client, auth, document, source):
@@ -86,7 +86,7 @@ def test_material_only_proposal_accept_stale_preview_archive_and_foreign(client,
     source = create(client, auth)
     session, runner = turn(client, auth, owner)
     args = content(materialIds=[source['id']]); args.pop('slug')
-    proposed = callback(client, session, runner, 'research_post_propose', {**args,'mutationId':str(uuid.uuid4())})
+    proposed = callback(client, session, runner, 'research_post_propose', {**{k:v for k,v in args.items() if k!='content'},'contentInput':{'format':'markdown','text':'# Text'},'mutationId':str(uuid.uuid4())})
     assert proposed.status_code == 200, proposed.text
     assert proposed.json()['slug'] == '' and proposed.json()['materialSources'][0]['documentIds'] == []
     assert client.get('/api/research/posts').json()['items'] == []

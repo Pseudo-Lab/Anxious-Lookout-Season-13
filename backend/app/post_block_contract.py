@@ -1,7 +1,7 @@
-"""Post blocks v1 wire shapes; not yet wired to application input validation.
+"""Post blocks v1 wire shapes used by the shared post_blocks validator.
 
-Exported JSON Schema covers shapes/local bounds. Semantic validation, ownership,
-normalization, projection and conversion are separate subsequent work.
+Exported JSON Schema covers shapes/local bounds. Semantic validation and normalization live in post_blocks; ownership is
+checked at the post storage boundary.
 """
 from __future__ import annotations
 

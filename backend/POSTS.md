@@ -239,3 +239,9 @@ Old payloads/snapshots are read with empty material fields. Continue the existin
 0006 readiness and coordinated backup procedure when deploying the reviewed
 images. Old immutable public snapshots remain unchanged in storage. W4 is outside
 this backend change until a separate decision is delivered.
+
+## Block-format successor (#32)
+
+For the current block-content API, 0007 migration, preservation and restore gates,
+use [BLOCK_POSTS.md](BLOCK_POSTS.md). The earlier Markdown/0006 checkpoint details
+above remain historical context and are not the current runtime's deployment target.

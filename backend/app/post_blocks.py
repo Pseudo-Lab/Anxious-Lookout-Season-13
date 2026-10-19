@@ -207,3 +207,53 @@ def format_changes(base, candidate):
     for node in left:
         if node['id'] not in used: changes.append({'baseBlockId':node['id'],'candidateBlockId':None,'kind':'removed','changedProperties':['structure']})
     return changes
+
+
+def markdown_projection(document, base_path=''):
+    """Readable supported-structure projection; formatSummary declares losses."""
+    def escape(value): return re.sub(r'([\\`*_{}\[\]()#+.!|>~-])', r'\\\1', value)
+    def inline(runs):
+        result=[]
+        for run in runs:
+            value=escape(run['text'])
+            for mark in run['marks']:
+                if mark=='code':
+                    fence='`'*(max([len(m) for m in re.findall(r'`+',run['text'])]+[0])+1)
+                    value=fence+' '+run['text']+' '+fence
+                elif mark in ('bold','italic','strike'):
+                    token={'bold':'**','italic':'*','strike':'~~'}[mark]; value=token+value+token
+            if run.get('link'): value='['+value+']('+run['link'].replace('(', '%28').replace(')', '%29')+')'
+            result.append(value)
+        return ''.join(result)
+    def block(node):
+        kind=node.get('type')
+        if kind=='paragraph': return inline(node['runs'])
+        if kind=='heading': return '#'*node['level']+' '+inline(node['runs'])
+        if kind=='divider': return '---'
+        if kind=='code':
+            fence='`'*(max([len(m) for m in re.findall(r'`+',node['text'])]+[2])+1)
+            return fence+node['language']+'\n'+node['text']+('' if node['text'].endswith('\n') else '\n')+fence
+        if kind=='image': return '!['+escape(node['alt'])+']('+base_path.rstrip('/')+'/api/media/post-images/'+node['imageId']+')'
+        if kind=='embed': return 'https://www.youtube.com/watch?v='+node['resourceId']
+        if kind=='quote': return '\n'.join('> '+line for line in '\n\n'.join(block(b) for b in node['blocks']).split('\n'))
+        if kind=='list':
+            lines=[]
+            for i,item in enumerate(node['items']):
+                marker=str(node.get('start',1)+i)+'. ' if node['ordered'] else '- '
+                lines.append(marker+block(item['blocks'][0]).replace('\n','\n'+' '*len(marker)))
+                if len(item['blocks'])>1: lines.extend(' '*len(marker)+line for line in block(item['blocks'][1]).split('\n'))
+            return '\n'.join(lines)
+        if kind=='table':
+            rows=['| '+' | '.join(' '.join(block(p) for p in c['blocks']).replace('\n',' ') for c in r['cells'])+' |' for r in node['rows']]
+            # Headerless tables have no lossless GFM form; text projection keeps all rows.
+            if not node['rows'][0]['header']: return escape(project_node(node))
+            rows.insert(1,'| '+' | '.join('---' for _ in node['rows'][0]['cells'])+' |')
+            return '\n'.join(rows)
+        if kind=='columns': return '\n\n'.join(block(c) for c in node['columns'])
+        return '\n\n'.join(block(b) for b in node.get('blocks',[]))
+    return '\n\n'.join(block(n) for n in document['blocks'])
+
+
+def format_summary(document):
+    return {'lossy':True,'omittedProperties':['color','underline','align','widthPercent','caption','background','columns','cellParagraphLayout','headerlessTableLayout'],
+            'message':'Markdown projection cannot preserve all block formatting; compare formatChanges before accepting.'}

@@ -2,8 +2,8 @@
 
 `input.schema.json` is the Pydantic export from `app/post_block_contract.py`.
 `golden.json` is the common frontend/backend expectation set. These files are the
-adapter's input contract, not evidence that the application's validator, converter,
-projections, or migration are implemented. No API routes use these models yet.
+adapter's input contract. The API uses post_blocks.canonicalize at all post input
+boundaries. See backend/BLOCK_POSTS.md for storage and 0007 migration details.
 
 ## Consuming fixtures
 
@@ -11,20 +11,20 @@ projections, or migration are implemented. No API routes use these models yet.
   image references (without a cover). Adapter round trips must preserve canonical
   output, including IDs, LF, run merging and cell paragraph alignment omission.
 - `invalid`: normative 422 code and request JSON Pointer. `stage=shape` is rejected
-  by the exported shapes. `stage=semantic` needs the subsequent document validator;
+  by the exported shapes. `stage=semantic` needs the shared document validator;
   accepting the JSON Schema alone does not make these inputs valid for storage.
   Do not expose raw Pydantic union branch names as API paths. Paths are against a
   request `{content: document}`; root pointer is `""`, escape `~` as `~0`, `/` as `~1`.
 - `formatDiff`: expected diff of already canonical documents; equal text must not
   hide formatting changes. `markdown` specifies conversion outcomes, not block IDs
-  or complete converter fixtures yet. No converter is part of this slice.
+  or complete converter fixtures yet. The converter implements these policies; its dedicated tests additionally cover seed conversion.
 - `limits`: agreed budgets. Aggregate limits, UTF-8 byte length and ownership are
   not fully expressible in JSON Schema. Treat all limits conjunctively.
 
-Tests in this slice verify shape acceptance/rejection and reproducible export.
-They do NOT claim to execute canonicalization, projection, semantic rejection,
-format comparison, Markdown conversion or API error mapping. Those expected
-outputs intentionally precede implementation and become its regression oracle.
+Shape tests verify reproducible export. test_post_blocks executes canonical,
+projection, semantic rejection and format expectations; test_post_block_markdown
+executes conversion policies. PostgreSQL tests verify the API boundary and atomic
+migration. These are isolated checks, not live rollout or browser equivalence.
 
 ## Canonical details
 
@@ -43,7 +43,7 @@ identical adjacent runs merge after normalization. Code may coexist with color
 and link; image/embed captions forbid links. Empty document is one explicitly
 identified paragraph with empty runs; no random ID creation during normalization.
 
-Semantic checks still required: unique IDs across all containers/items/rows/cells;
+Semantic checks enforced by the shared validator or storage boundary: unique IDs across all containers/items/rows/cells;
 control characters; safe links (http/https/mailto/#anchor, no credentials/controls);
 mark uniqueness; header only on first row; rectangular tables; ordered-list start;
 list depth<=3; node depth<=8; all aggregate limits; caption text<=2000; canonical

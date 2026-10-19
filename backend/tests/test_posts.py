@@ -11,12 +11,23 @@ ROOT = '/api/research/post-drafts'
 
 @pytest.fixture(scope='module', autouse=True)
 def posts_schema(schema):
-    migrate('0006_posts')
+    migrate('0007_post_blocks')
 
 
 def content(**changes):
-    return {'title': 'Post', 'content': '# Text', 'description': 'Summary', 'slug': '',
-            'tags': ['one'], 'coverImageId': None, 'documentIds': [], **changes}
+    from app.post_block_markdown import convert
+    value = {'title': 'Post', 'content': '# Text', 'description': 'Summary', 'slug': '',
+             'tags': ['one'], 'coverImageId': None, 'documentIds': [], **changes}
+    if isinstance(value['content'], str): value['content'] = convert(value['content'], 'test-input')[0]
+    return value
+
+
+def proposal_content(**changes):
+    markdown = changes.pop('content', '# Text')
+    value = content(**changes)
+    value.pop('content')
+    value['contentInput'] = {'format': 'markdown', 'text': markdown}
+    return value
 
 
 def make_draft(client, auth, post=None, **changes):
@@ -58,7 +69,7 @@ def test_new_draft_autosave_commit_replay_and_history(client, admin):
     latest = commit(client, auth, second, expectedVersion=1)
     assert latest['version'] == latest['latestVersion']['number'] == 2
     old = client.get('/api/research/posts/'+post['id']+'/versions/'+post['latestVersion']['id']).json()
-    assert old['content'] == '# Text'
+    assert old['textProjection'] == 'Text'
     assert client.get('/api/research/posts?q=Post').json()['items'][0]['id'] == post['id']
     versions = client.get('/api/research/posts/'+post['id']+'/versions?limit=1').json()
     assert versions['items'][0]['number'] == 2 and 'content' not in versions['items'][0]

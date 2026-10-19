@@ -79,3 +79,22 @@ def test_exact_ids_reserved_before_duplicate_fallback():
     base={**base,'blocks':[original,new]}
     other={**deepcopy(original),'id':'00000000-0000-0000-0000-000000000888'}
     assert format_changes(base,{**base,'blocks':[other]})[0]['kind']=='ambiguous'
+
+def test_cover_counts_in_distinct_image_budget():
+    import uuid
+    from app.post_images import references
+    blocks=[{'id':str(uuid.uuid4()),'type':'image','imageId':str(uuid.uuid4())} for _ in range(50)]
+    body={'content':{'format':'post-blocks','version':1,'blocks':blocks},'coverImageId':blocks[0]['imageId']}
+    assert len(references(body))==50
+    body['coverImageId']=str(uuid.uuid4())
+    with pytest.raises(ResearchError) as caught: references(body)
+    assert caught.value.code=='content_limit_exceeded'
+
+def test_readable_projection_declares_losses_and_uses_base_path():
+    from app.post_blocks import markdown_projection, format_summary
+    doc=canonicalize(G['valid'][1]['input'])
+    markdown=markdown_projection(doc,'/view')
+    assert '/view/api/media/post-images/' in markdown
+    assert 'print("안녕")' in markdown
+    assert format_summary(doc)['lossy'] is True
+    assert 'color' in format_summary(doc)['omittedProperties']

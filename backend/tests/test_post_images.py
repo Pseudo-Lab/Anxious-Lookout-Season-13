@@ -7,13 +7,13 @@ from sqlalchemy import text
 from app.migrate import migrate
 from app import post_images
 from tests.test_research import identity, headers
-from tests.test_posts import make_draft, commit, content
+from tests.test_posts import make_draft, commit, content, proposal_content
 from tests.test_post_publications import publish, preview
 
 
 @pytest.fixture(scope='module', autouse=True)
 def image_schema(schema):
-    migrate('0006_posts')
+    migrate('0007_post_blocks')
 
 
 @pytest.fixture(autouse=True)
@@ -107,20 +107,15 @@ def test_invalid_media_quota_missing_and_corrupt_bytes(client, admin, monkeypatc
     assert upload(client, auth).status_code == 503
 
 
-def test_markdown_references_are_images_only():
-    identity = uuid.uuid4(); url = '/base/api/media/post-images/'+str(identity)
-    def refs(body): return post_images.references(content(content=body), '/base')
-    assert refs('![alt]('+url+')') == [identity]
-    assert refs('![ref][x]\n\n[x]: '+url) == [identity]
-    assert refs('[![linked]('+url+')](https://example.com)') == [identity]
-    for body in [url, '[link]('+url+')', '`![a]('+url+')`', '```\n![a]('+url+')\n```',
-                 '[link](https://example.com "![hidden]('+url+')")',
-                 '    ![hidden]('+url+')',
-                 '![![hidden]('+url+')](https://example.com/outer.png)',
-                 '<img src="'+url+'">',
-                 '![a](https://example.com'+url+')', '![a]('+url+'?x=1)', '![a]('+url+'#a)',
-                 '![a]('+url.upper()+')', '![a]('+url.replace('/base', '/%62ase')+')']:
-        assert refs(body) == [], body
+def test_block_references_are_structural_only():
+    identity = uuid.uuid4()
+    block = {'id':str(uuid.uuid4()),'type':'image','imageId':str(identity),'alt':'alt','caption':[]}
+    assert post_images.references(content(content={'format':'post-blocks','version':1,'blocks':[block]})) == [identity]
+    for body in [str(identity), '/api/media/post-images/'+str(identity), '`'+str(identity)+'`']:
+        assert post_images.references(content(content=body)) == []
+    from app.research import ResearchError
+    with pytest.raises(ResearchError):
+        post_images.references({'content':'![x](/api/media/post-images/'+str(identity)+')','coverImageId':None})
 
 
 def test_animation_pixel_limit_and_tombstone_retry(client, admin, monkeypatch):
@@ -170,7 +165,7 @@ def test_proposal_retention_and_symlink_fail_closed(client, admin):
     owner, auth = identity(client, admin)
     image = upload(client, auth).json()
     with Session(admin) as db, db.begin():
-        proposed = propose(Store(db, owner), Propose(**content(content='![x]('+image['url']+')'), mutationId=str(uuid.uuid4())))
+        proposed = propose(Store(db, owner), Propose(**proposal_content(content='![x]('+image['url']+')'), mutationId=str(uuid.uuid4())))
     result = client.post('/api/research/post-proposals/'+proposed['id']+'/discard', json={'expectedProposalVersion':1}, headers=headers(auth))
     assert result.status_code == 200, result.text
     assert delete(client, auth, image).status_code == 409
@@ -192,9 +187,10 @@ def test_nested_alt_does_not_publish_hidden_image(client, admin):
     _, auth = identity(client, admin)
     hidden = upload(client, auth).json()
     visible = [upload(client, auth).json() for _ in range(3)]
-    body = (f"![![hidden]({hidden['url']})]({visible[0]['url']})\n\n"
-            f"[![linked]({visible[1]['url']})](https://example.com)\n\n"
-            f"![reference][ref]\n\n[ref]: {visible[2]['url']}")
+    body = {'format':'post-blocks','version':1,'blocks':[
+        {'id':str(uuid.uuid4()),'type':'image','imageId':image['id'],
+         'alt':f"![hidden]({hidden['url']})", 'caption':[]}
+        for image in visible]}
     post = commit(client, auth, make_draft(client, auth, content=body))
     publish(client, auth, post)
     client.cookies.clear()

@@ -20,7 +20,7 @@ from .writing import conflict
 def ready(db):
     from .research_schema_contract import validate_research
     try:
-        if validate_research(db.connection()) != '0006_posts': raise RuntimeError()
+        if validate_research(db.connection()) != '0007_post_blocks': raise RuntimeError()
     except RuntimeError:
         fail('not_ready', 'Post publication schema is not ready', 503)
 
@@ -85,7 +85,7 @@ def publish(store, identity, body, base_path):
     if not hmac.compare_digest(body.previewToken, shown['previewToken']): conflict('preview_changed')
     if not shown['publishable']: fail('validation_error', 'Remove archived document or material references before publishing', 422)
     identity, now = uuid.uuid4(), datetime.now(timezone.utc)
-    snapshot = {key: shown[key] for key in ('postId', 'versionId', 'slug', 'title', 'description', 'content', 'tags', 'author', 'documents', 'materials')}
+    snapshot = {key: shown[key] for key in ('postId', 'versionId', 'slug', 'title', 'description', 'content', 'textProjection', 'tags', 'author', 'documents', 'materials')}
     from .post_images import url
     snapshot.update(id=str(identity), coverImageUrl=url(shown['coverImageId'], base_path) if shown['coverImageId'] else None, publishedAt=stamp(now))
     row = PostPublication(id=identity, post_id=post.id, version_id=parse_id(body.versionId), snapshot=snapshot, image_ids=[parse_id(image['id']) for image in shown['images']],
@@ -97,7 +97,7 @@ def publish(store, identity, body, base_path):
     post.version += 1
     post.updated_at = now
     store.db.flush()
-    return snapshot
+    return public_value(row)
 
 
 def withdraw(store, identity, body):
@@ -114,7 +114,11 @@ def withdraw(store, identity, body):
 
 
 def public_value(row):
-    return {**row.snapshot, 'materials': row.snapshot.get('materials', [])}
+    from .post_blocks import markdown_projection, format_summary
+    from .post_images import base_path
+    return {**row.snapshot, 'materials': row.snapshot.get('materials', []),
+            'markdownProjection': markdown_projection(row.snapshot['content'], base_path()),
+            'formatSummary': format_summary(row.snapshot['content'])}
 
 
 def public_response(request, value):

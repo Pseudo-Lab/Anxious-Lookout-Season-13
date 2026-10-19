@@ -17,7 +17,7 @@ from tests.test_page_chat import callback
 
 @pytest.fixture(scope='module', autouse=True)
 def public_schema(schema):
-    migrate('0006_posts')
+    migrate('0007_post_blocks')
 
 
 def preview(client, post):
@@ -46,9 +46,9 @@ def test_public_snapshot_edit_republish_cache_and_withdraw(client, admin):
     current = client.get('/api/research/posts/'+post['id']).json()
     assert current['version'] == 2 and current['publication']['id'] == release['id']
     changed = commit(client, auth, make_draft(client, auth, current, content='Private revision'), expectedVersion=2)
-    assert client.get(url).json()['content'] == '# Text'
+    assert client.get(url).json()['textProjection'] == 'Text'
     assert preview(client, changed)['currentPublication'] == release
-    assert publish(client, auth, changed)['content'] == 'Private revision'
+    assert publish(client, auth, changed)['textProjection'] == 'Private revision'
     assert client.get(url, headers={'If-None-Match': first.headers['etag']}).status_code == 200
     assert client.get('/api/public/posts?tag=one').json()['items'][0]['author']['name'].startswith('fixture-')
     assert 'content' not in client.get('/api/public/posts').json()['items'][0]

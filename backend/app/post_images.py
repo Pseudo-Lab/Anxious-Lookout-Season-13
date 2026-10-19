@@ -55,23 +55,11 @@ def value(row, prefix=''):
 
 
 def references(payload, prefix=None):
-    prefix = base_path() if prefix is None else prefix
+    from .post_blocks import canonicalize, image_ids
     found = set()
     if payload['coverImageId']: found.add(parse_id(payload['coverImageId']))
-    def walk(tokens):
-        for token in tokens:
-            if token.type == 'image':
-                source = token.attrGet('src') or ''
-                start = prefix + '/api/media/post-images/'
-                if source.startswith(start):
-                    try:
-                        identity = uuid.UUID(source[len(start):])
-                        if source == url(identity, prefix): found.add(identity)
-                    except ValueError: pass
-                # Image children form alt text, not rendered image elements.
-                # Descend through ordinary inline containers only.
-            elif token.children: walk(token.children)
-    walk(MarkdownIt('commonmark').parse(payload['content']))
+    found.update(parse_id(identity) for identity in image_ids(canonicalize(payload['content'])))
+    if len(found) > 50: fail('content_limit_exceeded', 'Too many image references', 422, {'path': '/content', 'code': 'content_limit_exceeded'})
     return sorted(found, key=str)
 
 

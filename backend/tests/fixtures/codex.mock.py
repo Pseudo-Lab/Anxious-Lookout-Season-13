@@ -30,14 +30,16 @@ def save():
 
 
 def post_candidate(source=None):
-    fields = ('title', 'content', 'description', 'slug', 'tags', 'coverImageId', 'documentIds')
+    fields = ('title', 'description', 'slug', 'tags', 'coverImageId', 'documentIds')
     result = {key: source[key] for key in fields} if source else {
-        'title': 'Fixture post', 'content': '', 'description': '',
+        'title': 'Fixture post', 'description': '',
         'slug': 'fixture-post-' + uuid.uuid4().hex[:12], 'tags': [],
         'coverImageId': None, 'documentIds': []}
     result['materialIds'] = source.get('materialIds', []) if source else []
     result['title'] = (result['title'] + ' — Complete fixture post proposal')[-300:]
-    result['content'] += '\n\nComplete fixture post proposal'
+    original = source.get('markdownProjection', source.get('textProjection', source.get('content', ''))) if source else ''
+    if not isinstance(original, str): raise ValueError('Readable post projection required')
+    result['contentInput'] = {'format':'markdown','text':original+'\n\nComplete fixture post proposal'}
     if not result['slug']: result['slug'] = 'fixture-post-' + uuid.uuid4().hex[:12]
     result['mutationId'] = str(uuid.uuid4())
     return result

@@ -443,6 +443,9 @@ def register_research(app, sessions, settings, current_session, error):
         if not key:
             fail("validation_error", "Idempotency-Key is required", 422)
         result, code = store.mutate(key, request.method + " " + request.url.path, body, lambda: action(parsed), status)
+        if any(segment in request.url.path for segment in ("/post-drafts", "/post-proposals", "/posts/")):
+            from .posts import replay_response
+            result = replay_response(result)
         return response(result, code)
 
     def item_routes(kind):
