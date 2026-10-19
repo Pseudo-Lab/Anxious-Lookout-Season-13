@@ -11,7 +11,8 @@ The wire envelope stays `version: 1` (strict integer); `1.1` is the contract
 revision, not a new document version. No migration or persisted row rewrite is
 needed: all prior documents retain exactly the same canonical content and digest.
 Unspecified font size inherits the surrounding typography; no mark is inserted.
-Unspecified/null table column widths mean equal columns and remain omitted.
+Unspecified/null table column widths use the renderer default (currently
+content-based automatic layout) and remain omitted, preserving existing tables.
 
 - A `{fontSize: pt}` mark accepts only integer points in
   `10,11,12,14,16,18,20,24,28,32,36`, including image/embed captions. It may coexist
@@ -33,8 +34,12 @@ Unspecified/null table column widths mean equal columns and remain omitted.
   each1..1000. Its length must equal the rectangular table's cell count per row.
   Normalize by the greatest common divisor (`[400,600]`→`[2,3]`); omit any equal
   vector (`[20,20]`→absent). A one-column vector is therefore always omitted.
-  Render with fixed table layout and column percentages `100*w/sum(weights)`;
-  absent means `100/columnCount`. Wrap cell content/overflow within the available
+  Only explicit canonical weights use fixed table layout and column percentages
+  `100*w/sum(weights)`; absent weights use the renderer default (currently
+  content-based automatic layout), per PM decision D-36-1. Because equal vectors
+  are omitted, choosing equal weights returns to automatic layout after saving;
+  persisted fixed equal widths would require a separate contract change.
+  Wrap cell content/overflow within the available
   width. Drag UI clamps/rounds weights before submit. Do not store measured pixel
   widths or require weights to total100. Merged cells remain forbidden.
 
