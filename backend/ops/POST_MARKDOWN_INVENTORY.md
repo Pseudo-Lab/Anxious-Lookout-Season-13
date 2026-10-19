@@ -24,6 +24,13 @@ PM executes the live variant with `--database`, the existing approved DB network
 restart, writer stop, migration, upload, or provider request is needed. Use the
 reviewed source mount/workdir/PYTHONPATH; verify its revision before execution.
 
+The runtime image defaults to UID10001. It cannot read a root-owned mode0600
+DSN file bind-mounted from the host. For that input, explicitly run the one-shot
+inventory container with `--user 0` (keep the secret mount read-only), or provide
+a private DSN file readable by the selected container UID. Do not make the secret
+world-readable or print it to diagnose access. Verify the selected UID can read
+`DATABASE_URL_FILE` before starting the inventory.
+
 Database mode starts one REPEATABLE READ READ ONLY transaction, with statement
 60s and lock 5s timeouts, then streams only content from all rows of
 `research.post_versions`, `post_drafts`, `post_proposals`, `post_publications`.

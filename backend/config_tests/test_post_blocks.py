@@ -80,6 +80,29 @@ def test_exact_ids_reserved_before_duplicate_fallback():
     other={**deepcopy(original),'id':'00000000-0000-0000-0000-000000000888'}
     assert format_changes(base,{**base,'blocks':[other]})[0]['kind']=='ambiguous'
 
+@pytest.mark.parametrize('markdown', [
+    '> quoted text', '- first\n  - nested\n- second',
+    '| left | right |\n| --- | --- |\n| one | two |',
+])
+def test_seed_only_change_preserves_matched_parent_relationships(markdown):
+    from app.post_block_markdown import convert
+    base,_=convert(markdown,'base-seed')
+    candidate,_=convert(markdown,'candidate-seed')
+    assert base!=candidate
+    changes=format_changes(base,candidate)
+    # Anonymous row containers can remain ambiguous under the existing
+    # text/type fallback; UUID-only parent changes must not be reported.
+    assert all(c['kind']=='ambiguous' and c['changedProperties']==['structure'] for c in changes)
+    if not markdown.startswith('|'): assert changes==[]
+
+def test_fallback_child_moved_to_root_still_reports_parent():
+    from app.post_block_markdown import convert
+    base,_=convert('> original','base-seed')
+    candidate,_=convert('original','candidate-seed')
+    changes=format_changes(base,candidate)
+    child=next(c for c in changes if c['candidateBlockId']==candidate['blocks'][0]['id'])
+    assert child['kind']=='layout' and 'parent' in child['changedProperties']
+
 def test_cover_counts_in_distinct_image_budget():
     import uuid
     from app.post_images import references

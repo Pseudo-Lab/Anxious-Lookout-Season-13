@@ -186,18 +186,28 @@ def format_changes(base, candidate):
         return result
     old_locations, new_locations = locations(base), locations(candidate)
     def local(node): return {k:v for k,v in node.items() if k not in (*CHILDREN,'id')}
-    for i,node in enumerate(right):
+    pairs = []
+    matched_ids = {}
+    for node in right:
         old = by_id.get(node['id']) if node['id'] not in used else None; ambiguous = False
         if old is None:
             key = (node.get('type'),project_node(node))
             matches = [n for n in buckets[key] if n['id'] not in used and n['id'] not in reserved]
             if matches: old=matches[0]; ambiguous=len(matches)>1 or right_counts[key]>1
+        pairs.append((node, old, ambiguous))
+        if old is not None:
+            used.add(old['id'])
+            matched_ids[node['id']] = old['id']
+    # Compare relationships in the matched base-ID space, including fallback
+    # parents whose UUID changed only because conversion used a new seed.
+    for node, old, ambiguous in pairs:
         if old is None:
             changes.append({'baseBlockId':None,'candidateBlockId':node['id'],'kind':'added','changedProperties':['structure']}); continue
-        used.add(old['id']); a,b = local(old),local(node)
+        a,b = local(old),local(node)
         keys = sorted(k for k in a.keys()|b.keys() if a.get(k)!=b.get(k))
         old_location, new_location = old_locations[old['id']], new_locations[node['id']]
-        reparented = old_location[:2] != new_location[:2]
+        new_parent = matched_ids.get(new_location[0], new_location[0])
+        reparented = old_location[:2] != (new_parent, new_location[1])
         moved = old_location[2] != new_location[2]
         if reparented: keys.append('parent')
         if moved: keys.append('position')
