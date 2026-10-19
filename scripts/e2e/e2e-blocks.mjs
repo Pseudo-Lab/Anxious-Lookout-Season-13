@@ -1,4 +1,5 @@
-// #32 spike: 고정 블록 편집기(Tiptap v3) 시험 화면(/write/blocks-lab/)을 실제 브라우저로 확인한다.
+// #32 고정 블록 편집기(Tiptap v3)를 실제 글 쓰기 화면(/write/new/)에서 브라우저로 확인한다(시험 전용 화면은 두지 않는다).
+// 편집기 내부 상태는 ProseMirror DOM에 붙은 Tiptap 인스턴스(el.editor)로 읽고, 저장 형태는 자동 저장된 서버 초안으로 본다.
 // - K*: 한국어 IME. Chromium CDP(Input.imeSetComposition/insertText)로 자모 단위 조합을 흉내 낸다.
 //   OS IME 자체를 쓰는 것이 아니므로 실제 기기(macOS Safari·iOS·Android) 수동 확인을 대신하지 않는다.
 // - S*: 계약 구조 제한(목록 3단·표 병합 거절·columns·mark 공존·링크 정책·id 유일성·붙여넣기 정리).
@@ -10,7 +11,7 @@ import { chromium, firefox, webkit } from "playwright";
 const ORIGIN = process.env.ORIGIN ?? "http://127.0.0.1:8080";
 const BASE = process.env.BASE_PATH ?? "";
 const U = (p) => `${ORIGIN}${BASE}${p}`;
-const LAB = U("/write/blocks-lab/");
+const NEW = U("/write/new/");
 
 const results = [];
 function check(name, ok, detail = "") {
@@ -20,7 +21,7 @@ function check(name, ok, detail = "") {
 const setMock = (q) => fetch(`${ORIGIN}/__mock/set?${q}`).then((r) => r.json());
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 // WebKit은 페이지를 떠날 때 끊긴 같은 origin 요청(RSC prefetch·상태 조회 등)을 "… due to access control checks." pageerror로 남긴다.
-// 탐색 구간(홈 → lab 이동) 안에서 생긴 이 형태의 같은 origin 오류만 탐색 오류로 분류한다.
+// 탐색 구간(홈 → 글 쓰기 이동) 안에서 생긴 이 형태의 같은 origin 오류만 탐색 오류로 분류한다.
 const ORIGIN_HOST = new URL(ORIGIN).host;
 const isLeaveCancel = (msg) => {
   const m = /^(\S+) due to access control checks\.?$/.exec(msg);
@@ -63,7 +64,6 @@ async function login(page) {
 function harness(page) {
   const main = page.locator("main");
   const editor = main.locator(".ProseMirror");
-  const pre = main.locator('pre[aria-label="편집기 JSON"]');
   const tb = main.getByRole("toolbar", { name: "서식" });
   return {
     main,
@@ -71,22 +71,28 @@ function harness(page) {
     tb,
     async fresh() {
       // load는 전역 폰트 CDN 응답에 묶여 있어 기다리지 않는다(편집기 표시를 기다린다)
-      await page.goto(LAB, { waitUntil: "domcontentloaded" });
+      await page.goto(NEW, { waitUntil: "domcontentloaded", timeout: 60000 });
       await editor.waitFor({ timeout: 15000 });
       await editor.click();
     },
+    /** 편집기 내부 JSON(Tiptap). */
     async doc() {
       await page.waitForTimeout(80);
-      const t = await pre.textContent();
-      return t ? JSON.parse(t) : null;
+      return editor.evaluate((el) => el.editor.getJSON());
     },
+    /** 저장 형태: 자동 저장이 끝난 서버 초안의 post-blocks 본문. problem: 화면의 계약 위반 안내. */
     async blocks() {
-      await page.waitForTimeout(80);
-      const status = await main.getByRole("status", { name: "계약 검사" }).innerText();
-      const t = await main.locator('pre[aria-label="post-blocks JSON"]').textContent();
-      return { status, doc: t ? JSON.parse(t) : null };
+      await page.waitForTimeout(300);
+      await main.getByText(/^초안 자동 저장됨/).first().waitFor({ timeout: 15000 });
+      // 상태 문구가 주소(?draft=) 교체보다 먼저 보일 수 있다(e2e-write와 같은 이유)
+      await page.waitForURL(/[?&]draft=/, { timeout: 10000 }).catch(() => {});
+      const id = new URL(page.url()).searchParams.get("draft");
+      const r = id ? await page.request.get(U(`/api/research/post-drafts/${id}`)) : null;
+      const draft = r?.ok() ? await r.json() : null;
+      // 본문 계약 위반 안내 등 편집 화면의 경고(role=alert, Next route announcer는 main 밖)
+      const problem = await main.locator("[role=alert]").count();
+      return { problem, doc: draft?.content ?? null };
     },
-    notice: () => main.getByRole("status").filter({ hasText: /./ }).allInnerTexts(),
   };
 }
 
@@ -135,8 +141,8 @@ async function typeKo(word, { leaveLast = false } = {}) {
 }
 
 await login(page);
-await page.goto(LAB);
-check("L0. lab page renders the editor and toolbar", await H.editor.isVisible().catch(() => false) || (await H.editor.waitFor({ timeout: 15000 }).then(() => true, () => false)));
+await page.goto(NEW);
+check("L0. new post page renders the block editor and toolbar", (await H.editor.waitFor({ timeout: 15000 }).then(() => true, () => false)) && (await H.tb.isVisible()));
 
 // K1. 기본 조합
 await H.fresh();
@@ -242,7 +248,7 @@ await typeKo("아랫줄");
 {
   const b = await H.blocks();
   const runs = b.doc?.blocks?.[0]?.runs ?? [];
-  check("K10. Shift+Enter inside bold keeps one bold run with LF", runs.length === 1 && runs[0].text === "윗줄\n아랫줄" && runs[0].marks.join() === "bold", JSON.stringify(runs));
+  check("K10. Shift+Enter inside bold keeps one bold run with LF (saved draft)", runs.length === 1 && runs[0].text === "윗줄\n아랫줄" && runs[0].marks.join() === "bold", JSON.stringify(runs));
 }
 
 // S1. 목록 4단계 이상은 거절(조용히 고치지 않고 안내)
@@ -437,13 +443,13 @@ await H.tb.getByRole("button", { name: "오른쪽 정렬" }).click();
 const a1 = await H.blocks();
 const a1types = (a1.doc?.blocks ?? []).map((b) => b.type).join(",");
 const a1cell = a1.doc?.blocks?.find((b) => b.type === "table")?.rows?.[0];
-check("A1. mixed editor output converts to valid post-blocks (LF run, nested list, header row, cell align)",
-  a1.status === "post-blocks v1 검사 통과" && a1.doc.blocks[0].runs?.[0]?.text === "첫 문단\n둘째 줄" && a1types.startsWith("paragraph,list") && a1types.includes("table") &&
+check("A1. mixed editor output is saved as valid post-blocks (LF run, nested list, header row, cell align)",
+  a1.problem === 0 && a1.doc?.format === "post-blocks" && a1.doc.blocks[0].runs?.[0]?.text === "첫 문단\n둘째 줄" && a1types.startsWith("paragraph,list") && a1types.includes("table") &&
     a1cell?.header === true && a1cell.cells[0].align === "right" && !("align" in a1cell.cells[0].blocks[0]),
-  `${a1.status} types=${a1types}`);
+  `problem=${a1.problem} types=${a1types}`);
 
 check("Y*. no request to YouTube/ytimg/googlevideo hosts during editing", external.length === 0, external.slice(0, 3).join(" "));
-// R1. 공개 renderer: 서식·표·영상 카드. 누르기 전에는 YouTube 요청 0, 누르면 nocookie 주소의 고정 sandbox iframe
+// R1. renderer(저장한 글 화면의 최신 버전): 서식·영상 카드. 누르기 전에는 YouTube 요청 0, 누르면 nocookie 주소의 고정 sandbox iframe
 await H.fresh();
 await page.keyboard.type("굵은 ");
 await page.keyboard.press("Shift+Home");
@@ -451,10 +457,13 @@ await H.tb.getByRole("button", { name: "굵게" }).click();
 await page.keyboard.press("End");
 nextPrompt = ["https://youtu.be/dQw4w9WgXcQ"];
 await H.tb.getByRole("button", { name: "YouTube 영상" }).click();
-const preview = H.main.getByRole("region", { name: "공개 미리보기" });
-await H.main.getByText("공개 화면 미리보기").click();
-check("R1. preview renders bold as <strong> and the inactive YouTube card", (await preview.locator("strong").first().innerText().catch(() => "")).trim() === "굵은" && (await preview.getByRole("button", { name: /눌러서 재생/ }).count()) === 1);
-check("R1. no YouTube request before activation (editor + preview)", external.length === 0, external.slice(0, 3).join(" "));
+await H.main.getByLabel("제목").fill("영상 글");
+await H.main.getByRole("button", { name: "글 저장" }).click();
+await page.waitForURL(/\/write\/\?id=/, { timeout: 15000 });
+const preview = H.main.locator(".prose").first();
+await preview.waitFor({ timeout: 15000 });
+check("R1. saved post renders bold as <strong> and the inactive YouTube card", (await preview.locator("strong").first().innerText().catch(() => "")).trim() === "굵은" && (await preview.getByRole("button", { name: /눌러서 재생/ }).count()) === 1);
+check("R1. no YouTube request before activation (editor + rendered post)", external.length === 0, external.slice(0, 3).join(" "));
 const firstYt = page.waitForRequest((r) => YT_HOSTS.test(new URL(r.url()).hostname), { timeout: 5000 }).catch(() => null);
 await preview.getByRole("button", { name: /눌러서 재생/ }).click();
 const frame = preview.locator("iframe");
@@ -474,9 +483,10 @@ for (const [name, type] of [["webkit", webkit], ["firefox", firefox]]) {
   const p = await ctx.newPage();
   const errs = [];
   p.on("pageerror", (e) => errs.push({ msg: e.message, at: Date.now() }));
+  p.on("dialog", (d) => void d.accept());
   const h = harness(p);
   await login(p);
-  // 안정화: 로그인 뒤 홈의 prefetch·상태 조회가 잦아든 뒤에 lab으로 옮긴다
+  // 안정화: 로그인 뒤 홈의 prefetch·상태 조회가 잦아든 뒤에 글 쓰기 화면으로 옮긴다
   await p.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
   const leaveStart = Date.now();
   await h.fresh();

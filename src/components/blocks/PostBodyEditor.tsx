@@ -80,7 +80,7 @@ export default function PostBodyEditor({
       <span className="block text-sm font-medium text-stone-700">본문</span>
       {restore && problem && shown.key === 0 && (
         <p role="status" className="text-xs text-stone-600">
-          저장하지 못하고 떠났던 본문을 이 브라우저에서 되살렸습니다. 고치면 이어서 저장됩니다.
+          저장하지 못하고 떠났던 본문을 되살렸습니다(이 탭에만 있던 내용). 고치면 이어서 저장됩니다.
         </p>
       )}
       <BlockEditor

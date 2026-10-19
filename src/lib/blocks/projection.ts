@@ -163,28 +163,28 @@ function charStyles(n: AnyNode): { ch: string; style: string }[] {
 }
 
 /**
- * 같은 블록의 run 변화가 "글자만 바뀜"임을 증명할 수 있는지(리뷰 M2).
- * 앞뒤로 같은 글자가 이어지는 부분은 서식까지 그대로여야 하고, 새로 들어간 글자는 바로 옆 남은 글자의 서식만 이어받아야 한다.
- * 서식 적용 범위가 옮겨 갔거나(굵게가 다음 글자로 번짐 등) 판단할 수 없으면 false(서식 목록에 남긴다).
+ * 같은 블록의 run 변화가 "글자만 바뀜"임을 증명할 수 있는지(리뷰 M2). 증명하지 못하면 false(서식 목록에 남긴다).
+ * - 바뀌기 전후 모든 글자가 같은 한 가지 서식이면 글자 변화다.
+ * - 아니면 순수 삽입 또는 순수 삭제일 때만 본다: 앞뒤로 남은 글자는 서식까지 같아야 하고, 새로 들어간 글자는
+ *   바로 옆 남은 글자의 서식만 이어받아야 한다. 가운데를 바꾼 경우(삭제와 삽입이 함께)는 남은 글자의 서식이
+ *   바뀌었는지 알 수 없으므로 증명하지 않는다.
  */
 function textOnlyRuns(a: AnyNode, b: AnyNode): boolean {
   const x = charStyles(a);
   const y = charStyles(b);
+  if (new Set([...x, ...y].map((c) => c.style)).size <= 1) return true;
   let pre = 0;
   while (pre < x.length && pre < y.length && x[pre].ch === y[pre].ch) pre++;
   let suf = 0;
   while (suf < x.length - pre && suf < y.length - pre && x[x.length - 1 - suf].ch === y[y.length - 1 - suf].ch) suf++;
+  const removed = x.length - pre - suf;
+  const inserted = y.slice(pre, y.length - suf);
+  if (removed > 0 && inserted.length > 0) return false;
   for (let i = 0; i < pre; i++) if (x[i].style !== y[i].style) return false;
   for (let i = 1; i <= suf; i++) if (x[x.length - i].style !== y[y.length - i].style) return false;
-  const inserted = y.slice(pre, y.length - suf);
   if (inserted.length === 0) return true;
   const neighbors = [pre > 0 ? y[pre - 1].style : null, suf > 0 ? y[y.length - suf].style : null].filter((v): v is string => v !== null);
-  // 앞뒤로 남은 글자가 없으면(전부 바뀜): 바뀌기 전후 모든 글자가 같은 한 가지 서식일 때만 글자 변화로 본다
-  if (neighbors.length === 0) {
-    const styles = new Set([...x, ...y].map((c) => c.style));
-    return styles.size === 1;
-  }
-  return inserted.every((c) => neighbors.includes(c.style)) && new Set(inserted.map((c) => c.style)).size === 1;
+  return neighbors.length > 0 && new Set(inserted.map((c) => c.style)).size === 1 && neighbors.includes(inserted[0].style);
 }
 
 /**

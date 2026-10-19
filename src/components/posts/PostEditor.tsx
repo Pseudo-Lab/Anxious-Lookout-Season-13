@@ -109,7 +109,8 @@ export default function PostEditor({
   const [bodyUploading, setBodyUploading] = useState(false);
   const uploading = panelUploading || bodyUploading;
   // 화면의 본문이 계약을 넘어(상한 등) 마지막 유효 본문만 저장된 상태. 고칠 때까지 새 버전 저장·보관 닫기를 막는다(리뷰 M1).
-  // 그 편집기 내용은 이 브라우저에 보관해 두고(bodyBuffer), 화면 이동·뒤로가기 뒤 같은 초안을 다시 열면 되살린다.
+  // 그 편집기 내용은 이 탭의 메모리에 보관해 두고(bodyBuffer), 화면 이동·뒤로가기 뒤 같은 초안을 다시 열면 되살린다.
+  // 새로고침·탭 닫기는 떠날 때 확인으로 막는다(본문을 브라우저 저장소에 남기지 않는다).
   const { user, csrfToken } = useAuth();
   const accountId = user?.accountId ?? null;
   const buffer = bufferTarget(editor.draft?.id ?? resumeDraft?.id, post?.id);
@@ -138,7 +139,7 @@ export default function PostEditor({
     if (!accountId || !bodyProblemState) return;
     if (savedTarget.current && savedTarget.current !== buffer) clearBodyBuffer(accountId, savedTarget.current);
     savedTarget.current = buffer;
-    saveBodyBuffer(accountId, buffer, { revision: draftRevision, editor: bodyProblemState.editor, savedAt: new Date().toISOString() });
+    saveBodyBuffer(accountId, buffer, { revision: draftRevision, editor: bodyProblemState.editor });
   }, [accountId, buffer, bodyProblemState, draftRevision]);
   useEffect(() => {
     if (!bodyProblem) return;
@@ -318,7 +319,7 @@ export default function PostEditor({
     setFailure(null);
     const flushed = await editor.flush();
     const d = flushed.draft;
-    // 초안을 버리면 이 브라우저에 보관한 저장 못 한 본문도 함께 버린다(명시적 폐기)
+    // 초안을 버리면 이 탭에 보관한 저장 못 한 본문도 함께 버린다(명시적 폐기)
     if (!d) {
       if (accountId) clearBodyBuffer(accountId, buffer);
       onDiscarded();

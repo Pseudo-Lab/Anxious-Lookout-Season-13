@@ -183,6 +183,8 @@ describe("links and visible content", () => {
     ["typing inside bold inherits bold (text only)", [{ text: "AB", marks: ["bold"] }, { text: " 끝", marks: [] }], [{ text: "AXB", marks: ["bold"] }, { text: " 끝", marks: [] }], false],
     ["typing plain text at the end (text only)", [{ text: "굵게", marks: ["bold"] }, { text: " 보통", marks: [] }], [{ text: "굵게", marks: ["bold"] }, { text: " 보통 추가", marks: [] }], false],
     ["new text with a new mark", [{ text: "보통", marks: [] }], [{ text: "보통", marks: [] }, { text: "굵게", marks: ["bold"] }], true],
+    ["middle replaced while a kept char loses bold (round3)", [{ text: "a", marks: [] }, { text: "B", marks: ["bold"] }, { text: "c", marks: [] }], [{ text: "aXBZc", marks: [] }], true],
+    ["deleting a plain word next to bold (text only)", [{ text: "굵게", marks: ["bold"] }, { text: " 지울 말", marks: [] }], [{ text: "굵게", marks: ["bold"] }, { text: " 말", marks: [] }], false],
     ["whole text replaced, same single style (text only)", [{ text: "abc", marks: [] }], [{ text: "xyz", marks: [] }], false],
     ["whole text replaced and made bold", [{ text: "abc", marks: [] }], [{ text: "xyz", marks: ["bold"] }], true],
   ])("%s → listed: %s", (_name, before, after, listed) => {

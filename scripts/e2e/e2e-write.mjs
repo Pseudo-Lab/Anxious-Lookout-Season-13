@@ -285,7 +285,8 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   await writeBody(["kept-valid"]);
   await saved();
   const validDraft = await draftParam();
-  await page.keyboard.insertText("x".repeat(20001));
+  // 본문에 표식 문장을 넣어 브라우저 저장소에 본문이 남지 않는지도 확인한다(리뷰 round3 M3)
+  await page.keyboard.insertText("민감한표식" + "x".repeat(20001));
   const reason = main.getByText("저장할 수 있는 크기·개수 상한을 넘었습니다", { exact: false });
   check("WP3c. M1: over-limit body shows the reason", await appears(reason));
   check("WP3c. M1: save blocked while the body is invalid", await main.getByRole("button", { name: "글 저장" }).isDisabled());
@@ -301,16 +302,27 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   // round2: 실제 내부 Link 이동 → 뒤로가기, 그리고 새로고침 뒤에도 저장 못 한 본문을 경고와 함께 되살린다
   const restoredOk = async () =>
     (await appears(reason)) &&
-    (await bodyBox().innerText()).includes("kept-valid" + "x".repeat(100)) &&
+    (await bodyBox().innerText()).includes("kept-valid민감한표식" + "x".repeat(100)) &&
     (await main.getByRole("button", { name: "글 저장" }).isDisabled());
+  // round3 M1: 브라우저 저장소가 가득 차 쓰기가 실패해도(QuotaExceededError) 내부 이동 뒤 입력을 잃지 않는다
+  await page.evaluate(() => {
+    window.__setItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function () {
+      throw new DOMException("quota", "QuotaExceededError");
+    };
+  });
   await main.getByRole("link", { name: "← 내 글" }).click();
   await page.waitForURL(U("/write/"));
   await page.goBack();
   await page.waitForURL(/\/write\/new\/\?draft=/);
   check("WP3c. M1: after an in-app Link and Back, the unsaved body is restored with the warning and save stays blocked", await restoredOk());
-  check("WP3c. M1: restore notice shown", await appears(main.getByText("저장하지 못하고 떠났던 본문을 이 브라우저에서 되살렸습니다", { exact: false })));
-  await page.reload();
-  check("WP3c. M1: reload also restores the unsaved body", await restoredOk());
+  check("WP3c. M1: restore notice shown", await appears(main.getByText("저장하지 못하고 떠났던 본문을 되살렸습니다", { exact: false })));
+  await page.evaluate(() => {
+    Storage.prototype.setItem = window.__setItem;
+  });
+  const atRest = await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }));
+  check("WP3c. M3: the unsaved body is never written to browser storage", !atRest.includes("민감한표식"));
+  // 새로고침은 메모리 버퍼를 지우므로 떠날 때 확인으로 막는다(위 beforeunload 검사)
   check("WP3c. M1: server draft still the last valid body after leaving", (await api.get(`/research/post-drafts/${validDraft}`)).textProjection === "kept-valid");
   await writeBody(["kept-valid 고침"]);
   check("WP3c. M1: fixing the body lifts the block", (await reason.count()) === 0 && !(await main.getByRole("button", { name: "글 저장" }).isDisabled()));
