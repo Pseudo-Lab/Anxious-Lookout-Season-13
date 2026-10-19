@@ -12,6 +12,8 @@ const BASE = process.env.BASE_PATH ?? "";
 const SHOTS = process.env.SHOTS_DIR ?? "/tmp";
 const U = (p) => `${ORIGIN}${BASE}${p}`;
 
+await fetch(`${ORIGIN}/__mock/set?me=normal&health=normal&nextLogin=approved&access=approved&codex=fixture`);
+
 const results = [];
 function check(name, ok, detail = "") {
   results.push({ name, ok: !!ok, detail });
@@ -101,6 +103,43 @@ for (const scheme of ["light", "dark"]) {
   const bad = await contrast(page);
   check(`T. ${scheme} post with a YouTube card: card shown, no AA color-contrast violations`, shown && bad.length === 0, `shown=${shown} ${bad.slice(0, 4).map((b) => `${b.target} ${b.ratio} ${b.fg}/${b.bg}`).join(" | ")}`);
   await page.unrouteAll({ behavior: "ignoreErrors" });
+
+  // slice 2: 로그인 화면(내 글·글 화면·연구 목록·문서·자료·상태·대화창). 계정마다 자료를 만든다(모의 로그인은 새 계정일 수 있다).
+  await page.goto(U("/api/auth/github/start"), { waitUntil: "domcontentloaded" });
+  await page.locator("header").getByText("mock-user").first().waitFor({ timeout: 15000 });
+  const csrf = (await (await page.request.get(U("/api/auth/me"))).json()).csrfToken;
+  const send = async (method, path, data) =>
+    (await page.request.fetch(U(`/api${path}`), { method, data, headers: { Origin: ORIGIN, "X-CSRF-Token": csrf, "Idempotency-Key": crypto.randomUUID(), "X-Post-Contract-Revision": "1.1" } })).json();
+  const mat = await send("POST", "/research/materials", { title: "대비 자료", sourceUrl: "https://example.com/m", collectedAt: new Date().toISOString(), contentKind: "summary", content: "자료 본문" });
+  const doc = await send("POST", "/research/documents", { title: "대비 문서", content: "# 제목\n\n본문 **굵게**와 `코드`\n\n> 인용" });
+  const para = (t) => ({ id: crypto.randomUUID(), type: "paragraph", runs: [{ text: t, marks: [] }], align: "left" });
+  const draft = await send("POST", "/research/post-drafts", { title: "대비 글", content: { format: "post-blocks", version: 1, blocks: [para("첫 문단"), para("둘째 문단")] }, description: "요약", tags: ["테마"], coverImageId: null, documentIds: [] });
+  const committed = await send("POST", `/research/post-drafts/${draft.id}/commit`, { expectedDraftRevision: draft.revision });
+  const postId = committed.post?.id ?? committed.id;
+  const PRIVATE = [
+    ["write", "/write/"],
+    ["write-post", `/write/?id=${postId}`],
+    ["research", "/research/"],
+    ["document", `/research/document/?id=${doc.id}`],
+    ["material", `/research/material/?id=${mat.id}`],
+    ["status", "/status/"],
+  ];
+  for (const [name, path] of PRIVATE) {
+    await page.goto(U(path), { waitUntil: "domcontentloaded" });
+    await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
+    await page.locator("main").getByText("불러오는 중...").first().waitFor({ state: "detached", timeout: 10000 }).catch(() => {});
+    await page.screenshot({ path: `${SHOTS}/theme-${scheme}-${name}.png`, fullPage: true });
+    const bad = await contrast(page);
+    check(`T. ${scheme} ${name} (signed in): no WCAG AA color-contrast violations`, bad.length === 0, bad.slice(0, 4).map((b) => `${b.target} ${b.ratio} ${b.fg}/${b.bg}`).join(" | "));
+  }
+  // 대화창
+  await page.goto(U("/research/"), { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  await page.locator("#chat-panel").waitFor({ timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: `${SHOTS}/theme-${scheme}-chat.png`, fullPage: false });
+  const chatBad = await contrast(page);
+  check(`T. ${scheme} chat panel: no WCAG AA color-contrast violations`, chatBad.length === 0, chatBad.slice(0, 4).map((b) => `${b.target} ${b.ratio} ${b.fg}/${b.bg}`).join(" | "));
   await ctx.close();
 }
 await browser.close();
