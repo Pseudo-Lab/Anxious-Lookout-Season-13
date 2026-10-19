@@ -54,6 +54,8 @@ function steps(ch) {
 }
 
 await setMock("me=normal&health=normal&logout=normal&nextLogin=approved&access=approved&codex=fixture&window=&remaining=&runner=&runnerAll=");
+// 같은 모의 서버에서 앞서 돈 시험(e2e-write의 의도한 거절 등)과 섞이지 않게 이 시험 시작 시점의 거절 수를 기준으로 센다
+const rejectsAtStart = (await fetch(`${ORIGIN}/__mock/counts`).then((r) => r.json())).postRevisionRejects ?? 0;
 
 // 모의 OAuth 시작 주소로 바로 들어가 session을 받는다(로그인 버튼 흐름은 e2e.mjs가 확인한다)
 async function login(page) {
@@ -446,6 +448,8 @@ check("S4. paste drops iframe/external img/script; rgb() color normalized to hex
 await H.fresh();
 await page.keyboard.type("코드굵게");
 await page.keyboard.press("Shift+Home");
+// 브라우저 선택을 편집기가 읽은 뒤에 누른다(selectionchange는 비동기라 무거운 실행에서 늦게 반영된다)
+await H.editor.evaluate((el) => new Promise((ok) => { const t0 = Date.now(); const tick = () => (!el.editor.state.selection.empty || Date.now() - t0 > 3000 ? ok() : setTimeout(tick, 30)); tick(); }));
 await H.tb.getByRole("button", { name: "굵게" }).click();
 await H.tb.getByRole("button", { name: "인라인 코드" }).click();
 await H.tb.getByRole("button", { name: "글자 색 #2563EB" }).click();
@@ -670,7 +674,7 @@ await editingRegressions(page, H, "chromium");
 // 자동 저장을 멈추고 새로고침을 안내하며, 저장·닫기를 막고 입력은 화면에 남긴다(초안을 만들지 않는다).
 {
   const counts = () => fetch(`${ORIGIN}/__mock/counts`).then((r) => r.json());
-  check("G1. every body save so far declared revision 1.1 (no gate rejection)", (await counts()).postRevisionRejects === 0, JSON.stringify(await counts()));
+  check("G1. every body save so far declared revision 1.1 (no gate rejection)", (await counts()).postRevisionRejects === rejectsAtStart, `${rejectsAtStart} → ${JSON.stringify(await counts())}`);
   await setMock("postRevision=1.2");
   try {
     await H.fresh();
@@ -679,7 +683,7 @@ await editingRegressions(page, H, "chromium");
     check("G2. 409 upgrade: refresh notice shown", (await H.main.getByText("새 버전의 편집기가 있습니다", { exact: false }).count()) === 1);
     check("G2. 409 upgrade: save and close are blocked, refresh offered", (await H.main.getByRole("button", { name: "글 저장" }).isDisabled()) && (await H.main.getByRole("button", { name: "새로고침" }).count()) === 1);
     check("G2. 409 upgrade: input stays, no draft was created", textOf((await H.doc()).content?.[0] ?? {}) === "gate test" && !new URL(page.url()).searchParams.get("draft"), page.url());
-    check("G2. 409 upgrade: the server saw the rejected write", (await counts()).postRevisionRejects > 0);
+    check("G2. 409 upgrade: the server saw the rejected write", (await counts()).postRevisionRejects > rejectsAtStart);
   } finally {
     await setMock("postRevision=1.1");
   }
@@ -723,8 +727,11 @@ await editingRegressions(page, H, "chromium");
   const h = runs.find((n) => n.text === "hello ");
   check("F1·F2. bold and 18pt apply to the selected word only", !!w && w.marks?.some((m) => m.type === "bold") && w.marks?.some((m) => m.type === "textStyle" && m.attrs.fontSize === 18) && !h?.marks?.length, JSON.stringify(runs));
   check("F1. the menu stays while the text is still selected", (await menu.count()) === 1);
+  // 크기를 고르면 편집기가 다음 frame에 포커스를 되찾는다. 그 뒤에 커서를 옮긴다
+  await page.waitForFunction(() => document.activeElement?.classList.contains("ProseMirror"), null, { timeout: 5000 }).catch(() => {});
   await page.keyboard.press("ArrowRight");
-  check("F1. collapsing the selection hides the menu", (await menu.count()) === 0);
+  await menu.waitFor({ state: "detached", timeout: 3000 }).catch(() => {});
+  check("F1. collapsing the selection hides the menu", (await menu.count()) === 0, JSON.stringify(await page.evaluate(() => ({ active: `${document.activeElement?.tagName}.${String(document.activeElement?.className).slice(0, 30)}`, sel: String(getSelection()), pm: document.querySelector("main .ProseMirror").editor.state.selection.toJSON() }))));
   const saved = await H.blocks();
   const sr = saved.doc?.blocks?.[0]?.runs ?? [];
   check("F2. saved run carries the contract mark {fontSize: 18} after bold", saved.problem === 0 && JSON.stringify(sr) === JSON.stringify([{ text: "hello ", marks: [] }, { text: "world", marks: ["bold", { fontSize: 18 }] }]), JSON.stringify(sr));
@@ -746,6 +753,61 @@ await editingRegressions(page, H, "chromium");
   await mp.waitForTimeout(300);
   check("F1. touch device: no floating menu, the fixed toolbar keeps font size", (await mh.main.getByRole("toolbar", { name: "선택한 글자 서식" }).count()) === 0 && (await mh.tb.getByLabel("글자 크기").count()) === 1);
   await mctx.close();
+}
+
+// F6. 표 열 폭: 넓게·좁게 버튼과 테두리 끌기는 열 가중치(columnWidths)로 저장되고, 편집기·공개 화면 모두 그 비율의 고정 배치로 그린다.
+// 열을 넣고 빼면 가중치 길이도 맞춰지고, "같게"는 가중치를 없앤다(균등 = 생략).
+{
+  await H.fresh();
+  await H.tb.getByRole("button", { name: "표 넣기" }).click();
+  await page.keyboard.type("A");
+  const tableAttr = async () => (await H.doc()).content.find((b) => b.type === "table")?.attrs?.columnWidths ?? null;
+  const t = H.tb.getByRole("group", { name: "표" });
+  await t.getByRole("button", { name: "열 넓게" }).click();
+  await t.getByRole("button", { name: "열 넓게" }).click();
+  const widened = await tableAttr();
+  check("F6. widening the cursor column twice stores integer weights for 3 columns", JSON.stringify(widened) === "[156,100,100]", JSON.stringify(widened));
+  const pct = await H.editor.locator("table colgroup col").evaluateAll((cs) => cs.map((c) => c.style.width));
+  check("F6. editor draws the weights as colgroup percentages", pct.length === 3 && Math.abs(parseFloat(pct[0]) - 43.82) < 0.1, JSON.stringify(pct));
+  // 열 추가(커서 열 오른쪽, 같은 가중치) → 열 삭제
+  await t.getByRole("button", { name: "오른쪽에 열 추가" }).click();
+  const added = await tableAttr();
+  await t.getByRole("button", { name: "열 삭제" }).click();
+  const removed = await tableAttr();
+  // 커서가 있던 첫 열("A")을 지웠으므로 남은 칸에 다시 쓴다(빈 본문은 저장할 수 없다)
+  await page.keyboard.type("B");
+  check("F6. adding/removing a column keeps weights in step", JSON.stringify(added) === "[156,156,100,100]" && JSON.stringify(removed) === "[156,100,100]", `${JSON.stringify(added)} ${JSON.stringify(removed)}`);
+  // 테두리 끌기: 첫 칸 오른쪽 가장자리를 오른쪽으로 끌면 첫 열이 넓어지고 둘째 열이 좁아진다(표 폭 그대로)
+  const cell = H.editor.locator("table tr").first().locator("th, td").first();
+  const cb = await cell.boundingBox();
+  await page.mouse.move(cb.x + cb.width - 2, cb.y + cb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(cb.x + cb.width + 60, cb.y + cb.height / 2, { steps: 6 });
+  const during = await tableAttr();
+  const guide = await page.getByTestId("column-resize-guide").count();
+  await page.mouse.up();
+  const dragged = await tableAttr();
+  check("F6. dragging a column border shows a guide, saves once on release and shifts width to the left column", guide === 1 && (await page.getByTestId("column-resize-guide").count()) === 0 && JSON.stringify(during) === "[156,100,100]" && !!dragged && dragged[0] > 438 && dragged[1] < 281 && Math.abs(dragged[2] - 281) <= 2, `${JSON.stringify(during)} → ${JSON.stringify(dragged)}`);
+  const saved = await H.blocks();
+  const sw = saved.doc?.blocks?.find((b) => b.type === "table")?.columnWidths;
+  check("F6. saved table carries canonical columnWidths", saved.problem === 0 && Array.isArray(sw) && sw.length === 3, JSON.stringify(sw));
+  // 공개 renderer: 같은 비율의 고정 배치
+  await H.main.getByLabel("제목").fill("열 폭 글");
+  await H.main.getByRole("button", { name: "글 저장" }).click();
+  const committed = await page.waitForURL(/\/write\/\?id=/, { timeout: 30000, waitUntil: "commit" }).then(() => true, () => false);
+  check("F6. the post with weighted columns is saved", committed, committed ? "" : (await H.main.innerText()).slice(0, 300).replace(/\s+/g, " "));
+  const art = H.main.locator(".prose").first();
+  await art.locator("table").first().waitFor({ timeout: 15000 });
+  const rendered = await art.locator("table").first().evaluate((tb) => ({ cls: tb.className, cols: [...tb.querySelectorAll("col")].map((c) => c.style.width) }));
+  const sum = sw.reduce((a, b) => a + b, 0);
+  check("F6. renderer uses a fixed layout with the same column percentages", rendered.cls.includes("pb-weighted") && rendered.cols.length === 3 && Math.abs(parseFloat(rendered.cols[0]) - (100 * sw[0]) / sum) < 0.01, JSON.stringify(rendered));
+  // 같게: 가중치를 없앤다
+  await H.main.getByRole("button", { name: "내용 수정" }).click();
+  await H.editor.locator("table td, table th").first().click();
+  await H.tb.getByRole("group", { name: "표" }).getByRole("button", { name: "열 폭 같게" }).click();
+  check("F6. 'even' removes the weights (equal = omitted)", (await tableAttr()) === null);
+  await H.main.getByRole("button", { name: "초안 버리기…" }).click();
+  await H.main.getByRole("button", { name: "초안 버리기", exact: true }).click();
 }
 
 // R1. renderer(저장한 글 화면의 최신 버전): 서식·영상 카드. 누르기 전에는 YouTube 요청 0, 누르면 nocookie 주소의 고정 sandbox iframe

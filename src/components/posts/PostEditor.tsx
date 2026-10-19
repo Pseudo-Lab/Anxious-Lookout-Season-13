@@ -113,7 +113,7 @@ export default function PostEditor({
     onDraft,
     start: restored?.input,
     // 보관한 입력이 실제로 저장되면(화면을 떠난 뒤 늦게 끝난 응답 포함) 같은 내용을 담은 버퍼를 지운다
-    onSaved: (d, saved) => onSavedRef.current(d, saved),
+    onSaved: (d, saved, base) => onSavedRef.current(d, saved, base),
   });
   const { values, status } = editor;
   // 모든 변경은 최신 입력에 덧붙인다(렌더 시점 값을 캡처하지 않는다).
@@ -160,6 +160,8 @@ export default function PostEditor({
     savedTarget.current = null;
   }, [accountId, bodyProblemState, holdingInput]);
   // 저장 성공(늦은 응답 포함): 그 내용과 같은 입력을 담은 버퍼만 지운다. 본문 문제가 있는 버퍼나 그 뒤에 더 고친 입력은 남긴다.
+  // 남기는 버퍼가 바로 그 요청의 기준 revision이면(같은 편집기가 보낸 저장) 기준을 저장 결과 revision·초안으로 옮긴다(리뷰 round3 M1).
+  // 그래야 다시 열 때 "다른 탭이 바꾼 초안" 검사에 걸려 버려지지 않는다. 기준이 다른 버퍼(다른 탭·기기 변경)는 건드리지 않는다.
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -167,14 +169,23 @@ export default function PostEditor({
       mounted.current = false;
     };
   }, []);
-  const onSavedRef = useRef<(d: PostDraft, saved: PostText) => void>(() => {});
+  const onSavedRef = useRef<(d: PostDraft, saved: PostText, base: PostDraft | null) => void>(() => {});
   useEffect(() => {
-    onSavedRef.current = (d, saved) => {
+    onSavedRef.current = (d, saved, base) => {
       if (!accountId) return;
-      for (const t of new Set([savedTarget.current, bufferTarget(d.id, post?.id), bufferTarget(null, post?.id)])) {
+      const next = bufferTarget(d.id, post?.id);
+      for (const t of new Set([savedTarget.current, bufferTarget(base?.id, post?.id), next])) {
         if (!t) continue;
         const b = loadBodyBuffer(accountId, t);
-        if (b?.input && !b.editor && sameText(b.input, saved)) clearBodyBuffer(accountId, t);
+        if (!b) continue;
+        if (b.input && !b.editor && sameText(b.input, saved)) {
+          clearBodyBuffer(accountId, t);
+          continue;
+        }
+        if (b.revision !== (base?.revision ?? null)) continue;
+        if (t !== next) clearBodyBuffer(accountId, t);
+        saveBodyBuffer(accountId, next, { ...b, revision: d.revision });
+        if (savedTarget.current === t) savedTarget.current = next;
       }
       if (mounted.current && sameText(saved, editor.values)) setHoldingInput(false);
     };

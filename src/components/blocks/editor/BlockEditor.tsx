@@ -322,8 +322,12 @@ function Toolbar({ editor, onPickImage, uploading }: { editor: Editor; onPickIma
           <span className="px-1 text-stone-500">표</span>
           <Btn label="아래에 행 추가" onClick={() => c().addRowAfter().run()}>+행</Btn>
           <Btn label="행 삭제" onClick={() => c().deleteRow().run()}>−행</Btn>
-          <Btn label="오른쪽에 열 추가" onClick={() => c().addColumnAfter().run()}>+열</Btn>
-          <Btn label="열 삭제" onClick={() => c().deleteColumn().run()}>−열</Btn>
+          <Btn label="오른쪽에 열 추가" onClick={() => c().addColumnAfterKeepWidths().run()}>+열</Btn>
+          <Btn label="열 삭제" onClick={() => c().deleteColumnKeepWidths().run()}>−열</Btn>
+          {/* #36 F6: 열 폭(가중치). 표 칸 오른쪽 테두리를 끌어도 된다 */}
+          <Btn label="열 넓게" onClick={() => c().resizeColumn(1).run()}>↔+</Btn>
+          <Btn label="열 좁게" onClick={() => c().resizeColumn(-1).run()}>↔−</Btn>
+          <Btn label="열 폭 같게" onClick={() => c().evenColumns().run()}>↔=</Btn>
           <Btn label="첫 행 머리글" onClick={() => c().toggleHeaderRow().run()}>머리글</Btn>
           <span className="flex items-center gap-0.5 px-1" role="group" aria-label="칸 배경">
             {CELL_BACKGROUNDS.map((hex) => (

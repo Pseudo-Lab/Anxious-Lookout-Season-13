@@ -1,6 +1,7 @@
 import { Extension, Node, mergeAttributes, type Extensions } from "@tiptap/core";
 import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from "@tiptap/pm/state";
 import type { Node as PMNode } from "@tiptap/pm/model";
+import type { EditorView } from "@tiptap/pm/view";
 import Document from "@tiptap/extension-document";
 import Paragraph from "@tiptap/extension-paragraph";
 import Text from "@tiptap/extension-text";
@@ -20,6 +21,7 @@ import { Dropcursor, Gapcursor, Placeholder, UndoRedo } from "@tiptap/extensions
 import { TextStyle } from "@tiptap/extension-text-style";
 import TextAlign from "@tiptap/extension-text-align";
 import { Table, TableCell, TableHeader, TableRow, createTable } from "@tiptap/extension-table";
+import { TableMap, addColumn, isInTable, removeColumn, selectedRect } from "@tiptap/pm/tables";
 import UniqueID from "@tiptap/extension-unique-id";
 import { uuidV4 } from "@/lib/research/idempotency";
 import { CODE_LANGUAGES, COLUMN_WEIGHT, FONT_SIZES, IMAGE_WIDTH, LIMITS, YOUTUBE_ID, ptToPx, type Align } from "@/lib/blocks/types";
@@ -355,10 +357,85 @@ const isWeights = (v: unknown): v is number[] =>
 // #36 B2: 표는 커서가 있는 최상위 블록 바로 뒤에 넣는다(빈 문단이면 그 자리를 바꾼다). 커서는 첫 칸으로 간다.
 // 기본 insertTable(replaceSelectionWith)은 글줄 처음에서는 앞에, 글줄 중간에서는 문단을 둘로 나눠 넣는다.
 // 표는 문서 바로 아래에만 올 수 있으므로(단·표 안 금지) 그 안에서는 넣지 않는다.
+/** 지금 표의 열 폭 가중치(없으면 균등 100). */
+const weightsOf = (table: PMNode) => (isWeights(table.attrs.columnWidths) && table.attrs.columnWidths.length === tableColumnCount(table) ? [...table.attrs.columnWidths] : Array.from({ length: tableColumnCount(table) }, () => 100));
+/** 모두 같으면 생략(null, 계약 정규화와 같다). */
+const weightsAttr = (w: number[]) => (w.every((x) => x === w[0]) ? null : w.map((x) => Math.min(COLUMN_WEIGHT.max, Math.max(COLUMN_WEIGHT.min, Math.round(x)))));
+/** 화면 폭(px) → 가중치(합 1000 근처의 정수, 1..1000). 서버가 GCD로 정규화한다. */
+export const weightsFromPixels = (px: number[]) => {
+  const total = px.reduce((a, b) => a + b, 0) || 1;
+  return px.map((p) => Math.min(COLUMN_WEIGHT.max, Math.max(COLUMN_WEIGHT.min, Math.round((p / total) * 1000))));
+};
+
+// #36 F6 표 열 폭: 표 테두리를 끌거나(ColumnResize) 표 도구의 넓게·좁게·같게로 바꾼다. 열을 넣고 빼면 가중치도 같이 고친다.
+// 편집기와 공개 renderer 모두 가중치가 있는 표만 고정 배치(colgroup %)로 그린다(없으면 지금 배치).
 const PostTable = Table.extend({
+  renderHTML({ node, HTMLAttributes }) {
+    const n = tableColumnCount(node);
+    const w = node.attrs.columnWidths;
+    const weighted = isWeights(w) && w.length === n;
+    const sum = weighted ? w.reduce((a: number, b: number) => a + b, 0) : 0;
+    const cols = Array.from({ length: n }, (_, i) => ["col", weighted ? { style: `width: ${(100 * w[i]) / sum}%` } : {}]);
+    return ["table", mergeAttributes(this.options.HTMLAttributes, HTMLAttributes, weighted ? { class: "pb-weighted" } : {}), ["colgroup", {}, ...cols], ["tbody", 0]];
+  },
   addCommands() {
     return {
       ...this.parent?.(),
+      // 커서가 있는 열 오른쪽에 열을 넣고, 새 열은 그 열과 같은 가중치로 둔다
+      addColumnAfterKeepWidths:
+        () =>
+        ({ state, tr, dispatch }) => {
+          if (!isInTable(state)) return false;
+          const rect = selectedRect(state);
+          if (tableColumnCount(rect.table) >= LIMITS.tableCols) return false;
+          if (dispatch) {
+            const w = weightsOf(rect.table);
+            addColumn(tr, rect, rect.right);
+            w.splice(rect.right, 0, w[rect.right - 1]);
+            const pos = rect.tableStart - 1;
+            tr.setNodeMarkup(pos, undefined, { ...tr.doc.nodeAt(pos)!.attrs, columnWidths: weightsAttr(w) });
+          }
+          return true;
+        },
+      // 커서(선택)가 있는 열을 빼고 그 가중치도 뺀다. 모든 열이면 표를 지운다.
+      deleteColumnKeepWidths:
+        () =>
+        ({ state, tr, dispatch, commands }) => {
+          if (!isInTable(state)) return false;
+          const rect = selectedRect(state);
+          if (rect.left === 0 && rect.right === rect.map.width) return commands.deleteTable();
+          if (dispatch) {
+            const w = weightsOf(rect.table);
+            for (let i = rect.right - 1; i >= rect.left; i--) {
+              removeColumn(tr, rect, i);
+              rect.table = tr.doc.nodeAt(rect.tableStart - 1)!;
+              rect.map = TableMap.get(rect.table);
+            }
+            w.splice(rect.left, rect.right - rect.left);
+            const pos = rect.tableStart - 1;
+            tr.setNodeMarkup(pos, undefined, { ...tr.doc.nodeAt(pos)!.attrs, columnWidths: weightsAttr(w) });
+          }
+          return true;
+        },
+      // 커서가 있는 열을 넓게(1.25배)·좁게(0.8배). 다른 열은 그대로다(비율이 바뀐다).
+      resizeColumn:
+        (dir: 1 | -1) =>
+        ({ state, tr, dispatch }) => {
+          if (!isInTable(state)) return false;
+          const rect = selectedRect(state);
+          const w = weightsOf(rect.table);
+          w[rect.left] = w[rect.left] * (dir === 1 ? 1.25 : 0.8);
+          if (dispatch) tr.setNodeMarkup(rect.tableStart - 1, undefined, { ...rect.table.attrs, columnWidths: weightsAttr(w) });
+          return true;
+        },
+      evenColumns:
+        () =>
+        ({ state, tr, dispatch }) => {
+          if (!isInTable(state)) return false;
+          const rect = selectedRect(state);
+          if (dispatch) tr.setNodeMarkup(rect.tableStart - 1, undefined, { ...rect.table.attrs, columnWidths: null });
+          return true;
+        },
       insertTableAfterBlock:
         ({ rows = 3, cols = 3, withHeaderRow = true } = {}) =>
         ({ state, tr, dispatch }) => {
@@ -395,6 +472,88 @@ const PostTable = Table.extend({
         renderHTML: (attrs: Record<string, unknown>) => (isWeights(attrs.columnWidths) ? { "data-column-widths": JSON.stringify(attrs.columnWidths) } : {}),
       },
     };
+  },
+});
+
+/**
+ * #36 F6 표 테두리 끌기: 칸 오른쪽 가장자리(마지막 열 제외)를 끌면 그 열과 오른쪽 열의 폭을 나눠 바꾼다(표 전체 폭은 그대로).
+ * 끄는 동안은 편집 DOM 밖의 안내선만 움직이고, 놓을 때 한 번 가중치(columnWidths)로 저장한다. 손가락 기기는 표 도구의 넓게·좁게를 쓴다.
+ */
+const EDGE_PX = 6;
+function edgeCell(view: EditorView, e: MouseEvent) {
+  const cell = (e.target as HTMLElement | null)?.closest?.("td, th") as HTMLTableCellElement | null;
+  if (!cell || !view.dom.contains(cell) || !cell.nextElementSibling) return null;
+  const r = cell.getBoundingClientRect();
+  return r.right - e.clientX <= EDGE_PX && r.right - e.clientX >= -2 ? cell : null;
+}
+const ColumnResize = Extension.create({
+  name: "columnResize",
+  addProseMirrorPlugins() {
+    let dragging = false;
+    return [
+      new Plugin({
+        key: new PluginKey("pb-column-resize"),
+        props: {
+          handleDOMEvents: {
+            mousemove(view, e) {
+              if (!view.editable || dragging) return false;
+              // ProseMirror가 관리하는 view.dom이 아니라 그 바깥 감싸개에 표시한다(편집 DOM을 바꾸지 않는다)
+              view.dom.parentElement?.classList.toggle("pb-col-resize", !!edgeCell(view, e));
+              return false;
+            },
+            mouseleave(view) {
+              if (!dragging) view.dom.parentElement?.classList.remove("pb-col-resize");
+              return false;
+            },
+            mousedown(view, e) {
+              if (!view.editable || e.button !== 0) return false;
+              const cell = edgeCell(view, e);
+              const table = cell?.closest("table");
+              if (!cell || !table) return false;
+              // 표 위치는 시작할 때 정해 둔다(끄는 동안 편집 DOM은 건드리지 않는다: ProseMirror가 바뀐 DOM을 다시 그린다)
+              const $pos = view.state.doc.resolve(view.posAtDOM(cell, 0));
+              let tablePos = -1;
+              for (let d = $pos.depth; d > 0; d--) if ($pos.node(d).type.name === "table") tablePos = $pos.before(d);
+              if (tablePos < 0) return false;
+              e.preventDefault();
+              dragging = true;
+              const i = cell.cellIndex;
+              const start = Array.from(table.rows[0].cells).map((c) => c.getBoundingClientRect().width);
+              const total = start.reduce((a, b) => a + b, 0);
+              const min = Math.max(24, total * 0.03);
+              const box = table.getBoundingClientRect();
+              const edge0 = cell.getBoundingClientRect().right;
+              const x0 = e.clientX;
+              // 끄는 동안은 편집 DOM 밖의 안내선만 움직인다
+              const guide = document.createElement("div");
+              guide.setAttribute("data-testid", "column-resize-guide");
+              Object.assign(guide.style, { position: "fixed", top: `${box.top}px`, height: `${box.height}px`, width: "2px", left: `${edge0 - 1}px`, background: "#6366f1", zIndex: "40", pointerEvents: "none" });
+              document.body.appendChild(guide);
+              let cur = start;
+              const move = (ev: MouseEvent) => {
+                const pair = start[i] + start[i + 1];
+                const left = Math.min(pair - min, Math.max(min, start[i] + ev.clientX - x0));
+                cur = start.map((w, j) => (j === i ? left : j === i + 1 ? pair - left : w));
+                guide.style.left = `${edge0 - start[i] + left - 1}px`;
+              };
+              const up = () => {
+                window.removeEventListener("mousemove", move);
+                window.removeEventListener("mouseup", up);
+                guide.remove();
+                dragging = false;
+                view.dom.parentElement?.classList.remove("pb-col-resize");
+                const node = view.state.doc.nodeAt(tablePos);
+                if (cur === start || node?.type.name !== "table") return;
+                view.dispatch(view.state.tr.setNodeMarkup(tablePos, undefined, { ...node.attrs, columnWidths: weightsAttr(weightsFromPixels(cur)) }));
+              };
+              window.addEventListener("mousemove", move);
+              window.addEventListener("mouseup", up);
+              return true;
+            },
+          },
+        },
+      }),
+    ];
   },
 });
 
@@ -662,7 +821,9 @@ export function blockExtensions({ placeholder = "", onReject }: SchemaOptions = 
       HTMLAttributes: { rel: "noopener noreferrer nofollow ugc", target: null },
     }),
     TextAlign.configure({ types: ["heading", "paragraph"], alignments: ALIGNS, defaultAlignment: "left" }),
-    PostTable.configure({ resizable: false, allowTableNodeSelection: false }),
+    // View: null — 크기 조절을 끈 표에 Tiptap이 쓰는 TableView(셀 colwidth로 colgroup을 만든다) 대신 renderHTML(가중치 colgroup)을 쓴다
+    PostTable.configure({ resizable: false, allowTableNodeSelection: false, View: null }),
+    ColumnResize,
     TableRow,
     PostTableHeader,
     PostTableCell,
@@ -696,6 +857,10 @@ declare module "@tiptap/core" {
     };
     postTable: {
       insertTableAfterBlock: (options?: { rows?: number; cols?: number; withHeaderRow?: boolean }) => ReturnType;
+      addColumnAfterKeepWidths: () => ReturnType;
+      deleteColumnKeepWidths: () => ReturnType;
+      resizeColumn: (dir: 1 | -1) => ReturnType;
+      evenColumns: () => ReturnType;
     };
     postImage: {
       insertPostImage: (attrs: { imageId: string; alt: string }, at?: number) => ReturnType;

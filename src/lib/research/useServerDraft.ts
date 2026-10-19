@@ -72,8 +72,8 @@ export function useServerDraft<V, D extends DraftLike, B>({
   onDraft?: (draft: D) => void;
   // 저장하지 못하고 떠났다가 되살린 입력(#36 리뷰 M1). 화면은 이것으로 시작하고, 서버 기준은 초안(또는 initial) 그대로 두어 다시 저장한다.
   start?: V | null;
-  // 저장 요청이 성공할 때마다(화면이 닫힌 뒤 늦게 끝난 응답 포함). 저장된 초안과 보낸 내용.
-  onSaved?: (draft: D, saved: V) => void;
+  // 저장 요청이 성공할 때마다(화면이 닫힌 뒤 늦게 끝난 응답 포함). 저장된 초안, 보낸 내용, 그 요청의 기준 초안(새로 만들면 null).
+  onSaved?: (draft: D, saved: V, base: D | null) => void;
 }) {
   const A = adapter;
   const same = (a: V | null, b: V) => !!a && A.same(a, b);
@@ -156,7 +156,7 @@ export function useServerDraft<V, D extends DraftLike, B>({
       retries.current = 0;
       savedRef.current = body;
       setDraft(res.data);
-      onSavedRef.current?.(res.data, body);
+      onSavedRef.current?.(res.data, body, d);
       if (same(body, valuesRef.current)) setStatus({ kind: "saved", at: res.data.updatedAt });
       else again.current = true;
       return;

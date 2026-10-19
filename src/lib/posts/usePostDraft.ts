@@ -69,7 +69,7 @@ export function usePostDraft(opts: {
   base: PostDraftBase | null;
   onDraft?: (draft: PostDraft) => void;
   start?: PostText | null;
-  onSaved?: (draft: PostDraft, saved: PostText) => void;
+  onSaved?: (draft: PostDraft, saved: PostText, base: PostDraft | null) => void;
 }) {
   return useServerDraft({ adapter: postDrafts, ...opts });
 }

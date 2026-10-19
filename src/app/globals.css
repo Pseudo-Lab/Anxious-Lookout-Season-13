@@ -325,6 +325,11 @@ html[data-chat-resizing] body {
 .pb-editor td p {
   margin: 0;
 }
+/* #36 F6: 표 칸 오른쪽 가장자리에서 열 폭을 끈다 */
+.pb-col-resize,
+.pb-col-resize * {
+  cursor: col-resize !important;
+}
 .pb-editor td[data-align="center"],
 .pb-editor th[data-align="center"] {
   text-align: center;

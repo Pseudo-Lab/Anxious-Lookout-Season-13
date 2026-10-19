@@ -481,8 +481,11 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   };
   // 초안 저장(PUT)을 잡아 두었다가 원하는 결과로 돌려준다
   let held = [];
+  // 네트워크 실패로 끝낸 요청은 닫힌 편집기가 같은 key로 다시 보낸다. 그 재시도는 바로 실패시켜 뒤 단계와 섞이지 않게 한다.
+  const failedKeys = new Set();
   const hold = (route) => {
     if (route.request().method() !== "PUT") return route.continue();
+    if (failedKeys.has(route.request().headers()["idempotency-key"])) return route.abort("failed");
     held.push(route);
   };
   const waitHeld = async () => {
@@ -520,21 +523,39 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
     // (2) 같은 상황에서 네트워크 실패
     await waitHeld();
     await leave();
-    for (const r of held.splice(0)) await r.abort("failed");
+    for (const r of held.splice(0)) {
+      failedKeys.add(r.request().headers()["idempotency-key"]);
+      await r.abort("failed");
+    }
     await page.waitForTimeout(500);
     check("WP3f. after a network failure of the pending save, the guard is still on", await leaveGuarded());
     await back();
     check("WP3f. back again after the network failure: input restored", (await bodyText()) === "saved-base UNSAVED-NEW-TEXT MORE", await bodyText());
+    // (4) 리뷰 round3: 잡아 둔 저장(A) 중에 더 고치고 떠난다 → A는 늦게 성공, 이어 보낸 최신 저장(B)은 409 → 돌아오면 더 고친 입력까지 남는다
+    await waitHeld();
+    await bodyBox().click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type(" MORE2");
+    await page.waitForTimeout(300);
+    await leave();
+    for (const r of held.splice(0)) await r.continue();
+    const followUp = await waitHeld();
+    for (const r of held.splice(0)) await r.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: { code: "post_contract_upgrade_required", message: "x", details: { requiredRevision: "1.2" } } }) });
+    await page.waitForTimeout(500);
+    const mid = await api.get(`/research/post-drafts/${base.body.id}`);
+    check("WP3f. earlier save succeeded late, the follow-up save was refused, the guard is still on", followUp && mid.textProjection === "saved-base UNSAVED-NEW-TEXT MORE" && (await leaveGuarded()), `${followUp} ${mid.textProjection}`);
+    await back();
+    check("WP3f. back again: the newer input (after the late success) is restored, not dropped as another tab's", (await bodyText()) === "saved-base UNSAVED-NEW-TEXT MORE MORE2", await bodyText());
     // (3) 늦게 성공: 떠난 뒤 저장이 끝나면 버퍼와 확인이 풀리고, 서버 초안에 그 입력이 있다
     await waitHeld();
     await leave();
     for (const r of held.splice(0)) await r.continue();
     await page.waitForTimeout(1000);
     const after = await api.get(`/research/post-drafts/${base.body.id}`);
-    check("WP3f. a late successful save stores the input and releases the guard", after.textProjection === "saved-base UNSAVED-NEW-TEXT MORE" && !(await leaveGuarded()), `${after.textProjection} guard=${await leaveGuarded()}`);
+    check("WP3f. a late successful save stores the input and releases the guard", after.textProjection === "saved-base UNSAVED-NEW-TEXT MORE MORE2" && !(await leaveGuarded()), `${after.textProjection} guard=${await leaveGuarded()}`);
     await page.unroute(draftUrl, hold);
     await back();
-    check("WP3f. re-opened after the late save: the server draft is shown without a stale restore", (await bodyText()) === "saved-base UNSAVED-NEW-TEXT MORE" && (await main.getByText("저장하지 못하고 떠났던 입력", { exact: false }).count()) === 0, await bodyText());
+    check("WP3f. re-opened after the late save: the server draft is shown without a stale restore", (await bodyText()) === "saved-base UNSAVED-NEW-TEXT MORE MORE2" && (await main.getByText("저장하지 못하고 떠났던 입력", { exact: false }).count()) === 0, await bodyText());
     await main.getByRole("button", { name: "초안 버리기…" }).click();
     await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
     await main.getByText("초안을 버렸습니다").waitFor();
