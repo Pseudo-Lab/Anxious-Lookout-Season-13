@@ -29,7 +29,7 @@ def identity(client, admin, number="111111", approved=True, role="editor"):
 
 
 def headers(auth, key=None):
-    return {**auth, "Idempotency-Key": key or str(uuid.uuid4())}
+    return {**auth, "Idempotency-Key": key or str(uuid.uuid4()), 'X-Post-Contract-Revision': '1.1'}
 
 
 def material(**changes):

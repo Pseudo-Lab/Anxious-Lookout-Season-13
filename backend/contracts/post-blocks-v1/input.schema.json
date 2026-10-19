@@ -18,10 +18,13 @@
               },
               {
                 "$ref": "#/$defs/ColorMark"
+              },
+              {
+                "$ref": "#/$defs/FontSizeMark"
               }
             ]
           },
-          "maxItems": 6,
+          "maxItems": 7,
           "title": "Marks",
           "type": "array"
         },
@@ -373,6 +376,33 @@
       "title": "Embed",
       "type": "object"
     },
+    "FontSizeMark": {
+      "additionalProperties": false,
+      "properties": {
+        "fontSize": {
+          "enum": [
+            10,
+            11,
+            12,
+            14,
+            16,
+            18,
+            20,
+            24,
+            28,
+            32,
+            36
+          ],
+          "title": "Fontsize",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "fontSize"
+      ],
+      "title": "FontSizeMark",
+      "type": "object"
+    },
     "Heading": {
       "additionalProperties": false,
       "properties": {
@@ -470,12 +500,8 @@
         },
         "widthPercent": {
           "default": 100,
-          "enum": [
-            25,
-            50,
-            75,
-            100
-          ],
+          "maximum": 100,
+          "minimum": 10,
           "title": "Widthpercent",
           "type": "integer"
         }
@@ -730,10 +756,13 @@
               },
               {
                 "$ref": "#/$defs/ColorMark"
+              },
+              {
+                "$ref": "#/$defs/FontSizeMark"
               }
             ]
           },
-          "maxItems": 6,
+          "maxItems": 7,
           "title": "Marks",
           "type": "array"
         },
@@ -753,6 +782,25 @@
     "Table": {
       "additionalProperties": false,
       "properties": {
+        "columnWidths": {
+          "anyOf": [
+            {
+              "items": {
+                "maximum": 1000,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "maxItems": 20,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Columnwidths"
+        },
         "id": {
           "maxLength": 36,
           "minLength": 36,

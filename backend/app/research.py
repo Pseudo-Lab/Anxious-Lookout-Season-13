@@ -448,8 +448,16 @@ def register_research(app, sessions, settings, current_session, error):
         key = request.headers.get("idempotency-key")
         if not key:
             fail("validation_error", "Idempotency-Key is required", 422)
+        def apply_new_write():
+            if post_route:
+                from .posts import PostText
+                from .writing import DraftCommit
+                if issubclass(model, (PostText, DraftCommit)) and request.headers.get('x-post-contract-revision') != '1.1':
+                    fail('post_contract_upgrade_required', 'Reload with a compatible post editor before saving', 409,
+                         {'requiredRevision': '1.1'})
+            return action(model.model_validate(body) if post_route else parsed)
         result, code = store.mutate(key, request.method + " " + request.url.path, body,
-                                    lambda: action(model.model_validate(body) if post_route else parsed), status)
+                                    apply_new_write, status)
         if post_route:
             from .posts import replay_response
             result = replay_response(result)

@@ -121,3 +121,24 @@ def test_readable_projection_declares_losses_and_uses_base_path():
     assert 'print("안녕")' in markdown
     assert format_summary(doc)['lossy'] is True
     assert 'color' in format_summary(doc)['omittedProperties']
+
+
+def test_v11_projection_and_equal_width_normalization():
+    from copy import deepcopy
+    from app.post_blocks import markdown_projection, format_summary, digest
+    for name in ('font-size-only','table-width-only','image-width-only'):
+        case=next(c for c in G['formatDiff'] if c.get('name')==name)
+        assert text_projection(case['base'])==text_projection(case['candidate'])
+        assert markdown_projection(case['base'])==markdown_projection(case['candidate'])
+    assert {'fontSize','columnWidths'} <= set(format_summary(G['valid'][0]['canonical'])['omittedProperties'])
+    table=next(c for c in G['valid'] if c['name']=='table-widths-ratio')
+    canonical=canonicalize(table['input'])
+    assert digest(canonical)==digest(table['canonical'])
+    assert format_changes(canonical,table['canonical'])==[]
+    equal=next(c for c in G['valid'] if c['name']=='table-widths-equal')
+    missing=next(c for c in G['valid'] if c['name']=='table-widths-omitted')
+    assert digest(canonicalize(equal['input']))==digest(canonicalize(missing['input']))
+    value=deepcopy(G['valid'][0]['canonical'])
+    value['blocks'][0]['runs']=[{'text':'all','marks':[{'fontSize':36},{'color':'#abcdef'},'code','strike','underline','italic','bold']}]
+    normalized=canonicalize(value)
+    assert normalized['blocks'][0]['runs'][0]['marks']==['bold','italic','underline','strike','code',{'color':'#ABCDEF'},{'fontSize':36}]
