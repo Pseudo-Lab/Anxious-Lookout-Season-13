@@ -298,8 +298,21 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   check("WP3c. M1: leaving the page asks for confirmation", prevented);
   const kept = await api.get(`/research/post-drafts/${validDraft}`);
   check("WP3c. M1: server draft keeps the last valid body (not the over-limit input)", kept.textProjection === "kept-valid", JSON.stringify(kept.textProjection?.slice(0, 40)));
-  await page.keyboard.press("Control+z");
-  await page.keyboard.type(" 고침");
+  // round2: 실제 내부 Link 이동 → 뒤로가기, 그리고 새로고침 뒤에도 저장 못 한 본문을 경고와 함께 되살린다
+  const restoredOk = async () =>
+    (await appears(reason)) &&
+    (await bodyBox().innerText()).includes("kept-valid" + "x".repeat(100)) &&
+    (await main.getByRole("button", { name: "글 저장" }).isDisabled());
+  await main.getByRole("link", { name: "← 내 글" }).click();
+  await page.waitForURL(U("/write/"));
+  await page.goBack();
+  await page.waitForURL(/\/write\/new\/\?draft=/);
+  check("WP3c. M1: after an in-app Link and Back, the unsaved body is restored with the warning and save stays blocked", await restoredOk());
+  check("WP3c. M1: restore notice shown", await appears(main.getByText("저장하지 못하고 떠났던 본문을 이 브라우저에서 되살렸습니다", { exact: false })));
+  await page.reload();
+  check("WP3c. M1: reload also restores the unsaved body", await restoredOk());
+  check("WP3c. M1: server draft still the last valid body after leaving", (await api.get(`/research/post-drafts/${validDraft}`)).textProjection === "kept-valid");
+  await writeBody(["kept-valid 고침"]);
   check("WP3c. M1: fixing the body lifts the block", (await reason.count()) === 0 && !(await main.getByRole("button", { name: "글 저장" }).isDisabled()));
   await main.getByRole("button", { name: "글 저장" }).click();
   await page.waitForURL(/\/write\/\?id=/);

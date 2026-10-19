@@ -176,6 +176,21 @@ describe("links and visible content", () => {
     expect(shown.map((c) => c.candidateBlockId)).toEqual([ID(1), ID(3)]);
   });
 
+  // 리뷰 round2 M2: 같은 서식 순서 안에서 적용 범위가 옮겨 가면(굵게가 다음 글자로 번짐, 링크 범위 이동) 남긴다
+  it.each([
+    ["bold extends to an existing char", [{ text: "A", marks: ["bold"] }, { text: "B", marks: [] }], [{ text: "AB", marks: ["bold"] }, { text: "C", marks: [] }], true],
+    ["link range moves", [{ text: "ab", marks: [], link: "https://x.example/" }, { text: "cd", marks: [] }], [{ text: "a", marks: [], link: "https://x.example/" }, { text: "bcde", marks: [] }], true],
+    ["typing inside bold inherits bold (text only)", [{ text: "AB", marks: ["bold"] }, { text: " 끝", marks: [] }], [{ text: "AXB", marks: ["bold"] }, { text: " 끝", marks: [] }], false],
+    ["typing plain text at the end (text only)", [{ text: "굵게", marks: ["bold"] }, { text: " 보통", marks: [] }], [{ text: "굵게", marks: ["bold"] }, { text: " 보통 추가", marks: [] }], false],
+    ["new text with a new mark", [{ text: "보통", marks: [] }], [{ text: "보통", marks: [] }, { text: "굵게", marks: ["bold"] }], true],
+    ["whole text replaced, same single style (text only)", [{ text: "abc", marks: [] }], [{ text: "xyz", marks: [] }], false],
+    ["whole text replaced and made bold", [{ text: "abc", marks: [] }], [{ text: "xyz", marks: ["bold"] }], true],
+  ])("%s → listed: %s", (_name, before, after, listed) => {
+    const b = canonical(doc([{ id: ID(1), type: "paragraph", runs: before }]));
+    const a = canonical(doc([{ id: ID(1), type: "paragraph", runs: after }]));
+    expect(formattingChanges(b, a, formatChanges(b, a)).length > 0).toBe(listed);
+  });
+
   it("moving a block keeps its id and reports a move, not remove+add", () => {
     const a = para([{ text: "A", marks: [] }]);
     const b = para([{ text: "B", marks: [] }]);

@@ -29,8 +29,20 @@ export function blockProblemText(e: BlockError) {
   return `${PROBLEM_TEXT[e.code] ?? "저장할 수 없는 본문입니다"}(${e.path || "문서 전체"}). 고칠 때까지 마지막으로 저장 가능한 본문을 유지합니다.`;
 }
 
+/** 저장하지 못한 편집 상태: 계약 위반 이유와 그때의 편집기 내용(보관해 두었다가 되살린다). */
+export interface BodyProblem {
+  error: BlockError;
+  editor: EditorNode;
+}
+
+const problemOf = (json: EditorNode): BodyProblem | null => {
+  const r = fromEditor(json);
+  return r.ok ? null : { error: r.error, editor: json };
+};
+
 export default function PostBodyEditor({
   value,
+  restore,
   onChange,
   onEditor,
   onUploading,
@@ -38,17 +50,19 @@ export default function PostBodyEditor({
   readOnly,
 }: {
   value: BlockDocument;
+  // 이전에 저장하지 못하고 떠난 편집기 내용(있으면 이것으로 편집기를 열고 경고를 다시 보인다)
+  restore?: EditorNode | null;
   onChange: (doc: BlockDocument) => void;
   // 편집기가 준비되면(이미지 패널의 "본문에 넣기"가 쓴다)
   onEditor?: (editor: Editor) => void;
   onUploading?: (uploading: boolean) => void;
-  // 저장할 수 없는 편집 상태가 생기고(오류) 풀릴 때(null)
-  onProblem?: (problem: BlockError | null) => void;
+  // 저장할 수 없는 편집 상태가 생기거나 바뀔 때(그때의 편집기 내용 포함)와 풀릴 때(null)
+  onProblem?: (problem: BodyProblem | null) => void;
   readOnly?: boolean;
 }) {
   // init: 편집기를 만들 때 넣은 내용(편집기 JSON). 편집 중에는 바꾸지 않는다.
-  const [shown, setShown] = useState(() => ({ key: 0, doc: value, init: toEditor(value) }));
-  const [problem, setProblem] = useState<BlockError | null>(null);
+  const [shown, setShown] = useState(() => ({ key: 0, doc: value, init: restore ?? toEditor(value) }));
+  const [problem, setProblem] = useState<BodyProblem | null>(() => (restore ? problemOf(restore) : null));
   const onProblemRef = useRef(onProblem);
   useEffect(() => {
     onProblemRef.current = onProblem;
@@ -56,9 +70,7 @@ export default function PostBodyEditor({
   useEffect(() => {
     onProblemRef.current?.(problem);
   }, [problem]);
-  // 편집기가 사라질 때(편집 닫기·버리기) 바깥의 잠금을 남기지 않는다
-  useEffect(() => () => onProblemRef.current?.(null), []);
-  // 바깥에서 본문이 바뀌었으면 편집기를 새로 만든다(렌더 중 상태 조정)
+  // 바깥에서 본문이 바뀌었으면(서버 초안 불러오기 등) 편집기를 새로 만든다(렌더 중 상태 조정). 보관한 버퍼도 그 내용으로 대신한다.
   if (value !== shown.doc) {
     setShown({ key: shown.key + 1, doc: value, init: toEditor(value) });
     if (problem) setProblem(null);
@@ -66,6 +78,11 @@ export default function PostBodyEditor({
   return (
     <div className="space-y-1">
       <span className="block text-sm font-medium text-stone-700">본문</span>
+      {restore && problem && shown.key === 0 && (
+        <p role="status" className="text-xs text-stone-600">
+          저장하지 못하고 떠났던 본문을 이 브라우저에서 되살렸습니다. 고치면 이어서 저장됩니다.
+        </p>
+      )}
       <BlockEditor
         key={shown.key}
         initialContent={shown.init}
@@ -75,7 +92,7 @@ export default function PostBodyEditor({
         onChange={(json) => {
           const r = fromEditor(json as EditorNode);
           if (!r.ok) {
-            setProblem(r.error);
+            setProblem({ error: r.error, editor: json as EditorNode });
             return;
           }
           setProblem(null);
@@ -85,7 +102,7 @@ export default function PostBodyEditor({
       />
       {problem && (
         <p role="alert" className="text-xs text-amber-800">
-          {blockProblemText(problem)}
+          {blockProblemText(problem.error)}
         </p>
       )}
     </div>
