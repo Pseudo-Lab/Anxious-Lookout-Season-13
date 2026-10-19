@@ -15,14 +15,23 @@ from starlette.concurrency import run_in_threadpool
 from markdown_it import MarkdownIt
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy import select, func
+from sqlalchemy.dialects.postgresql import array
 from .post_models import PostImage, PostDraft, PostProposal, PostVersion, PostPublication, PostPublicationHead
-from .research import Input, ResearchError, fail, stamp, parse_id
+from .research import Input, ResearchError, fail, stamp, parse_id, page_query, encode_cursor
 from . import posts
 
 LIMIT = 5 * 1024 * 1024
 QUOTA = 100 * 1024 * 1024
 FORMATS = {'image/png': 'PNG', 'image/jpeg': 'JPEG', 'image/webp': 'WEBP'}
 DECODERS = threading.BoundedSemaphore(2)
+RETAINED = (('draft', PostDraft), ('proposal', PostProposal),
+            ('version', PostVersion), ('publication', PostPublication))
+
+
+def retained_reference(model, identity):
+    # Same persisted body+cover references for both usage hints and deletion.
+    # Closed drafts/proposals and withdrawn/old publications remain protective.
+    return model.image_ids.contains(array([identity]))
 
 
 def root():
@@ -140,8 +149,8 @@ def remove(store, identity):
     posts.ready(store); store.graph_lock()
     row = store.db.get(PostImage, identity)
     if row is None or row.owner_id != store.owner: fail('not_found', 'Not found', 404)
-    for model in (PostDraft, PostProposal, PostVersion, PostPublication):
-        if store.db.scalar(select(model.id).where(model.image_ids.contains([identity])).limit(1)):
+    for _, model in RETAINED:
+        if store.db.scalar(select(model.id).where(retained_reference(model, identity)).limit(1)):
             posts.conflict('image_in_use')
     row.deleted = True
     store.db.flush()
@@ -194,8 +203,15 @@ def register(app, authorized, sessions, settings, response, write):
     def listing(request: Request, limit: int = 30, cursor: str | None = None):
         with authorized(request) as store:
             posts.ready(store)
-            query = select(PostImage).where(PostImage.owner_id == store.owner, PostImage.deleted.is_(False))
-            return response(posts.listing(store, PostImage, query, lambda row: value(row, settings.base_path), limit, cursor))
+            flags = [select(model.id).where(retained_reference(model, PostImage.id))
+                     .correlate(PostImage).exists().label(kind) for kind, model in RETAINED]
+            query = select(PostImage, *flags).where(PostImage.owner_id == store.owner, PostImage.deleted.is_(False))
+            rows = store.db.execute(page_query(query, PostImage, limit, cursor)).all()
+            items = [{**value(row[0], settings.base_path),
+                      'usage': [kind for (kind, _), used in zip(RETAINED, row[1:]) if used]}
+                     for row in rows[:limit]]
+            return response({'items': items,
+                             'nextCursor': encode_cursor(rows[limit-1][0]) if len(rows)>limit else None})
 
     @app.delete(private + '/{identity}')
     def delete(identity: uuid.UUID, body: dict, request: Request):

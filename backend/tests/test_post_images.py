@@ -197,3 +197,61 @@ def test_nested_alt_does_not_publish_hidden_image(client, admin):
     # Alt descendants render as text, so they must never acquire public access.
     assert client.get(hidden['url']).status_code == 404
     assert all(client.get(image['url']).status_code == 200 for image in visible)
+
+
+def test_usage_lists_all_retained_kinds_without_duplicates(client,admin):
+    from sqlalchemy.orm import Session
+    from app.research import Store
+    from app.post_proposals import Propose, create as propose
+    owner,auth=identity(client,admin)
+    image=upload(client,auth).json()
+    unused=upload(client,auth).json()
+    def usages():
+        response=client.get('/api/research/post-images')
+        assert response.status_code==200 and response.headers['cache-control']=='no-store'
+        return {item['id']:item['usage'] for item in response.json()['items']}
+    assert usages()=={image['id']:[],unused['id']:[]}
+    draft=make_draft(client,auth,content='![body]('+image['url']+')',coverImageId=image['id'])
+    duplicate=make_draft(client,auth,coverImageId=image['id'])
+    assert usages()[image['id']]==['draft']
+    assert client.request('DELETE','/api/research/post-drafts/'+duplicate['id'],
+        json={'expectedDraftRevision':1},headers=headers(auth)).status_code==200
+    with Session(admin) as db,db.begin():
+        proposal=propose(Store(db,owner),Propose(**proposal_content(coverImageId=image['id']),mutationId=str(uuid.uuid4())))
+    assert usages()[image['id']]==['draft','proposal']
+    assert client.post('/api/research/post-proposals/'+proposal['id']+'/discard',
+        json={'expectedProposalVersion':1},headers=headers(auth)).status_code==200
+    post=commit(client,auth,draft)
+    assert usages()[image['id']]==['draft','proposal','version']
+    publish(client,auth,post)
+    all_kinds=['draft','proposal','version','publication']
+    assert usages()[image['id']]==all_kinds
+    assert client.request('DELETE','/api/research/posts/'+post['id']+'/publication',
+        json={'expectedVersion':2},headers=headers(auth)).status_code==200
+    assert client.request('DELETE','/api/research/posts/'+post['id'],
+        json={'expectedVersion':3},headers=headers(auth)).status_code==200
+    assert usages()[image['id']]==all_kinds
+    make_draft(client,auth,content='`'+unused['url']+'`')
+    assert usages()[unused['id']]==[]  # Image-looking text grants no retention.
+    assert delete(client,auth,image).status_code==409
+    assert delete(client,auth,unused).status_code==200
+    assert usages()=={image['id']:all_kinds}
+
+
+def test_usage_pagination_and_owner_isolation(client,admin):
+    _,auth=identity(client,admin)
+    used=upload(client,auth).json();unused=upload(client,auth).json()
+    make_draft(client,auth,coverImageId=used['id'])
+    first=client.get('/api/research/post-images',params={'limit':1}).json()
+    assert len(first['items'])==1 and first['nextCursor']
+    second=client.get('/api/research/post-images',params={'limit':1,'cursor':first['nextCursor']}).json()
+    assert len(second['items'])==1 and second['nextCursor'] is None
+    listed={row['id']:row['usage'] for page in (first,second) for row in page['items']}
+    assert listed=={used['id']:['draft'],unused['id']:[]}
+    _,other=identity(client,admin,'222222')
+    assert client.get('/api/research/post-images').json()['items']==[]
+    theirs=upload(client,other).json()
+    response=client.get('/api/research/post-images').json()
+    assert [(row['id'],row['usage']) for row in response['items']]==[(theirs['id'],[])]
+    client.cookies.clear()
+    assert client.get('/api/research/post-images').status_code==401
