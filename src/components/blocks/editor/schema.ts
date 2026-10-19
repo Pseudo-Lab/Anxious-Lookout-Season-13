@@ -1,5 +1,5 @@
 import { Extension, Node, mergeAttributes, type Extensions } from "@tiptap/core";
-import { Plugin, PluginKey, TextSelection, type Transaction } from "@tiptap/pm/state";
+import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from "@tiptap/pm/state";
 import type { Node as PMNode } from "@tiptap/pm/model";
 import Document from "@tiptap/extension-document";
 import Paragraph from "@tiptap/extension-paragraph";
@@ -575,6 +575,27 @@ const MoveBlock = Extension.create({
           }
           return false;
         },
+      // #36 F4: pos에서 시작하는 블록(이미지·영상 등)을 같은 부모(문서·단·인용·목록) 안에서 한 칸 옮기고 그 블록을 선택한다.
+      // 블록을 선택한 상태(NodeSelection)에서는 moveBlock이 이동 단위를 찾지 못하므로 블록 화면의 위/아래 버튼이 이것을 쓴다.
+      moveBlockAt:
+        (pos: number, dir: -1 | 1) =>
+        ({ state, tr, dispatch }) => {
+          const $pos = state.doc.resolve(pos);
+          const parent = $pos.parent;
+          const node = state.doc.nodeAt(pos);
+          if (!node || !["doc", "column", "blockquote", "bulletList", "orderedList"].includes(parent.type.name)) return false;
+          const target = $pos.index() + dir;
+          if (target < 0 || target >= parent.childCount) return false;
+          if (dispatch) {
+            const other = parent.child(target);
+            tr.delete(pos, pos + node.nodeSize);
+            const at = dir === 1 ? pos + other.nodeSize : pos - other.nodeSize;
+            tr.insert(at, node);
+            tr.setSelection(NodeSelection.create(tr.doc, at));
+            tr.scrollIntoView();
+          }
+          return true;
+        },
     };
   },
 });
@@ -684,6 +705,7 @@ declare module "@tiptap/core" {
     };
     moveBlock: {
       moveBlock: (dir: -1 | 1) => ReturnType;
+      moveBlockAt: (pos: number, dir: -1 | 1) => ReturnType;
     };
   }
 }

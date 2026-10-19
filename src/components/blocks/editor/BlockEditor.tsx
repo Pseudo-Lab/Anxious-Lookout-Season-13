@@ -141,15 +141,21 @@ function SelectionMenu({ editor }: { editor: Editor }) {
   const menu = useRef<HTMLDivElement>(null);
   const [pressing, setPressing] = useState(false);
   const [coarse] = useState(coarsePointer);
-  const range = useEditorState({
+  // 메뉴 안(글자 크기 목록 등)으로 포커스가 옮겨 간 동안에도 메뉴와 선택을 유지한다(리뷰 round2 M2).
+  // 편집기 선택은 state에 남아 있고, 메뉴의 명령은 focus()로 편집기에 돌아가 그 선택에 적용한다.
+  const [menuFocused, setMenuFocused] = useState(false);
+  const sel = useEditorState({
     editor,
     selector: ({ editor: e }) => {
-      const sel = e.state.selection;
-      const text = sel instanceof TextSelection && !sel.empty && e.isFocused && e.isEditable;
-      return text ? { from: sel.from, to: sel.to } : null;
+      const s = e.state.selection;
+      const text = s instanceof TextSelection && !s.empty && e.isEditable;
+      return text ? { from: s.from, to: s.to, focused: e.isFocused } : null;
     },
-    equalityFn: (a, b) => a?.from === b?.from && a?.to === b?.to,
+    equalityFn: (a, b) => a?.from === b?.from && a?.to === b?.to && a?.focused === b?.focused,
   });
+  const range = sel && (sel.focused || menuFocused) ? sel : null;
+  // 선택이 사라지면 메뉴 포커스 표시도 내린다(메뉴가 포커스를 가진 채 사라지면 blur가 오지 않는다)
+  if (!sel && menuFocused) setMenuFocused(false);
 
   useEffect(() => {
     const dom = editor.view.dom;
@@ -192,9 +198,15 @@ function SelectionMenu({ editor }: { editor: Editor }) {
       ref={menu}
       role="toolbar"
       aria-label="선택한 글자 서식"
+      onFocus={() => setMenuFocused(true)}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setMenuFocused(false);
+      }}
       // 메뉴 안을 눌러도 편집기 선택이 풀리지 않게 한다(select는 예외: 목록을 열어야 한다)
       onMouseDown={(e) => {
-        if (!(e.target instanceof HTMLSelectElement)) e.preventDefault();
+        // 목록(select)은 포커스를 가져가야 열린다. 편집기 blur로 메뉴가 먼저 사라지지 않게 포커스가 옮겨 가기 전에 표시해 둔다.
+        if (e.target instanceof HTMLSelectElement) setMenuFocused(true);
+        else e.preventDefault();
       }}
       className="fixed z-30 flex max-w-[calc(100vw-1rem)] flex-wrap items-center gap-0.5 rounded-lg bg-white p-1 shadow-lg ring-1 ring-stone-300"
       style={{ visibility: "hidden", top: 0, left: 0 }}

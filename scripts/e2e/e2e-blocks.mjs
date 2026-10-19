@@ -567,6 +567,54 @@ check("I1. picked image uploads and inserts by imageId with alt from file name",
   check("F3. saved image width equals the editor value", saved.problem === 0 && saved.doc?.blocks?.find((b) => b.type === "image")?.widthPercent === dragged, JSON.stringify(saved.doc?.blocks?.map((b) => b.widthPercent)));
 }
 
+// F4. 이미지 블록 위/아래 이동(블록 화면의 버튼). id는 그대로, 저장 순서도 같다
+{
+  await H.fresh();
+  await page.keyboard.type("first");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("second");
+  await H.main.getByLabel("본문 이미지 파일").setInputFiles({ name: "옮길.png", mimeType: "image/png", buffer: PNG });
+  await H.editor.locator("figure[data-type=post-image] img").first().waitFor({ timeout: 10000 }).catch(() => {});
+  const order = async () => outline(await H.doc());
+  const start = await order();
+  const imgId = async () => (await H.doc()).content.find((b) => b.type === "postImage")?.attrs?.id;
+  const id0 = await imgId();
+  await H.editor.getByRole("button", { name: "이미지 위로" }).click();
+  const up1 = await order();
+  await H.editor.getByRole("button", { name: "이미지 위로" }).click();
+  const up2 = await order();
+  await H.editor.getByRole("button", { name: "이미지 위로" }).click();
+  const stay = await order();
+  await H.editor.getByRole("button", { name: "이미지 아래로" }).click();
+  const down = await order();
+  check("F4. image moves up/down one block at a time and stops at the top", start === "p(first),p(second),postImage" && up1 === "p(first),postImage,p(second)" && up2 === "postImage,p(first),p(second)" && stay === up2 && down === up1, [start, up1, up2, stay, down].join(" / "));
+  check("F4. the moved image keeps its id", (await imgId()) === id0);
+  const saved = await H.blocks();
+  check("F4. saved order matches the editor", saved.problem === 0 && (saved.doc?.blocks ?? []).map((b) => b.type).join(",") === "paragraph,image,paragraph", JSON.stringify(saved.doc?.blocks?.map((b) => b.type)));
+}
+
+// F5. 단 안 이미지: 단 안에서 파일로 올리거나 이미지 패널에서 넣으면 그 단 안에 이미지 블록이 들어가고, 계약대로 저장된다
+{
+  await H.fresh();
+  await H.tb.getByRole("combobox", { name: "단 나누기" }).selectOption({ label: "1:1" });
+  await page.keyboard.type("left");
+  check("F5. image upload is available inside columns", !(await H.tb.getByRole("button", { name: "이미지 올리기" }).isDisabled()));
+  await H.main.getByLabel("본문 이미지 파일").setInputFiles({ name: "왼쪽.png", mimeType: "image/png", buffer: PNG });
+  await H.editor.locator("figure[data-type=post-image] img").first().waitFor({ timeout: 10000 }).catch(() => {});
+  await H.editor.locator(".pb-column").nth(1).click();
+  await page.keyboard.type("right");
+  // 이미지 패널에서 올리면 본문 커서 위치(오른쪽 단)에 넣는다
+  await H.main.getByRole("region", { name: "이미지" }).getByLabel("이미지 파일").setInputFiles({ name: "오른쪽.png", mimeType: "image/png", buffer: PNG });
+  await H.editor.locator("figure[data-type=post-image]").nth(1).waitFor({ timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(300);
+  const cols = (await H.doc()).content.find((b) => b.type === "columns");
+  const kinds = (cols?.content ?? []).map((c) => (c.content ?? []).filter((b) => !(b.type === "paragraph" && !b.content)).map((b) => b.type).join("+"));
+  check("F5. picked file goes into the left column, panel upload into the right column", kinds.join(" | ") === "paragraph+postImage | paragraph+postImage", kinds.join(" | "));
+  const saved = await H.blocks();
+  const sc = saved.doc?.blocks?.find((b) => b.type === "columns");
+  check("F5. saved as columns > column > image (depth 3)", saved.problem === 0 && sc?.columns?.every((c) => c.blocks.some((b) => b.type === "image")), JSON.stringify(sc?.columns?.map((c) => c.blocks.map((b) => b.type))));
+}
+
 // I2. 이미지 파일 붙여넣기
 await H.fresh();
 await page.evaluate((b64) => {
@@ -663,7 +711,13 @@ await editingRegressions(page, H, "chromium");
   const mb = await menu.boundingBox().catch(() => null);
   check("F1. double-click selection shows the menu right above the selection", selRect.text === "world" && !!mb && mb.y + mb.height <= selRect.top + 1 && mb.y + mb.height >= selRect.top - 40, `${JSON.stringify(selRect)} ${JSON.stringify(mb)}`);
   await menu.getByRole("button", { name: "굵게" }).click();
-  await menu.getByLabel("글자 크기").selectOption("18");
+  // 리뷰 round2 M2: 실제로 목록을 눌러 포커스가 메뉴로 옮겨 가도 메뉴·선택이 남고, 키보드로 고른 크기가 선택한 글자에 적용된다
+  const size = menu.getByLabel("글자 크기");
+  await size.click();
+  check("F1. clicking the size list keeps the menu open", (await menu.count()) === 1);
+  for (let i = 0; i < 6; i++) await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(200);
   const runs = (await H.doc()).content[0].content;
   const w = runs.find((n) => n.text === "world");
   const h = runs.find((n) => n.text === "hello ");

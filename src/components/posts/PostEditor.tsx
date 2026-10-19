@@ -7,7 +7,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { commitPostDraft, discardPostDraft, getPost, getPostDraft, resolvePostMaterials } from "@/lib/posts/api";
 import { postErrorMessage } from "@/lib/posts/errors";
 import type { Post, PostDraft, PostMaterialSource, PostText } from "@/lib/posts/types";
-import { EMPTY_TEXT, textOf, usePostDraft } from "@/lib/posts/usePostDraft";
+import { EMPTY_TEXT, sameText, textOf, usePostDraft } from "@/lib/posts/usePostDraft";
 import { useMutation } from "@/lib/research/hooks";
 import { formatDateTime } from "@/lib/research/format";
 import { LIMITS } from "@/lib/research/types";
@@ -112,6 +112,8 @@ export default function PostEditor({
     base: post ? { postId: post.id, basePostVersion: post.version, baseVersionId: post.latestVersion.id } : null,
     onDraft,
     start: restored?.input,
+    // 보관한 입력이 실제로 저장되면(화면을 떠난 뒤 늦게 끝난 응답 포함) 같은 내용을 담은 버퍼를 지운다
+    onSaved: (d, saved) => onSavedRef.current(d, saved),
   });
   const { values, status } = editor;
   // 모든 변경은 최신 입력에 덧붙인다(렌더 시점 값을 캡처하지 않는다).
@@ -130,29 +132,53 @@ export default function PostEditor({
   const buffer = bufferTarget(editor.draft?.id ?? resumeDraft?.id, post?.id);
   const [bodyProblemState, setBodyProblemState] = useState<BodyProblem | null>(null);
   const bodyProblem = bodyProblemState?.error ?? null;
-  function onBodyProblem(p: BodyProblem | null) {
-    setBodyProblemState(p);
-    if (!p && accountId) clearBodyBuffer(accountId, buffer);
-  }
   // #36: 서버가 이 화면보다 새 문서 계약을 요구해 저장을 거절했다. 저장·닫기를 막고 새로고침을 안내한다(입력은 화면과 버퍼에 남는다).
   const upgradeRequired = status.kind === "stopped" && status.failure.kind === "http" && status.failure.code === "post_contract_upgrade_required";
+  // 입력 전체를 보관하는 중인지(리뷰 round2 M1). 거절되었거나 되살려 연 입력은 본문 유효성과 상관없이, 그 내용이 실제로
+  // 저장된 것을 확인하거나(onSaved) 초안을 명시적으로 버릴 때까지 보관한다. 다시 저장하는 중에 고친 입력도 버퍼에 반영한다.
+  const [holdingInput, setHoldingInput] = useState(!!restored?.input);
+  if (upgradeRequired && !holdingInput) setHoldingInput(true);
+  function onBodyProblem(p: BodyProblem | null) {
+    setBodyProblemState(p);
+    // 본문만 보관하던 경우에만 본문이 다시 유효해질 때 지운다(입력 전체를 보관 중이면 저장 확인까지 둔다)
+    if (!p && accountId && !holdingInput) clearBodyBuffer(accountId, buffer);
+  }
   // 문제가 있는 동안 버퍼를 지금 초안(마지막 유효 본문의 자동 저장이 늦게 끝나 revision·ID가 바뀌어도 그 기준)과 지금 입력에 맞춰 둔다
   const draftRevision = editor.draft?.revision ?? null;
-  // 이 화면이 버퍼를 둔 대상. 되살려 열었으면 그 대상이다(다시 저장되면 지운다).
+  // 이 화면이 버퍼를 둔 대상. 되살려 열었으면 그 대상이다.
   const savedTarget = useRef<string | null>(restored?.target ?? null);
   useEffect(() => {
-    if (!accountId || (!bodyProblemState && !upgradeRequired)) return;
+    if (!accountId || (!bodyProblemState && !holdingInput)) return;
     if (savedTarget.current && savedTarget.current !== buffer) clearBodyBuffer(accountId, savedTarget.current);
     savedTarget.current = buffer;
-    saveBodyBuffer(accountId, buffer, { revision: draftRevision, editor: bodyProblemState?.editor ?? null, ...(upgradeRequired ? { input: values } : {}) });
-  }, [accountId, buffer, bodyProblemState, draftRevision, upgradeRequired, values]);
-  // 보관했던 입력이 서버에 저장되면(문제가 풀리고 저장 완료) 버퍼를 지운다
+    saveBodyBuffer(accountId, buffer, { revision: draftRevision, editor: bodyProblemState?.editor ?? null, ...(holdingInput ? { input: values } : {}) });
+  }, [accountId, buffer, bodyProblemState, draftRevision, holdingInput, values]);
+  // 보관할 것이 없어졌으면(본문 문제 해소, 입력 저장 확인) 이 화면이 둔 버퍼를 지운다
   useEffect(() => {
-    if (!accountId || bodyProblemState || upgradeRequired || !savedTarget.current) return;
-    if (status.kind !== "saved" && status.kind !== "clean") return;
+    if (!accountId || bodyProblemState || holdingInput || !savedTarget.current) return;
     clearBodyBuffer(accountId, savedTarget.current);
     savedTarget.current = null;
-  }, [accountId, bodyProblemState, upgradeRequired, status]);
+  }, [accountId, bodyProblemState, holdingInput]);
+  // 저장 성공(늦은 응답 포함): 그 내용과 같은 입력을 담은 버퍼만 지운다. 본문 문제가 있는 버퍼나 그 뒤에 더 고친 입력은 남긴다.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const onSavedRef = useRef<(d: PostDraft, saved: PostText) => void>(() => {});
+  useEffect(() => {
+    onSavedRef.current = (d, saved) => {
+      if (!accountId) return;
+      for (const t of new Set([savedTarget.current, bufferTarget(d.id, post?.id), bufferTarget(null, post?.id)])) {
+        if (!t) continue;
+        const b = loadBodyBuffer(accountId, t);
+        if (b?.input && !b.editor && sameText(b.input, saved)) clearBodyBuffer(accountId, t);
+      }
+      if (mounted.current && sameText(saved, editor.values)) setHoldingInput(false);
+    };
+  });
   useEffect(() => {
     if (!bodyProblem && !upgradeRequired) return;
     // 떠나면 화면의 입력(저장되지 않은 본문)을 잃으므로 브라우저 확인을 띄운다

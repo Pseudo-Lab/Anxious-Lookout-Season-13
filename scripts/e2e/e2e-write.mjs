@@ -466,6 +466,84 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   }
 }
 
+// WP3f. 리뷰 round2 M1: 되살린 입력을 다시 저장하는 요청이 끝나기 전에 또 떠나도 입력을 잃지 않는다.
+// 그 요청이 409·네트워크 실패로 끝나면 버퍼(그 사이 고친 입력 포함)가 남아 다시 되살아나고, 늦게라도 성공하면 버퍼와 떠날 때 확인이 풀린다.
+{
+  const upgrade = () => main.getByText("새 버전의 편집기가 있습니다", { exact: false });
+  const bodyText = async () => (await bodyBox().innerText()).replace(/\s+/g, " ").trim();
+  const leave = async () => {
+    await page.locator("header").getByRole("link").first().click();
+    await page.waitForURL(U("/"));
+  };
+  const back = async () => {
+    await page.goBack();
+    await bodyBox().waitFor({ timeout: 15000 });
+  };
+  // 초안 저장(PUT)을 잡아 두었다가 원하는 결과로 돌려준다
+  let held = [];
+  const hold = (route) => {
+    if (route.request().method() !== "PUT") return route.continue();
+    held.push(route);
+  };
+  const waitHeld = async () => {
+    for (let i = 0; i < 100 && !held.length; i++) await page.waitForTimeout(100);
+    return held.length > 0;
+  };
+  const content = { format: "post-blocks", version: 1, blocks: [{ id: crypto.randomUUID(), type: "paragraph", runs: [{ text: "saved-base", marks: [] }], align: "left" }] };
+  const base = await api.send("POST", "/research/post-drafts", { title: "느린 저장", content, description: "", tags: [], coverImageId: null, documentIds: [] });
+  const draftUrl = /\/research\/post-drafts\/[^/]+$/;
+  await page.goto(U(`/write/new/?draft=${base.body.id}`));
+  await bodyBox().waitFor({ timeout: 15000 });
+  await setMock("postRevision=1.2");
+  try {
+    await bodyBox().click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type(" UNSAVED-NEW-TEXT");
+    await upgrade().waitFor({ timeout: 15000 });
+    await leave();
+    await setMock("postRevision=1.1");
+    // (1) 되살린 입력의 저장을 잡아 둔 채 고치고 다시 떠난다 → 409로 끝낸다 → 돌아오면 고친 것까지 남아 있다
+    await page.route(draftUrl, hold);
+    await back();
+    const sent = await waitHeld();
+    await bodyBox().click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type(" MORE");
+    await page.waitForTimeout(300);
+    await leave();
+    check("WP3f. leaving while the restored save is pending keeps the leave guard", sent && (await leaveGuarded()), `held=${held.length}`);
+    for (const r of held.splice(0)) await r.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: { code: "post_contract_upgrade_required", message: "x", details: { requiredRevision: "1.2" } } }) });
+    await page.waitForTimeout(500);
+    check("WP3f. after that save is refused (409), the guard is still on", await leaveGuarded());
+    await back();
+    check("WP3f. back again: the input including edits made during the pending save is restored", (await bodyText()) === "saved-base UNSAVED-NEW-TEXT MORE", await bodyText());
+    // (2) 같은 상황에서 네트워크 실패
+    await waitHeld();
+    await leave();
+    for (const r of held.splice(0)) await r.abort("failed");
+    await page.waitForTimeout(500);
+    check("WP3f. after a network failure of the pending save, the guard is still on", await leaveGuarded());
+    await back();
+    check("WP3f. back again after the network failure: input restored", (await bodyText()) === "saved-base UNSAVED-NEW-TEXT MORE", await bodyText());
+    // (3) 늦게 성공: 떠난 뒤 저장이 끝나면 버퍼와 확인이 풀리고, 서버 초안에 그 입력이 있다
+    await waitHeld();
+    await leave();
+    for (const r of held.splice(0)) await r.continue();
+    await page.waitForTimeout(1000);
+    const after = await api.get(`/research/post-drafts/${base.body.id}`);
+    check("WP3f. a late successful save stores the input and releases the guard", after.textProjection === "saved-base UNSAVED-NEW-TEXT MORE" && !(await leaveGuarded()), `${after.textProjection} guard=${await leaveGuarded()}`);
+    await page.unroute(draftUrl, hold);
+    await back();
+    check("WP3f. re-opened after the late save: the server draft is shown without a stale restore", (await bodyText()) === "saved-base UNSAVED-NEW-TEXT MORE" && (await main.getByText("저장하지 못하고 떠났던 입력", { exact: false }).count()) === 0, await bodyText());
+    await main.getByRole("button", { name: "초안 버리기…" }).click();
+    await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+    await main.getByText("초안을 버렸습니다").waitFor();
+  } finally {
+    await page.unroute(draftUrl, hold).catch(() => {});
+    await setMock("postRevision=1.1");
+  }
+}
+
 // WP4. #31: 자료만 바탕으로 한 글, 보관 자료 제외, 문서 해제 뒤에도 자료 유지, 요약 없는 글의 목록 발췌(W2)
 {
   const docB = (await api.send("POST", "/research/documents", { title: "바탕 문서 B", content: "문서 B" })).body;

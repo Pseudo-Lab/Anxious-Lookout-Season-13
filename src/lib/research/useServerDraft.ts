@@ -59,6 +59,7 @@ export function useServerDraft<V, D extends DraftLike, B>({
   base,
   onDraft,
   start: restoredStart,
+  onSaved,
 }: {
   adapter: DraftAdapter<V, D, B>;
   // 초안이 없을 때의 시작 내용(기존 대상 본문 또는 빈 새 내용)
@@ -71,6 +72,8 @@ export function useServerDraft<V, D extends DraftLike, B>({
   onDraft?: (draft: D) => void;
   // 저장하지 못하고 떠났다가 되살린 입력(#36 리뷰 M1). 화면은 이것으로 시작하고, 서버 기준은 초안(또는 initial) 그대로 두어 다시 저장한다.
   start?: V | null;
+  // 저장 요청이 성공할 때마다(화면이 닫힌 뒤 늦게 끝난 응답 포함). 저장된 초안과 보낸 내용.
+  onSaved?: (draft: D, saved: V) => void;
 }) {
   const A = adapter;
   const same = (a: V | null, b: V) => !!a && A.same(a, b);
@@ -93,6 +96,7 @@ export function useServerDraft<V, D extends DraftLike, B>({
   const statusRef = useRef<SaveStatus<D>>(status);
   const baseRef = useRef(base);
   const onDraftRef = useRef(onDraft);
+  const onSavedRef = useRef(onSaved);
   const runRef = useRef(run);
   const inflight = useRef<Promise<void> | null>(null);
   const again = useRef(false);
@@ -106,6 +110,7 @@ export function useServerDraft<V, D extends DraftLike, B>({
   useEffect(() => {
     baseRef.current = base;
     onDraftRef.current = onDraft;
+    onSavedRef.current = onSaved;
     runRef.current = run;
   });
 
@@ -151,6 +156,7 @@ export function useServerDraft<V, D extends DraftLike, B>({
       retries.current = 0;
       savedRef.current = body;
       setDraft(res.data);
+      onSavedRef.current?.(res.data, body);
       if (same(body, valuesRef.current)) setStatus({ kind: "saved", at: res.data.updatedAt });
       else again.current = true;
       return;

@@ -59,7 +59,25 @@ function WidthInput({ value, onCommit }: { value: number; onCommit: (w: number) 
   );
 }
 
-function ImageView({ node, updateAttributes, selected, editor }: ReactNodeViewProps) {
+/** #36 F4: 블록을 같은 묶음(본문·단) 안에서 위/아래로 한 칸 옮긴다. 끌어 옮기기(drag)는 그대로 쓸 수 있다. */
+function MoveButtons({ editor, getPos, what }: Pick<ReactNodeViewProps, "editor" | "getPos"> & { what: string }) {
+  const move = (dir: -1 | 1) => {
+    const pos = getPos();
+    if (typeof pos === "number") editor.chain().focus().moveBlockAt(pos, dir).run();
+  };
+  return (
+    <span className="flex items-center gap-0.5">
+      <button type="button" aria-label={`${what} 위로`} title={`${what} 위로`} onMouseDown={(e) => e.preventDefault()} onClick={() => move(-1)} className="rounded border border-stone-300 px-1.5 py-0.5 hover:bg-stone-100">
+        ↑
+      </button>
+      <button type="button" aria-label={`${what} 아래로`} title={`${what} 아래로`} onMouseDown={(e) => e.preventDefault()} onClick={() => move(1)} className="rounded border border-stone-300 px-1.5 py-0.5 hover:bg-stone-100">
+        ↓
+      </button>
+    </span>
+  );
+}
+
+function ImageView({ node, updateAttributes, selected, editor, getPos }: ReactNodeViewProps) {
   const { imageId, alt, widthPercent, align } = node.attrs as { imageId: string; alt: string; widthPercent: number; align: Align };
   const editable = editor.isEditable;
   const figure = useRef<HTMLElement | null>(null);
@@ -128,6 +146,7 @@ function ImageView({ node, updateAttributes, selected, editor }: ReactNodeViewPr
             />
           </label>
           <WidthInput value={shown} onCommit={(w) => w !== widthPercent && updateAttributes({ widthPercent: w })} />
+          <MoveButtons editor={editor} getPos={getPos} what="이미지" />
           <select aria-label="이미지 정렬" value={align} onChange={(e) => updateAttributes({ align: e.target.value })} className="rounded border border-stone-300 px-1 py-0.5">
             {(Object.keys(ALIGN_LABEL) as Align[]).map((a) => (
               <option key={a} value={a}>
@@ -142,12 +161,17 @@ function ImageView({ node, updateAttributes, selected, editor }: ReactNodeViewPr
   );
 }
 
-function EmbedView({ node, selected }: ReactNodeViewProps) {
+function EmbedView({ node, selected, editor, getPos }: ReactNodeViewProps) {
   return (
     <NodeViewWrapper as="figure" data-type="embed" className={`my-4 ${selected ? "ring-2 ring-indigo-400" : ""}`}>
       <div contentEditable={false} data-drag-handle>
         <YouTubeCard resourceId={node.attrs.resourceId as string} activatable={false} />
       </div>
+      {editor.isEditable && (
+        <div contentEditable={false} className="mt-1 flex justify-end text-xs text-stone-600">
+          <MoveButtons editor={editor} getPos={getPos} what="영상" />
+        </div>
+      )}
       <Caption placeholder="영상 설명(선택)" />
     </NodeViewWrapper>
   );
