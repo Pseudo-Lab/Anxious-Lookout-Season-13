@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "postImagesStorageClass": "m2-postgres-retain",
   "runtimeImage": "docker.io/library/anxious-s13-issue16-runtime@sha256:3c3cb4f515a2053cf26c9bd0fb3567f2d666cecb2b8b013866c1247ef8394690",
   "runnerImage": "docker.io/library/anxious-s13-issue16-runner@sha256:e8b91b0c4291c2412f5ad58796034e01931d8b2a120a0a21ec7f9b40ea2454de",
   "executor": {
