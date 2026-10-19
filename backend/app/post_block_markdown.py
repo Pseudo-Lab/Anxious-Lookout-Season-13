@@ -11,7 +11,9 @@ from .research import ResearchError
 def convert(source, seed, base_path=''):
     root=('contentInput','text')
     if not isinstance(source,str): invalid(root,'unsupported_content')
-    if len(source.encode('utf-8'))>1048576: invalid(root,'payload_too_large',413)
+    try: size = len(source.encode('utf-8'))
+    except UnicodeError: invalid(root,'unsupported_content')
+    if size>1048576: invalid(root,'payload_too_large',413)
     if len(source)>200000: invalid(root,'content_limit_exceeded')
     source=source.replace('\r\n','\n')
     if re.search(r'[\x00-\x09\x0b-\x1f\x7f-\x9f]',source): invalid(root,'unsupported_content')

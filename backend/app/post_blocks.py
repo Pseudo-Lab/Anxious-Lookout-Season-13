@@ -172,20 +172,37 @@ def format_changes(base, candidate):
     by_id = {n['id']:n for n in left}; used = set(); changes = []
     buckets = defaultdict(list)
     for node in left: buckets[(node.get('type'),project_node(node))].append(node)
-    positions = {n['id']:i for i,n in enumerate(left)}
+    # Reserve all exact-ID matches before fallback, including IDs appearing
+    # later in the candidate. Each source node can be consumed only once.
+    reserved = set(by_id) & {n['id'] for n in right}
+    right_counts = Counter((n.get('type'),project_node(n)) for n in right if n['id'] not in reserved)
+    def locations(document):
+        result = {}
+        def walk(children, parent, field):
+            for index, child in enumerate(children):
+                result[child['id']] = (parent,field,index)
+                for key in CHILDREN: walk(child.get(key,[]),child['id'],key)
+        walk(document['blocks'],None,'blocks')
+        return result
+    old_locations, new_locations = locations(base), locations(candidate)
     def local(node): return {k:v for k,v in node.items() if k not in (*CHILDREN,'id')}
     for i,node in enumerate(right):
-        old = by_id.get(node['id']); ambiguous = False
+        old = by_id.get(node['id']) if node['id'] not in used else None; ambiguous = False
         if old is None:
-            matches = [n for n in buckets[(node.get('type'),project_node(node))] if n['id'] not in used]
-            if matches: old=matches[0]; ambiguous=len(matches)>1
+            key = (node.get('type'),project_node(node))
+            matches = [n for n in buckets[key] if n['id'] not in used and n['id'] not in reserved]
+            if matches: old=matches[0]; ambiguous=len(matches)>1 or right_counts[key]>1
         if old is None:
             changes.append({'baseBlockId':None,'candidateBlockId':node['id'],'kind':'added','changedProperties':['structure']}); continue
         used.add(old['id']); a,b = local(old),local(node)
         keys = sorted(k for k in a.keys()|b.keys() if a.get(k)!=b.get(k))
-        moved = positions[old['id']] != i
+        old_location, new_location = old_locations[old['id']], new_locations[node['id']]
+        reparented = old_location[:2] != new_location[:2]
+        moved = old_location[2] != new_location[2]
+        if reparented: keys.append('parent')
+        if moved: keys.append('position')
         if keys or moved or ambiguous:
-            kind = 'ambiguous' if ambiguous else 'layout' if any(k in keys for k in ('width','type','ordered','start')) else 'moved' if moved else 'format-only'
+            kind = 'ambiguous' if ambiguous else 'layout' if reparented or any(k in keys for k in ('width','type','ordered','start')) else 'moved' if moved else 'format-only'
             changes.append({'baseBlockId':old['id'],'candidateBlockId':node['id'],'kind':kind,'changedProperties':keys or ['structure']})
     for node in left:
         if node['id'] not in used: changes.append({'baseBlockId':node['id'],'candidateBlockId':None,'kind':'removed','changedProperties':['structure']})

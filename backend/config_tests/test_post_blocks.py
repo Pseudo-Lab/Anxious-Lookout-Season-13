@@ -56,3 +56,26 @@ def test_format_changes_target_move_add_remove():
     assert any(x['kind']=='moved' for x in format_changes(a,b))
     b['blocks'].pop()
     assert any(x['kind']=='removed' for x in format_changes(a,b))
+
+def test_equal_projection_reparent_reports_layout():
+    from copy import deepcopy
+    p=G['valid'][0]['input']['blocks'][0]
+    a={**deepcopy(p),'id':'00000000-0000-0000-0000-000000000011','runs':[{'text':'one','marks':[]}]}
+    b={**deepcopy(p),'id':'00000000-0000-0000-0000-000000000012','runs':[{'text':'two','marks':[]}]}
+    q={'id':'00000000-0000-0000-0000-000000000013','type':'quote','blocks':[a,b]}
+    base=canonicalize({'format':'post-blocks','version':1,'blocks':[q]})
+    candidate=canonicalize({'format':'post-blocks','version':1,'blocks':[{**q,'blocks':[a]},b]})
+    assert text_projection(base)==text_projection(candidate)
+    assert any(c['candidateBlockId']==b['id'] and c['kind']=='layout' and 'parent' in c['changedProperties'] for c in format_changes(base,candidate))
+
+def test_exact_ids_reserved_before_duplicate_fallback():
+    from copy import deepcopy
+    base=canonicalize(G['valid'][3]['input']); original=base['blocks'][0]
+    new={**deepcopy(original),'id':'00000000-0000-0000-0000-000000000999'}
+    candidate={**base,'blocks':[new,original]}
+    changes=format_changes(base,candidate)
+    assert any(c['candidateBlockId']==new['id'] and c['kind']=='added' for c in changes)
+    assert len([c for c in changes if c['baseBlockId']==original['id']])==1
+    base={**base,'blocks':[original,new]}
+    other={**deepcopy(original),'id':'00000000-0000-0000-0000-000000000888'}
+    assert format_changes(base,{**base,'blocks':[other]})[0]['kind']=='ambiguous'

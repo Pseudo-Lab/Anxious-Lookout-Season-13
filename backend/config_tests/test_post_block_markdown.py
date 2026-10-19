@@ -30,3 +30,12 @@ def test_structural_images_only_and_unsupported_no_flatten():
     assert image_ids(doc)==[value]
     for bad in ('- one\n\n  two', 'text ![x](/api/media/post-images/'+value+')', '<div>x</div>', '{danger()}', '```python\n\tbad\n```'):
         with pytest.raises(ResearchError): convert(bad,'seed')
+
+def test_surrogate_is_safe_contract_error_and_non_bmp_is_preserved():
+    with pytest.raises(ResearchError) as caught: convert(json.loads('"\\ud800"'),'seed')
+    assert caught.value.code=='unsupported_content'
+    assert caught.value.status==422
+    assert caught.value.details['path']=='/contentInput/text'
+    assert '\ud800' not in str(caught.value.__dict__)
+    document,_=convert('한글 😀 𝄞','seed')
+    assert text_projection(document)=='한글 😀 𝄞'
