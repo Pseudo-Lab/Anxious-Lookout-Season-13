@@ -27,7 +27,22 @@ const pageErrors = [];
 const context = await browser.newContext();
 const page = await context.newPage();
 page.on("pageerror", (e) => pageErrors.push(e.message));
-page.on("dialog", (d) => void d.accept());
+// 대화상자는 기본으로 수락한다. dismissNext면 다음 하나만 취소한다(떠날 때 확인에서 "머무르기" 선택).
+let dismissNext = false;
+const dialogsSeen = [];
+page.on("dialog", (d) => {
+  dialogsSeen.push(d.type());
+  if (dismissNext) {
+    dismissNext = false;
+    void d.dismiss();
+  } else void d.accept();
+});
+const leaveGuarded = () =>
+  page.evaluate(() => {
+    const e = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  });
 const main = page.locator("main");
 const chat = page.locator("#chat-panel");
 
@@ -322,14 +337,47 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   });
   const atRest = await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }));
   check("WP3c. M3: the unsaved body is never written to browser storage", !atRest.includes("민감한표식"));
-  // 새로고침은 메모리 버퍼를 지우므로 떠날 때 확인으로 막는다(위 beforeunload 검사)
   check("WP3c. M1: server draft still the last valid body after leaving", (await api.get(`/research/post-drafts/${validDraft}`)).textProjection === "kept-valid");
+  // round4: 편집기를 떠난 글 목록에서도(편집기 unmount) 버퍼가 남아 있는 동안 새로고침·닫기 전에 확인한다
+  await main.getByRole("link", { name: "← 내 글" }).click();
+  await page.waitForURL(U("/write/"));
+  await bodyBox().waitFor({ state: "detached" });
+  check("WP3c. round4: on the post list (editor gone) leaving still asks while the buffer exists", await leaveGuarded());
+  // 실제 새로고침에서 "머무르기"를 고르면 이동하지 않고 버퍼가 남는다
+  const before = dialogsSeen.length;
+  dismissNext = true;
+  await page.reload({ timeout: 5000 }).catch(() => {});
+  dismissNext = false;
+  check("WP3c. round4: real reload shows the leave dialog", dialogsSeen.slice(before).includes("beforeunload"), JSON.stringify(dialogsSeen.slice(before)));
+  await page.goBack();
+  await page.waitForURL(/\/write\/new\/\?draft=/);
+  check("WP3c. round4: after cancelling the leave, the unsaved body is still restored", await restoredOk());
   await writeBody(["kept-valid 고침"]);
   check("WP3c. M1: fixing the body lifts the block", (await reason.count()) === 0 && !(await main.getByRole("button", { name: "글 저장" }).isDisabled()));
   await main.getByRole("button", { name: "글 저장" }).click();
   await page.waitForURL(/\/write\/\?id=/);
   const fixed = await api.get(`/research/posts/${idParam()}`);
   check("WP3c. M1: saved version equals what the screen showed", fixed.latestVersion.textProjection === "kept-valid 고침", JSON.stringify(fixed.latestVersion.textProjection));
+  check("WP3c. round4: after fixing and saving, leaving no longer asks", !(await leaveGuarded()));
+}
+
+// WP3d. round4: 저장 못 한 본문을 남긴 채 떠났다가 돌아와 초안을 버리면(명시적 폐기) 떠날 때 확인도 풀린다
+{
+  await page.goto(U("/write/new/"));
+  await main.getByLabel("제목").fill("버릴 상한 초안");
+  await writeBody(["discard-base"]);
+  await saved();
+  await page.keyboard.insertText("x".repeat(20001));
+  await main.getByText("저장할 수 있는 크기·개수 상한을 넘었습니다", { exact: false }).waitFor();
+  await main.getByRole("link", { name: "← 내 글" }).click();
+  await page.waitForURL(U("/write/"));
+  await page.goBack();
+  await page.waitForURL(/\/write\/new\/\?draft=/);
+  await main.getByText("저장할 수 있는 크기·개수 상한을 넘었습니다", { exact: false }).waitFor();
+  await main.getByRole("button", { name: "초안 버리기…" }).click();
+  await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+  await main.getByText("초안을 버렸습니다").waitFor();
+  check("WP3d. round4: explicit discard releases the leave confirmation", !(await leaveGuarded()));
 }
 
 // WP4. #31: 자료만 바탕으로 한 글, 보관 자료 제외, 문서 해제 뒤에도 자료 유지, 요약 없는 글의 목록 발췌(W2)

@@ -1,6 +1,6 @@
 // #32 리뷰 M3: 저장하지 못한 본문 버퍼는 지금 계정의 메모리에만 있고, 로그아웃·계정 전환 뒤에는 남지 않는다.
 import { describe, expect, it } from "vitest";
-import { bufferTarget, clearAllBodyBuffers, loadBodyBuffer, saveBodyBuffer, setBodyBufferOwner } from "./bodyBuffer";
+import { bufferTarget, clearAllBodyBuffers, clearBodyBuffer, hasBodyBuffers, loadBodyBuffer, saveBodyBuffer, setBodyBufferOwner } from "./bodyBuffer";
 
 const buf = (text: string) => ({ revision: 1, editor: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text }] }] } });
 
@@ -37,6 +37,17 @@ describe("body buffer ownership", () => {
     saveBodyBuffer("A", "d1", buf("kept"));
     setBodyBufferOwner("A");
     expect(loadBodyBuffer("A", "d1")).not.toBeNull();
+  });
+
+  it("reports whether any buffer (and so the leave confirmation) is held", () => {
+    setBodyBufferOwner("A");
+    saveBodyBuffer("A", "d1", buf("x"));
+    expect(hasBodyBuffers()).toBe(true);
+    clearBodyBuffer("A", "d1");
+    expect(hasBodyBuffers()).toBe(false);
+    saveBodyBuffer("A", "d1", buf("x"));
+    clearAllBodyBuffers();
+    expect(hasBodyBuffers()).toBe(false);
   });
 
   it("targets: draft id, post without draft, new post", () => {
