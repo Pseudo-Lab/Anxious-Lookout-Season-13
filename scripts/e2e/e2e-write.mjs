@@ -277,6 +277,36 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   await main.getByText("초안을 버렸습니다").waitFor();
 }
 
+// WP3c. 리뷰 M1: 상한을 넘은 본문(화면 입력 ≠ 저장 가능한 본문)은 고칠 때까지 새 글 저장을 막고, 떠날 때 확인한다.
+//        서버 초안은 마지막 유효 본문이며, 고친 뒤 저장한 버전은 화면에 보이던 본문과 같다.
+{
+  await page.goto(U("/write/new/"));
+  await main.getByLabel("제목").fill("상한 회귀");
+  await writeBody(["kept-valid"]);
+  await saved();
+  const validDraft = await draftParam();
+  await page.keyboard.insertText("x".repeat(20001));
+  const reason = main.getByText("저장할 수 있는 크기·개수 상한을 넘었습니다", { exact: false });
+  check("WP3c. M1: over-limit body shows the reason", await appears(reason));
+  check("WP3c. M1: save blocked while the body is invalid", await main.getByRole("button", { name: "글 저장" }).isDisabled());
+  check("WP3c. M1: explicit discard stays available", !(await main.getByRole("button", { name: "초안 버리기…" }).isDisabled()));
+  const prevented = await page.evaluate(() => {
+    const e = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  });
+  check("WP3c. M1: leaving the page asks for confirmation", prevented);
+  const kept = await api.get(`/research/post-drafts/${validDraft}`);
+  check("WP3c. M1: server draft keeps the last valid body (not the over-limit input)", kept.textProjection === "kept-valid", JSON.stringify(kept.textProjection?.slice(0, 40)));
+  await page.keyboard.press("Control+z");
+  await page.keyboard.type(" 고침");
+  check("WP3c. M1: fixing the body lifts the block", (await reason.count()) === 0 && !(await main.getByRole("button", { name: "글 저장" }).isDisabled()));
+  await main.getByRole("button", { name: "글 저장" }).click();
+  await page.waitForURL(/\/write\/\?id=/);
+  const fixed = await api.get(`/research/posts/${idParam()}`);
+  check("WP3c. M1: saved version equals what the screen showed", fixed.latestVersion.textProjection === "kept-valid 고침", JSON.stringify(fixed.latestVersion.textProjection));
+}
+
 // WP4. #31: 자료만 바탕으로 한 글, 보관 자료 제외, 문서 해제 뒤에도 자료 유지, 요약 없는 글의 목록 발췌(W2)
 {
   const docB = (await api.send("POST", "/research/documents", { title: "바탕 문서 B", content: "문서 B" })).body;

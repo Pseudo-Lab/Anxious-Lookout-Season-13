@@ -1,8 +1,8 @@
 // #32 post-blocks v1 <-> 편집기(Tiptap JSON) 변환. 편집기 내부 JSON은 저장하지 않는다.
 // - toEditor: canonical 문서(parseBlockDocument 결과)를 편집기 내용으로. id·속성을 그대로 옮긴다.
 // - fromEditor: 편집기 내용을 계약 형태로 옮긴 뒤 parseBlockDocument로 검사·정규화한다(run 병합·mark 순서·기본값).
-// run.text의 LF는 편집기에서 hardBreak다. hardBreak에는 그 run의 marks를 실어 왕복해도 run 경계가 바뀌지 않게 하고,
-// mark 없는 hardBreak(사용자가 Shift+Enter로 넣은 것)는 앞 run에 붙인다.
+// run.text의 LF는 편집기에서 hardBreak다. hardBreak에는 그 run의 marks를 실어 왕복해도 run 경계·서식이 바뀌지 않는다
+// (편집기에서 새로 넣는 줄바꿈은 넣는 위치의 marks를 받는다, schema.ts PostHardBreak).
 
 import { parseBlockDocument, type ParseResult } from "./document";
 import {
@@ -132,13 +132,9 @@ function runsOf(n: EditorNode): Run[] {
         if (m.attrs?.color) marks.push({ color: String(m.attrs.color) });
       } else marks.push(m.type as Mark);
     }
+    // 줄바꿈은 그 노드 자신의 marks·link를 가진 "\n" run이다(같은 서식의 인접 run은 검사 단계에서 합쳐진다)
     const text = c.type === "text" ? (c.text ?? "") : c.type === "hardBreak" ? "\n" : "";
     if (!text) continue;
-    const prev = runs[runs.length - 1];
-    if (c.type === "hardBreak" && !(c.marks ?? []).length && prev) {
-      prev.text += "\n";
-      continue;
-    }
     runs.push(link === undefined ? { text, marks } : { text, marks, link });
   }
   return runs;

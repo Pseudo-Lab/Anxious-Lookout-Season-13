@@ -151,3 +151,24 @@ export function formatChanges(base: BlockDocument, candidate: BlockDocument): Fo
   for (const n of left) if (!used.has(n.id)) changes.push({ baseBlockId: n.id, candidateBlockId: null, kind: "removed", changedProperties: ["structure"] });
   return changes;
 }
+
+// run 서식 순서(marks·link). 글자만 바뀐 run과 서식·링크가 바뀐 run을 구분한다.
+const runStyle = (n: AnyNode | undefined) =>
+  n ? JSON.stringify(((n.runs as { marks: unknown; link?: string }[] | undefined) ?? []).map((r) => [r.marks, r.link ?? null])) : null;
+
+/**
+ * 서식·배치 목록에 보일 변화. 글자 변화는 줄 비교에 보이므로, 같은 블록에서 run의 서식 순서(marks·link)가 그대로이고
+ * 글자만 바뀐 경우(changedProperties가 runs뿐)만 뺀다. 링크 대상·서식이 함께 바뀌었으면 글자 변화가 있어도 남긴다.
+ */
+export function formattingChanges(before: BlockDocument, after: BlockDocument, changes: FormatChange[]): FormatChange[] {
+  const base = new Map(nodes(before).map((n) => [n.id, n]));
+  const cand = new Map(nodes(after).map((n) => [n.id, n]));
+  const textOnly = (c: FormatChange) => {
+    if (c.kind !== "format-only" || c.baseBlockId === null || c.candidateBlockId === null) return false;
+    if (!c.changedProperties.every((p) => p === "runs")) return false;
+    const a = base.get(c.baseBlockId);
+    const b = cand.get(c.candidateBlockId);
+    return !!a && !!b && runStyle(a) === runStyle(b) && project(a) !== project(b);
+  };
+  return changes.filter((c) => !textOnly(c));
+}

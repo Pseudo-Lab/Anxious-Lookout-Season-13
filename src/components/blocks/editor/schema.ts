@@ -125,6 +125,30 @@ const TextColor = Extension.create({
   },
 });
 
+// ---- 문단 안 줄바꿈(run.text의 LF). 줄바꿈 노드에 지금 위치의 marks를 그대로 싣는다. ----
+// adapter는 줄바꿈을 그 노드의 marks를 가진 "\n" run으로 옮기므로(앞 run에 붙이지 않는다), 굵은 글자 안에서 넣은 줄바꿈은
+// 굵은 run 안에 남고, 서식 없는 줄바꿈은 서식 없이 남는다. 이미지·영상 설명 안에서도 줄바꿈을 넣을 수 있다(계약 caption LF).
+const PostHardBreak = HardBreak.extend({
+  addCommands() {
+    return {
+      setHardBreak:
+        () =>
+        ({ state, tr, dispatch, commands }) => {
+          const { selection, storedMarks, schema } = state;
+          if (selection.$from.parent.type.spec.code) return commands.exitCode();
+          // 링크는 줄바꿈으로 이어지지 않는다(inclusive=false와 같게)
+          const marks = (storedMarks ?? selection.$from.marks()).filter((m) => m.type.name !== "link");
+          if (dispatch) {
+            tr.replaceSelectionWith(schema.nodes.hardBreak.create(null, null, marks), false);
+            tr.setStoredMarks(marks);
+            tr.scrollIntoView();
+          }
+          return true;
+        },
+    };
+  },
+});
+
 // ---- 단 배치(columns > column). 2~3단, width는 1~4 가중치. ----
 const Columns = Node.create({
   name: "columns",
@@ -467,7 +491,7 @@ export function blockExtensions({ placeholder = "", onReject }: SchemaOptions = 
       },
     }).configure({ defaultLanguage: "plain", enableTabIndentation: true, tabSize: 2 }),
     HorizontalRule.extend({ group: "block flow" }),
-    HardBreak,
+    PostHardBreak,
     Bold,
     Italic,
     Underline,

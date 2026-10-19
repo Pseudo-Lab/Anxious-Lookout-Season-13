@@ -1,6 +1,6 @@
 "use client";
 
-import { formatChanges as localChanges, textProjection, type FormatChange } from "@/lib/blocks/projection";
+import { formatChanges as localChanges, formattingChanges, textProjection, type FormatChange } from "@/lib/blocks/projection";
 import type { BlockDocument } from "@/lib/blocks/types";
 import TextDiff from "@/components/research/TextDiff";
 
@@ -56,8 +56,8 @@ export default function BodyDiff({
   const list = changes ?? localChanges(before, after);
   const beforeText = textProjection(before);
   const afterText = textProjection(after);
-  // 글자 변화는 줄 비교에 보이므로, 목록에는 글자 외 속성이 바뀐 곳과 구조 변화만 따로 적는다
-  const formatting = list.filter((c) => c.kind !== "format-only" || c.changedProperties.some((p) => p !== "runs") || beforeText === afterText);
+  // 글자만 바뀐 곳은 줄 비교에 보이므로 빼고, 서식·링크·배치·구조 변화는 글자 변화가 함께 있어도 남긴다
+  const formatting = formattingChanges(before, after, list);
   return (
     <div className="space-y-2">
       <TextDiff before={beforeText} after={afterText} beforeTitle={beforeTitle} afterTitle={afterTitle} />

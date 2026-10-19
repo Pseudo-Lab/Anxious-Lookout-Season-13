@@ -68,8 +68,9 @@ wait_file() {
 
 $OFF down --volumes >/dev/null 2>&1 || true
 $BASE up -d db mock-github
-# #22 서버 초안·제안(0005_writing), #28 글·발행·이미지(0006_posts)까지 적용한다(compose 기본 migrate는 0004).
-$BASE run --rm migrate python -m app.migrate --revision 0006_posts
+# #22 서버 초안·제안(0005_writing), #28 글·발행·이미지(0006_posts), #32 블록 본문 이관(0007_post_blocks)까지 적용한다
+# (compose 기본 migrate는 0004). 0007은 seed 글을 블록 문서로 바꾸며, 새 runtime은 0007이 없으면 글 API를 열지 않는다.
+$BASE run --rm migrate python -m app.migrate --revision 0007_post_blocks
 $BASE up -d api web gateway
 wait_ready
 echo "== base stack ready"

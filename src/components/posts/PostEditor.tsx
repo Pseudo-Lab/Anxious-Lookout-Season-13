@@ -13,9 +13,10 @@ import { formatDateTime } from "@/lib/research/format";
 import { LIMITS } from "@/lib/research/types";
 import { StatusLine, isReason } from "@/components/research/DocumentEditor";
 import ErrorNotice from "@/components/research/ErrorNotice";
+import type { BlockError } from "@/lib/blocks/document";
 import { hasVisibleContent } from "@/lib/blocks/projection";
 import BodyDiff from "@/components/blocks/BodyDiff";
-import PostBodyEditor from "@/components/blocks/PostBodyEditor";
+import PostBodyEditor, { blockProblemText } from "@/components/blocks/PostBodyEditor";
 import { Field, inputClass } from "@/components/research/ItemForms";
 import Notice from "@/components/research/Notice";
 import DocumentLinks from "./DocumentLinks";
@@ -107,6 +108,15 @@ export default function PostEditor({
   const [panelUploading, setPanelUploading] = useState(false);
   const [bodyUploading, setBodyUploading] = useState(false);
   const uploading = panelUploading || bodyUploading;
+  // 화면의 본문이 계약을 넘어(상한 등) 마지막 유효 본문만 저장된 상태. 고칠 때까지 새 버전 저장·보관 닫기를 막는다(리뷰 M1).
+  const [bodyProblem, setBodyProblem] = useState<BlockError | null>(null);
+  useEffect(() => {
+    if (!bodyProblem) return;
+    // 떠나면 화면의 입력(저장되지 않은 본문)을 잃으므로 브라우저 확인을 띄운다
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [bodyProblem]);
 
   // 바탕이 된 자료(#31 W3). 문서를 연결하면 그 문서가 가리키는 자료를 서버에 물어 선택에 더한다(선택은 언제나 명시 materialIds).
   // 자료를 찾는 동안에도 저장·닫기·버리기를 잠근다(결과가 저장된 버전 밖에 남지 않게).
@@ -224,6 +234,10 @@ export default function PostEditor({
   async function commit(): Promise<boolean> {
     setFailure(null);
     setNote(null);
+    if (bodyProblem) {
+      setNote(`본문을 고친 뒤 저장하세요. ${blockProblemText(bodyProblem)}`);
+      return false;
+    }
     const problem = textProblem(values);
     if (problem) {
       setNote(problem);
@@ -289,6 +303,10 @@ export default function PostEditor({
   }
 
   async function close(): Promise<boolean> {
+    if (bodyProblem) {
+      setNote("저장할 수 없는 본문이 화면에 있어 닫지 않았습니다. 본문을 고치거나 초안을 버리세요.");
+      return false;
+    }
     const flushed = await editor.flush();
     if (flushed.ok) {
       onClose?.();
@@ -360,6 +378,7 @@ export default function PostEditor({
           bodyEditor.current = e;
         }}
         onUploading={setBodyUploading}
+        onProblem={setBodyProblem}
         readOnly={locked}
       />
       {locked && (
@@ -461,13 +480,13 @@ export default function PostEditor({
         <button
           type="button"
           onClick={() => void finish("commit", commit)}
-          disabled={busy || locked || pending || status.kind === "conflict"}
+          disabled={busy || locked || pending || !!bodyProblem || status.kind === "conflict"}
           className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
         >
           {finishing === "commit" ? "저장 중..." : post ? (contentMoved && comparing ? "비교했고 이 내용으로 저장" : "새 버전으로 저장") : "글 저장"}
         </button>
         {onClose && (
-          <button type="button" onClick={() => void finish("close", close)} disabled={busy || locked || pending} className="rounded-lg px-4 py-2 text-sm text-stone-600 hover:bg-stone-100">
+          <button type="button" onClick={() => void finish("close", close)} disabled={busy || locked || pending || !!bodyProblem} className="rounded-lg px-4 py-2 text-sm text-stone-600 hover:bg-stone-100">
             편집 닫기(초안 보관)
           </button>
         )}

@@ -7,7 +7,7 @@ import { Node as PMNode } from "@tiptap/pm/model";
 import { blockExtensions } from "@/components/blocks/editor/schema";
 import { fromEditor, toEditor, type EditorNode } from "./adapter";
 import { BLOCK_LIMITS, canonicalBytes, isAllowedLink, parseBlockDocument } from "./document";
-import { formatChanges, hasVisibleContent, imageIds, textProjection } from "./projection";
+import { formatChanges, formattingChanges, hasVisibleContent, imageIds, textProjection } from "./projection";
 import type { BlockDocument } from "./types";
 
 interface Golden {
@@ -159,6 +159,23 @@ describe("links and visible content", () => {
     expect(formatChanges(canonical(doc([list(100)])), canonical(doc([list(200)])))).toEqual([]);
   });
 
+  // 리뷰 M2: 다른 문단의 글자가 바뀌어도, 글자가 같은 문단의 링크 대상 변경은 서식 목록에 남는다
+  it("keeps link/mark changes next to unrelated text edits; drops pure text edits", () => {
+    const base = canonical(doc([
+      { id: ID(1), type: "paragraph", runs: [{ text: "link", marks: [], link: "https://old.example/" }] },
+      { id: ID(2), type: "paragraph", runs: [{ text: "before", marks: [] }] },
+      { id: ID(3), type: "paragraph", runs: [{ text: "굵게 ", marks: ["bold"] }, { text: "보통", marks: [] }] },
+    ]));
+    const cand = canonical(doc([
+      { id: ID(1), type: "paragraph", runs: [{ text: "link", marks: [], link: "https://new.example/" }] },
+      { id: ID(2), type: "paragraph", runs: [{ text: "after", marks: [] }] },
+      { id: ID(3), type: "paragraph", runs: [{ text: "굵게 바뀜", marks: [] }] },
+    ]));
+    const shown = formattingChanges(base, cand, formatChanges(base, cand));
+    // 1: 링크 대상만 바뀜(남김), 2: 글자만 바뀜(뺌), 3: 글자와 함께 굵게가 빠짐(남김)
+    expect(shown.map((c) => c.candidateBlockId)).toEqual([ID(1), ID(3)]);
+  });
+
   it("moving a block keeps its id and reports a move, not remove+add", () => {
     const a = para([{ text: "A", marks: [] }]);
     const b = para([{ text: "B", marks: [] }]);
@@ -168,7 +185,7 @@ describe("links and visible content", () => {
 });
 
 describe("editor adapter details", () => {
-  it("hard breaks without marks join the previous run; bold text across a break stays one run", () => {
+  it("an unmarked hard break between bold texts is its own unmarked LF run (not merged into bold)", () => {
     const editor: EditorNode = {
       type: "doc",
       content: [
@@ -184,7 +201,27 @@ describe("editor adapter details", () => {
       ],
     };
     const r = fromEditor(editor);
-    expect(r.ok && r.doc.blocks[0]).toEqual({ id: ID(1), type: "paragraph", align: "left", runs: [{ text: "a\nb", marks: ["bold"] }] });
+    expect(r.ok && r.doc.blocks[0]).toEqual({
+      id: ID(1),
+      type: "paragraph",
+      align: "left",
+      runs: [
+        { text: "a", marks: ["bold"] },
+        { text: "\n", marks: [] },
+        { text: "b", marks: ["bold"] },
+      ],
+    });
+  });
+
+  // 리뷰 M3: 서식 없는 줄바꿈을 앞 run의 서식으로 바꾸지 않는다(서버가 받은 본문이 왕복 뒤 저장 불가가 되지 않게)
+  it.each([
+    ["unmarked LF after bold stays unmarked", [{ text: "bold", marks: ["bold"] }, { text: "\nplain", marks: [] }]],
+    ["LF with different marks keeps them", [{ text: "a", marks: ["bold"] }, { text: "\n", marks: ["italic"] }, { text: "b", marks: ["bold"] }]],
+    ["linked text then unlinked LF", [{ text: "link", marks: [], link: "https://example.com/" }, { text: "\nafter", marks: [] }]],
+    ["20000-char bold run next to an unmarked LF run (boundary)", [{ text: "b".repeat(20000), marks: ["bold"] }, { text: "\nplain", marks: [] }]],
+  ])("%s round-trips unchanged", (_name, runs) => {
+    const d = canonical(doc([{ id: ID(1), type: "paragraph", runs }]));
+    expect(viaEditor(d)).toEqual(d);
   });
 
   it("a marked line break run keeps its own marks", () => {

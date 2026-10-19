@@ -19,6 +19,13 @@ function check(name, ok, detail = "") {
 }
 const setMock = (q) => fetch(`${ORIGIN}/__mock/set?${q}`).then((r) => r.json());
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+// WebKit은 페이지를 떠날 때 끊긴 같은 origin 요청(RSC prefetch·상태 조회 등)을 "… due to access control checks." pageerror로 남긴다.
+// 탐색 구간(홈 → lab 이동) 안에서 생긴 이 형태의 같은 origin 오류만 탐색 오류로 분류한다.
+const ORIGIN_HOST = new URL(ORIGIN).host;
+const isLeaveCancel = (msg) => {
+  const m = /^(\S+) due to access control checks\.?$/.exec(msg);
+  return !!m && m[1].replace(/^\/+/, "").startsWith(ORIGIN_HOST);
+};
 const YT_HOSTS = /(^|\.)(youtube\.com|youtube-nocookie\.com|youtu\.be|ytimg\.com|googlevideo\.com|ggpht\.com)$/;
 
 // ---- 문서 JSON 도우미 ----
@@ -225,6 +232,18 @@ await page.keyboard.press("Shift+Enter");
 await typeKo("아랫줄");
 d = await H.doc();
 check("K9. Shift+Enter inserts an in-paragraph line break", blocks(d).length === 1 && textOf(blocks(d)[0]) === "윗줄\n아랫줄", JSON.stringify(textOf(blocks(d)[0] ?? {})));
+
+// K10. 굵게 안에서 넣은 줄바꿈은 굵은 run 안에 남는다(줄바꿈 노드가 넣는 위치의 marks를 받는다, 리뷰 M3)
+await H.fresh();
+await page.keyboard.press("Control+b");
+await typeKo("윗줄");
+await page.keyboard.press("Shift+Enter");
+await typeKo("아랫줄");
+{
+  const b = await H.blocks();
+  const runs = b.doc?.blocks?.[0]?.runs ?? [];
+  check("K10. Shift+Enter inside bold keeps one bold run with LF", runs.length === 1 && runs[0].text === "윗줄\n아랫줄" && runs[0].marks.join() === "bold", JSON.stringify(runs));
+}
 
 // S1. 목록 4단계 이상은 거절(조용히 고치지 않고 안내)
 await H.fresh();
@@ -454,13 +473,20 @@ for (const [name, type] of [["webkit", webkit], ["firefox", firefox]]) {
   const ctx = await b.newContext();
   const p = await ctx.newPage();
   const errs = [];
-  p.on("pageerror", (e) => errs.push(e.message));
+  p.on("pageerror", (e) => errs.push({ msg: e.message, at: Date.now() }));
   const h = harness(p);
   await login(p);
+  // 안정화: 로그인 뒤 홈의 prefetch·상태 조회가 잦아든 뒤에 lab으로 옮긴다
+  await p.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
+  const leaveStart = Date.now();
   await h.fresh();
-  // 로그인 홈에서 lab으로 옮길 때 WebKit이 취소된 RSC prefetch(/posts·/tags ?_rsc)를 pageerror로 남긴다(편집기 이전 단계).
-  // 편집기와 무관한 기존 탐색 동작이라 숨기지 않고 정보로만 출력하며, 편집기를 연 뒤의 오류는 그대로 실패로 센다.
-  if (errs.length) console.log(`INFO  ${name}: page errors before the editor (navigation from home): ${errs.slice(0, 2).join(" | ")}`);
+  const leaveEnd = Date.now();
+  // 진단: 탐색 구간 안의 같은 origin 끊긴 요청 오류만 탐색 오류로 정보 출력한다. 그 밖의 오류는 단계와 관계없이 실패로 센다.
+  const inLeave = (e) => e.at >= leaveStart && e.at <= leaveEnd && isLeaveCancel(e.msg);
+  const navigation = errs.filter(inLeave).map((e) => e.msg);
+  const before = errs.filter((e) => !inLeave(e)).map((e) => e.msg);
+  if (navigation.length) console.log(`INFO  ${name}: ${navigation.length} same-origin request(s) cut off while leaving home: ${navigation.slice(0, 2).join(" | ")}`);
+  check(`W. ${name}: no non-navigation page errors before the editor`, before.length === 0, before.slice(0, 2).join(" | "));
   errs.length = 0;
   await p.keyboard.insertText("한글 입력");
   await p.keyboard.press("Enter");
@@ -472,7 +498,7 @@ for (const [name, type] of [["webkit", webkit], ["firefox", firefox]]) {
   const dd = await h.doc();
   const bs = blocks(dd);
   check(`W. ${name}: Korean insertText, paragraph split, list nesting`, textOf(bs[0] ?? {}) === "한글 입력" && bs[1]?.type === "bulletList" && listDepth(dd) === 2, `${bs.map((x) => x.type).join(",")} depth=${listDepth(dd)}`);
-  check(`W. ${name}: no page errors while editing`, errs.length === 0, errs.slice(0, 2).join(" | "));
+  check(`W. ${name}: no page errors while editing`, errs.length === 0, errs.slice(0, 2).map((e) => e.msg).join(" | "));
   await b.close();
 }
 

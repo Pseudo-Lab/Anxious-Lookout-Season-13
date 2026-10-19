@@ -217,6 +217,7 @@ check("J. post detail shows like/comment 준비 중", await appears(page.getByTe
   // #32 블록 본문: HTML처럼 보이는 글자도 텍스트 노드로만 그린다
   check("P. HTML-looking text stays text", (await page.locator("article b").count()) === 0 && (await page.locator("article").innerText()).includes("<b>raw html</b>은 렌더하지 않습니다."));
   check("P. no image loaded for a post without own images", (await page.locator("article img").count()) === 0);
+  check("P. #32: migrated block body renders without a format error", (await page.locator("article [role=alert]").count()) === 0 && (await page.locator("article .prose h2").count()) === 1);
   check("P. tab title from post", (await page.title()).startsWith("개발자를 위한 Docker 기초"), await page.title());
   await page.goto(U("/posts/understanding-transformer-architecture/"));
   await page.locator("article table").first().waitFor();
