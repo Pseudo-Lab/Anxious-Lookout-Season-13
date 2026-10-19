@@ -71,7 +71,16 @@ function harness(page) {
     tb,
     async fresh() {
       // load는 전역 폰트 CDN 응답에 묶여 있어 기다리지 않는다(편집기 표시를 기다린다)
-      await page.goto(NEW, { waitUntil: "domcontentloaded", timeout: 60000 });
+      // 앞 화면의 자동 저장 주소 교체(?draft=)가 진행 중이면 Firefox는 새 탐색을 NS_BINDING_ABORTED로 끊는다. 끊긴 탐색만 다시 한다.
+      for (let i = 0; ; i++) {
+        try {
+          await page.goto(NEW, { waitUntil: "domcontentloaded", timeout: 60000 });
+          break;
+        } catch (e) {
+          if (i >= 2 || !/ABORTED|interrupted by another navigation/i.test(String(e))) throw e;
+          await page.waitForTimeout(500);
+        }
+      }
       await editor.waitFor({ timeout: 15000 });
       await editor.click();
     },
@@ -94,6 +103,126 @@ function harness(page) {
       return { problem, doc: draft?.content ?? null };
     },
   };
+}
+
+
+// ---- #36 B1·B2: 목록 Backspace와 표 삽입 위치. Chromium·WebKit·Firefox에서 같은 순서로 확인한다. ----
+// 문서 모양을 짧은 문자열로: p(글), ul[항목,항목[ul[...]]], ol[...], quote{...}, cols{|}, table
+function outline(node) {
+  const kids = (n) => (n.content ?? []).map(outline).join(",");
+  switch (node.type) {
+    case "doc":
+      return (node.content ?? []).filter((b) => !(b.type === "paragraph" && !b.content)).map(outline).join(",");
+    case "paragraph":
+      return `p(${textOf(node)})`;
+    case "bulletList":
+    case "orderedList":
+      return `${node.type === "bulletList" ? "ul" : "ol"}[${(node.content ?? []).map((it) => textOf(it.content?.[0] ?? {}) + (it.content?.[1] ? `[${outline(it.content[1])}]` : "")).join(",")}]`;
+    case "blockquote":
+      return `quote{${kids(node)}}`;
+    case "columns":
+      return `cols{${(node.content ?? []).map(kids).join("|")}}`;
+    default:
+      return node.type;
+  }
+}
+async function editingRegressions(p, h, tag) {
+  const shape = async () => outline(await h.doc());
+  const kb = p.keyboard;
+  // B1a. 빈 마지막 항목: Backspace 1번은 항목 해제(문단), 2번은 앞 항목 끝에 합침. 표식이 새로 생기지 않는다
+  await h.fresh();
+  await kb.type("- a");
+  await kb.press("Enter");
+  await kb.press("Backspace");
+  const once = await shape();
+  await kb.press("Backspace");
+  await kb.type("Z");
+  check(`B1a. ${tag}: empty last item → paragraph → joins the previous item (no new marker)`, once === "ul[a]" && (await shape()) === "ul[aZ]", `${once} → ${await shape()}`);
+  // B1b. 번호 목록 마지막 항목
+  await h.fresh();
+  await kb.type("1. a");
+  await kb.press("Enter");
+  await kb.type("b");
+  await kb.press("Enter");
+  await kb.press("Backspace");
+  await kb.press("Backspace");
+  await kb.type("Z");
+  check(`B1b. ${tag}: ordered list, same two-step Backspace`, (await shape()) === "ol[a,bZ]", await shape());
+  // B1c. 가운데 항목 첫 글자에서: 해제하면 목록이 나뉘고, 다시 Backspace면 앞 항목에 합치며 목록이 다시 하나가 된다
+  await h.fresh();
+  await kb.type("- a");
+  await kb.press("Enter");
+  await kb.type("b");
+  await kb.press("Enter");
+  await kb.type("c");
+  await kb.press("ArrowUp");
+  await kb.press("Home");
+  await kb.press("Backspace");
+  const split = await shape();
+  await kb.press("Backspace");
+  check(`B1c. ${tag}: middle item lifts out, then joins back into one list`, split === "ul[a],p(b),ul[c]" && (await shape()) === "ul[ab,c]", `${split} → ${await shape()}`);
+  // B1d. 중첩 항목: 한 단계씩 올라간 뒤 문단이 되고, 마지막에는 가장 깊은 마지막 항목에 합친다
+  await h.fresh();
+  await kb.type("- a");
+  await kb.press("Enter");
+  await kb.press("Tab");
+  await kb.type("b");
+  await kb.press("Enter");
+  const steps = [];
+  for (let i = 0; i < 3; i++) {
+    await kb.press("Backspace");
+    steps.push(await shape());
+  }
+  await kb.type("Z");
+  check(`B1d. ${tag}: nested empty item outdents, becomes a paragraph, then joins the deepest last item`,
+    steps.join(" / ") === "ul[a[ul[b]],] / ul[a[ul[b]]] / ul[a[ul[b]]]" && (await shape()) === "ul[a[ul[bZ]]]", `${steps.join(" / ")} → ${await shape()}`);
+  // B1e. 단 안 목록
+  await h.fresh();
+  await h.tb.getByRole("combobox", { name: "단 나누기" }).selectOption({ label: "1:1" });
+  await kb.type("- a");
+  await kb.press("Enter");
+  await kb.press("Backspace");
+  await kb.press("Backspace");
+  await kb.type("Z");
+  check(`B1e. ${tag}: list inside a column behaves the same`, (await shape()) === "cols{ul[aZ]|p()}", await shape());
+  // B1f. 인용 안 목록
+  await h.fresh();
+  await kb.type("> ");
+  await kb.type("- a");
+  await kb.press("Enter");
+  await kb.press("Backspace");
+  await kb.press("Backspace");
+  await kb.type("Z");
+  check(`B1f. ${tag}: list inside a quote behaves the same`, (await shape()) === "quote{ul[aZ]}", await shape());
+  // B1g. 저장도 계약을 통과한다
+  const saved = await h.blocks();
+  check(`B1g. ${tag}: result saves as valid post-blocks`, saved.problem === 0 && saved.doc?.blocks?.[0]?.type === "quote", `problem=${saved.problem}`);
+
+  // B2. 표는 커서가 있는 블록 뒤에 들어간다(문서 맨 위가 아니다)
+  await h.fresh();
+  await kb.type("one");
+  await kb.press("Enter");
+  await kb.type("two");
+  await kb.press("Enter");
+  await kb.type("three");
+  await h.editor.getByText("two", { exact: true }).click();
+  await kb.press("End");
+  await h.tb.getByRole("button", { name: "표 넣기" }).click();
+  await kb.type("cell");
+  const mid = await shape();
+  check(`B2a. ${tag}: table goes right after the block with the cursor`, mid === "p(one),p(two),table,p(three)", mid);
+  const firstCell = (await h.doc()).content.find((b) => b.type === "table")?.content?.[0]?.content?.[0];
+  check(`B2a. ${tag}: cursor lands in the first cell`, textOf(firstCell ?? {}) === "cell", textOf(firstCell ?? {}));
+  await h.editor.getByText("three", { exact: true }).click();
+  await kb.press("End");
+  await h.tb.getByRole("button", { name: "표 넣기" }).click();
+  check(`B2b. ${tag}: table at the last block goes after it`, (await shape()) === "p(one),p(two),table,p(three),table", await shape());
+  await h.editor.getByText("one", { exact: true }).click();
+  await kb.press("Home");
+  await h.tb.getByRole("button", { name: "표 넣기" }).click();
+  check(`B2c. ${tag}: cursor at the start of a block still inserts after that block`, (await shape()) === "p(one),table,p(two),table,p(three),table", await shape());
+  const b2 = await h.blocks();
+  check(`B2d. ${tag}: saved as valid post-blocks`, b2.problem === 0 && (b2.doc?.blocks ?? []).filter((b) => b.type === "table").length === 3, `problem=${b2.problem}`);
 }
 
 // ======================= Chromium =======================
@@ -401,6 +530,35 @@ const img = blocks(d).find((b) => b.type === "postImage");
 const src = await H.editor.locator("figure[data-type=post-image] img").first().getAttribute("src").catch(() => null);
 check("I1. picked image uploads and inserts by imageId with alt from file name", /^[0-9a-f-]{36}$/.test(img?.attrs?.imageId ?? "") && img.attrs.alt === "사진" && src === `${BASE}/api/media/post-images/${img.attrs.imageId}`, JSON.stringify(img?.attrs));
 
+// F3. 이미지 폭: % 칸(반올림·10..100 제한)과 가장자리 손잡이 끌기. 끄는 동안이 아니라 놓을 때 한 번 저장한다
+{
+  const widthOf = async () => blocks(await H.doc()).find((b) => b.type === "postImage")?.attrs?.widthPercent;
+  const box = H.editor.getByLabel("이미지 폭(%)");
+  const setWidth = async (v) => {
+    await box.fill(v);
+    await box.press("Enter");
+  };
+  await setWidth("37.4");
+  const typed = await widthOf();
+  await setWidth("5");
+  const low = await widthOf();
+  await setWidth("250");
+  const high = await widthOf();
+  check("F3. width box rounds and clamps to 10..100", typed === 37 && low === 10 && high === 100, `${typed} ${low} ${high}`);
+  const handle = H.editor.getByTestId("image-resize");
+  const hb = await handle.boundingBox();
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(hb.x - 60, hb.y + hb.height / 2, { steps: 5 });
+  const during = await widthOf();
+  await page.mouse.move(hb.x - 120, hb.y + hb.height / 2, { steps: 5 });
+  await page.mouse.up();
+  const dragged = await widthOf();
+  check("F3. dragging the handle changes the width once, on release, as an integer %", during === 100 && Number.isInteger(dragged) && dragged >= 10 && dragged < 100, `during=${during} after=${dragged}`);
+  const saved = await H.blocks();
+  check("F3. saved image width equals the editor value", saved.problem === 0 && saved.doc?.blocks?.find((b) => b.type === "image")?.widthPercent === dragged, JSON.stringify(saved.doc?.blocks?.map((b) => b.widthPercent)));
+}
+
 // I2. 이미지 파일 붙여넣기
 await H.fresh();
 await page.evaluate((b64) => {
@@ -449,6 +607,27 @@ check("A1. mixed editor output is saved as valid post-blocks (LF run, nested lis
   `problem=${a1.problem} types=${a1types}`);
 
 check("Y*. no request to YouTube/ytimg/googlevideo hosts during editing", external.length === 0, external.slice(0, 3).join(" "));
+
+await editingRegressions(page, H, "chromium");
+
+// G1·G2. #36 계약 revision 선언: 모든 본문 저장이 X-Post-Contract-Revision을 보냈다. 서버가 더 새 revision을 요구하면(409)
+// 자동 저장을 멈추고 새로고침을 안내하며, 저장·닫기를 막고 입력은 화면에 남긴다(초안을 만들지 않는다).
+{
+  const counts = () => fetch(`${ORIGIN}/__mock/counts`).then((r) => r.json());
+  check("G1. every body save so far declared revision 1.1 (no gate rejection)", (await counts()).postRevisionRejects === 0, JSON.stringify(await counts()));
+  await setMock("postRevision=1.2");
+  try {
+    await H.fresh();
+    await page.keyboard.type("gate test");
+    await H.main.getByText("새 버전의 편집기가 있습니다", { exact: false }).waitFor({ timeout: 15000 }).catch(() => {});
+    check("G2. 409 upgrade: refresh notice shown", (await H.main.getByText("새 버전의 편집기가 있습니다", { exact: false }).count()) === 1);
+    check("G2. 409 upgrade: save and close are blocked, refresh offered", (await H.main.getByRole("button", { name: "글 저장" }).isDisabled()) && (await H.main.getByRole("button", { name: "새로고침" }).count()) === 1);
+    check("G2. 409 upgrade: input stays, no draft was created", textOf((await H.doc()).content?.[0] ?? {}) === "gate test" && !new URL(page.url()).searchParams.get("draft"), page.url());
+    check("G2. 409 upgrade: the server saw the rejected write", (await counts()).postRevisionRejects > 0);
+  } finally {
+    await setMock("postRevision=1.1");
+  }
+}
 // R1. renderer(저장한 글 화면의 최신 버전): 서식·영상 카드. 누르기 전에는 YouTube 요청 0, 누르면 nocookie 주소의 고정 sandbox iframe
 await H.fresh();
 await page.keyboard.type("굵은 ");
@@ -509,6 +688,13 @@ for (const [name, type] of [["webkit", webkit], ["firefox", firefox]]) {
   const bs = blocks(dd);
   check(`W. ${name}: Korean insertText, paragraph split, list nesting`, textOf(bs[0] ?? {}) === "한글 입력" && bs[1]?.type === "bulletList" && listDepth(dd) === 2, `${bs.map((x) => x.type).join(",")} depth=${listDepth(dd)}`);
   check(`W. ${name}: no page errors while editing`, errs.length === 0, errs.slice(0, 2).map((e) => e.msg).join(" | "));
+  // 목록·표 회귀는 화면을 여러 번 새로 연다. 그때 끊긴 같은 origin 요청(WebKit)은 탐색 오류로 따로 센다.
+  errs.length = 0;
+  await editingRegressions(p, h, name);
+  const cut = errs.filter((e) => isLeaveCancel(e.msg));
+  const other = errs.filter((e) => !isLeaveCancel(e.msg));
+  if (cut.length) console.log(`INFO  ${name}: ${cut.length} same-origin request(s) cut off by re-opening the editor`);
+  check(`W. ${name}: no non-navigation page errors in list/table regressions`, other.length === 0, other.slice(0, 2).map((e) => e.msg).join(" | "));
   await b.close();
 }
 

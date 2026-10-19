@@ -8,7 +8,7 @@ import { blockExtensions } from "@/components/blocks/editor/schema";
 import { fromEditor, toEditor, type EditorNode } from "./adapter";
 import { BLOCK_LIMITS, canonicalBytes, isAllowedLink, parseBlockDocument } from "./document";
 import { formatChanges, formattingChanges, hasVisibleContent, imageIds, textProjection } from "./projection";
-import type { BlockDocument } from "./types";
+import { CONTRACT_REVISION, type BlockDocument } from "./types";
 
 interface Golden {
   contractVersion: string;
@@ -18,7 +18,15 @@ interface Golden {
   invalid: { name: string; input: unknown; stage: string; status: number; code: string; path: string }[];
   limits: Record<string, number>;
 }
-const golden: Golden = JSON.parse(readFileSync("backend/contracts/post-blocks-v1/golden.json", "utf8"));
+const goldenText = readFileSync("backend/contracts/post-blocks-v1/golden.json", "utf8");
+const golden: Golden = JSON.parse(goldenText);
+// 정수 값의 실수 표기(14.0)를 쓰는 fixture. JSON.parse 뒤에는 정수 14와 구별할 수 없어 JS 클라이언트는 이 입력을 만들 수도,
+// 받아도 알아볼 수도 없다(JSON.stringify는 항상 14로 쓴다). 서버가 원문 JSON에서 거절한다. 여기서는 그 사실만 확인한다.
+const FLOAT_FIXTURES = new Set(
+  (JSON.parse(goldenText, (_k, v, ctx?: { source?: string }) => (typeof v === "number" && ctx?.source?.includes(".") ? { __float: ctx.source } : v)) as Golden).invalid
+    .filter((f) => JSON.stringify(f.input).includes("__float"))
+    .map((f) => f.name)
+);
 const schema = getSchema(blockExtensions());
 
 function canonical(input: unknown): BlockDocument {
@@ -43,9 +51,14 @@ const para = (runs: unknown[] = []) => ({ id: nextId(), type: "paragraph", runs 
 const code = (text: string) => ({ id: nextId(), type: "code", text });
 
 describe("golden contract", () => {
-  it("is contract 0.3 and front limits match", () => {
-    expect(golden.contractVersion).toBe("0.3");
+  it("is contract revision 1.1 and front limits match", () => {
+    expect(golden.contractVersion).toBe(CONTRACT_REVISION);
     expect(BLOCK_LIMITS).toEqual(golden.limits);
+  });
+
+  it("float-literal fixtures are the only ones JS cannot represent, and JS never writes them", () => {
+    expect([...FLOAT_FIXTURES].sort()).toEqual(["font-size-invalid-float", "image-width-invalid-float", "table-widths-invalid-float"]);
+    expect(JSON.stringify({ fontSize: 14.0, widthPercent: 37.0, columnWidths: [1.0, 2] })).toBe('{"fontSize":14,"widthPercent":37,"columnWidths":[1,2]}');
   });
 
   describe.each(golden.valid)("valid: $name", (f) => {
@@ -65,7 +78,7 @@ describe("golden contract", () => {
     });
   });
 
-  describe.each(golden.invalid)("invalid: $name ($stage)", (f) => {
+  describe.each(golden.invalid.filter((f) => !FLOAT_FIXTURES.has(f.name)))("invalid: $name ($stage)", (f) => {
     it(`rejects with ${f.code} at ${f.path}`, () => {
       const r = parseBlockDocument(f.input);
       expect(r.ok).toBe(false);

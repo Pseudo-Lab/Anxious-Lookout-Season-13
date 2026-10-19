@@ -141,13 +141,15 @@ export default function PostEditor({
     savedTarget.current = buffer;
     saveBodyBuffer(accountId, buffer, { revision: draftRevision, editor: bodyProblemState.editor });
   }, [accountId, buffer, bodyProblemState, draftRevision]);
+  // #36: 서버가 이 화면보다 새 문서 계약을 요구해 저장을 거절했다. 저장·닫기를 막고 새로고침을 안내한다(입력은 화면에 남는다).
+  const upgradeRequired = status.kind === "stopped" && status.failure.kind === "http" && status.failure.code === "post_contract_upgrade_required";
   useEffect(() => {
-    if (!bodyProblem) return;
+    if (!bodyProblem && !upgradeRequired) return;
     // 떠나면 화면의 입력(저장되지 않은 본문)을 잃으므로 브라우저 확인을 띄운다
     const warn = (e: BeforeUnloadEvent) => e.preventDefault();
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [bodyProblem]);
+  }, [bodyProblem, upgradeRequired]);
 
   // 바탕이 된 자료(#31 W3). 문서를 연결하면 그 문서가 가리키는 자료를 서버에 물어 선택에 더한다(선택은 언제나 명시 materialIds).
   // 자료를 찾는 동안에도 저장·닫기·버리기를 잠근다(결과가 저장된 버전 밖에 남지 않게).
@@ -483,10 +485,16 @@ export default function PostEditor({
               새 초안으로 계속
             </button>
           )}
-          {!isReason(stopped, "base_changed", "post_version", "draft_closed", "archived") && (
-            <button type="button" onClick={() => editor.resume()} className="font-medium underline hover:no-underline">
-              다시 시도
+          {upgradeRequired ? (
+            <button type="button" onClick={() => window.location.reload()} className="font-medium underline hover:no-underline">
+              새로고침
             </button>
+          ) : (
+            !isReason(stopped, "base_changed", "post_version", "draft_closed", "archived") && (
+              <button type="button" onClick={() => editor.resume()} className="font-medium underline hover:no-underline">
+                다시 시도
+              </button>
+            )
           )}
         </Notice>
       )}
@@ -514,13 +522,13 @@ export default function PostEditor({
         <button
           type="button"
           onClick={() => void finish("commit", commit)}
-          disabled={busy || locked || pending || !!bodyProblem || status.kind === "conflict"}
+          disabled={busy || locked || pending || !!bodyProblem || upgradeRequired || status.kind === "conflict"}
           className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
         >
           {finishing === "commit" ? "저장 중..." : post ? (contentMoved && comparing ? "비교했고 이 내용으로 저장" : "새 버전으로 저장") : "글 저장"}
         </button>
         {onClose && (
-          <button type="button" onClick={() => void finish("close", close)} disabled={busy || locked || pending || !!bodyProblem} className="rounded-lg px-4 py-2 text-sm text-stone-600 hover:bg-stone-100">
+          <button type="button" onClick={() => void finish("close", close)} disabled={busy || locked || pending || !!bodyProblem || upgradeRequired} className="rounded-lg px-4 py-2 text-sm text-stone-600 hover:bg-stone-100">
             편집 닫기(초안 보관)
           </button>
         )}

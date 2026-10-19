@@ -19,10 +19,10 @@ import { BulletList, ListItem, ListKeymap, OrderedList } from "@tiptap/extension
 import { Dropcursor, Gapcursor, Placeholder, UndoRedo } from "@tiptap/extensions";
 import { TextStyle } from "@tiptap/extension-text-style";
 import TextAlign from "@tiptap/extension-text-align";
-import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
+import { Table, TableCell, TableHeader, TableRow, createTable } from "@tiptap/extension-table";
 import UniqueID from "@tiptap/extension-unique-id";
 import { uuidV4 } from "@/lib/research/idempotency";
-import { CODE_LANGUAGES, IMAGE_WIDTHS, LIMITS, YOUTUBE_ID, type Align } from "@/lib/blocks/types";
+import { CODE_LANGUAGES, COLUMN_WEIGHT, FONT_SIZES, IMAGE_WIDTH, LIMITS, YOUTUBE_ID, ptToPx, type Align } from "@/lib/blocks/types";
 import { isAllowedLink } from "@/lib/blocks/document";
 import { ownImageUrl } from "@/lib/posts/api";
 
@@ -92,7 +92,9 @@ const intAttr = (name: string, allowed: readonly number[], fallback: number) => 
   renderHTML: (attrs: Record<string, unknown>) => ({ [`data-${name}`]: attrs[name] }),
 });
 
-// ---- 텍스트 색(textStyle.color). 계약 hex만 저장한다. ----
+// ---- 텍스트 색(textStyle.color)과 글자 크기(textStyle.fontSize, #36 pt). 계약 hex·허용 pt만 저장한다. ----
+// 글자 크기는 이 편집기가 쓴 HTML(data-font-size)에서만 읽는다. 다른 곳에서 붙여 넣은 글자 크기는 가져오지 않는다.
+const isFontSize = (v: unknown): v is number => (FONT_SIZES as readonly number[]).includes(v as number);
 const TextColor = Extension.create({
   name: "textColor",
   addGlobalAttributes() {
@@ -104,6 +106,14 @@ const TextColor = Extension.create({
             default: null,
             parseHTML: (el) => normalizeHex(el.style.color),
             renderHTML: (attrs) => (attrs.color ? { style: `color: ${attrs.color}` } : {}),
+          },
+          fontSize: {
+            default: null,
+            parseHTML: (el) => {
+              const v = Number(el.getAttribute("data-font-size"));
+              return isFontSize(v) ? v : null;
+            },
+            renderHTML: (attrs) => (isFontSize(attrs.fontSize) ? { "data-font-size": attrs.fontSize, style: `font-size: ${ptToPx(attrs.fontSize)}px` } : {}),
           },
         },
       },
@@ -121,6 +131,14 @@ const TextColor = Extension.create({
         () =>
         ({ chain }) =>
           chain().setMark("textStyle", { color: null }).removeEmptyTextStyle().run(),
+      setTextSize:
+        (pt: number) =>
+        ({ chain }) =>
+          isFontSize(pt) && chain().setMark("textStyle", { fontSize: pt }).run(),
+      unsetTextSize:
+        () =>
+        ({ chain }) =>
+          chain().setMark("textStyle", { fontSize: null }).removeEmptyTextStyle().run(),
     };
   },
 });
@@ -242,7 +260,14 @@ export const PostImage = Node.create({
       parseHTML: (el) => (el.getAttribute("data-alt") ?? "").replace(/[\r\n]+/g, " "),
       renderHTML: (attrs) => ({ "data-alt": attrs.alt }),
     },
-    widthPercent: intAttr("width-percent", IMAGE_WIDTHS, 100),
+    widthPercent: {
+      default: 100,
+      parseHTML: (el: HTMLElement) => {
+        const v = Number(el.getAttribute("data-width-percent"));
+        return Number.isInteger(v) && v >= IMAGE_WIDTH.min && v <= IMAGE_WIDTH.max ? v : 100;
+      },
+      renderHTML: (attrs: Record<string, unknown>) => ({ "data-width-percent": attrs.widthPercent }),
+    },
     align: alignAttr("center"),
   }),
   parseHTML: () => [{ tag: 'figure[data-type="post-image"]', getAttrs: (el) => (UUID.test(el.getAttribute("data-image-id") ?? "") ? null : false), contentElement: "figcaption" }],
@@ -324,6 +349,58 @@ const PostTableHeader = TableHeader.extend({
   },
 });
 
+// ---- 표: 열 폭은 표 속성 columnWidths(열별 정수 가중치, #36). 생략(null)이면 균등. 셀 colwidth(픽셀)는 쓰지 않는다. ----
+const isWeights = (v: unknown): v is number[] =>
+  Array.isArray(v) && v.length > 0 && v.length <= LIMITS.tableCols && v.every((w) => Number.isInteger(w) && w >= COLUMN_WEIGHT.min && w <= COLUMN_WEIGHT.max);
+// #36 B2: 표는 커서가 있는 최상위 블록 바로 뒤에 넣는다(빈 문단이면 그 자리를 바꾼다). 커서는 첫 칸으로 간다.
+// 기본 insertTable(replaceSelectionWith)은 글줄 처음에서는 앞에, 글줄 중간에서는 문단을 둘로 나눠 넣는다.
+// 표는 문서 바로 아래에만 올 수 있으므로(단·표 안 금지) 그 안에서는 넣지 않는다.
+const PostTable = Table.extend({
+  addCommands() {
+    return {
+      ...this.parent?.(),
+      insertTableAfterBlock:
+        ({ rows = 3, cols = 3, withHeaderRow = true } = {}) =>
+        ({ state, tr, dispatch }) => {
+          const { selection } = state;
+          const { $from } = selection;
+          for (let d = $from.depth; d > 0; d--) if (["table", "columns"].includes($from.node(d).type.name)) return false;
+          const table = createTable(state.schema, rows, cols, withHeaderRow);
+          // gapcursor·블록 선택(이미지 등)은 그 뒤, 글줄은 그 최상위 블록 뒤, 빈 문단은 그 자리
+          const block = $from.depth > 0 ? $from.node(1) : null;
+          const replace = !!block && block.type.name === "paragraph" && block.content.size === 0;
+          const at = !block ? selection.to : replace ? $from.before(1) : $from.after(1);
+          if (dispatch) {
+            if (replace) tr.replaceWith(at, at + block.nodeSize, table);
+            else tr.insert(at, table);
+            tr.setSelection(TextSelection.near(tr.doc.resolve(at + 1))).scrollIntoView();
+          }
+          return true;
+        },
+    };
+  },
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      columnWidths: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          try {
+            const v: unknown = JSON.parse(el.getAttribute("data-column-widths") ?? "null");
+            return isWeights(v) ? v : null;
+          } catch {
+            return null;
+          }
+        },
+        renderHTML: (attrs: Record<string, unknown>) => (isWeights(attrs.columnWidths) ? { "data-column-widths": JSON.stringify(attrs.columnWidths) } : {}),
+      },
+    };
+  },
+});
+
+/** 표의 열 수(첫 행 셀 수). */
+export const tableColumnCount = (table: PMNode) => (table.childCount ? table.child(0).childCount : 0);
+
 /** 목록 중첩 깊이(최상위 목록 = 1). */
 export function maxListDepth(node: PMNode, depth = 0): number {
   let max = depth;
@@ -389,6 +466,11 @@ const ContractGuard = Extension.create<{ onReject: (reason: string) => void }>({
             if (node.type.name === "paragraph" && parent && CELL_TYPES.has(parent.type.name) && node.attrs.textAlign !== "left") {
               tr.setNodeMarkup(pos, undefined, { ...node.attrs, textAlign: "left" });
             }
+            // 열 폭 가중치가 열 수와 맞지 않게 된 표(열을 넣고 뺀 명령이 가중치를 고치지 않은 경우)는 균등으로 되돌린다.
+            // 열 추가·삭제 도구는 가중치를 같이 고치므로, 이것은 다른 경로(붙여넣기 등)의 안전장치다.
+            if (node.type.name === "table" && node.attrs.columnWidths && node.attrs.columnWidths.length !== tableColumnCount(node)) {
+              tr.setNodeMarkup(pos, undefined, { ...node.attrs, columnWidths: null });
+            }
             return node.type.name !== "paragraph";
           });
           return tr.docChanged ? tr : null;
@@ -408,6 +490,55 @@ const ImeSafeKeys = Extension.create({
       "Mod-Alt-ArrowUp": () => !composing() && this.editor.commands.moveBlock(-1),
       "Mod-Alt-ArrowDown": () => !composing() && this.editor.commands.moveBlock(1),
     };
+  },
+});
+
+// #36 B1: 목록 Backspace. ListKeymap은 목록 바로 뒤 문단을 마지막 항목 안으로 옮기는데, 이 계약의 항목은
+// "문단 하나 + 하위 목록"이라 두 번째 문단이 들어갈 수 없어 새 빈 항목(표식)으로 감싸져 남았다.
+// - 항목 첫 글자에서: 항목을 한 단계 해제한다(맨 위 단계면 문단으로).
+// - 목록 바로 뒤 문단의 첫 글자에서: 목록의 마지막 글줄(가장 깊은 마지막 항목)에 합친다. 빈 문단이면 지우기만 한다.
+//   그 뒤에 같은 종류 목록이 이어지면(가운데 항목을 해제했던 경우) 두 목록을 다시 하나로 잇는다.
+// 표 칸·단·인용 안 목록도 같은 부모 안에서 똑같이 동작한다. 한글 조합 중에는 처리하지 않는다.
+const ListBackspace = Extension.create({
+  name: "listBackspace",
+  priority: 1000,
+  addKeyboardShortcuts() {
+    const run = () => {
+      const editor = this.editor;
+      if (editor.view.composing) return false;
+      if (editor.commands.undoInputRule()) return true;
+      const { state } = editor;
+      const { selection } = state;
+      if (!selection.empty || !(selection instanceof TextSelection)) return false;
+      const { $from } = selection;
+      if ($from.parentOffset !== 0 || $from.parent.type.name !== "paragraph" || $from.depth < 1) return false;
+      const holder = $from.node($from.depth - 1);
+      if (holder.type.name === "listItem") {
+        if ($from.index($from.depth - 1) !== 0) return false;
+        return editor.commands.liftListItem("listItem");
+      }
+      const index = $from.index($from.depth - 1);
+      const prev = index > 0 ? holder.child(index - 1) : null;
+      if (!prev || !LIST_TYPES.has(prev.type.name)) return false;
+      // 앞 목록의 마지막 글줄 끝 위치
+      const paraStart = $from.before();
+      const listStart = paraStart - prev.nodeSize;
+      let end = -1;
+      prev.descendants((node, pos) => {
+        if (node.isTextblock) end = listStart + 1 + pos + 1 + node.content.size;
+      });
+      if (end < 0) return false;
+      const para = $from.parent;
+      const tr = state.tr.delete(paraStart, paraStart + para.nodeSize);
+      // 가운데 항목을 해제했다가 합친 경우처럼 같은 종류 목록이 다시 맞닿으면 하나로 잇는다(앞 목록 안 위치는 그대로다)
+      const next = index + 1 < holder.childCount ? holder.child(index + 1) : null;
+      if (next && next.type === prev.type) tr.join(paraStart);
+      if (para.content.size) tr.insert(end, para.content);
+      tr.setSelection(TextSelection.create(tr.doc, end)).scrollIntoView();
+      editor.view.dispatch(tr);
+      return true;
+    };
+    return { Backspace: run, "Mod-Backspace": run };
   },
 });
 
@@ -473,6 +604,7 @@ export function blockExtensions({ placeholder = "", onReject }: SchemaOptions = 
     OrderedList.extend({ group: "block flow list" }),
     ListItem.extend({ content: "paragraph (bulletList | orderedList)?" }),
     ListKeymap,
+    ListBackspace,
     CodeBlock.extend({
       group: "block flow",
       addAttributes() {
@@ -509,7 +641,7 @@ export function blockExtensions({ placeholder = "", onReject }: SchemaOptions = 
       HTMLAttributes: { rel: "noopener noreferrer nofollow ugc", target: null },
     }),
     TextAlign.configure({ types: ["heading", "paragraph"], alignments: ALIGNS, defaultAlignment: "left" }),
-    Table.configure({ resizable: false, allowTableNodeSelection: false }),
+    PostTable.configure({ resizable: false, allowTableNodeSelection: false }),
     TableRow,
     PostTableHeader,
     PostTableCell,
@@ -534,10 +666,15 @@ declare module "@tiptap/core" {
     textColor: {
       setTextColor: (color: string) => ReturnType;
       unsetTextColor: () => ReturnType;
+      setTextSize: (pt: number) => ReturnType;
+      unsetTextSize: () => ReturnType;
     };
     columns: {
       insertColumns: (widths: number[]) => ReturnType;
       setColumnWidths: (widths: number[]) => ReturnType;
+    };
+    postTable: {
+      insertTableAfterBlock: (options?: { rows?: number; cols?: number; withHeaderRow?: boolean }) => ReturnType;
     };
     postImage: {
       insertPostImage: (attrs: { imageId: string; alt: string }, at?: number) => ReturnType;

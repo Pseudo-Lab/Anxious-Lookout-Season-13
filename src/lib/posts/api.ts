@@ -3,7 +3,7 @@ import { BASE_PATH } from "@/lib/constants";
 import { listQuery, mutate, parsePage, type MutationContext } from "@/lib/research/api";
 import { parseBlockDocument } from "@/lib/blocks/document";
 import type { FormatChange } from "@/lib/blocks/projection";
-import type { BlockDocument } from "@/lib/blocks/types";
+import { CONTRACT_REVISION, type BlockDocument } from "@/lib/blocks/types";
 import type {
   Post,
   PostDocumentOption,
@@ -463,18 +463,23 @@ export const resolvePostMaterials = (documentIds: string[], csrfToken: string) =
 
 // ---- 글 서버 초안 ----
 
+// #36: 본문을 쓰는 사람 요청(초안 만들기·저장, 명시 저장, 제안 수락)은 이 화면이 지키는 문서 계약 revision을 밝힌다.
+// 서버가 더 새 revision을 요구하면 409 post_contract_upgrade_required로 거절한다(저장되지 않는다, 새로고침 안내).
+// 권한 토큰이 아니라 "이 화면은 그 revision의 필드를 버리지 않는다"는 선언이다. 본문 없는 요청(버리기·삭제·발행)에는 보내지 않는다.
+const BODY_WRITE = { "X-Post-Contract-Revision": CONTRACT_REVISION };
+
 /** 새 초안. 기존 글이면 base(글 version·현재 snapshot 번호·ID)를 함께 보낸다. */
 export const createPostDraft = (
   input: PostText & { postId?: string; basePostVersion?: number; baseVersionId?: string },
   ctx: MutationContext
-) => mutate("/research/post-drafts", "POST", input, parseFullDraft, ctx);
+) => mutate("/research/post-drafts", "POST", input, parseFullDraft, ctx, BODY_WRITE);
 export const listPostDrafts = (cursor?: string | null) =>
   fetchJson(apiUrl(`/research/post-drafts${listQuery(cursor)}`), parsePage(parseDraft));
 export const getPostDraft = (id: string) => fetchJson(apiUrl(`/research/post-drafts/${enc(id)}`), parseFullDraft);
 export const getPostDraftOf = (postId: string) =>
   fetchJson(apiUrl(`/research/posts/${enc(postId)}/draft`), parsePostDraftRef);
 export const savePostDraft = (id: string, input: PostText, expectedDraftRevision: number, ctx: MutationContext) =>
-  mutate(`/research/post-drafts/${enc(id)}`, "PUT", { ...input, expectedDraftRevision }, parseFullDraft, ctx);
+  mutate(`/research/post-drafts/${enc(id)}`, "PUT", { ...input, expectedDraftRevision }, parseFullDraft, ctx, BODY_WRITE);
 export const discardPostDraft = (id: string, expectedDraftRevision: number, ctx: MutationContext) =>
   mutate(`/research/post-drafts/${enc(id)}`, "DELETE", { expectedDraftRevision }, parseDraft, ctx);
 /** 명시 저장: 버전 1개. 기존 글은 expectedVersion 필수, base가 바뀌었으면 비교 뒤 현재 snapshot ID를 resolvedBaseVersionId로. */
@@ -482,7 +487,7 @@ export const commitPostDraft = (
   id: string,
   body: { expectedDraftRevision: number; expectedVersion?: number; resolvedBaseVersionId?: string },
   ctx: MutationContext
-) => mutate(`/research/post-drafts/${enc(id)}/commit`, "POST", body, parseCommit, ctx);
+) => mutate(`/research/post-drafts/${enc(id)}/commit`, "POST", body, parseCommit, ctx, BODY_WRITE);
 
 // ---- 발행 ----
 
@@ -517,7 +522,7 @@ export const acceptPostProposal = (
     expectedDraftRevision?: number;
   },
   ctx: MutationContext
-) => mutate(`/research/post-proposals/${enc(id)}/accept`, "POST", body, parseAccept, ctx);
+) => mutate(`/research/post-proposals/${enc(id)}/accept`, "POST", body, parseAccept, ctx, BODY_WRITE);
 /**
  * 수락하려는 내용을 지금 기준(현재 글 head 또는 새 글 연결 초안)과 서버가 다시 비교한다(#32 §11).
  * 저장하지 않는 읽기라 Idempotency-Key 없이 CSRF만 보낸다. 수락 CAS를 대신하지 않는다.

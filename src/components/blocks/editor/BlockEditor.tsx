@@ -168,7 +168,7 @@ function Toolbar({ editor, onPickImage, uploading }: { editor: Editor; onPickIma
       <Sep />
       <Btn label="이미지 올리기" disabled={uploading || s.inCell} onClick={onPickImage}>🖼</Btn>
       <Btn label="YouTube 영상" disabled={s.inCell} onClick={insertYouTube}>▶</Btn>
-      <Btn label="표 넣기" disabled={s.inTable || s.inColumns} onClick={() => c().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}>▦</Btn>
+      <Btn label="표 넣기" disabled={s.inTable || s.inColumns} onClick={() => c().insertTableAfterBlock({ rows: 3, cols: 3, withHeaderRow: true }).run()}>▦</Btn>
       {!s.inColumns && !s.inTable && (
         <select aria-label="단 나누기" value="" onChange={(e) => c().insertColumns(COLUMN_PRESETS[Number(e.target.value)].widths).run()} className="rounded border border-stone-300 px-1 py-1 text-sm">
           <option value="" disabled>단 나누기</option>

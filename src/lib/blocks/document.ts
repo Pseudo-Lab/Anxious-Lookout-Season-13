@@ -1,4 +1,4 @@
-// #32 post-blocks v1 엄격 해석·정규화(api-contracts/issue32-blocks-draft.md v0.3, backend/contracts/post-blocks-v1/).
+// #32 post-blocks v1 엄격 해석·정규화(api-contracts/issue32-blocks-draft.md v0.3, #36 revision 1.1, backend/contracts/post-blocks-v1/).
 // 서버 validator와 같은 규칙으로 입력을 검사하고 canonical 문서를 만든다. 첫 오류에서 멈추고 코드·JSON Pointer만 돌려준다
 // (입력 원문은 오류에 넣지 않는다). 저장 직전 사전 검사와, 서버가 준 문서를 편집기·renderer에 넘기기 전 검사에 쓴다.
 // 서버 판단이 최종이다(이미지 소유·존재는 여기서 확인하지 않는다).
@@ -7,7 +7,9 @@ import {
   BLOCKS_FORMAT,
   BLOCKS_VERSION,
   CODE_LANGUAGES,
-  IMAGE_WIDTHS,
+  COLUMN_WEIGHT,
+  FONT_SIZES,
+  IMAGE_WIDTH,
   SIMPLE_MARKS,
   YOUTUBE_ID,
   type Align,
@@ -20,6 +22,7 @@ import {
   type Mark,
   type ParagraphBlock,
   type Run,
+  type TableBlock,
   type TableCell,
   type TableRow,
 } from "./types";
@@ -128,6 +131,12 @@ function optional<T>(o: Obj, key: string, fallback: T, read: (v: unknown, path: 
   return o[key] === undefined ? fallback : read(o[key], at(path, key));
 }
 
+function intIn(v: unknown, path: string, min: number, max: number): number {
+  if (!isInt(v) || v < min || v > max) shape(path);
+  return v as number;
+}
+const gcd = (a: number, b: number): number => (b ? gcd(b, a % b) : a);
+
 const SIMPLE_ORDER = SIMPLE_MARKS as readonly string[];
 
 class Parser {
@@ -164,6 +173,11 @@ class Parser {
         if (!SIMPLE_ORDER.includes(m)) shape(p);
         key = m;
         out.push(m as Mark);
+      } else if (isObj(m) && "fontSize" in m) {
+        const o = object(m, p, ["fontSize"]);
+        const size = oneOf(o.fontSize, at(p, "fontSize"), FONT_SIZES);
+        key = "fontSize";
+        out.push({ fontSize: size });
       } else {
         const o = object(m, p, ["color"]);
         const c = str(o.color, at(p, "color"));
@@ -174,7 +188,7 @@ class Parser {
       if (seen.has(key)) shape(p);
       seen.add(key);
     });
-    const rank = (m: Mark) => (typeof m === "string" ? SIMPLE_ORDER.indexOf(m) : SIMPLE_ORDER.length);
+    const rank = (m: Mark) => (typeof m === "string" ? SIMPLE_ORDER.indexOf(m) : "color" in m ? SIMPLE_ORDER.length : SIMPLE_ORDER.length + 1);
     return out.sort((a, b) => rank(a) - rank(b));
   }
 
@@ -306,7 +320,7 @@ class Parser {
         if (codepoints(alt) > BLOCK_LIMITS.altCodepoints) limit(at(path, "alt"));
         this.counts.text += codepoints(alt);
         const caption = optional(o, "caption", [] as Run[], (x, p) => this.runs(x, p, true), path);
-        const widthPercent = optional(o, "widthPercent", 100 as const, (x, p) => oneOf(x, p, IMAGE_WIDTHS), path);
+        const widthPercent = optional(o, "widthPercent", 100, (x, p) => intIn(x, p, IMAGE_WIDTH.min, IMAGE_WIDTH.max), path);
         const align = this.align(o, path);
         this.counts.images++;
         this.counts.imageIds.add(imageId);
@@ -344,8 +358,13 @@ class Parser {
   }
 
   private table(o: Obj, path: string, depth: number): Block {
-    object(o, path, ["id", "type", "rows"]);
+    object(o, path, ["id", "type", "rows", "columnWidths"]);
     const id = this.id(o, path, depth);
+    const wp = at(path, "columnWidths");
+    const weights =
+      o.columnWidths === undefined || o.columnWidths === null
+        ? null
+        : array(o.columnWidths, wp, 1, BLOCK_LIMITS.tableColumns).map((w, i) => intIn(w, at(wp, i), COLUMN_WEIGHT.min, COLUMN_WEIGHT.max));
     if (++this.counts.tables > BLOCK_LIMITS.tables) limit(path);
     const rp = at(path, "rows");
     const rowsIn = array(o.rows, rp, 1);
@@ -382,7 +401,14 @@ class Parser {
       width = cells.length;
       return { id: rid, header, cells };
     });
-    return { id, type: "table", rows };
+    // 열 폭 가중치는 열 수와 같은 길이. GCD로 나누고, 모두 같으면(한 열 포함) 생략한다.
+    if (weights && weights.length !== width) shape(wp);
+    const table: TableBlock = { id, type: "table", rows };
+    if (weights && weights.some((w) => w !== weights[0])) {
+      const g = weights.reduce(gcd);
+      table.columnWidths = weights.map((w) => w / g);
+    }
+    return table;
   }
 
   doc(v: unknown): BlockDocument {

@@ -140,7 +140,7 @@ export function formatChanges(base: BlockDocument, candidate: BlockDocument): Fo
     if (keys.length || moved || ambiguous) {
       const kind: FormatChangeKind = ambiguous
         ? "ambiguous"
-        : reparented || keys.some((k) => ["width", "type", "ordered", "start"].includes(k))
+        : reparented || keys.some((k) => ["width", "columnWidths", "type", "ordered", "start"].includes(k))
           ? "layout"
           : moved
             ? "moved"
