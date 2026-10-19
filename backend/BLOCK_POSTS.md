@@ -38,6 +38,11 @@ not an authorization to publish. API paths respect the configured base path.
 Pre-0007 cached post-route mutation responses are adapted on read by deterministic
 conversion; original fingerprints and cached rows are not rewritten, and no
 mutation is replayed. Ordinary research document responses are not adapted.
+For post HTTP writes and `research_post_propose`, the owner-scoped original
+fingerprint is checked before the new input model. Only exact successful cache
+hits bypass that model; changed bodies with the same key return 409, while
+uncached legacy Markdown writes return 422. HTTP authentication/CSRF/readiness
+and tool callback authorization/readiness still run before cache access.
 
 ## Migration and preservation
 

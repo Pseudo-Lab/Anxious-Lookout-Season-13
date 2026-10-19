@@ -383,6 +383,16 @@ def register_posts(app, authorized, settings, response, write):
             return write(store, request, DraftCommit, body, lambda parsed: commit_draft(store, identity, parsed))
 
 
+def validate_retry_encoding(body, model):
+    """Invalid UTF-8 cannot have a stored fingerprint; keep model error paths."""
+    import json
+    try:
+        json.dumps(body, ensure_ascii=False).encode('utf-8')
+    except UnicodeError:
+        model.model_validate(body)
+        fail('validation_error', 'Valid UTF-8 text is required', 422)
+
+
 def replay_response(value):
     """Adapt pre-0007 cached post responses without replaying a mutation.
 

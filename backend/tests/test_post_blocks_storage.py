@@ -128,3 +128,86 @@ def test_codex_boundary_errors_have_safe_json_pointer(client,admin):
     with pytest.raises(ResearchError) as caught: Propose.model_validate(value)
     assert caught.value.details['path']=='/contentInput/text'
     assert caught.value.status==422
+    result=client.post('/api/internal/research/tools',content=json.dumps({
+        'sessionId':session['id'],'requestId':runner.last['requestId'],
+        'name':'research_post_propose','arguments':value}),headers={
+        'Authorization':'Bearer '+runner.last['toolToken'],'Content-Type':'application/json'})
+    assert result.status_code==422,result.text
+    assert result.json()['error']['details']['path']=='/contentInput/text'
+
+
+def legacy_cache(admin, owner, key, operation, body, cached):
+    import hashlib
+    def old(value):
+        if isinstance(value,list): return [old(v) for v in value]
+        if not isinstance(value,dict): return value
+        return {k: '# Text' if k=='content' and isinstance(v,dict) else old(v) for k,v in value.items()}
+    fingerprint=hashlib.sha256(json.dumps([operation,body],sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+    with admin.begin() as c:
+        c.execute(text('UPDATE research.idempotency SET fingerprint=:fp,response=CAST(:v AS jsonb) WHERE owner_id=:owner AND key=CAST(:key AS uuid)'),
+                  {'fp':fingerprint,'v':json.dumps(old(cached)),'owner':owner,'key':key})
+
+
+def post_storage_snapshot(admin):
+    with admin.connect() as c:
+        return {table:c.execute(text(f'SELECT to_jsonb(t) FROM research.{table} t ORDER BY to_jsonb(t)::text')).scalars().all()
+                for table in ('posts','post_drafts','post_versions','post_proposals','post_publications','idempotency')}
+
+
+@pytest.mark.parametrize('operation', ['create','update','accept'])
+def test_legacy_changed_wire_retry_owner_fingerprint_and_no_writes(client,admin,operation):
+    from tests.test_posts import proposal_content
+    owner,auth=identity(client,admin)
+    method='POST';path=ROOT;body=content();status=201
+    if operation=='update':
+        draft=make_draft(client,auth)
+        method='PUT';path=ROOT+'/'+draft['id'];body['expectedDraftRevision']=1;status=200
+    elif operation=='accept':
+        session,runner=turn(client,auth,owner)
+        proposed=callback(client,session,runner,'research_post_propose',{
+            **proposal_content(),'mutationId':str(uuid.uuid4())})
+        assert proposed.status_code==200,proposed.text
+        path='/api/research/post-proposals/'+proposed.json()['id']+'/accept'
+        body['expectedProposalVersion']=1;status=200
+    key=str(uuid.uuid4())
+    result=client.request(method,path,json=body,headers=headers(auth,key))
+    assert result.status_code==status,result.text
+    legacy={**body,'content':'# Text'}
+    legacy_cache(admin,owner,key,method+' '+path,legacy,result.json())
+    before=post_storage_snapshot(admin)
+    replay=client.request(method,path,json=legacy,headers=headers(auth,key))
+    assert replay.status_code==status,replay.text
+    value=replay.json()['post']['latestVersion'] if operation=='accept' else replay.json()
+    assert value['content']['format']=='post-blocks' and value['textProjection']=='Text'
+    changed=client.request(method,path,json={**legacy,'content':'changed'},headers=headers(auth,key))
+    assert changed.status_code==409 and changed.json()['error']['code']=='idempotency_conflict'
+    assert client.request(method,path,json=legacy,headers=headers(auth)).status_code==422
+    assert client.request(method,path,json=legacy,headers={**headers(auth,key),'X-CSRF-Token':'wrong'}).status_code==403
+    assert client.request(method,path,json=legacy,headers={**headers(auth,key),'Origin':'https://wrong.example'}).status_code==403
+    _,other=identity(client,admin,'222222')
+    assert client.request(method,path,json=legacy,headers=headers(other,key)).status_code==422
+    client.cookies.clear()
+    assert client.request(method,path,json=legacy,headers=headers(auth,key)).status_code==401
+    assert post_storage_snapshot(admin)==before
+
+
+def test_legacy_propose_tool_retry_before_new_shape_validation(client,admin):
+    from tests.test_posts import proposal_content
+    owner,auth=identity(client,admin);session,runner=turn(client,auth,owner)
+    key=str(uuid.uuid4());body={**proposal_content(),'mutationId':key}
+    result=callback(client,session,runner,'research_post_propose',body)
+    assert result.status_code==200,result.text
+    legacy={k:v for k,v in body.items() if k!='contentInput'};legacy['content']='# Text'
+    legacy_cache(admin,owner,key,'tool:research_post_propose',legacy,result.json())
+    other,other_auth=identity(client,admin,'222222');other_session,other_runner=turn(client,other_auth,other)
+    before=post_storage_snapshot(admin)
+    replay=callback(client,session,runner,'research_post_propose',legacy)
+    assert replay.status_code==200,replay.text
+    assert replay.json()['content']['format']=='post-blocks'
+    assert replay.json()['id']==result.json()['id']
+    assert callback(client,session,runner,'research_post_propose',{**legacy,'content':'changed'}).status_code==409
+    assert callback(client,session,runner,'research_post_propose',{**legacy,'mutationId':str(uuid.uuid4())}).status_code==422
+    assert callback(client,other_session,other_runner,'research_post_propose',legacy).status_code==422
+    assert client.post('/api/internal/research/tools',json={'sessionId':session['id'],'requestId':runner.last['requestId'],
+        'name':'research_post_propose','arguments':legacy}).status_code in (401,403)
+    assert post_storage_snapshot(admin)==before

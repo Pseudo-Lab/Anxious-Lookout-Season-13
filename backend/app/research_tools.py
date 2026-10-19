@@ -90,6 +90,16 @@ def definitions():
 def dispatch(store, name, arguments, context=None):
     if name not in TOOLS:
         fail("validation_error", "Unknown storage tool", 422)
+    if name == 'research_post_propose':
+        from .posts import ready, replay_response, validate_retry_encoding
+        from .post_proposals import create
+        ready(store)
+        validate_retry_encoding(arguments, TOOLS[name][0])
+        key = arguments.get('mutationId') if isinstance(arguments, dict) else None
+        parse_id(key)
+        result, _ = store.mutate(key, 'tool:' + name, arguments,
+                                lambda: create(store, TOOLS[name][0].model_validate(arguments)))
+        return replay_response(result)
     body = TOOLS[name][0].model_validate(arguments)
     if name == "research_page_context":
         if not context:
@@ -148,9 +158,6 @@ def dispatch(store, name, arguments, context=None):
             return store.create_item("material", body)
         if name == "research_document_save":
             from .document_proposals import create
-            return create(store, body)
-        if name == 'research_post_propose':
-            from .post_proposals import create
             return create(store, body)
         if name == "research_material_update":
             return store.change_item(body.id, "material", body)

@@ -438,12 +438,19 @@ def register_research(app, sessions, settings, current_session, error):
         return JSONResponse(result, status_code=status, headers={"Cache-Control": "no-store"})
 
     def write(store, request, model, body, action, status=200):
-        parsed = model.model_validate(body)
+        post_route = any(segment in request.url.path for segment in ("/post-drafts", "/post-proposals", "/posts/"))
+        if post_route:
+            from .posts import validate_retry_encoding
+            validate_retry_encoding(body, model)
+        # Post wire shapes changed in 0007. Exact successful retries must reach
+        # the owner-scoped fingerprint check before validating a new write.
+        parsed = None if post_route else model.model_validate(body)
         key = request.headers.get("idempotency-key")
         if not key:
             fail("validation_error", "Idempotency-Key is required", 422)
-        result, code = store.mutate(key, request.method + " " + request.url.path, body, lambda: action(parsed), status)
-        if any(segment in request.url.path for segment in ("/post-drafts", "/post-proposals", "/posts/")):
+        result, code = store.mutate(key, request.method + " " + request.url.path, body,
+                                    lambda: action(model.model_validate(body) if post_route else parsed), status)
+        if post_route:
             from .posts import replay_response
             result = replay_response(result)
         return response(result, code)
