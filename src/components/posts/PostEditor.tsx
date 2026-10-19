@@ -351,7 +351,6 @@ export default function PostEditor({
 
   const locked = finishing !== null;
   const stopped = status.kind === "stopped" ? status.failure : null;
-  const fixedSlug = post ? post.latestVersion.slug : null;
   // 연결이 남아 있는 문서만 출처로 보인다(문서를 해제해도 담긴 자료는 직접 빼기 전까지 남는다)
   const linkedSources = Object.fromEntries(
     values.materialIds.map((id) => [id, (sources[id] ?? []).filter((d) => values.documentIds.includes(d))])
@@ -365,19 +364,7 @@ export default function PostEditor({
       <Field label="제목">
         <input value={values.title} onChange={(e) => set({ title: e.target.value })} maxLength={LIMITS.title} readOnly={locked} className={`${inputClass} read-only:bg-stone-50`} />
       </Field>
-      <div className="grid gap-4 sm:grid-cols-2">
-        {fixedSlug !== null ? (
-          <Field label="공개 주소" hint="처음 저장할 때 정해졌고 바꿀 수 없습니다.">
-            <input value={`/posts/${fixedSlug}/`} readOnly className={`${inputClass} bg-stone-50 font-mono`} />
-          </Field>
-        ) : (
-          <div>
-            <span className="mb-1 block text-sm font-medium text-stone-700">공개 주소</span>
-            <p className="text-xs text-stone-500">처음 저장할 때 자동으로 정해지며 그 뒤에는 바뀌지 않습니다. 따로 입력하지 않습니다.</p>
-          </div>
-        )}
-        <TagInput tags={values.tags} onChange={(tags) => set({ tags })} readOnly={locked} />
-      </div>
+      <TagInput tags={values.tags} onChange={(tags) => set({ tags })} readOnly={locked} />
       <DescriptionField value={values.description} onChange={(description) => set({ description })} readOnly={locked} />
       <DocumentLinks ids={values.documentIds} onChange={(documentIds) => void linkDocuments(documentIds)} readOnly={locked} />
       <MaterialLinks
@@ -521,7 +508,7 @@ export default function PostEditor({
         </button>
         {onClose && (
           <button type="button" onClick={() => void finish("close", close)} disabled={busy || locked || pending || !!bodyProblem} className="rounded-lg px-4 py-2 text-sm text-stone-600 hover:bg-stone-100">
-            편집 닫기(초안 보관)
+            편집 닫기(초안 유지)
           </button>
         )}
         {confirmDiscard ? (

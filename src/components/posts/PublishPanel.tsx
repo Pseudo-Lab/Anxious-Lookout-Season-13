@@ -186,7 +186,7 @@ export default function PublishPanel({ post, onChanged }: { post: Post; onChange
         <p className="text-sm text-stone-600">발행하지 않은 글입니다. 내 글 목록에서만 보입니다.</p>
       )}
       {post.archived ? (
-        <p className="text-xs text-stone-500">보관한 글은 발행할 수 없습니다.</p>
+        <p className="text-xs text-stone-500">삭제한 글은 발행할 수 없습니다.</p>
       ) : (
         <div className="flex flex-wrap items-center gap-2 text-sm">
           <label className="flex items-center gap-1">

@@ -182,7 +182,7 @@ export function ProposalReview({
       {failure && <ErrorNotice failure={failure} prefix="처리하지 못했습니다." describe={postErrorMessage} />}
       {pending &&
         (editing ? (
-          <p className="text-xs text-stone-600">편집 중에는 수락할 수 없습니다. 편집을 닫은 뒤(초안은 보관됩니다) 다시 검토하세요.</p>
+          <p className="text-xs text-stone-600">편집 중에는 수락할 수 없습니다. 편집을 닫은 뒤(초안은 그대로 남습니다) 다시 검토하세요.</p>
         ) : (
           <div className="flex flex-wrap items-center gap-3">
             {!baseClosed &&
