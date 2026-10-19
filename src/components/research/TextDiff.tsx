@@ -33,8 +33,8 @@ function Line({ row }: { row: Row }) {
   const parts = row.kind === "context" ? undefined : row.parts;
   return (
     <div data-diff={row.kind} className={`grid grid-cols-[2.5rem_2.5rem_1rem_minmax(0,1fr)] ${tone}`}>
-      <span className="select-none pr-1 text-right text-stone-400">{row.kind !== "add" ? row.oldNo : ""}</span>
-      <span className="select-none pr-1 text-right text-stone-400">{row.kind !== "del" ? row.newNo : ""}</span>
+      <span className="select-none pr-1 text-right text-stone-500">{row.kind !== "add" ? row.oldNo : ""}</span>
+      <span className="select-none pr-1 text-right text-stone-500">{row.kind !== "del" ? row.newNo : ""}</span>
       <span aria-hidden="true" className="select-none text-center text-stone-500">
         {sign}
       </span>

@@ -186,7 +186,7 @@ export function VersionHistoryView<V extends VersionLike>({
                 ))}
               </select>
             </label>
-            <span aria-hidden="true" className="text-stone-400">→</span>
+            <span aria-hidden="true" className="text-stone-500">→</span>
             <label className="flex items-center gap-1">
               <span className="text-stone-600">비교</span>
               <select

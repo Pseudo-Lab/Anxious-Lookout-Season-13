@@ -23,7 +23,7 @@ function Tags() {
             href={`/tags/${encodeURIComponent(tag)}/`}
             className="rounded-lg border border-stone-200 bg-white px-4 py-2 text-sm hover:border-stone-400"
           >
-            {tag} <span className="text-stone-400">({count})</span>
+            {tag} <span className="text-stone-500">({count})</span>
           </Link>
         ))}
       </div>

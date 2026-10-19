@@ -28,13 +28,13 @@ export default function YouTubeCard({ resourceId, activatable = true }: { resour
   return (
     <div className="flex aspect-video w-full flex-col items-center justify-center gap-2 rounded-lg bg-stone-800 p-4 text-center text-stone-100">
       <span className="text-sm font-semibold">YouTube 동영상</span>
-      <span className="font-mono text-xs text-stone-400">{resourceId}</span>
+      <span className="font-mono text-xs text-stone-500">{resourceId}</span>
       {activatable ? (
         <button type="button" onClick={() => setActive(true)} className="mt-1 rounded-full bg-white px-4 py-1.5 text-sm font-medium text-stone-900 hover:bg-stone-200">
           눌러서 재생 (YouTube에 연결합니다)
         </button>
       ) : (
-        <span className="text-xs text-stone-400">편집 화면에서는 재생하지 않습니다.</span>
+        <span className="text-xs text-stone-500">편집 화면에서는 재생하지 않습니다.</span>
       )}
     </div>
   );
