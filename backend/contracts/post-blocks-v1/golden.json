@@ -762,6 +762,24 @@
   ],
   "invalid": [
     {
+      "name": "boolean-version",
+      "input": {
+        "format": "post-blocks",
+        "version": true,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": []
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/version"
+    },
+    {
       "name": "empty-blocks",
       "input": {
         "format": "post-blocks",

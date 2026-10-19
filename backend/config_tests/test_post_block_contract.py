@@ -39,6 +39,20 @@ def test_negative_shapes(case):
     assert case['path'].startswith('/content')
 
 
+@pytest.mark.parametrize('version', [True, False, 1.0, '1', None, 0, 2])
+def test_version_rejects_raw_non_integer_and_unknown_values(version):
+    document = {**GOLDEN['valid'][0]['input'], 'version': version}
+    with pytest.raises(ValidationError) as error:
+        Document.model_validate_json(json.dumps(document))
+    assert error.value.errors()[0]['loc'] == ('version',)
+
+
+def test_integer_version_one_remains_valid():
+    document = Document.model_validate_json(json.dumps(GOLDEN['valid'][0]['input']))
+    assert type(document.version) is int
+    assert document.version == 1
+
+
 def test_local_array_and_integer_bounds():
     paragraph = GOLDEN['valid'][0]['input']['blocks'][0]
     document = {'format': 'post-blocks', 'version': 1, 'blocks': [paragraph] * 500}

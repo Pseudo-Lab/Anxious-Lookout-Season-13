@@ -6,7 +6,7 @@ normalization, projection and conversion are separate subsequent work.
 from __future__ import annotations
 
 from typing import Annotated, Literal, Union
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 UUIDText = Annotated[str, StringConstraints(min_length=36, max_length=36, pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')]
 Color = Annotated[str, StringConstraints(min_length=7, max_length=7, pattern=r'^#[0-9a-fA-F]{6}$')]
@@ -137,6 +137,15 @@ class Document(Shape):
     format: Literal['post-blocks']
     version: Literal[1]
     blocks: Annotated[list[Block], Field(min_length=1, max_length=500)]
+
+    @field_validator('version', mode='before')
+    @classmethod
+    def require_integer_version(cls, value):
+        # Literal equality otherwise accepts True == 1 before semantic checks
+        # can inspect the original input. Do not echo rejected input in errors.
+        if type(value) is not int:
+            raise ValueError('Version must be an integer')
+        return value
 
 
 ListItem.model_rebuild()
