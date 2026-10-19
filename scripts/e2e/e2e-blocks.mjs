@@ -810,6 +810,36 @@ await editingRegressions(page, H, "chromium");
   await H.main.getByRole("button", { name: "초안 버리기", exact: true }).click();
 }
 
+// F6b. 리뷰 round4 M3: 정규화된 작은 가중치([1,2,2])의 표를 저장·새로고침한 뒤에도 넓게·좁게가 양방향으로 바뀐다
+{
+  const csrf = (await (await page.request.get(U("/api/auth/me"))).json()).csrfToken;
+  const id = () => crypto.randomUUID();
+  const cell = (t) => ({ id: id(), align: "left", blocks: [{ id: id(), type: "paragraph", runs: t ? [{ text: t, marks: [] }] : [] }] });
+  const table = { id: id(), type: "table", columnWidths: [1, 2, 2], rows: [{ id: id(), header: true, cells: [cell("a"), cell("b"), cell("c")] }, { id: id(), header: false, cells: [cell("1"), cell("2"), cell("3")] }] };
+  const r = await page.request.post(U("/api/research/post-drafts"), {
+    data: { title: "작은 가중치", content: { format: "post-blocks", version: 1, blocks: [table] }, description: "", tags: [], coverImageId: null, documentIds: [] },
+    headers: { Origin: ORIGIN, "X-CSRF-Token": csrf, "Idempotency-Key": crypto.randomUUID(), "X-Post-Contract-Revision": "1.1" },
+  });
+  const draft = await r.json();
+  await page.goto(U(`/write/new/?draft=${draft.id}`), { waitUntil: "domcontentloaded" });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await H.editor.waitFor({ timeout: 15000 });
+  const w = async () => (await H.doc()).content.find((b) => b.type === "table")?.attrs?.columnWidths ?? null;
+  const ratio = (x) => (x ? x[0] / x[1] : null);
+  const start = await w();
+  await H.editor.locator("table th").first().click();
+  const t = H.tb.getByRole("group", { name: "표" });
+  await t.getByRole("button", { name: "열 넓게" }).click();
+  const wide = await w();
+  await t.getByRole("button", { name: "열 좁게" }).click();
+  await t.getByRole("button", { name: "열 좁게" }).click();
+  const narrow = await w();
+  check("F6b. small canonical weights [1,2,2]: widen and narrow both change the first column", JSON.stringify(start) === "[1,2,2]" && ratio(wide) > 0.5 && ratio(narrow) < 0.5 && wide[1] === wide[2] && narrow[1] === narrow[2], `${JSON.stringify(start)} → ${JSON.stringify(wide)} → ${JSON.stringify(narrow)}`);
+  const saved = await H.blocks();
+  const sw = saved.doc?.blocks?.[0]?.columnWidths;
+  check("F6b. the changed weights save as valid canonical weights", saved.problem === 0 && Array.isArray(sw) && sw[0] / sw[1] < 0.5, JSON.stringify(sw));
+}
+
 // R1. renderer(저장한 글 화면의 최신 버전): 서식·영상 카드. 누르기 전에는 YouTube 요청 0, 누르면 nocookie 주소의 고정 sandbox iframe
 await H.fresh();
 await page.keyboard.type("굵은 ");

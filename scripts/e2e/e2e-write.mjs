@@ -889,6 +889,20 @@ check("WP12. public post scope: bounded", await appears(chat.getByText("다음 �
 }
 
 // WP12b. 쓰는 이미지는 지울 수 없고, 쓰지 않는 이미지는 지울 수 있다
+// #36 F8: 앞부분은 usage가 없는 구형 서버 응답으로 본다(이 글 판정 + 삭제 409 안내 fallback). 뒤에서 usage가 있는 목록을 본다.
+const stripUsage = async (route) => {
+  // 가로채기를 풀 때 진행 중이던 요청이 있으면 이미 처리된 route가 되므로 오류를 삼킨다
+  try {
+    const res = await route.fetch();
+    const body = await res.json();
+    for (const it of body.items ?? []) delete it.usage;
+    await route.fulfill({ response: res, json: body });
+  } catch {
+    await route.continue().catch(() => {});
+  }
+};
+const IMAGE_LIST = /\/api\/research\/post-images\?/;
+await page.route(IMAGE_LIST, stripUsage);
 await page.goto(U(`/write/?id=${postId}`));
 await main.getByRole("button", { name: "내용 수정" }).click();
 const imgPanel = main.getByRole("region", { name: "이미지" });
@@ -912,18 +926,49 @@ await page.unroute("**/api/research/post-images", holdSpare);
 check("WP12b. close unlocked after upload", !(await main.getByRole("button", { name: "편집 닫기(초안 보관)" }).isDisabled()));
 // 방금 넣은 이미지 블록은 본문에서 다시 빼서 쓰지 않는 이미지로 만든다(본문을 새로 쓴다)
 check("WP12b. spare image block inserted", (await bodyBox().locator("figure[data-type=post-image]").count()) === 1);
+const spare = (await api.get("/research/post-images")).items.find((i) => i.mimeType === "image/webp");
+const rowOf = (id) => imgPanel.locator("li").filter({ has: page.locator(`img[src$="${id}"]`) });
+// #36 F8: 이 글의 본문·표지에서 쓰는 이미지는 '지우기' 대신 '사용 중(이 글)'
+await rowOf(spare.id).waitFor({ timeout: 10000 }).catch(() => {});
+check(
+  "WP12b. F8: images used in this post show '사용 중(이 글)' instead of delete (body and cover)",
+  (await rowOf(spare.id).getByText("사용 중(이 글)").count()) === 1 && (await rowOf(spare.id).getByRole("button", { name: "지우기" }).count()) === 0 &&
+    (await rowOf(IMG).getByText("사용 중(이 글)").count()) === 1 && (await rowOf(IMG).getByRole("button", { name: "지우기" }).count()) === 0
+);
 await writeBody(["두 번째 버전 문장"]);
 await saved();
-const spare = (await api.get("/research/post-images")).items.find((i) => i.mimeType === "image/webp");
-await imgPanel.locator("li").filter({ has: page.locator(`img[src$="${IMG}"]`) }).getByRole("button", { name: "지우기" }).click();
+// 표지에서 빼면 이 화면은 다른 곳(이전 버전)의 쓰임을 모르므로 지우기가 보이고, 서버가 이유와 함께 거절한다
+await imgPanel.getByRole("button", { name: "표지 빼기" }).click();
+await rowOf(IMG).getByRole("button", { name: "지우기" }).click();
 check("WP12b. in-use image delete refused", await appears(imgPanel.getByText("쓰고 있는 이미지라 지울 수 없습니다", { exact: false })));
-await imgPanel.locator("li").filter({ has: page.locator(`img[src$="${spare.id}"]`) }).getByRole("button", { name: "지우기" }).click();
+await rowOf(spare.id).getByRole("button", { name: "지우기" }).click();
 let spareGone = false;
 for (let i = 0; i < 20 && !spareGone; i++) {
   spareGone = !(await api.get("/research/post-images")).items.some((x) => x.id === spare.id);
   if (!spareGone) await page.waitForTimeout(300);
 }
 check("WP12b. unused image deleted", spareGone);
+await page.unroute(IMAGE_LIST, stripUsage);
+await page.waitForTimeout(300);
+// #36 F7: 이미지·표지 패널 접기. 접힘은 이 브라우저에 기억되어 다시 열어도 접혀 있다
+await imgPanel.getByRole("button", { name: "이미지·표지 접기" }).click();
+check("WP12b. F7: collapsed panel hides the cover row and image list, keeps upload", (await imgPanel.getByText("표지:").count()) === 0 && (await imgPanel.getByRole("button", { name: "이미지 올리기" }).count()) === 1);
+await saved();
+await page.reload();
+await main.getByRole("button", { name: "초안 이어서 편집" }).click();
+await bodyBox().waitFor({ timeout: 15000 });
+check("WP12b. F7: the panel stays collapsed after reopening", (await imgPanel.getByRole("button", { name: "이미지·표지 펼치기" }).getAttribute("aria-expanded")) === "false" && (await imgPanel.getByText("표지:").count()) === 0);
+await imgPanel.getByRole("button", { name: "이미지·표지 펼치기" }).click();
+check("WP12b. F7: expanding shows the panel again", (await imgPanel.getByText("표지:").count()) === 1);
+// #36 F8: 서버가 알려 준 사용처(usage). 표지에서 뺀 이미지도 이전 버전·발행본에 남아 있으면 지우기 대신 그 이유를 보인다
+await imgPanel.getByRole("button", { name: "내 이미지" }).click();
+await rowOf(IMG).waitFor({ timeout: 10000 }).catch(() => {});
+check(
+  // 앞선 시험의 종료된 초안·제안도 계약대로 사용처에 든다(초안·제안·버전·발행본 순서)
+  "WP12b. F8: an image kept by past versions and the publication shows its usage kinds without delete",
+  /사용 중\((초안·)?(제안·)?버전·발행본\)/.test(await rowOf(IMG).innerText()) && (await rowOf(IMG).getByRole("button", { name: "지우기" }).count()) === 0,
+  (await rowOf(IMG).innerText().catch(() => "")).replace(/\s+/g, " ")
+);
 await main.getByRole("button", { name: "초안 버리기…" }).click();
 await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
 await main.getByRole("button", { name: "내용 수정" }).waitFor();

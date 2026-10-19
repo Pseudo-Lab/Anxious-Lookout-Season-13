@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { getSchema } from "@tiptap/core";
 import { Node as PMNode } from "@tiptap/pm/model";
-import { blockExtensions } from "@/components/blocks/editor/schema";
+import { blockExtensions, resizedWeights } from "@/components/blocks/editor/schema";
 import { fromEditor, toEditor, type EditorNode } from "./adapter";
 import { BLOCK_LIMITS, canonicalBytes, isAllowedLink, parseBlockDocument } from "./document";
 import { formatChanges, formattingChanges, hasVisibleContent, imageIds, textProjection } from "./projection";
@@ -268,5 +268,34 @@ describe("editor adapter details", () => {
     const cell = (colspan: number) => ({ type: "tableCell", attrs: { id: nextId(), colspan, rowspan: 1, align: "left" }, content: [{ type: "paragraph", attrs: { id: nextId() } }] });
     const r = fromEditor({ type: "doc", content: [{ type: "table", attrs: { id: nextId() }, content: [{ type: "tableRow", attrs: { id: nextId() }, content: [cell(2)] }] }] });
     expect(r.ok ? null : r.error.path).toBe("/blocks/0/rows/0/cells/0/colspan");
+  });
+});
+
+describe("table column resize buttons (#36 review round4 M3)", () => {
+  const norm = (w: number[]) => {
+    const g = w.reduce((a, b) => (b ? norm2(b, a % b) : a));
+    return w.map((x) => x / g);
+  };
+  const norm2 = (a: number, b: number): number => (b ? norm2(b, a % b) : a);
+  it("changes small canonical weights in both directions and keeps the other columns' ratio", () => {
+    const wide = resizedWeights([1, 2, 2], 0, 1);
+    const narrow = resizedWeights([1, 2, 2], 0, -1);
+    expect(wide[0] / wide[1]).toBeGreaterThan(1 / 2);
+    expect(narrow[0] / narrow[1]).toBeLessThan(1 / 2);
+    expect(wide[1]).toBe(wide[2]);
+    expect(narrow[1]).toBe(narrow[2]);
+    expect([...wide, ...narrow].every((x) => Number.isInteger(x) && x >= 1 && x <= 1000)).toBe(true);
+  });
+  it("keeps changing on repeated presses after normalization (no fixed point)", () => {
+    let w = [1, 2, 2];
+    for (let i = 0; i < 5; i++) {
+      const next = norm(resizedWeights(w, 0, 1));
+      expect(next[0] / next[1]).toBeGreaterThan(w[0] / w[1]);
+      w = next;
+    }
+  });
+  it("only stops at the contract bounds", () => {
+    expect(resizedWeights([1000, 1], 0, 1)).toEqual([1000, 1]);
+    expect(resizedWeights([1, 1000], 0, -1)).toEqual([1, 1000]);
   });
 });

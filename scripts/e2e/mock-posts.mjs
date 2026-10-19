@@ -577,9 +577,22 @@ const imageInUse = (id) =>
   [...drafts.values()].some((d) => imageIdsOf(d).includes(id)) ||
   [...proposals.values()].some((p) => imageIdsOf(p).includes(id));
 
+/** #36 D-36-2: 이미지를 쓰는 곳의 종류(순서 고정, 중복 없음). 삭제 409와 같은 참조 집합(본문+표지). */
+function imageUsage(id) {
+  const out = [];
+  if ([...drafts.values()].some((d) => imageIdsOf(d).includes(id))) out.push("draft");
+  if ([...proposals.values()].some((p) => imageIdsOf(p).includes(id))) out.push("proposal");
+  if ([...posts.values()].some((p) => p.versions.some((v) => imageIdsOf(v).includes(id)))) out.push("version");
+  if ([...posts.values()].some((p) => p.publication && p.versions.some((v) => v.id === p.publication.versionId && imageIdsOf(v).includes(id)))) out.push("publication");
+  return out;
+}
+
 export function handleImageRead(owner, path, url) {
   if (path !== "/research/post-images") return null;
-  const list = [...images.values()].filter((i) => i.owner === owner).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)).map(imageView);
+  const list = [...images.values()]
+    .filter((i) => i.owner === owner)
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+    .map((i) => ({ ...imageView(i), usage: imageUsage(i.id) }));
   return ok(200, page(list, url));
 }
 export function handleImageDelete(owner, path) {

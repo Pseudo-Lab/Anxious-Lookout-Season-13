@@ -176,7 +176,10 @@ export interface PostProposal extends PostMeta {
 }
 
 /** 직접 올린 이미지(#28 D2). url은 `{BASE_PATH}/api/media/post-images/{id}` 그대로 본문·표지에 쓴다. */
+/** #36 F8: 서버가 알려 주면(선택 필드) 이 이미지를 쓰는 곳의 종류. 모르는 값은 버린다. */
+export type PostImageUse = "draft" | "proposal" | "version" | "publication";
 export interface PostImage {
+  usage?: PostImageUse[];
   id: string;
   url: string;
   mimeType: string;

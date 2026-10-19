@@ -9,6 +9,7 @@ import type {
   PostDocumentOption,
   PostDraft,
   PostImage,
+  PostImageUse,
   PostMaterialOption,
   PostMaterialSource,
   PostMeta,
@@ -413,7 +414,9 @@ function parseAccept(v: unknown): { proposal: PostProposal; post: Post; draft: P
 
 function parseImage(v: unknown): PostImage | null {
   if (!isObj(v) || !isId(v.id) || !isStr(v.url) || !isStr(v.mimeType) || !isInt(v.size) || !isInt(v.width) || !isInt(v.height) || !isStr(v.createdAt)) return null;
-  return { id: v.id, url: v.url, mimeType: v.mimeType, size: v.size, width: v.width, height: v.height, createdAt: v.createdAt };
+  const out: PostImage = { id: v.id, url: v.url, mimeType: v.mimeType, size: v.size, width: v.width, height: v.height, createdAt: v.createdAt };
+  if (Array.isArray(v.usage)) out.usage = v.usage.filter((u): u is PostImageUse => u === "draft" || u === "proposal" || u === "version" || u === "publication");
+  return out;
 }
 
 function parseUnpublish(v: unknown): { id: string; version: number } | null {

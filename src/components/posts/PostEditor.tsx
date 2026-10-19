@@ -13,7 +13,7 @@ import { formatDateTime } from "@/lib/research/format";
 import { LIMITS } from "@/lib/research/types";
 import { StatusLine, isReason } from "@/components/research/DocumentEditor";
 import ErrorNotice from "@/components/research/ErrorNotice";
-import { hasVisibleContent } from "@/lib/blocks/projection";
+import { hasVisibleContent, imageIds } from "@/lib/blocks/projection";
 import BodyDiff from "@/components/blocks/BodyDiff";
 import PostBodyEditor, { blockProblemText, type BodyProblem } from "@/components/blocks/PostBodyEditor";
 import { bufferTarget, clearBodyBuffer, loadBodyBuffer, saveBodyBuffer } from "@/lib/posts/bodyBuffer";
@@ -452,6 +452,7 @@ export default function PostEditor({
         onCover={(coverImageId) => set({ coverImageId })}
         onUploading={setPanelUploading}
         readOnly={locked}
+        usedHere={new Set(imageIds(values.content))}
       />
       <PostBodyEditor
         value={values.content}

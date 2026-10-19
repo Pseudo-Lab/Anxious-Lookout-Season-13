@@ -361,6 +361,20 @@ const isWeights = (v: unknown): v is number[] =>
 const weightsOf = (table: PMNode) => (isWeights(table.attrs.columnWidths) && table.attrs.columnWidths.length === tableColumnCount(table) ? [...table.attrs.columnWidths] : Array.from({ length: tableColumnCount(table) }, () => 100));
 /** 모두 같으면 생략(null, 계약 정규화와 같다). */
 const weightsAttr = (w: number[]) => (w.every((x) => x === w[0]) ? null : w.map((x) => Math.min(COLUMN_WEIGHT.max, Math.max(COLUMN_WEIGHT.min, Math.round(x)))));
+/**
+ * 넓게·좁게(리뷰 round4 M3): 정규화된 작은 가중치([1,2,2])는 ×1.25·×0.8을 반올림하면 그대로라 바뀌지 않는다.
+ * 비율을 그대로 둔 채 공통 배수로 키운 뒤(가장 작은 값 100 근처, 가장 큰 값 1000 이하) 조절한다.
+ * 계약 상한(1..1000) 때문에 더 넓히거나 좁힐 수 없을 때만 그대로다.
+ */
+export function resizedWeights(w: number[], index: number, dir: 1 | -1): number[] {
+  const min = Math.min(...w);
+  const max = Math.max(...w);
+  const k = Math.max(1, Math.min(Math.ceil(100 / min), Math.floor(COLUMN_WEIGHT.max / max)));
+  const scaled = w.map((x) => x * k);
+  scaled[index] = Math.min(COLUMN_WEIGHT.max, Math.max(COLUMN_WEIGHT.min, Math.round(scaled[index] * (dir === 1 ? 1.25 : 0.8))));
+  return scaled;
+}
+
 /** 화면 폭(px) → 가중치(합 1000 근처의 정수, 1..1000). 서버가 GCD로 정규화한다. */
 export const weightsFromPixels = (px: number[]) => {
   const total = px.reduce((a, b) => a + b, 0) || 1;
@@ -423,8 +437,7 @@ const PostTable = Table.extend({
         ({ state, tr, dispatch }) => {
           if (!isInTable(state)) return false;
           const rect = selectedRect(state);
-          const w = weightsOf(rect.table);
-          w[rect.left] = w[rect.left] * (dir === 1 ? 1.25 : 0.8);
+          const w = resizedWeights(weightsOf(rect.table), rect.left, dir);
           if (dispatch) tr.setNodeMarkup(rect.tableStart - 1, undefined, { ...rect.table.attrs, columnWidths: weightsAttr(w) });
           return true;
         },
