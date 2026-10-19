@@ -1,5 +1,6 @@
 """Offline rollout contracts; never contact Docker daemon, cluster or host source."""
 from copy import deepcopy
+import hashlib
 import importlib.util
 import json
 import os
@@ -207,12 +208,14 @@ def test_cli_check_no_output_and_exclusive_render(values, baseline, maps, tmp_pa
         (tmp_path/(name+'.json')).write_text(json.dumps(value))
     args = [sys.executable, '-B', '-m', 'ops.runner_rollout', '--values', str(tmp_path/'values.json'),
             '--deployment', str(tmp_path/'deployment.json'), '--configmaps', str(tmp_path/'configmaps.json'),
-            '--templates', str(TEMPLATES), '--check']
+            '--templates', str(TEMPLATES), '--check', '--expected-module-sha256',
+            hashlib.sha256(Path(rollout.__file__).read_bytes()).hexdigest()]
     assert subprocess.run(args, capture_output=True).returncode == 0
     assert len(list(tmp_path.iterdir())) == 3
     args += ['--output', str(tmp_path/'result')]
     assert subprocess.run(args, capture_output=True).returncode == 0
     assert (tmp_path/'result/api-patch.json').stat().st_mode & 0o777 == 0o600
+    assert json.loads((tmp_path/'result/renderer-provenance.json').read_text()) == rollout.provenance(args[-3])
     assert subprocess.run(args, capture_output=True).returncode == 1
     (tmp_path/'values.json').write_text('{"version":1,"version":1}')
     result = subprocess.run(args[:-2], capture_output=True)
@@ -271,3 +274,74 @@ def test_post_images_pvc_mount_and_repeat_render(values, baseline, maps):
     pvc = json.loads(rendered['post-images-pvc.json'])
     assert pvc['spec']['accessModes'] == ['ReadWriteOnce']
     assert pvc['metadata']['name'] == 'hosting-post-images'
+
+
+@pytest.mark.parametrize('value', [None, '', ' ', 'UPPER', '-bad', 'a..b', 'a'*64, 'a.'*127+'a'])
+def test_storage_class_refused(values, value):
+    values['postImagesStorageClass'] = value
+    with pytest.raises(ValueError): rollout.checked(values)
+
+
+def test_storage_class_required_and_rendered(values, baseline, maps):
+    values['postImagesStorageClass'] = 'approved-retain.example'
+    files = rollout.render(values, baseline, TEMPLATES, maps)
+    assert json.loads(files['post-images-pvc.json'])['spec']['storageClassName'] == 'approved-retain.example'
+    del values['postImagesStorageClass']
+    with pytest.raises(ValueError): rollout.checked(values)
+
+
+@pytest.mark.parametrize('change', ['missing-pvc', 'class', 'claim', 'readonly', 'root', 'patch'])
+def test_artifact_preflight_refuses(values, baseline, maps, change):
+    files = rollout.render(values, baseline, TEMPLATES, maps)
+    if change == 'missing-pvc':
+        del files['post-images-pvc.json']
+    elif change == 'class':
+        pvc = json.loads(files['post-images-pvc.json'])
+        pvc['spec']['storageClassName'] = 'wrong'
+        files['post-images-pvc.json'] = json.dumps(pvc)
+    else:
+        candidate = json.loads(files['api-candidate.json'])
+        spec = candidate['spec']['template']['spec']
+        api = spec['containers'][0]
+        if change == 'claim':
+            next(v for v in spec['volumes'] if v['name'] == 'post-images')['persistentVolumeClaim']['claimName'] = 'other'
+        if change == 'readonly':
+            next(m for m in api['volumeMounts'] if m['name'] == 'post-images')['readOnly'] = True
+        if change == 'root':
+            next(e for e in api['env'] if e['name'] == 'POST_IMAGE_ROOT')['value'] = '/tmp'
+        if change == 'patch':
+            files['api-patch.json'] = '[]'
+        files['api-candidate.json'] = json.dumps(candidate)
+    with pytest.raises((ValueError, KeyError, IndexError)): rollout.preflight(files, values)
+
+
+def test_stale_module_hash_refused_before_render():
+    with pytest.raises(ValueError): rollout.provenance('0'*64)
+    digest = hashlib.sha256(Path(rollout.__file__).read_bytes()).hexdigest()
+    assert rollout.provenance(digest)['moduleSha256'] == digest
+
+
+def test_stale_renderer_cli_fails_before_inputs_or_output(tmp_path):
+    old = tmp_path/'old-renderer.py'
+    source = Path(rollout.__file__).read_bytes()
+    old.write_bytes(source + b'\n# stale image module\n')
+    output = tmp_path/'candidate'
+    result = subprocess.run([sys.executable, '-B', str(old), '--values', '/missing-values',
+        '--deployment', '/missing-deployment', '--templates', str(TEMPLATES),
+        '--output', str(output), '--expected-module-sha256', hashlib.sha256(source).hexdigest()],
+        capture_output=True)
+    assert result.returncode == 1
+    assert b'Rollout render refused' in result.stderr
+    assert not output.exists() and not result.stdout
+
+
+def test_storage_class_schema_agrees(values):
+    import re
+    prop = json.loads((TEMPLATES/'values.schema.json').read_text())['properties']['postImagesStorageClass']
+    for value in ['m2-postgres-retain', 'approved.example', '', 'a..b', 'UPPER', 'a'*64, 'a.'*127+'a']:
+        candidate = {**values, 'postImagesStorageClass': value}
+        valid = len(value) <= prop['maxLength'] and bool(re.fullmatch(prop['pattern'], value))
+        if valid:
+            rollout.checked(candidate)
+        else:
+            with pytest.raises(ValueError): rollout.checked(candidate)

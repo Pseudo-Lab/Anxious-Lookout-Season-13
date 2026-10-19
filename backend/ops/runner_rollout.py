@@ -1,5 +1,6 @@
 """Offline D4 rollout renderer. No cluster, credential, Docker or systemd calls."""
 import argparse
+import hashlib
 from copy import deepcopy
 import ipaddress
 import json
@@ -13,7 +14,7 @@ STORAGE = '/var/lib/anxious-lookout/user-runners'
 CONFIG = '/etc/anxious-lookout/issue16'
 BIN = '/usr/local/lib/anxious-lookout/issue16'
 NS = 'codex-runner'
-KEYS = {'version', 'runtimeImage', 'runnerImage', 'provisionerImageId', 'api', 'hostApi',
+KEYS = {'version', 'runtimeImage', 'runnerImage', 'provisionerImageId', 'postImagesStorageClass', 'api', 'hostApi',
         'namespaceUid', 'podCIDR', 'node', 'nodeUid', 'bootId', 'hostPidNamespace',
         'hostCgroupNamespace', 'providerAccountId', 'sourceUid', 'allowlist',
         'kubectl', 'crictl', 'criSocket', 'maxPods', 'idleSeconds', 'nativeSizeGiB', 'controlSizeGiB'}
@@ -44,6 +45,9 @@ def canonical_uuid(value):
 
 def checked(v):
     require(type(v) is dict and set(v) in (KEYS, KEYS | {'executor'}) and type(v['version']) is int and v['version'] == 1)
+    sc = v['postImagesStorageClass']
+    require(type(sc) is str and len(sc) <= 253 and all(
+        re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in sc.split('.')))
     if 'executor' in v:
         e = v['executor']
         require(type(e) is dict and set(e) == {'image', 'wallSeconds', 'outputBytes'})
@@ -300,13 +304,42 @@ def docker(v, role):
     return args
 
 
+def provenance(expected):
+    path = Path(__file__).resolve()
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    require(type(expected) is str and re.fullmatch(r'[a-f0-9]{64}', expected) and digest == expected)
+    return {'modulePath': str(path), 'moduleSha256': digest}
+
+
+def preflight(files, v):
+    """Fail closed on missing/incorrect durable-image artifacts, before any apply."""
+    pvc = json.loads(files['post-images-pvc.json'])
+    require(pvc['apiVersion'] == 'v1' and pvc['kind'] == 'PersistentVolumeClaim')
+    require(pvc['metadata'] == {'name': 'hosting-post-images', 'namespace': 'm2-hosting'})
+    require(pvc['spec']['storageClassName'] == v['postImagesStorageClass'])
+    require(pvc['spec']['accessModes'] == ['ReadWriteOnce'])
+    candidate = json.loads(files['api-candidate.json'])
+    spec = candidate['spec']['template']['spec']
+    api, = [c for c in spec['containers'] if c['name'] == 'api']
+    volume, = [x for x in spec['volumes'] if x['name'] == 'post-images']
+    require(volume == {'name': 'post-images', 'persistentVolumeClaim': {'claimName': 'hosting-post-images'}})
+    mount, = [m for m in api['volumeMounts'] if m['name'] == 'post-images']
+    require(mount in ({'name': 'post-images', 'mountPath': '/var/lib/posts/images'},
+                      {'name': 'post-images', 'mountPath': '/var/lib/posts/images', 'readOnly': False}))
+    root, = [e for e in api['env'] if e['name'] == 'POST_IMAGE_ROOT']
+    require(root == {'name': 'POST_IMAGE_ROOT', 'value': '/var/lib/posts/images/data'})
+    patch = json.loads(files['api-patch.json'])
+    require(patch[2] == {'op': 'replace', 'path': '/spec/template/spec', 'value': spec})
+
+
 def render(v, baseline, templates, configmaps=()):
     checked(v)
     candidate, patch = deployment(v, baseline, configmaps)
     files = {'resources.json': resources(v), 'api-candidate.json': candidate, 'api-patch.json': patch,
              'post-images-pvc.json': {'apiVersion': 'v1', 'kind': 'PersistentVolumeClaim',
                  'metadata': {'name': 'hosting-post-images', 'namespace': 'm2-hosting'},
-                 'spec': {'accessModes': ['ReadWriteOnce'], 'resources': {'requests': {'storage': '10Gi'}}}}}
+                 'spec': {'storageClassName': v['postImagesStorageClass'],
+                          'accessModes': ['ReadWriteOnce'], 'resources': {'requests': {'storage': '10Gi'}}}}}
     result = {key: json.dumps(value, indent=2)+'\n' for key, value in files.items()}
     for role, value in inputs(v).items():
         result[role+'-inputs.json'] = json.dumps(value, indent=2)+'\n'
@@ -344,6 +377,7 @@ def render(v, baseline, templates, configmaps=()):
         '[Service]\nType=oneshot\nUser=root\nUMask=0077\nRemainAfterExit=yes\nExecStart='+BIN+'/storage-root.sh\n'
         '[Install]\nWantedBy=multi-user.target\n')
     result['k3s-issue16.conf'] = '[Unit]\nRequires=issue16-restore.service\nAfter=issue16-restore.service\n'
+    preflight(result, v)
     return result
 
 
@@ -355,12 +389,18 @@ def main():
     p.add_argument('--configmaps', type=Path, help='ConfigMap or List snapshot for API envFrom')
     p.add_argument('--output', type=Path)
     p.add_argument('--check', action='store_true')
+    p.add_argument('--expected-module-sha256', required=True,
+                   help='SHA256 of runner_rollout.py from the reviewed source SHA')
     args = p.parse_args()
     try:
         require(args.check or args.output is not None)
+        source = provenance(args.expected_module_sha256)
+        print(json.dumps(source, sort_keys=True), flush=True)
         snapshot = read(args.configmaps) if args.configmaps else {'kind': 'List', 'items': []}
         maps = snapshot['items'] if snapshot['kind'] == 'List' else [snapshot]
-        files = render(read(args.values), read(args.deployment), args.templates, maps)
+        values = read(args.values)
+        files = render(values, read(args.deployment), args.templates, maps)
+        files['renderer-provenance.json'] = json.dumps(source, indent=2)+'\n'
         if args.output is not None:
             require(args.output.absolute() == args.output.resolve() and not args.output.exists())
             args.output.mkdir(mode=0o700)
@@ -369,6 +409,7 @@ def main():
                 with target.open('x') as stream:
                     stream.write(value)
                 target.chmod(0o700 if name.endswith('.sh') else 0o600)
+            preflight({name: (args.output/name).read_text() for name in files}, values)
     except Exception:
         p.exit(1, 'Rollout render refused; values and credentials are not printed\n')
     print('PASS offline rollout validation; no deployment or service changes')

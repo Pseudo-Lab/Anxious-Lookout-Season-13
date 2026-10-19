@@ -82,16 +82,27 @@ backup alone will not be a complete post-image backup.
 
 Prerequisites: full-scope approval for exact SHA/image and 0006, current API
 Deployment snapshot, reviewed renderer values and a recoverable populated 0005
-backup. Do not apply an earlier provisional 0006. Render ops.runner_rollout with
-the existing reviewed inputs; inspect post-images-pvc.json, api-candidate.json,
-and api-patch.json. The default PVC requests 10Gi RWO in m2-hosting under the
-name hosting-post-images. Confirm the site's default StorageClass, encryption,
-node affinity, capacity and reclaim policy; select an approved class explicitly
-in the reviewed manifest if there is no suitable default. No emptyDir fallback.
+backup. Do not apply an earlier provisional 0006. Run the renderer from the
+approved SHA's runtime digest (or same-SHA provisioner), using the mandatory
+module hash preflight in [the rollout runbook](../infra/hosting/m3/multi-user-runners/rollout/README.md).
+A `/source` bind does not prove which module Python imports. Record actual module
+path/hash from stdout and renderer-provenance.json. Inspect post-images-pvc.json,
+api-candidate.json and api-patch.json; missing PVC, wrong claim/root, read-only
+mount or mismatched patch fails preflight. Values must explicitly provide
+postImagesStorageClass (`m2-postgres-retain` on this cluster); there is no default.
+The PVC requests 10Gi RWO in m2-hosting under hosting-post-images.
+Confirm encryption, node affinity, capacity and Retain policy. No emptyDir fallback.
 A single API writer replica is the supported rollout; stop old replicas during
 cutover so RWO scheduling cannot leave two unsynchronized deployments.
 
-1. Create the PVC: `kubectl apply -f post-images-pvc.json`. For WaitForFirstConsumer,
+1. Follow the rollout runbook's existing-PVC gate before applying anything.
+   If absent, verify the selected StorageClass uses Retain, then create using
+   `kubectl create -f post-images-pvc.json` (an existence race must fail).
+   If present, assert expected UID, Bound and bound PV Retain, then **skip PVC apply**.
+   The existing live PVC UID is `2eefbd17-f87d-4880-90a7-a6918f759536`, class
+   local-path; PM patched its PV to Retain on 2026-10-17. Do not delete/recreate
+   it or change its immutable storageClassName to match the new template.
+   For WaitForFirstConsumer,
    Pending is expected until the API pod is scheduled; do not substitute local
    ephemeral storage to work around it.
 2. Stop admissions and pause API/runner writers; take the pre-migration database
@@ -103,8 +114,14 @@ cutover so RWO scheduling cannot leave two unsynchronized deployments.
 3. Verify the PVC is Bound and API mounts it read/write at /var/lib/posts/images.
    POST_IMAGE_ROOT is /var/lib/posts/images/data. The pod uses UID/GID/fsGroup10001;
    its parent volume must allow that UID to create the private 0700 data directory.
-   Files are 0600. Read-only root filesystem remains enabled. Check the PVC and
-   mounted path explicitly before opening admission; a directory alone is not
+   Files are 0600. Read-only root filesystem remains enabled.
+   Keep the local-path parent (observed 0:10001 mode2777) exclusive to trusted
+   writers; never share it with another untrusted UID writer. Protect the private
+   data child (observed 10001:10001 mode2700). A setgid bit does not grant access.
+   local-path is node-local, not HA or node-loss recovery; a 10Gi request is not
+   a physical quota. Record actual disk usage and matched DB/image backup and
+   recovery evidence before claiming operational durability.
+   Check the PVC and mounted path explicitly before opening admission; a directory alone is not
    evidence of persistence. Never expose this directory through a static server.
 4. Check research readiness, upload and private read as an approved editor,
    anonymous404 before publish, public200 after publish, anonymous404 after

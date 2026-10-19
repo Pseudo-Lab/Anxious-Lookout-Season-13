@@ -24,9 +24,17 @@ and registered repo@index references in k3s/CRI. These are not config digests.
 Worker uses the recorded provisioner local ID with `--pull=never`. API uses
 `imagePullPolicy: Never`; runner retains its reviewed `IfNotPresent` behavior and
 exact digest. Verify the imported references resolve on the one target node.
-No new application image is needed: the reviewed `worker.py` wrapper is mounted
+For worker execution, the reviewed `worker.py` wrapper is mounted
 read-only into the original provisioner. Record BOTH image provenance and this
 bundle's git SHA/hash in the operation record.
+
+Rendering is separate: use the **approved source SHA's runtime image digest**
+(or a provisioner built from that same SHA). Never use an old provisioner merely
+because current backend code is bound at `/source`: Python can still import
+`/app/ops/runner_rollout.py`. Set RENDERER_IMAGE to the reviewed repo@sha256 digest
+from release evidence, not a mutable tag or the historical example worker ID.
+Record approved SHA, image digest, templates SHA and module hash together.
+`postImagesStorageClass` is required; this cluster selects `m2-postgres-retain`.
 
 PM must replace providerAccountId and verify sourceUid, node/boot/namespace IDs,
 CIDR, API TLS names and canonical root-owned executable paths in the example.
@@ -55,17 +63,21 @@ non-secret ConfigMaps. The renderer never prints their contents.
 ```sh
 # Run from the backend worktree. /private-rollout is a root-only staging directory
 # holding values.json, api-deployment.json and configmaps.json. No credentials here.
-# Worker image is the PM-provided local ID; this run has no network/host privileges.
+# Set APPROVED_SHA and RENDERER_IMAGE from reviewed release evidence first.
+# Hash the approved Git object, not an uncommitted working copy.
+test -n "$APPROVED_SHA" && test -n "$RENDERER_IMAGE"
+git show "$APPROVED_SHA:backend/ops/runner_rollout.py" > /private-rollout/approved-renderer.py
+MODULE_SHA256=$(sha256sum /private-rollout/approved-renderer.py | cut -d ' ' -f 1)
+# Templates must also come from that approved checkout. No source overlay.
 docker run --rm --pull=never --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges --user 0:0 \
-  -v "$PWD/backend:/source:ro" \
   -v "$PWD/infra/hosting/m3/multi-user-runners/rollout:/templates:ro" \
-  -v /private-rollout:/inputs:ro -e PYTHONPATH=/source \
+  -v /private-rollout:/inputs:ro \
   --entrypoint python \
-  sha256:65113675ba9e1d067a2213127157bcabece62e47254c8d9987abcff4c088e108 \
+  "$RENDERER_IMAGE" \
   -B -m ops.runner_rollout --values /inputs/values.json \
   --deployment /inputs/api-deployment.json --configmaps /inputs/configmaps.json \
-  --templates /templates --check
+  --templates /templates --expected-module-sha256 "$MODULE_SHA256" --check
 ```
 
 To render, repeat with a writable root-only staging parent mounted at `/output`,
@@ -73,6 +85,39 @@ and `--output /output/candidate` (must not exist). `--check` alone writes nothin
 `--check --output ...` both validates and renders. Files are 0600, scripts 0700.
 Review `resources.json`, `api-candidate.json`, `api-patch.json`, inputs, scripts and
 units. The renderer never runs kubectl, Docker, systemctl, migrations or deletion.
+The module path/hash are printed before rendering and saved in
+`renderer-provenance.json`. A hash mismatch fails before output creation; old
+renderers reject the mandatory flag. Do not remove the flag to make them run.
+Post-render preflight checks the PVC file, explicit class, claim, writable mount,
+POST_IMAGE_ROOT and patch/candidate agreement, including files read back from disk.
+Any nonzero renderer exit blocks apply; discard partial output and rerender into
+a fresh directory. Keep the successful output private and unchanged until apply.
+
+### Existing image PVC gate (PM, before any apply)
+
+Use `kubectl get pvc hosting-post-images -n m2-hosting -o json` to distinguish
+NotFound from authorization/connection errors (errors stop the procedure).
+If absent, inspect the selected StorageClass and require reclaimPolicy=Retain,
+approved provisioner/node placement/capacity, then `kubectl create -f
+post-images-pvc.json`. Do not use apply here: a concurrent creation must fail.
+WaitForFirstConsumer may stay Pending until the API schedules.
+
+If present, require metadata.uid=`2eefbd17-f87d-4880-90a7-a6918f759536`
+for the existing live installation, status.phase=Bound and a nonempty
+spec.volumeName. Fetch that PV and require its claimRef UID/name/namespace match
+this PVC and spec.persistentVolumeReclaimPolicy=Retain. **Skip PVC apply**.
+This PVC still has immutable class `local-path`; PM patched its existing PV to
+Retain on 2026-10-17. Never delete/recreate it or change its class to match the
+new template. A different UID requires investigation and a reviewed baseline.
+If reclaim is Delete, stop before deployment apply; PM must verify the exact PV
+and, within authorized operations, patch its reclaim policy to Retain and reread
+it. Do not change the cluster default StorageClass. Record PVC/PV UID and policy
+evidence; Retain alone does not establish backup or recovery.
+
+local-path is node-local and a 10Gi request is not a disk quota. Record actual
+disk usage and matched DB/image backup recovery evidence. Keep the observed
+0:10001 mode2777 parent away from untrusted other-UID writers and protect its
+10001:10001 mode2700 private data child; do not loosen permissions for migration.
 
 `api-patch.json` is **JSON Patch**, with exact Deployment UID/resourceVersion tests.
 It replaces only the Pod spec. Replicas, selectors, rollout strategy and unrelated
@@ -84,6 +129,7 @@ not apply: applying that snapshot could restore stale replicas/metadata.
 kubectl diff -f /private-rollout/candidate/resources.json
 kubectl diff -f /private-rollout/candidate/api-candidate.json
 # Diff exit1 means differences; exit>1 is an error. Review before continuing.
+# Complete the existing image PVC gate above before these mutations.
 kubectl apply -f /private-rollout/candidate/resources.json
 kubectl -n m2-hosting patch deployment api --type=json \
   --patch-file /private-rollout/candidate/api-patch.json
