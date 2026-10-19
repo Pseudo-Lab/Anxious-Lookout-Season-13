@@ -367,12 +367,21 @@ const weightsAttr = (w: number[]) => (w.every((x) => x === w[0]) ? null : w.map(
  * 계약 상한(1..1000) 때문에 더 넓히거나 좁힐 수 없을 때만 그대로다.
  */
 export function resizedWeights(w: number[], index: number, dir: 1 | -1): number[] {
-  const min = Math.min(...w);
-  const max = Math.max(...w);
-  const k = Math.max(1, Math.min(Math.ceil(100 / min), Math.floor(COLUMN_WEIGHT.max / max)));
-  const scaled = w.map((x) => x * k);
-  scaled[index] = Math.min(COLUMN_WEIGHT.max, Math.max(COLUMN_WEIGHT.min, Math.round(scaled[index] * (dir === 1 ? 1.25 : 0.8))));
-  return scaled;
+  const { min: lo, max: hi } = COLUMN_WEIGHT;
+  const k = Math.max(1, Math.min(Math.ceil(100 / Math.min(...w)), Math.floor(hi / Math.max(...w))));
+  const out = w.map((x) => x * k);
+  // 반올림으로 그대로가 되면(작은 값·비대칭 가중치, 리뷰 round5 M3) 방향대로 1만큼은 바꾼다
+  const step = (x: number, f: number, d: 1 | -1) => {
+    const y = Math.round(x * f);
+    return Math.min(hi, Math.max(lo, y === x ? x + d : y));
+  };
+  const own = step(out[index], dir === 1 ? 1.25 : 0.8, dir);
+  if (own !== out[index]) {
+    out[index] = own;
+    return out;
+  }
+  // 이 열이 경계(1 또는 1000)라면 다른 열을 반대로 조절해 비율을 바꾼다. 모두 경계일 때만 그대로다.
+  return out.map((x, j) => (j === index ? x : step(x, dir === 1 ? 0.8 : 1.25, dir === 1 ? -1 : 1)));
 }
 
 /** 화면 폭(px) → 가중치(합 1000 근처의 정수, 1..1000). 서버가 GCD로 정규화한다. */

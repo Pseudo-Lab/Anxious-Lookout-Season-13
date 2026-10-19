@@ -14,6 +14,7 @@ import { LIMITS } from "@/lib/research/types";
 import { StatusLine, isReason } from "@/components/research/DocumentEditor";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import { hasVisibleContent, imageIds } from "@/lib/blocks/projection";
+import type { EditorNode } from "@/lib/blocks/adapter";
 import BodyDiff from "@/components/blocks/BodyDiff";
 import PostBodyEditor, { blockProblemText, type BodyProblem } from "@/components/blocks/PostBodyEditor";
 import { bufferTarget, clearBodyBuffer, loadBodyBuffer, saveBodyBuffer } from "@/lib/posts/bodyBuffer";
@@ -65,6 +66,17 @@ function DescriptionField({ value, onChange, readOnly }: { value: string; onChan
       />
     </Field>
   );
+}
+
+/** 편집기 JSON 안의 이미지 블록 id(검사 전 내용에서도 읽는다). */
+function editorImageIds(node: EditorNode): string[] {
+  const out: string[] = [];
+  const walk = (n: EditorNode) => {
+    if (n.type === "postImage" && typeof n.attrs?.imageId === "string") out.push(n.attrs.imageId);
+    n.content?.forEach(walk);
+  };
+  walk(node);
+  return out;
 }
 
 export default function PostEditor({
@@ -133,6 +145,9 @@ export default function PostEditor({
   const [bodyProblemState, setBodyProblemState] = useState<BodyProblem | null>(null);
   const bodyProblem = bodyProblemState?.error ?? null;
   // #36: 서버가 이 화면보다 새 문서 계약을 요구해 저장을 거절했다. 저장·닫기를 막고 새로고침을 안내한다(입력은 화면과 버퍼에 남는다).
+  // #36 F8(리뷰 round5): 이 글에서 쓰는 이미지. 본문이 계약을 넘어 저장하지 못하는 동안에는 화면의 편집기 내용(bodyProblem)에만
+  // 있는 이미지도 포함한다(마지막 유효 본문만 보면 그 사이 넣은 이미지를 지울 수 있게 되고, 서버도 아직 참조를 모른다).
+  const usedHere = new Set([...imageIds(values.content), ...(bodyProblemState ? editorImageIds(bodyProblemState.editor) : [])]);
   const upgradeRequired = status.kind === "stopped" && status.failure.kind === "http" && status.failure.code === "post_contract_upgrade_required";
   // 입력 전체를 보관하는 중인지(리뷰 round2 M1). 거절되었거나 되살려 연 입력은 본문 유효성과 상관없이, 그 내용이 실제로
   // 저장된 것을 확인하거나(onSaved) 초안을 명시적으로 버릴 때까지 보관한다. 다시 저장하는 중에 고친 입력도 버퍼에 반영한다.
@@ -452,7 +467,7 @@ export default function PostEditor({
         onCover={(coverImageId) => set({ coverImageId })}
         onUploading={setPanelUploading}
         readOnly={locked}
-        usedHere={new Set(imageIds(values.content))}
+        usedHere={usedHere}
       />
       <PostBodyEditor
         value={values.content}

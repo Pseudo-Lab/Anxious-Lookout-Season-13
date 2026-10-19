@@ -294,7 +294,31 @@ describe("table column resize buttons (#36 review round4 M3)", () => {
       w = next;
     }
   });
-  it("only stops at the contract bounds", () => {
+  const share = (w: number[], i: number) => w[i] / w.reduce((a, b) => a + b, 0);
+  it("changes asymmetric weights where rounding alone would stay put (review round5)", () => {
+    // [1,600,600]: 공통 배수 1, 1×1.25 → 1 이었다
+    expect(share(resizedWeights([1, 600, 600], 0, 1), 0)).toBeGreaterThan(share([1, 600, 600], 0));
+    expect(share(resizedWeights([2, 601, 601], 0, -1), 0)).toBeLessThan(share([2, 601, 601], 0));
+  });
+  it("moves the other columns when the column itself is at a bound", () => {
+    expect(share(resizedWeights([1000, 500], 0, 1), 0)).toBeGreaterThan(share([1000, 500], 0));
+    expect(share(resizedWeights([1, 2], 0, -1), 0)).toBeLessThan(share([1, 2], 0));
+  });
+  it("every press inside the valid range changes the share in the asked direction", () => {
+    for (const w of [[1, 2, 2], [1, 600, 600], [2, 601, 601], [7, 993], [1000, 999], [3, 1000, 1], [500, 500, 500]]) {
+      for (let i = 0; i < w.length; i++) {
+        for (const dir of [1, -1] as const) {
+          const next = resizedWeights(w, i, dir);
+          expect(next.every((x) => Number.isInteger(x) && x >= 1 && x <= 1000)).toBe(true);
+          const before = share(w, i);
+          const after = share(next, i);
+          const atBound = dir === 1 ? next.every((x, j) => (j === i ? true : x === 1)) && w[i] * Math.max(1, Math.min(Math.ceil(100 / Math.min(...w)), Math.floor(1000 / Math.max(...w)))) === 1000 : false;
+          if (!atBound) expect(dir === 1 ? after > before : after < before, `${JSON.stringify(w)} col ${i} dir ${dir} → ${JSON.stringify(next)}`).toBe(true);
+        }
+      }
+    }
+  });
+  it("only stops when every column is at its bound", () => {
     expect(resizedWeights([1000, 1], 0, 1)).toEqual([1000, 1]);
     expect(resizedWeights([1, 1000], 0, -1)).toEqual([1, 1000]);
   });

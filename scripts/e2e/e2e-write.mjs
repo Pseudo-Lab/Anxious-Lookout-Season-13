@@ -565,6 +565,34 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   }
 }
 
+// WP3g. 리뷰 round5 F8: 본문이 상한을 넘어 저장하지 못하는 동안 넣은 이미지(화면의 편집기에만 있고 서버는 아직 모름)도
+// '사용 중(이 글)'로 보여 지울 수 없다.
+{
+  await page.goto(U("/write/new/"));
+  await main.getByLabel("제목").fill("상한 중 이미지");
+  await writeBody(["valid-base"]);
+  await saved();
+  const draftId = await draftParam();
+  await page.keyboard.insertText("x".repeat(20001));
+  await main.getByText("저장할 수 있는 크기·개수 상한을 넘었습니다", { exact: false }).waitFor({ timeout: 10000 });
+  const panel = main.getByRole("region", { name: "이미지" });
+  await panel.getByLabel("이미지 파일").setInputFiles({ name: "상한중.png", mimeType: "image/png", buffer: PNG });
+  await panel.getByText("올렸습니다", { exact: false }).waitFor({ timeout: 10000 });
+  const newest = (await api.get("/research/post-images")).items[0];
+  const row = panel.locator("li").filter({ has: page.locator(`img[src$="${newest.id}"]`) });
+  await row.waitFor({ timeout: 10000 }).catch(() => {});
+  const inBody = (await bodyBox().locator("figure[data-type=post-image]").count()) === 1;
+  const server = await api.get(`/research/post-drafts/${draftId}`);
+  check(
+    "WP3g. image inserted while the body is over the limit shows '사용 중(이 글)' and no delete (server does not reference it yet)",
+    inBody && (await row.getByText("사용 중(이 글)").count()) === 1 && (await row.getByRole("button", { name: "지우기" }).count()) === 0 && !JSON.stringify(server.content).includes(newest.id),
+    `inBody=${inBody} row=${(await row.innerText().catch(() => "")).replace(/\s+/g, " ")}`
+  );
+  await main.getByRole("button", { name: "초안 버리기…" }).click();
+  await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+  await main.getByText("초안을 버렸습니다").waitFor();
+}
+
 // WP4. #31: 자료만 바탕으로 한 글, 보관 자료 제외, 문서 해제 뒤에도 자료 유지, 요약 없는 글의 목록 발췌(W2)
 {
   const docB = (await api.send("POST", "/research/documents", { title: "바탕 문서 B", content: "문서 B" })).body;
