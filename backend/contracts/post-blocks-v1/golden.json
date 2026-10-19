@@ -1,0 +1,1691 @@
+{
+  "contractVersion": "0.3",
+  "schemaVersion": 1,
+  "requestContentPointer": "/content",
+  "valid": [
+    {
+      "name": "empty-document",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": []
+          }
+        ]
+      },
+      "canonical": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [],
+            "align": "left"
+          }
+        ]
+      },
+      "textProjection": "",
+      "imageIds": []
+    },
+    {
+      "name": "all-node-types",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "안녕\n세계",
+                "marks": []
+              }
+            ],
+            "align": "center"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000002",
+            "type": "heading",
+            "level": 2,
+            "runs": [
+              {
+                "text": "제목",
+                "marks": [
+                  "bold"
+                ]
+              }
+            ]
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000003",
+            "type": "quote",
+            "blocks": [
+              {
+                "id": "00000000-0000-0000-0000-000000000004",
+                "type": "paragraph",
+                "runs": [
+                  {
+                    "text": "인용",
+                    "marks": []
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000005",
+            "type": "list",
+            "ordered": true,
+            "start": 3,
+            "items": [
+              {
+                "id": "00000000-0000-0000-0000-000000000006",
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000007",
+                    "type": "paragraph",
+                    "runs": [
+                      {
+                        "text": "항목",
+                        "marks": []
+                      }
+                    ]
+                  },
+                  {
+                    "id": "00000000-0000-0000-0000-000000000008",
+                    "type": "list",
+                    "ordered": false,
+                    "items": [
+                      {
+                        "id": "00000000-0000-0000-0000-000000000009",
+                        "blocks": [
+                          {
+                            "id": "00000000-0000-0000-0000-000000000010",
+                            "type": "paragraph",
+                            "runs": [
+                              {
+                                "text": "하위",
+                                "marks": []
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000011",
+            "type": "divider"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000012",
+            "type": "code",
+            "language": "python",
+            "text": "print(\"안녕\")\n"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000013",
+            "type": "image",
+            "imageId": "00000000-0000-0000-0000-000000000900",
+            "alt": "대체",
+            "caption": [
+              {
+                "text": "설명",
+                "marks": [
+                  "italic"
+                ]
+              }
+            ],
+            "widthPercent": 50,
+            "align": "right"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000014",
+            "type": "table",
+            "rows": [
+              {
+                "id": "00000000-0000-0000-0000-000000000015",
+                "header": true,
+                "cells": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000016",
+                    "align": "right",
+                    "background": "#FFEE00",
+                    "blocks": [
+                      {
+                        "id": "00000000-0000-0000-0000-000000000017",
+                        "type": "paragraph",
+                        "runs": [
+                          {
+                            "text": "셀",
+                            "marks": []
+                          }
+                        ],
+                        "align": "left"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000018",
+            "type": "columns",
+            "columns": [
+              {
+                "id": "00000000-0000-0000-0000-000000000019",
+                "width": 2,
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000020",
+                    "type": "paragraph",
+                    "runs": [
+                      {
+                        "text": "왼쪽",
+                        "marks": []
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "00000000-0000-0000-0000-000000000021",
+                "width": 1,
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000022",
+                    "type": "paragraph",
+                    "runs": [
+                      {
+                        "text": "오른쪽",
+                        "marks": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000023",
+            "type": "embed",
+            "provider": "youtube",
+            "resourceId": "abcdefghijk",
+            "caption": [
+              {
+                "text": "영상",
+                "marks": []
+              }
+            ]
+          }
+        ]
+      },
+      "canonical": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "안녕\n세계",
+                "marks": []
+              }
+            ],
+            "align": "center"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000002",
+            "type": "heading",
+            "level": 2,
+            "runs": [
+              {
+                "text": "제목",
+                "marks": [
+                  "bold"
+                ]
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000003",
+            "type": "quote",
+            "blocks": [
+              {
+                "id": "00000000-0000-0000-0000-000000000004",
+                "type": "paragraph",
+                "runs": [
+                  {
+                    "text": "인용",
+                    "marks": []
+                  }
+                ],
+                "align": "left"
+              }
+            ]
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000005",
+            "type": "list",
+            "ordered": true,
+            "start": 3,
+            "items": [
+              {
+                "id": "00000000-0000-0000-0000-000000000006",
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000007",
+                    "type": "paragraph",
+                    "runs": [
+                      {
+                        "text": "항목",
+                        "marks": []
+                      }
+                    ],
+                    "align": "left"
+                  },
+                  {
+                    "id": "00000000-0000-0000-0000-000000000008",
+                    "type": "list",
+                    "ordered": false,
+                    "items": [
+                      {
+                        "id": "00000000-0000-0000-0000-000000000009",
+                        "blocks": [
+                          {
+                            "id": "00000000-0000-0000-0000-000000000010",
+                            "type": "paragraph",
+                            "runs": [
+                              {
+                                "text": "하위",
+                                "marks": []
+                              }
+                            ],
+                            "align": "left"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000011",
+            "type": "divider"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000012",
+            "type": "code",
+            "language": "python",
+            "text": "print(\"안녕\")\n"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000013",
+            "type": "image",
+            "imageId": "00000000-0000-0000-0000-000000000900",
+            "alt": "대체",
+            "caption": [
+              {
+                "text": "설명",
+                "marks": [
+                  "italic"
+                ]
+              }
+            ],
+            "widthPercent": 50,
+            "align": "right"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000014",
+            "type": "table",
+            "rows": [
+              {
+                "id": "00000000-0000-0000-0000-000000000015",
+                "header": true,
+                "cells": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000016",
+                    "align": "right",
+                    "background": "#FFEE00",
+                    "blocks": [
+                      {
+                        "id": "00000000-0000-0000-0000-000000000017",
+                        "type": "paragraph",
+                        "runs": [
+                          {
+                            "text": "셀",
+                            "marks": []
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000018",
+            "type": "columns",
+            "columns": [
+              {
+                "id": "00000000-0000-0000-0000-000000000019",
+                "width": 2,
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000020",
+                    "type": "paragraph",
+                    "runs": [
+                      {
+                        "text": "왼쪽",
+                        "marks": []
+                      }
+                    ],
+                    "align": "left"
+                  }
+                ]
+              },
+              {
+                "id": "00000000-0000-0000-0000-000000000021",
+                "width": 1,
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000022",
+                    "type": "paragraph",
+                    "runs": [
+                      {
+                        "text": "오른쪽",
+                        "marks": []
+                      }
+                    ],
+                    "align": "left"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000023",
+            "type": "embed",
+            "provider": "youtube",
+            "resourceId": "abcdefghijk",
+            "caption": [
+              {
+                "text": "영상",
+                "marks": []
+              }
+            ]
+          }
+        ]
+      },
+      "textProjection": "안녕\n세계\n\n제목\n\n인용\n\n항목\n하위\n\n\n\nprint(\"안녕\")\n\n\n대체\n설명\n\n셀\n\n왼쪽\n\n오른쪽\n\nyoutube:abcdefghijk\n영상",
+      "imageIds": [
+        "00000000-0000-0000-0000-000000000900"
+      ]
+    },
+    {
+      "name": "crlf-color-order-adjacent-merge",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "가\r\n",
+                "marks": [
+                  {
+                    "color": "#aabbcc"
+                  },
+                  "italic",
+                  "bold"
+                ]
+              },
+              {
+                "text": "나",
+                "marks": [
+                  "bold",
+                  {
+                    "color": "#AABBCC"
+                  },
+                  "italic"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "canonical": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "align": "left",
+            "runs": [
+              {
+                "text": "가\n나",
+                "marks": [
+                  "bold",
+                  "italic",
+                  {
+                    "color": "#AABBCC"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "textProjection": "가\n나",
+      "imageIds": []
+    },
+    {
+      "name": "literal-script-text-not-html-node",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "<script>alert(1)</script>",
+                "marks": []
+              }
+            ]
+          }
+        ]
+      },
+      "canonical": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "<script>alert(1)</script>",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "textProjection": "<script>alert(1)</script>",
+      "imageIds": []
+    },
+    {
+      "name": "code-color-link-coexist",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "코드",
+                "marks": [
+                  "code",
+                  {
+                    "color": "#abcdef"
+                  }
+                ],
+                "link": "https://example.com/"
+              }
+            ]
+          }
+        ]
+      },
+      "canonical": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "align": "left",
+            "runs": [
+              {
+                "text": "코드",
+                "marks": [
+                  "code",
+                  {
+                    "color": "#ABCDEF"
+                  }
+                ],
+                "link": "https://example.com/"
+              }
+            ]
+          }
+        ]
+      },
+      "textProjection": "코드",
+      "imageIds": []
+    },
+    {
+      "name": "image-looking-text-grants-no-reference",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "/api/media/post-images/00000000-0000-0000-0000-000000000900",
+                "marks": []
+              }
+            ]
+          }
+        ]
+      },
+      "canonical": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "/api/media/post-images/00000000-0000-0000-0000-000000000900",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "textProjection": "/api/media/post-images/00000000-0000-0000-0000-000000000900",
+      "imageIds": []
+    },
+    {
+      "name": "nullable-unset-fields",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "x",
+                "marks": [],
+                "link": null
+              }
+            ]
+          }
+        ]
+      },
+      "canonical": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "x",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "textProjection": "x",
+      "imageIds": []
+    },
+    {
+      "name": "caption-lf-and-image-defaults",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "image",
+            "imageId": "00000000-0000-0000-0000-000000000900",
+            "caption": [
+              {
+                "text": "줄1\r\n줄2",
+                "marks": []
+              }
+            ]
+          }
+        ]
+      },
+      "canonical": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "image",
+            "imageId": "00000000-0000-0000-0000-000000000900",
+            "alt": "",
+            "caption": [
+              {
+                "text": "줄1\n줄2",
+                "marks": []
+              }
+            ],
+            "widthPercent": 100,
+            "align": "left"
+          }
+        ]
+      },
+      "textProjection": "줄1\n줄2",
+      "imageIds": [
+        "00000000-0000-0000-0000-000000000900"
+      ]
+    },
+    {
+      "name": "ordered-list-default-start",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "list",
+            "ordered": true,
+            "items": [
+              {
+                "id": "00000000-0000-0000-0000-000000000002",
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000003",
+                    "type": "paragraph",
+                    "runs": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "canonical": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "list",
+            "ordered": true,
+            "start": 1,
+            "items": [
+              {
+                "id": "00000000-0000-0000-0000-000000000002",
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000003",
+                    "type": "paragraph",
+                    "runs": [],
+                    "align": "left"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "textProjection": "",
+      "imageIds": []
+    }
+  ],
+  "invalid": [
+    {
+      "name": "empty-blocks",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": []
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks"
+    },
+    {
+      "name": "unknown-node",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "html",
+            "html": "<script/>"
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/type"
+    },
+    {
+      "name": "extra-event-attribute",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [],
+            "onclick": "alert(1)"
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/onclick"
+    },
+    {
+      "name": "empty-run",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "",
+                "marks": []
+              }
+            ]
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/runs/0/text"
+    },
+    {
+      "name": "invalid-color",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "x",
+                "marks": [
+                  {
+                    "color": "url(x)"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/runs/0/marks/0/color"
+    },
+    {
+      "name": "caption-link",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "embed",
+            "provider": "youtube",
+            "resourceId": "abcdefghijk",
+            "caption": [
+              {
+                "text": "x",
+                "marks": [],
+                "link": "https://example.com"
+              }
+            ]
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/caption/0/link"
+    },
+    {
+      "name": "youtube-query",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "embed",
+            "provider": "youtube",
+            "resourceId": "abcdefghijk?t=1"
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/resourceId"
+    },
+    {
+      "name": "external-provider",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "embed",
+            "provider": "vimeo",
+            "resourceId": "123"
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/provider"
+    },
+    {
+      "name": "external-image-url",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "image",
+            "imageId": "00000000-0000-0000-0000-000000000900",
+            "url": "https://example.com/x.png"
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/url"
+    },
+    {
+      "name": "code-language-enum",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "code",
+            "text": "x",
+            "language": "weird"
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/language"
+    },
+    {
+      "name": "quote-heading",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "quote",
+            "blocks": [
+              {
+                "id": "00000000-0000-0000-0000-000000000002",
+                "type": "heading",
+                "level": 2,
+                "runs": []
+              }
+            ]
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/blocks/0/type"
+    },
+    {
+      "name": "multi-paragraph-list-item",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "list",
+            "ordered": false,
+            "items": [
+              {
+                "id": "00000000-0000-0000-0000-000000000002",
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000003",
+                    "type": "paragraph",
+                    "runs": []
+                  },
+                  {
+                    "id": "00000000-0000-0000-0000-000000000004",
+                    "type": "paragraph",
+                    "runs": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/items/0/blocks/1/type"
+    },
+    {
+      "name": "merged-cell",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000014",
+            "type": "table",
+            "rows": [
+              {
+                "id": "00000000-0000-0000-0000-000000000015",
+                "header": true,
+                "cells": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000016",
+                    "align": "right",
+                    "background": "#FFEE00",
+                    "blocks": [
+                      {
+                        "id": "00000000-0000-0000-0000-000000000017",
+                        "type": "paragraph",
+                        "runs": [
+                          {
+                            "text": "셀",
+                            "marks": []
+                          }
+                        ],
+                        "align": "left"
+                      }
+                    ],
+                    "colspan": 2
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/rows/0/cells/0/colspan"
+    },
+    {
+      "name": "cell-paragraph-align",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000014",
+            "type": "table",
+            "rows": [
+              {
+                "id": "00000000-0000-0000-0000-000000000015",
+                "header": true,
+                "cells": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000016",
+                    "align": "right",
+                    "background": "#FFEE00",
+                    "blocks": [
+                      {
+                        "id": "00000000-0000-0000-0000-000000000017",
+                        "type": "paragraph",
+                        "runs": [
+                          {
+                            "text": "셀",
+                            "marks": []
+                          }
+                        ],
+                        "align": "right"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/rows/0/cells/0/blocks/0/align"
+    },
+    {
+      "name": "table-in-columns",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000018",
+            "type": "columns",
+            "columns": [
+              {
+                "id": "00000000-0000-0000-0000-000000000019",
+                "width": 2,
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000014",
+                    "type": "table",
+                    "rows": [
+                      {
+                        "id": "00000000-0000-0000-0000-000000000015",
+                        "header": true,
+                        "cells": [
+                          {
+                            "id": "00000000-0000-0000-0000-000000000016",
+                            "align": "right",
+                            "background": "#FFEE00",
+                            "blocks": [
+                              {
+                                "id": "00000000-0000-0000-0000-000000000017",
+                                "type": "paragraph",
+                                "runs": [
+                                  {
+                                    "text": "셀",
+                                    "marks": []
+                                  }
+                                ],
+                                "align": "left"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "00000000-0000-0000-0000-000000000021",
+                "width": 1,
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000022",
+                    "type": "paragraph",
+                    "runs": [
+                      {
+                        "text": "오른쪽",
+                        "marks": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/columns/0/blocks/0/type"
+    },
+    {
+      "name": "duplicate-id",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": []
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": []
+          }
+        ]
+      },
+      "stage": "semantic",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/1/id"
+    },
+    {
+      "name": "duplicate-mark",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "x",
+                "marks": [
+                  "bold",
+                  "bold"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "stage": "semantic",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/runs/0/marks/1"
+    },
+    {
+      "name": "unsafe-link",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "x",
+                "marks": [],
+                "link": "javascript:alert(1)"
+              }
+            ]
+          }
+        ]
+      },
+      "stage": "semantic",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/runs/0/link"
+    },
+    {
+      "name": "tab-in-code",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "code",
+            "text": "\tcode"
+          }
+        ]
+      },
+      "stage": "semantic",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/text"
+    },
+    {
+      "name": "unordered-start",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "list",
+            "ordered": false,
+            "start": 2,
+            "items": [
+              {
+                "id": "00000000-0000-0000-0000-000000000002",
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000003",
+                    "type": "paragraph",
+                    "runs": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "stage": "semantic",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/start"
+    },
+    {
+      "name": "unknown-version",
+      "input": {
+        "format": "post-blocks",
+        "version": 2,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": []
+          }
+        ]
+      },
+      "stage": "shape",
+      "status": 422,
+      "code": "unsupported_schema_version",
+      "path": "/content/version"
+    },
+    {
+      "name": "second-row-header",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000014",
+            "type": "table",
+            "rows": [
+              {
+                "id": "00000000-0000-0000-0000-000000000015",
+                "header": true,
+                "cells": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000016",
+                    "align": "right",
+                    "background": "#FFEE00",
+                    "blocks": [
+                      {
+                        "id": "00000000-0000-0000-0000-000000000017",
+                        "type": "paragraph",
+                        "runs": [
+                          {
+                            "text": "셀",
+                            "marks": []
+                          }
+                        ],
+                        "align": "left"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "00000000-0000-0000-0000-000000000030",
+                "header": true,
+                "cells": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000031",
+                    "blocks": [
+                      {
+                        "id": "00000000-0000-0000-0000-000000000032",
+                        "type": "paragraph",
+                        "runs": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "stage": "semantic",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/rows/1/header"
+    },
+    {
+      "name": "ragged-table",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000014",
+            "type": "table",
+            "rows": [
+              {
+                "id": "00000000-0000-0000-0000-000000000015",
+                "header": true,
+                "cells": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000016",
+                    "align": "right",
+                    "background": "#FFEE00",
+                    "blocks": [
+                      {
+                        "id": "00000000-0000-0000-0000-000000000017",
+                        "type": "paragraph",
+                        "runs": [
+                          {
+                            "text": "셀",
+                            "marks": []
+                          }
+                        ],
+                        "align": "left"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "00000000-0000-0000-0000-000000000030",
+                "header": false,
+                "cells": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000031",
+                    "blocks": [
+                      {
+                        "id": "00000000-0000-0000-0000-000000000032",
+                        "type": "paragraph",
+                        "runs": []
+                      }
+                    ]
+                  },
+                  {
+                    "id": "00000000-0000-0000-0000-000000000033",
+                    "blocks": [
+                      {
+                        "id": "00000000-0000-0000-0000-000000000034",
+                        "type": "paragraph",
+                        "runs": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "stage": "semantic",
+      "status": 422,
+      "code": "invalid_block_document",
+      "path": "/content/blocks/0/rows/1/cells"
+    },
+    {
+      "name": "four-list-levels",
+      "input": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "list",
+            "ordered": false,
+            "items": [
+              {
+                "id": "00000000-0000-0000-0000-000000000002",
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000000003",
+                    "type": "paragraph",
+                    "runs": []
+                  },
+                  {
+                    "id": "00000000-0000-0000-0000-000000000004",
+                    "type": "list",
+                    "ordered": false,
+                    "items": [
+                      {
+                        "id": "00000000-0000-0000-0000-000000000005",
+                        "blocks": [
+                          {
+                            "id": "00000000-0000-0000-0000-000000000006",
+                            "type": "paragraph",
+                            "runs": []
+                          },
+                          {
+                            "id": "00000000-0000-0000-0000-000000000007",
+                            "type": "list",
+                            "ordered": false,
+                            "items": [
+                              {
+                                "id": "00000000-0000-0000-0000-000000000008",
+                                "blocks": [
+                                  {
+                                    "id": "00000000-0000-0000-0000-000000000009",
+                                    "type": "paragraph",
+                                    "runs": []
+                                  },
+                                  {
+                                    "id": "00000000-0000-0000-0000-000000000010",
+                                    "type": "list",
+                                    "ordered": false,
+                                    "items": [
+                                      {
+                                        "id": "00000000-0000-0000-0000-000000000011",
+                                        "blocks": [
+                                          {
+                                            "id": "00000000-0000-0000-0000-000000000012",
+                                            "type": "paragraph",
+                                            "runs": []
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "stage": "semantic",
+      "status": 422,
+      "code": "content_limit_exceeded",
+      "path": "/content/blocks/0/items/0/blocks/1/items/0/blocks/1/items/0/blocks/1"
+    }
+  ],
+  "formatDiff": [
+    {
+      "name": "alignment-only",
+      "base": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "같은 글",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "candidate": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "같은 글",
+                "marks": []
+              }
+            ],
+            "align": "right"
+          }
+        ]
+      },
+      "baseTextProjection": "같은 글",
+      "candidateTextProjection": "같은 글",
+      "formatChanges": [
+        {
+          "baseBlockId": "00000000-0000-0000-0000-000000000001",
+          "candidateBlockId": "00000000-0000-0000-0000-000000000001",
+          "kind": "format-only",
+          "changedProperties": [
+            "align"
+          ]
+        }
+      ]
+    }
+  ],
+  "markdown": [
+    {
+      "name": "unknown-language-preserves-code",
+      "input": "```unknown\nprint(1)\n```",
+      "expectedCode": {
+        "text": "print(1)\n",
+        "language": "plain"
+      },
+      "warningCodes": [
+        "code_language_downgraded"
+      ]
+    },
+    {
+      "name": "quote-heading-no-flatten",
+      "input": "> # heading",
+      "status": 422,
+      "code": "unsupported_content"
+    },
+    {
+      "name": "external-image-no-fetch",
+      "input": "![x](https://example.com/x.png)",
+      "status": 422,
+      "code": "unsupported_content"
+    },
+    {
+      "name": "raw-html-no-execution",
+      "input": "<script>alert(1)</script>",
+      "status": 422,
+      "code": "unsupported_content"
+    }
+  ],
+  "limits": {
+    "documentBytes": 1048576,
+    "textCodepoints": 200000,
+    "ids": 2000,
+    "nodeDepth": 8,
+    "listDepth": 3,
+    "topLevelBlocks": 500,
+    "images": 100,
+    "distinctImagesIncludingCover": 50,
+    "tables": 20,
+    "tableRows": 100,
+    "tableColumns": 20,
+    "totalCells": 1000,
+    "columnGroups": 20,
+    "columnsPerGroup": 3,
+    "runs": 10000,
+    "runCodepoints": 20000,
+    "altCodepoints": 1000,
+    "captionCodepoints": 2000
+  },
+  "boundaryRecipes": [
+    {
+      "name": "text-total",
+      "metric": "textCodepoints",
+      "at": 200000,
+      "above": 200001,
+      "aboveStatus": 422,
+      "aboveCode": "content_limit_exceeded",
+      "notes": "Distribute among <=20000 character runs with different marks, avoiding merge overflow."
+    },
+    {
+      "name": "document-utf8",
+      "metric": "documentBytes",
+      "at": 1048576,
+      "above": 1048577,
+      "aboveStatus": 413,
+      "aboveCode": "payload_too_large",
+      "notes": "Measure canonical sorted-key compact UTF-8 JSON, not Python or JS string length."
+    },
+    {
+      "name": "total-ids",
+      "metric": "ids",
+      "at": 2000,
+      "above": 2001,
+      "aboveStatus": 422,
+      "aboveCode": "content_limit_exceeded",
+      "notes": "Include item/row/cell/column/paragraph IDs; keep all local limits satisfied."
+    },
+    {
+      "name": "total-cells",
+      "metric": "totalCells",
+      "at": 1000,
+      "above": 1001,
+      "aboveStatus": 422,
+      "aboveCode": "content_limit_exceeded",
+      "notes": "These budgets are conjunctive: 1000 cells with paragraph/row IDs already exceeds 2000 IDs. Do not expect a valid document at this cell bound."
+    },
+    {
+      "name": "merged-run",
+      "metric": "runCodepoints",
+      "at": 20000,
+      "above": 20001,
+      "aboveStatus": 422,
+      "aboveCode": "content_limit_exceeded",
+      "notes": "Merge identical adjacent runs before checking canonical run length."
+    },
+    {
+      "name": "caption-total",
+      "metric": "captionCodepoints",
+      "at": 2000,
+      "above": 2001,
+      "aboveStatus": 422,
+      "aboveCode": "content_limit_exceeded",
+      "notes": "Total text across all runs of one image/embed caption."
+    }
+  ]
+}
