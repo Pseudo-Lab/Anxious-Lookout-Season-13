@@ -129,7 +129,7 @@ def test_foreign_draft_and_discard_do_not_mutate_head(client, admin):
 def test_draft_slug_in_progress_and_workspace_hint_validate_owner(client, admin):
     owner, auth = identity(client, admin)
     draft = make_draft(client, auth, slug='docker-basics-')
-    assert client.post(ROOT+'/'+draft['id']+'/commit', json={'expectedDraftRevision': 1}, headers=headers(auth)).status_code == 422
+    assert draft['slug'] == ''  # Supplied new-post slug is ignored.
     session, runner = turn(client, auth, owner, {'kind': 'post_workspace', 'draftId': draft['id']})
     assert runner.last['scope']['context']['draft']['id'] == draft['id']
     assert runner.last['scope']['page']['draftId'] == draft['id']

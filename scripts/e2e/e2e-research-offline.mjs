@@ -511,15 +511,27 @@ async function dropFirstSend(p) {
 
   const doc = await api.send("POST", "/research/documents", { title: "글 바탕 문서", content: "비공개 바탕 본문" });
   check("IP2. setup: document", doc.status === 201, String(doc.status));
+  // #31 W3: 문서가 가리키는 자료(문서→자료 관계)와 직접 고를 자료
+  const mat = await api.send("POST", "/research/materials", { title: "글 바탕 자료", sourceUrl: "https://example.com/offline-source", collectedAt: "2026-10-18T00:00:00Z", contentKind: "excerpt", content: "자료 비공개 메모" });
+  const mat2 = await api.send("POST", "/research/materials", { title: "직접 고른 오프라인 자료", sourceUrl: "https://example.com/offline-direct", collectedAt: "2026-10-18T00:00:00Z", contentKind: "summary", content: "직접 자료 비공개 메모" });
+  const rel = await api.send("POST", "/research/relations", { source: { type: "document", id: doc.body.id }, target: { type: "material", id: mat.body.id }, kind: "근거", directed: true });
+  check("IP2. setup: materials + document->material relation", mat.status === 201 && mat2.status === 201 && rel.status === 201, `${mat.status} ${mat2.status} ${rel.status}`);
   await page.goto(U("/write/new/"));
   await main.getByLabel("제목").fill("오프라인 첫 글");
-  await main.getByLabel("주소(slug)").fill("Offline First Post");
+  check("IP2. W1: no slug input", (await main.getByLabel(/주소\(slug\)/).count()) === 0);
   await main.getByLabel("태그", { exact: true }).fill("오프라인");
   await main.getByLabel("태그", { exact: true }).press("Enter");
+  await main.getByRole("button", { name: "요약 추가(선택)" }).click();
   await main.getByLabel("요약").fill("실 API 글 요약");
   await main.getByRole("button", { name: "문서 연결" }).click();
   await main.getByLabel("연결할 문서 찾기").fill("글 바탕");
   await main.getByRole("button", { name: "글 바탕 문서 연결" }).click();
+  const matBox = main.getByRole("region", { name: "바탕이 된 자료" });
+  check("IP2. W3: real resolve adds the document's material", await appears(matBox.locator("li", { hasText: "글 바탕 자료" }).getByText("문서에서 자동 포함", { exact: false }), 20000), (await matBox.innerText()).slice(0, 300));
+  await matBox.getByRole("button", { name: "자료 추가" }).click();
+  await matBox.getByLabel("추가할 자료 찾기").fill("직접 고른");
+  await matBox.getByRole("button", { name: "직접 고른 오프라인 자료 추가" }).click();
+  check("IP2. W3: material added directly", await appears(matBox.locator("li", { hasText: "직접 고른 오프라인 자료" }).getByText("직접 추가")));
   await main.getByLabel("본문").fill("# 오프라인 본문\n\n첫 버전 문장");
   await main.getByText("초안 자동 저장됨").first().waitFor({ timeout: 20000 });
   await page.waitForURL(/[?&]draft=/, { timeout: 10000 }).catch(() => {});
@@ -527,30 +539,52 @@ async function dropFirstSend(p) {
   const d = draftId ? await api.get(`/research/post-drafts/${draftId}`) : null;
   check(
     "IP2. real API draft holds all post fields",
-    d?.status === 200 && d.body.slug === "offline-first-post" && d.body.tags?.[0] === "오프라인" && d.body.documentIds?.[0] === doc.body.id && d.body.postId === null,
+    d?.status === 200 &&
+      d.body.slug === "" &&
+      d.body.tags?.[0] === "오프라인" &&
+      d.body.documentIds?.[0] === doc.body.id &&
+      JSON.stringify(d.body.materialIds) === JSON.stringify([mat.body.id, mat2.body.id]) &&
+      d.body.postId === null,
     JSON.stringify(d?.body ?? null).slice(0, 200)
   );
   await page.reload();
   await main.getByLabel("제목").waitFor();
-  check("IP2. reload restores server draft", (await main.getByLabel("제목").inputValue()) === "오프라인 첫 글" && (await main.getByLabel("주소(slug)").inputValue()) === "offline-first-post");
+  check(
+    "IP2. reload restores server draft (with materials)",
+    (await main.getByLabel("제목").inputValue()) === "오프라인 첫 글" && (await appears(matBox.locator("li", { hasText: "직접 고른 오프라인 자료" }).getByText("직접 추가")))
+  );
   await main.getByRole("button", { name: "글 저장" }).click();
   await page.waitForURL(/\/write\/\?id=/, { timeout: 20000 }).catch(() => {});
   const postId = new URL(page.url()).searchParams.get("id");
   const p1 = postId ? await api.get(`/research/posts/${postId}`) : null;
-  check("IP2. commit: post v1, draft committed", p1?.status === 200 && p1.body.latestVersion.number === 1 && (await api.get(`/research/post-drafts/${draftId}`)).body.state === "committed");
+  const slug = p1?.body?.latestVersion?.slug ?? "";
+  check(
+    "IP2. commit: post v1 with server-generated slug and material sources, draft committed",
+    p1?.status === 200 &&
+      p1.body.latestVersion.number === 1 &&
+      /^post-[0-9a-f]{32}$/.test(slug) &&
+      JSON.stringify(p1.body.latestVersion.materialSources) === JSON.stringify([{ materialId: mat.body.id, documentIds: [doc.body.id] }, { materialId: mat2.body.id, documentIds: [] }]) &&
+      (await api.get(`/research/post-drafts/${draftId}`)).body.state === "committed",
+    JSON.stringify({ slug, sources: p1?.body?.latestVersion?.materialSources })
+  );
 
   // 발행: 미리보기의 문서 제목 공개 안내 → 발행 → 익명 조회(문서 본문 비공개)
   const pub = main.getByRole("region", { name: "발행" });
   await pub.getByRole("button", { name: "발행 미리보기" }).click();
   check("IP3. preview warns linked document title becomes public", await appears(pub.getByText("함께 공개되는 문서 제목 (1)")));
+  check("IP3. W3: preview lists public material title + URL", await appears(pub.getByText("글 바탕 자료 — https://example.com/offline-source")));
   await pub.getByRole("button", { name: "이 버전 발행" }).click();
   check("IP3. published", await appears(pub.getByText("발행했습니다", { exact: false })));
-  await anon.goto(U("/posts/offline-first-post/"));
+  await anon.goto(U(`/posts/${slug}/`));
   await anon.locator("article h1").first().waitFor().catch(() => {});
   const pubText = await anon.locator("main").innerText();
   check("IP3. anonymous public post shows v1", pubText.includes("첫 버전 문장") && pubText.includes("오프라인 첫 글"));
   check("IP3. based-on document title shown, private body not", pubText.includes("글 바탕 문서") && !pubText.includes("비공개 바탕 본문"));
-  const pubRes = await anon.request.get(U("/api/public/posts/offline-first-post"));
+  check(
+    "IP3. W3: based-on materials show title + source URL only",
+    pubText.includes("글 바탕 자료") && pubText.includes("직접 고른 오프라인 자료") && (await anon.getByRole("link", { name: "https://example.com/offline-source" }).count()) === 1 && !pubText.includes("비공개 메모")
+  );
+  const pubRes = await anon.request.get(U(`/api/public/posts/${slug}`));
   check(
     "IP3. public API revalidation headers (ETag + must-revalidate)",
     pubRes.status() === 200 && !!pubRes.headers()["etag"] && (pubRes.headers()["cache-control"] ?? "").includes("must-revalidate"),
@@ -578,7 +612,7 @@ async function dropFirstSend(p) {
   check("IP4. republish diff vs current publication", await appears(pub.locator('[data-diff="add"]', { hasText: "두 번째 버전 문장" })));
   await pub.getByRole("button", { name: "이 버전으로 다시 발행" }).click();
   check("IP4. republished", await appears(pub.getByText("발행했습니다", { exact: false })));
-  await anon.goto(U("/posts/offline-first-post/"));
+  await anon.goto(U(`/posts/${slug}/`));
   check("IP4. anonymous sees v2", await appears(anon.getByText("두 번째 버전 문장")));
   await anon.locator("article .prose img").first().waitFor({ timeout: 20000 }).catch(() => {});
   const pubImgs = await anon.locator("article img").evaluateAll((els) => els.map((e) => [e.getAttribute("src"), e.complete && e.naturalWidth > 0]));
@@ -613,7 +647,7 @@ async function dropFirstSend(p) {
     return route.continue().catch(() => {});
   };
   await page.route("**/api/research/sessions/*/messages", record);
-  await openAt(page, s1, U("/posts/offline-first-post/"));
+  await openAt(page, s1, U(`/posts/${slug}/`));
   await page.locator("article h1").first().waitFor();
   check("IP5. public post scope shown (bounded)", await appears(chat.getByText("다음 질문 범위: 이 발행 글")));
   await send(chat, "/fixture/page-context 발행 글 질문");
@@ -656,12 +690,17 @@ async function dropFirstSend(p) {
   await chat.locator("li", { hasText: "research_post_propose" }).last().getByRole("link", { name: "제안 검토" }).click();
   await page.waitForURL(/\/write\/new\/\?proposal=/, { timeout: 20000 }).catch(() => {});
   check("IP10. review diff from the draft", await appears(main.locator('[data-diff="add"]', { hasText: "Complete fixture post proposal" })));
-  check("IP10. fixture slug prefilled", /^fixture-post-/.test(await main.getByLabel("주소(slug)").inputValue()));
+  check("IP10. W1: no slug asked when accepting a new post", (await main.getByLabel(/주소\(slug\)/).count()) === 0);
   await main.getByRole("button", { name: "제안 수락" }).click();
   await main.getByRole("button", { name: "수락 확인" }).click();
   await page.waitForURL(/\/write\/\?id=/, { timeout: 20000 }).catch(() => {});
   check("IP10. accepted: new post page", await appears(main.getByRole("region", { name: "발행" })));
   check("IP10. real API: base draft committed", (await api.get(`/research/post-drafts/${ctxDraft}`)).body?.state === "committed");
+  {
+    const accepted = new URL(page.url()).searchParams.get("id");
+    const generated = accepted ? (await api.get(`/research/posts/${accepted}`)).body?.latestVersion?.slug : null;
+    check("IP10. W1: accept generated a server slug (fixture slug ignored)", /^post-[0-9a-f]{32}$/.test(generated ?? ""), String(generated));
+  }
 
   // D1: 그 turn의 research_document_save는 새 문서 제안 → 대화 '제안 검토' → 수락하면 문서 1개
   const direct = await directFixtureDocs();
@@ -678,9 +717,9 @@ async function dropFirstSend(p) {
   await pub.getByRole("button", { name: "발행 취소…" }).click();
   await pub.getByRole("button", { name: "발행 취소", exact: true }).click();
   check("IP8. unpublished", await appears(pub.getByText("발행을 취소했습니다", { exact: false })));
-  await anon.goto(U("/posts/offline-first-post/"));
+  await anon.goto(U(`/posts/${slug}/`));
   check("IP8. anonymous 404 after unpublish", await appears(anon.getByText("글을 찾을 수 없습니다")));
-  check("IP8. public API 404", (await anon.request.get(U("/api/public/posts/offline-first-post"))).status() === 404);
+  check("IP8. public API 404", (await anon.request.get(U(`/api/public/posts/${slug}`))).status() === 404);
   check("IP8. image no longer public after unpublish", (await anon.request.get(U(uploaded?.url ?? "/x"))).status() === 404);
   await anonCtx.close();
 }

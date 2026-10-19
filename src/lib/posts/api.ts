@@ -6,6 +6,9 @@ import type {
   PostDocumentOption,
   PostDraft,
   PostImage,
+  PostMaterialOption,
+  PostMaterialSource,
+  PostMeta,
   PostProposal,
   PostPublicationPreview,
   PostTag,
@@ -13,9 +16,11 @@ import type {
   PostVersion,
   PublicPost,
   PublicPostDocument,
+  PublicPostMaterial,
+  ResolvedPostMaterial,
 } from "@/lib/posts/types";
 
-// api-contracts/issue28-posts.md 클라이언트. 응답 형식이 계약과 다르면 invalid로 처리하고 추정값으로 채우지 않는다.
+// api-contracts/issue28-posts.md(+ #31 issue31-write-ux.md) 클라이언트. 응답 형식이 계약과 다르면 invalid로 처리하고 추정값으로 채우지 않는다.
 
 type Obj = Record<string, unknown>;
 
@@ -29,6 +34,18 @@ const enc = encodeURIComponent;
 function parseDocRef(v: unknown): PublicPostDocument | null {
   if (!isObj(v) || !isId(v.id) || !isStr(v.title) || (v.publicUrl !== null && !isStr(v.publicUrl))) return null;
   return { id: v.id, title: v.title, publicUrl: v.publicUrl };
+}
+
+function parseMaterialRef(v: unknown): PublicPostMaterial | null {
+  if (!isObj(v) || !isId(v.id) || !isStr(v.title) || !isStr(v.sourceUrl)) return null;
+  return { id: v.id, title: v.title, sourceUrl: v.sourceUrl };
+}
+
+/** 배열의 모든 원소가 해석되면 그 결과, 하나라도 계약과 다르면 null. */
+function parseAll<T>(v: unknown, parse: (x: unknown) => T | null): T[] | null {
+  if (!Array.isArray(v)) return null;
+  const out = v.map(parse);
+  return out.some((x) => x === null) ? null : (out as T[]);
 }
 
 function parsePublicPost(v: unknown): PublicPost | null {
@@ -46,13 +63,13 @@ function parsePublicPost(v: unknown): PublicPost | null {
     (v.author.login !== null && !isStr(v.author.login)) ||
     !isStr(v.author.name) ||
     !isStr(v.publishedAt) ||
-    !Array.isArray(v.documents) ||
     (v.content !== undefined && !isStr(v.content))
   ) {
     return null;
   }
-  const documents = v.documents.map(parseDocRef);
-  if (documents.some((d) => d === null)) return null;
+  const documents = parseAll(v.documents, parseDocRef);
+  const materials = parseAll(v.materials, parseMaterialRef);
+  if (!documents || !materials) return null;
   const post: PublicPost = {
     id: v.id,
     postId: v.postId,
@@ -64,7 +81,8 @@ function parsePublicPost(v: unknown): PublicPost | null {
     coverImageUrl: v.coverImageUrl,
     author: { login: v.author.login, name: v.author.name },
     publishedAt: v.publishedAt,
-    documents: documents as PublicPostDocument[],
+    documents,
+    materials,
   };
   if (isStr(v.content)) post.content = v.content;
   return post;
@@ -80,8 +98,13 @@ function parseTag(v: unknown): PostTag | null {
   return { tag: v.tag, count: v.count };
 }
 
-/** PostText에서 content를 뺀 메타(목록 응답에는 content가 없다). */
-function parseMeta(v: Obj): Omit<PostText, "content"> | null {
+function parseMaterialSource(v: unknown): PostMaterialSource | null {
+  if (!isObj(v) || !isId(v.materialId) || !isStrList(v.documentIds)) return null;
+  return { materialId: v.materialId, documentIds: v.documentIds };
+}
+
+/** 글 메타(content 제외, 목록 응답에는 content가 없다). */
+function parseMeta(v: Obj): PostMeta | null {
   if (
     !isStr(v.title) ||
     !isStr(v.description) ||
@@ -89,10 +112,13 @@ function parseMeta(v: Obj): Omit<PostText, "content"> | null {
     !isStrList(v.tags) ||
     (v.coverImageId !== null && !isStr(v.coverImageId)) ||
     !isStrList(v.documentIds) ||
+    !isStrList(v.materialIds) ||
     (v.content !== undefined && !isStr(v.content))
   ) {
     return null;
   }
+  const materialSources = parseAll(v.materialSources, parseMaterialSource);
+  if (!materialSources) return null;
   return {
     title: v.title,
     description: v.description,
@@ -100,6 +126,8 @@ function parseMeta(v: Obj): Omit<PostText, "content"> | null {
     tags: v.tags,
     coverImageId: v.coverImageId,
     documentIds: v.documentIds,
+    materialIds: v.materialIds,
+    materialSources,
   };
 }
 
@@ -210,6 +238,21 @@ function parseOption(v: unknown): PostDocumentOption | null {
   return { id: v.id, title: v.title, version: v.version, latestVersionId: v.latestVersionId };
 }
 
+function parseMaterialOption(v: unknown): PostMaterialOption | null {
+  const base = parseOption(v);
+  if (!base || !isObj(v) || !isStr(v.sourceUrl)) return null;
+  return { ...base, sourceUrl: v.sourceUrl };
+}
+
+function parseResolved(v: unknown): { items: ResolvedPostMaterial[]; excludedArchivedIds: string[] } | null {
+  if (!isObj(v) || !isStrList(v.excludedArchivedIds)) return null;
+  const items = parseAll(v.items, (x) => {
+    const option = parseMaterialOption(x);
+    return option && isObj(x) && isStrList(x.documentIds) ? { ...option, documentIds: x.documentIds } : null;
+  });
+  return items ? { items, excludedArchivedIds: v.excludedArchivedIds } : null;
+}
+
 function parsePreview(v: unknown): PostPublicationPreview | null {
   if (
     !isObj(v) ||
@@ -220,16 +263,15 @@ function parsePreview(v: unknown): PostPublicationPreview | null {
     typeof v.publishable !== "boolean" ||
     !isStr(v.content) ||
     !isObj(v.author) ||
-    !isStr(v.author.login) ||
-    !Array.isArray(v.documents) ||
-    !Array.isArray(v.images)
+    !isStr(v.author.login)
   ) {
     return null;
   }
   const meta = parseMeta(v);
-  const documents = v.documents.map(parseDocRef);
-  const images = v.images.map((i) => (isObj(i) && isId(i.id) && isStr(i.url) ? { id: i.id, url: i.url } : null));
-  if (!meta || documents.some((d) => d === null) || images.some((i) => i === null)) return null;
+  const documents = parseAll(v.documents, parseDocRef);
+  const materials = parseAll(v.materials, parseMaterialRef);
+  const images = parseAll(v.images, (i) => (isObj(i) && isId(i.id) && isStr(i.url) ? { id: i.id, url: i.url } : null));
+  if (!meta || !documents || !materials || !images) return null;
   let currentPublication: PublicPost | null = null;
   if (v.currentPublication !== null) {
     currentPublication = parsePublicPostDetail(v.currentPublication);
@@ -244,8 +286,9 @@ function parsePreview(v: unknown): PostPublicationPreview | null {
     ...meta,
     content: v.content,
     author: { login: v.author.login },
-    documents: documents as PublicPostDocument[],
-    images: images as { id: string; url: string }[],
+    documents,
+    materials,
+    images,
     currentPublication,
   };
 }
@@ -341,6 +384,16 @@ export const archivePost = (id: string, expectedVersion: number, ctx: MutationCo
   mutate(`/research/posts/${enc(id)}`, "DELETE", { expectedVersion }, parsePost, ctx);
 export const listPostDocumentOptions = (q: string, cursor?: string | null) =>
   fetchJson(apiUrl(`/research/post-document-options${listQuery(cursor, q ? { q } : undefined)}`), parsePage(parseOption));
+/** 직접 추가할 내 자료 찾기(#31 W3). */
+export const listPostMaterialOptions = (q: string, cursor?: string | null) =>
+  fetchJson(apiUrl(`/research/post-material-options${listQuery(cursor, q ? { q } : undefined)}`), parsePage(parseMaterialOption));
+/** 연결 문서가 가리키는 자료(직접 관계만). 읽기 전용이라 Idempotency-Key 없이 CSRF만 보낸다. */
+export const resolvePostMaterials = (documentIds: string[], csrfToken: string) =>
+  fetchJson(apiUrl("/research/post-material-options/resolve"), parseResolved, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+    body: JSON.stringify({ documentIds }),
+  });
 
 // ---- 글 서버 초안 ----
 

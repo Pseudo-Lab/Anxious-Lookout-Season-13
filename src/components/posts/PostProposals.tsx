@@ -11,10 +11,8 @@ import { useLoad, useMutation } from "@/lib/research/hooks";
 import { usePagedList } from "@/lib/research/usePagedList";
 import { formatDateTime } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
-import { inputClass } from "@/components/research/ItemForms";
 import Notice from "@/components/research/Notice";
 import TextDiff from "@/components/research/TextDiff";
-import { SLUG_RE, normalizeSlug } from "./PostEditor";
 import PostMetaDiff from "./PostMetaDiff";
 
 // #28 Codex 글 제안(D1: 언제나 제안 → 사람의 수락). 수락하기 전에는 글·초안이 바뀌지 않으며, 수락하면 새 버전 하나가 된다.
@@ -55,9 +53,7 @@ export function ProposalReview({
   const { run, busy } = useMutation();
   const draft = target.kind === "post" ? target.draft : null;
   const [against, setAgainst] = useState<"head" | "draft">(draft ? "draft" : "head");
-  const [slug, setSlug] = useState<string | null>(null);
   const [failure, setFailure] = useState<FetchFailure | null>(null);
-  const [note, setNote] = useState<string | null>(null);
   const [confirm, setConfirm] = useState(false);
 
   if (!result) return <p className="text-sm text-stone-500">제안을 불러오는 중...</p>;
@@ -77,18 +73,13 @@ export function ProposalReview({
     target.kind === "post" ? textOf({ ...target.post.latestVersion, content: target.post.latestVersion.content ?? "" }) : EMPTY_TEXT;
   const useDraft = target.kind === "post" && against === "draft" && !!draft;
   const before: PostText = useDraft ? textOf({ ...draft!, content: draft!.content ?? "" }) : baseDraft ? textOf({ ...baseDraft, content: baseDraft.content ?? "" }) : headText;
-  const finalSlug = target.kind === "new" ? (slug ?? proposed.slug) : proposed.slug;
   const stale = target.kind === "post" && p.baseVersionId !== target.post.latestVersion.id;
 
   async function accept() {
     if (!p) return;
     setFailure(null);
-    setNote(null);
-    if (!SLUG_RE.test(finalSlug)) {
-      setNote("주소(slug)를 소문자 영문·숫자와 중간 하이픈으로 정한 뒤 수락하세요.");
-      return;
-    }
-    const text = { ...proposed, slug: finalSlug };
+    // 주소는 보내지 않는다(#31 W1): 새 글은 서버가 정하고, 기존 글은 저장된 주소를 그대로 쓴다.
+    const text = proposed;
     const draftPair = target.kind === "post" ? draft : baseDraft;
     const body = {
       ...text,
@@ -129,7 +120,7 @@ export function ProposalReview({
         <p className="text-xs text-stone-600">
           {baseDraft
             ? `작성 중인 새 글 초안(${formatDateTime(baseDraft.updatedAt)} 자동 저장)에서 이 제안으로 바뀌는 내용입니다. 수락하면 이 제안으로 새 글이 만들어지고 그 초안은 닫힙니다(초안 내용은 기록으로 보존).`
-            : "Codex가 새 글로 제안한 내용입니다. 수락하면 이 내용으로 새 글과 첫 버전이 만들어집니다(발행은 따로 합니다)."}
+            : "Codex가 새 글로 제안한 내용입니다. 수락하면 이 내용으로 새 글과 첫 버전이 만들어지고 공개 주소가 자동으로 정해집니다(발행은 따로 합니다)."}
         </p>
       )}
       {pending && baseClosed && (
@@ -140,23 +131,8 @@ export function ProposalReview({
           이 제안은 이전 글을 기준으로 만들어졌고 그 뒤 글이 바뀌었습니다. 수락하면 현재 글을 아래 제안 내용으로 바꾼 새 버전이 만들어집니다.
         </p>
       )}
-      <PostMetaDiff before={before} after={{ ...proposed, slug: finalSlug }} />
+      <PostMetaDiff before={before} after={proposed} />
       <TextDiff key={`${p.id}:${against}`} before={before.content} after={proposed.content} beforeTitle={before.title} afterTitle={proposed.title} />
-      {pending && target.kind === "new" && !baseClosed && (
-        <label className="block max-w-md">
-          <span className="mb-1 block text-sm font-medium text-stone-700">주소(slug)</span>
-          <input
-            value={finalSlug}
-            onChange={(e) => setSlug(normalizeSlug(e.target.value))}
-            spellCheck={false}
-            autoCapitalize="none"
-            placeholder="예: docker-basics"
-            className={`${inputClass} font-mono`}
-          />
-          <span className="mt-1 block text-xs text-stone-500">수락하면 이 주소가 글에 영구히 정해집니다(공개 주소 /posts/{finalSlug || "…"}/).</span>
-        </label>
-      )}
-      {note && <p role="alert" className="text-sm text-amber-800">{note}</p>}
       {failure && <ErrorNotice failure={failure} prefix="처리하지 못했습니다." describe={postErrorMessage} />}
       {pending &&
         (editing ? (

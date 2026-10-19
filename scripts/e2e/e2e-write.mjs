@@ -1,4 +1,4 @@
-// #28 글 쓰기 화면 검증: 모의 글 API(mock-posts.mjs) 뒤의 Next standalone을 실제 브라우저로 확인한다.
+// #28(+#31 W1–W3) 글 쓰기 화면 검증: 모의 글 API(mock-posts.mjs) 뒤의 Next standalone을 실제 브라우저로 확인한다.
 // 실제 backend/DB/Codex가 아니다(계약 형태만 흉내 낸다). 실제 API 검증은 e2e-research-offline.mjs(IP*)에서 한다.
 import { chromium } from "playwright";
 
@@ -84,16 +84,22 @@ await page.waitForURL(U("/write/"));
 check("WP2. /write/ is the post index (not 준비 중)", (await appears(main.getByRole("heading", { name: "글 쓰기" }))) && !(await main.innerText()).includes("준비 중"));
 check("WP2. empty list notice", await appears(main.getByText("아직 저장한 글이 없습니다")));
 
-// 연결할 문서(비공개) 준비
+// 연결할 문서(비공개)와 그 문서가 가리키는 자료(#31 W3) 준비
 const docA = (await api.send("POST", "/research/documents", { title: "바탕 문서 A", content: "문서 A 본문 비밀 문장" })).body;
 check("WP3. setup: document", !!docA.id, JSON.stringify(docA).slice(0, 120));
+const material = async (title, sourceUrl, content) =>
+  (await api.send("POST", "/research/materials", { title, sourceUrl, collectedAt: "2026-10-18T00:00:00Z", contentKind: "excerpt", content })).body;
+const relate = (docId, materialId) => api.send("POST", "/research/relations", { source: { type: "document", id: docId }, target: { type: "material", id: materialId }, kind: "근거", directed: true });
+const matA = await material("문서 A의 자료", "https://example.com/source-a", "자료 A 본문 비밀 메모");
+const matB = await material("직접 고른 자료", "https://example.com/source-b", "자료 B 본문 비밀 메모");
+check("WP3. setup: materials + document->material relation", !!matA.id && !!matB.id && (await relate(docA.id, matA.id)).status === 201);
 
-// WP3. 새 글: 주소 정리, 태그, 문서 연결·열람, 자체 이미지 미리보기, 자동 저장·복구, 저장
+// WP3. 새 글: 주소 입력 없음(#31 W1), 요약은 접힘(W2), 태그, 문서 연결·열람과 자료 자동 포함·직접 추가(W3), 자체 이미지 미리보기, 자동 저장·복구, 저장
 await main.getByRole("link", { name: "새 글 쓰기" }).click();
 await page.waitForURL(U("/write/new/"));
 await main.getByLabel("제목").fill("첫 글");
-await main.getByLabel("주소(slug)").fill("First Post_1!");
-check("WP3. slug normalized while typing", (await main.getByLabel("주소(slug)").inputValue()) === "first-post-1", await main.getByLabel("주소(slug)").inputValue());
+check("WP3. W1: no slug input; address is assigned on first save", (await main.getByLabel(/주소\(slug\)/).count()) === 0 && (await appears(main.getByText("처음 저장할 때 자동으로 정해지며", { exact: false }))));
+check("WP3. W2: summary collapsed by default", (await main.getByRole("button", { name: "요약 추가(선택)" }).isVisible()) && (await main.getByLabel("요약").count()) === 0);
 const tagBox = main.getByLabel("태그", { exact: true });
 await tagBox.fill("AI,");
 await tagBox.fill("테스트");
@@ -101,12 +107,30 @@ await tagBox.press("Enter");
 await tagBox.fill("AI");
 await tagBox.press("Enter");
 check("WP3. tags added, duplicate ignored", (await main.getByRole("button", { name: /^태그 .* 빼기$/ }).count()) === 2);
+await main.getByRole("button", { name: "요약 추가(선택)" }).click();
 await main.getByLabel("요약").fill("첫 글 요약");
+// 자료 찾기는 읽기 전용 POST: CSRF만 보내고 Idempotency-Key는 보내지 않는다
+const resolveRequests = [];
+page.on("request", (r) => {
+  if (r.url().includes("/api/research/post-material-options/resolve")) resolveRequests.push({ headers: r.headers(), body: r.postDataJSON() });
+});
 await main.getByRole("button", { name: "문서 연결" }).click();
 await main.getByLabel("연결할 문서 찾기").fill("바탕");
 await main.getByRole("button", { name: "바탕 문서 A 연결" }).click();
 const links = main.getByRole("region", { name: "연결 문서" });
 check("WP3. linked document listed", await appears(links.getByText("바탕 문서 A")));
+const mats = main.getByRole("region", { name: "바탕이 된 자료" });
+check("WP3. W3: linking a document adds its material (auto)", await appears(mats.locator("li", { hasText: "문서 A의 자료" }).getByText("문서에서 자동 포함", { exact: false })));
+check(
+  "WP3. W3: resolve sent with CSRF, without Idempotency-Key",
+  resolveRequests.length === 1 && !!resolveRequests[0].headers["x-csrf-token"] && !("idempotency-key" in resolveRequests[0].headers) && JSON.stringify(resolveRequests[0].body) === JSON.stringify({ documentIds: [docA.id] }),
+  JSON.stringify(resolveRequests.map((r) => [Object.keys(r.headers), r.body]))
+);
+await mats.getByRole("button", { name: "자료 추가" }).click();
+await mats.getByLabel("추가할 자료 찾기").fill("직접");
+await mats.getByRole("button", { name: "직접 고른 자료 추가" }).click();
+check("WP3. W3: material added directly", await appears(mats.locator("li", { hasText: "직접 고른 자료" }).getByText("직접 추가")));
+check("WP3. W3: source URL shown", await appears(mats.getByRole("link", { name: "https://example.com/source-a" })));
 await links.getByRole("button", { name: "열람" }).click();
 check("WP3. linked document body readable", await appears(links.getByText("문서 A 본문 비밀 문장")));
 const FAKE = "0f0e0d0c-0b0a-4908-8706-050403020100";
@@ -136,25 +160,42 @@ const draftId = await draftParam();
 check("WP3. autosave: address bound to draft", !!draftId);
 const d1 = await api.get(`/research/post-drafts/${draftId}`);
 check(
-  "WP3. autosave: all post fields in draft",
-  d1.slug === "first-post-1" && d1.coverImageId === IMG && JSON.stringify(d1.tags) === JSON.stringify(["AI", "테스트"]) && JSON.stringify(d1.documentIds) === JSON.stringify([docA.id]) && d1.description === "첫 글 요약" && d1.postId === null,
-  JSON.stringify({ slug: d1.slug, tags: d1.tags, documentIds: d1.documentIds })
+  "WP3. autosave: all post fields in draft (no slug, explicit materials)",
+  d1.slug === "" &&
+    d1.coverImageId === IMG &&
+    JSON.stringify(d1.tags) === JSON.stringify(["AI", "테스트"]) &&
+    JSON.stringify(d1.documentIds) === JSON.stringify([docA.id]) &&
+    JSON.stringify(d1.materialIds) === JSON.stringify([matA.id, matB.id]) &&
+    d1.description === "첫 글 요약" &&
+    d1.postId === null,
+  JSON.stringify({ slug: d1.slug, tags: d1.tags, documentIds: d1.documentIds, materialIds: d1.materialIds })
 );
 await page.reload();
 await main.getByLabel("제목").waitFor();
 check(
-  "WP3. reload restores draft (title, slug, tags, documents)",
+  "WP3. reload restores draft (title, summary, tags, documents, materials)",
   (await main.getByLabel("제목").inputValue()) === "첫 글" &&
-    (await main.getByLabel("주소(slug)").inputValue()) === "first-post-1" &&
+    (await main.getByLabel("요약").inputValue()) === "첫 글 요약" &&
     (await main.getByRole("button", { name: "태그 테스트 빼기" }).count()) === 1 &&
-    (await appears(links.getByText("바탕 문서 A")))
+    (await appears(links.getByText("바탕 문서 A"))) &&
+    (await appears(mats.locator("li", { hasText: "문서 A의 자료" }).getByText("문서에서 자동 포함", { exact: false }))) &&
+    (await appears(mats.locator("li", { hasText: "직접 고른 자료" }).getByText("직접 추가")))
 );
 await main.getByRole("button", { name: "글 저장" }).click();
 await page.waitForURL(/\/write\/\?id=/);
 const postId = idParam();
 check("WP3. commit opens post page", await appears(main.getByRole("heading", { name: "첫 글" })));
 const p1 = await api.get(`/research/posts/${postId}`);
-check("WP3. commit: v1 with fields, draft closed", p1.latestVersion.number === 1 && p1.latestVersion.slug === "first-post-1" && (await api.get(`/research/post-drafts/${draftId}`)).state === "committed");
+const slug1 = p1.latestVersion.slug;
+check(
+  "WP3. commit: v1, server-generated slug, material sources, draft closed",
+  p1.latestVersion.number === 1 &&
+    /^post-[0-9a-f]{32}$/.test(slug1) &&
+    JSON.stringify(p1.latestVersion.materialSources) === JSON.stringify([{ materialId: matA.id, documentIds: [docA.id] }, { materialId: matB.id, documentIds: [] }]) &&
+    (await api.get(`/research/post-drafts/${draftId}`)).state === "committed",
+  JSON.stringify({ slug1, sources: p1.latestVersion.materialSources })
+);
+check("WP3. W1: post page shows the public address", await appears(main.getByText(`주소 /posts/${slug1}/`, { exact: false })));
 
 // WP3b. 리뷰 F1: 업로드를 기다리는 동안 바꾼 제목·본문·메타를 업로드 완료가 되돌리지 않는다. 그동안 저장·버리기는 잠긴다.
 {
@@ -174,6 +215,7 @@ check("WP3. commit: v1 with fields, draft closed", p1.latestVersion.number === 1
   check("WP3b. save/discard locked during upload", (await main.getByRole("button", { name: "글 저장" }).isDisabled()) && (await main.getByRole("button", { name: "초안 버리기…" }).isDisabled()));
   await main.getByLabel("제목").fill("업로드 중 바꾼 제목");
   await main.getByLabel("본문").fill("업로드 중 바꾼 본문");
+  await main.getByRole("button", { name: "요약 추가(선택)" }).click();
   await main.getByLabel("요약").fill("업로드 중 요약");
   await main.getByLabel("태그", { exact: true }).fill("업로드중");
   await main.getByLabel("태그", { exact: true }).press("Enter");
@@ -199,38 +241,128 @@ check("WP3. commit: v1 with fields, draft closed", p1.latestVersion.number === 1
   await main.getByText("초안을 버렸습니다").waitFor();
 }
 
-// WP4. 저장 전 주소 확인(끝 하이픈은 초안에는 남지만 저장은 막는다)
-await page.goto(U("/write/new/"));
-await main.getByLabel("제목").fill("주소 확인");
-await main.getByLabel("주소(slug)").fill("bad-");
-await main.getByLabel("본문").fill("본문");
-await saved();
-check("WP4. draft keeps trailing hyphen while typing", (await api.get(`/research/post-drafts/${await draftParam()}`)).slug === "bad-");
-await main.getByRole("button", { name: "글 저장" }).click();
-check("WP4. strict slug checked before commit", await appears(main.getByText("주소(slug)를 소문자 영문·숫자와 중간 하이픈으로", { exact: false })));
-await main.getByLabel("주소(slug)").fill("first-post-1");
-await saved();
-await main.getByRole("button", { name: "글 저장" }).click();
-check("WP4. taken slug -> slug_taken message", await appears(main.getByText("이미 쓰였거나 예약된 주소(slug)입니다", { exact: false })));
-await main.getByRole("button", { name: "초안 버리기…" }).click();
-await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
-await main.getByText("초안을 버렸습니다").waitFor();
+// WP4. #31: 자료만 바탕으로 한 글, 보관 자료 제외, 문서 해제 뒤에도 자료 유지, 요약 없는 글의 목록 발췌(W2)
+{
+  const docB = (await api.send("POST", "/research/documents", { title: "바탕 문서 B", content: "문서 B" })).body;
+  const matOld = await material("보관할 자료", "https://example.com/old", "보관 자료 본문");
+  await relate(docB.id, matOld.id);
+  await relate(docB.id, matA.id);
+  await api.send("DELETE", `/research/materials/${matOld.id}`, { expectedVersion: matOld.version });
+  await page.goto(U("/write/new/"));
+  await main.getByLabel("제목").fill("자료만 쓴 글");
+  await main.getByLabel("본문").fill("## 소제목\n\n**굵은** 첫 문장과 [링크](https://example.com) 그리고 `코드`.\n\n![그림](https://example.com/x.png)\n\n둘째 문단");
+  await main.getByRole("button", { name: "문서 연결" }).click();
+  await main.getByLabel("연결할 문서 찾기").fill("바탕 문서 B");
+  await main.getByRole("button", { name: "바탕 문서 B 연결" }).click();
+  const box = main.getByRole("region", { name: "바탕이 된 자료" });
+  check("WP4. W3: archived material excluded on auto add", (await appears(box.getByText("보관한 자료 1개는 담지 않았습니다"))) && !(await box.innerText()).includes("보관할 자료"));
+  check("WP4. W3: active material from document added", await appears(box.locator("li", { hasText: "문서 A의 자료" })));
+  // 문서 연결을 해제해도 담긴 자료는 남고 출처만 직접 추가로 보인다
+  await main.getByRole("region", { name: "연결 문서" }).getByRole("button", { name: "연결 해제" }).click();
+  check("WP4. W3: unlinking a document keeps its material", await appears(box.locator("li", { hasText: "문서 A의 자료" }).getByText("직접 추가")));
+  await saved();
+  const d4 = await api.get(`/research/post-drafts/${await draftParam()}`);
+  check("WP4. W3: materials-only draft", d4.documentIds.length === 0 && JSON.stringify(d4.materialIds) === JSON.stringify([matA.id]), JSON.stringify(d4));
+  await main.getByRole("button", { name: "글 저장" }).click();
+  await page.waitForURL(/\/write\/\?id=/);
+  const p4 = await api.get(`/research/posts/${idParam()}`);
+  check("WP4. W3: materials-only post saved", p4.latestVersion.documentIds.length === 0 && JSON.stringify(p4.latestVersion.materialIds) === JSON.stringify([matA.id]));
+  const pub4 = main.getByRole("region", { name: "발행" });
+  await pub4.getByRole("button", { name: "발행 미리보기" }).click();
+  check("WP4. W3: preview lists public material title + URL", await appears(pub4.getByText("문서 A의 자료 — https://example.com/source-a")));
+  await pub4.getByRole("button", { name: "이 버전 발행" }).click();
+  await pub4.getByText("발행했습니다", { exact: false }).waitFor();
+  const anon = await (await browser.newContext()).newPage();
+  await anon.goto(U("/posts/"));
+  const card = anon.locator("main article", { hasText: "자료만 쓴 글" });
+  await card.waitFor();
+  check("WP4. W2: card without summary shows plain body excerpt", await appears(card.getByText("소제목 굵은 첫 문장과 링크 그리고 코드. 둘째 문단")));
+  const legacy = anon.locator("main article", { hasText: "Observatory에 오신 것을 환영합니다" });
+  check("WP4. W2: existing summary still shown", await appears(legacy.getByText("스터디 그룹의 관찰과 기록을 위한 공간", { exact: false })));
+  await anon.goto(U(`/posts/${p4.latestVersion.slug}/`));
+  await anon.locator("article h1").first().waitFor();
+  check("WP4. W2: article header has no summary line when empty", (await anon.locator("article header > p").count()) === 0);
+  await anon.context().close();
+}
+
+// WP4b. 리뷰 F1: 자료 찾기 응답을 기다리는 동안(요청 2개가 겹쳐도) 사람이 뺀 자료는 늦은 응답이 다시 넣지 않는다.
+//       뺀 뒤에 새로 연결한 문서는 그 자료를 다시 담을 수 있다.
+{
+  const doc = async (title) => (await api.send("POST", "/research/documents", { title, content: title })).body;
+  const docC = await doc("경합 문서 C");
+  const docD = await doc("경합 문서 D");
+  const docE = await doc("경합 문서 E");
+  for (const d of [docC, docD, docE]) await relate(d.id, matA.id);
+  await page.goto(U("/write/new/"));
+  await main.getByLabel("제목").fill("자료 제거 경합");
+  await main.getByLabel("본문").fill("본문");
+  const box = main.getByRole("region", { name: "바탕이 된 자료" });
+  const row = box.locator("li", { hasText: "문서 A의 자료" });
+  await box.getByRole("button", { name: "자료 추가" }).click();
+  await box.getByLabel("추가할 자료 찾기").fill("문서 A의");
+  await box.getByRole("button", { name: "문서 A의 자료 추가" }).click();
+  await box.getByRole("button", { name: "찾기 닫기" }).click();
+  await row.waitFor();
+  let release;
+  const held = new Promise((r) => (release = r));
+  let holding = 0;
+  const hold = async (route) => {
+    holding++;
+    await held;
+    return route.continue().catch(() => {});
+  };
+  await page.route("**/api/research/post-material-options/resolve", hold);
+  const link = async (title) => {
+    await main.getByLabel("연결할 문서 찾기").fill(title);
+    await main.getByRole("button", { name: `${title} 연결` }).click();
+  };
+  await main.getByRole("button", { name: "문서 연결" }).click();
+  await link("경합 문서 C");
+  await link("경합 문서 D");
+  for (let i = 0; i < 50 && holding < 2; i++) await page.waitForTimeout(100);
+  check("WP4b. setup: two resolve requests pending", holding === 2, String(holding));
+  await row.getByRole("button", { name: "자료 빼기" }).click();
+  check("WP4b. removed while resolving", (await row.count()) === 0);
+  release();
+  await main.getByText("연결한 문서의 자료를 찾는 중입니다").waitFor({ state: "detached" });
+  await page.unroute("**/api/research/post-material-options/resolve", hold);
+  check("WP4b. F1: late (overlapping) responses keep the removal", (await row.count()) === 0);
+  let d = null;
+  for (let i = 0; i < 30; i++) {
+    const id = await draftParam();
+    d = id ? await api.get(`/research/post-drafts/${id}`) : null;
+    if (d && JSON.stringify(d.documentIds) === JSON.stringify([docC.id, docD.id])) break;
+    await page.waitForTimeout(300);
+  }
+  check("WP4b. F1: saved draft keeps the removal", !!d && JSON.stringify(d.documentIds) === JSON.stringify([docC.id, docD.id]) && d.materialIds.length === 0, JSON.stringify(d && { documentIds: d.documentIds, materialIds: d.materialIds }));
+  await link("경합 문서 E");
+  check("WP4b. F1: a document linked after the removal adds it again", await appears(row.getByText("문서에서 자동 포함", { exact: false })));
+  await main.getByRole("button", { name: "초안 버리기…" }).click();
+  await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+  await main.getByText("초안을 버렸습니다").waitFor();
+}
 
 // WP5. 기존 글 수정: 주소는 읽기 전용, 새 버전, 버전 비교에 글 정보 변경
 await page.goto(U(`/write/?id=${postId}`));
 await main.getByRole("button", { name: "내용 수정" }).click();
-check("WP5. slug read-only for saved post", (await main.getByLabel("주소(slug)").getAttribute("readonly")) !== null);
+check("WP5. W1: public address read-only for saved post", (await main.getByLabel("공개 주소").inputValue()) === `/posts/${slug1}/` && (await main.getByLabel("공개 주소").getAttribute("readonly")) !== null);
+// 직접 추가한 자료를 빼면 다음 버전에서 빠진다(자동 포함 자료도 같은 방식으로 뺄 수 있다)
+await main.getByRole("region", { name: "바탕이 된 자료" }).locator("li", { hasText: "직접 고른 자료" }).getByRole("button", { name: "자료 빼기" }).click();
 await main.getByLabel("본문").fill("# 첫 글 본문\n\n두 번째 버전 문장");
 await main.getByLabel("태그", { exact: true }).fill("v2");
 await main.getByLabel("태그", { exact: true }).press("Enter");
 await saved();
 await main.getByRole("button", { name: "새 버전으로 저장" }).click();
 await main.getByRole("button", { name: "내용 수정" }).waitFor();
-check("WP5. new version saved", (await api.get(`/research/posts/${postId}`)).latestVersion.number === 2);
+{
+  const v2 = (await api.get(`/research/posts/${postId}`)).latestVersion;
+  check("WP5. new version saved, slug kept, removed material gone", v2.number === 2 && v2.slug === slug1 && JSON.stringify(v2.materialIds) === JSON.stringify([matA.id]), JSON.stringify(v2));
+}
 await main.getByRole("button", { name: "버전 비교" }).click();
 const cmp = main.getByRole("region", { name: "버전 비교" });
 check("WP5. version compare shows body diff", await appears(cmp.locator('[data-diff="add"]', { hasText: "두 번째 버전 문장" })));
 check("WP5. version compare shows meta diff (+tag)", await appears(cmp.getByLabel("글 정보 변경").getByText("+v2")));
+check("WP5. version compare shows removed material", await appears(cmp.getByLabel("글 정보 변경").locator("del", { hasText: "직접 고른 자료" })));
 await cmp.getByRole("button", { name: "비교 닫기" }).click();
 
 // WP6. 발행: v1 미리보기 → 문서 제목 공개 안내 → 발행 → 비로그인 공개 화면
@@ -241,16 +373,25 @@ await pub.getByLabel("발행할 버전").selectOption(v1Id);
 await pub.getByRole("button", { name: "발행 미리보기" }).click();
 check("WP6. preview warns linked document title becomes public", await appears(pub.getByText("함께 공개되는 문서 제목 (1)")));
 check("WP6. preview marks private document as title only", await appears(pub.getByText(/바탕 문서 A — 제목만 표시/)));
+check("WP6. W3: preview lists 2 public materials (title + URL only)", await appears(pub.getByText("함께 공개되는 자료 (2)")));
 check("WP6. page preview renders the article", await appears(pub.locator("article h1", { hasText: "첫 글" })));
 await pub.getByRole("button", { name: "이 버전 발행" }).click();
 check("WP6. published note", await appears(pub.getByText("발행했습니다", { exact: false })));
 check("WP6. status shows published v1 not latest", await appears(pub.getByText("최신 버전 v2은 아직 발행하지 않았습니다", { exact: false })));
 {
   const anon = await (await browser.newContext()).newPage();
-  await anon.goto(U("/posts/first-post-1/"));
+  await anon.goto(U(`/posts/${slug1}/`));
   await anon.locator("article h1").first().waitFor();
   const text = await anon.locator("main").innerText();
   check("WP6. public page shows v1 (not v2)", text.includes("첫 글 본문") && !text.includes("두 번째 버전 문장"));
+  check(
+    "WP6. W3: public page lists based-on materials (title + source URL, no body)",
+    text.includes("바탕이 된 자료") &&
+      text.includes("문서 A의 자료") &&
+      text.includes("직접 고른 자료") &&
+      (await anon.getByRole("link", { name: "https://example.com/source-b" }).count()) === 1 &&
+      !text.includes("비밀 메모")
+  );
   check("WP6. public page lists based-on document title, no link, no body", text.includes("바탕이 된 참고 문서") && text.includes("바탕 문서 A") && !text.includes("문서 A 본문 비밀 문장") && (await anon.getByRole("link", { name: "바탕 문서 A" }).count()) === 0);
   await anon.locator("article .prose img").first().waitFor().catch(() => {});
   const pubImgs = await anon.locator("article img").evaluateAll((els) => els.map((e) => [e.getAttribute("src"), e.naturalWidth]));
@@ -323,11 +464,9 @@ await page.waitForURL(/\/write\/new\/\?proposal=/);
 check("WP9. review diffs from the draft", await appears(main.locator('[data-diff="add"]', { hasText: "Codex가 덧붙인 문단" })));
 await main.getByRole("button", { name: "제안 수락" }).click();
 await main.getByRole("button", { name: "수락 확인" }).click();
-check("WP9. slug required before accepting new post", await appears(main.getByText("주소(slug)를 소문자 영문·숫자와 중간 하이픈으로 정한 뒤 수락하세요")));
-await main.getByLabel("주소(slug)").fill("codex-new-post");
-await main.getByRole("button", { name: "수락 확인" }).click();
 await page.waitForURL(/\/write\/\?id=/);
-check("WP9. accepted new post opens", await appears(main.getByRole("heading", { name: "초안 글 (제안)" })));
+check("WP9. accepted new post opens (no slug asked)", await appears(main.getByRole("heading", { name: "초안 글 (제안)" })));
+check("WP9. W1: accept generated the slug", /^post-[0-9a-f]{32}$/.test((await api.get(`/research/posts/${idParam()}`)).latestVersion.slug));
 check("WP9. base draft closed", (await api.get(`/research/post-drafts/${draft9}`)).state === "committed");
 
 // WP10. 초안 없이 제안된 새 글 → 목록 → 버리기
@@ -357,7 +496,7 @@ check("WP11. accepted: document created", await appears(main.getByRole("heading"
 check("WP11. exactly one document added", (await api.get("/research/documents")).items.length === docsBefore + 1);
 
 // WP12. 공개 글 화면의 대화 범위는 이 발행 글(postId)
-await page.goto(U("/posts/first-post-1/"));
+await page.goto(U(`/posts/${slug1}/`));
 await page.locator("article h1").first().waitFor();
 await openChat("글 대화");
 check("WP12. public post scope: bounded", await appears(chat.getByText("다음 질문 범위: 이 발행 글")));
@@ -375,8 +514,8 @@ check("WP12. public post scope: bounded", await appears(chat.getByText("다음 �
     await held;
     return route.continue().catch(() => {});
   };
-  await page.route("**/api/public/posts/first-post-1", hold);
-  await page.goto(U("/posts/first-post-1/"));
+  await page.route(`**/api/public/posts/${slug1}`, hold);
+  await page.goto(U(`/posts/${slug1}/`));
   await openChat("글 대화");
   await chat.getByLabel("메시지").fill("느린 공개 글 질문");
   const sendBtn = chat.getByRole("button", { name: "보내기" });
@@ -388,7 +527,7 @@ check("WP12. public post scope: bounded", await appears(chat.getByText("다음 �
   // 조회가 끝나지 않으면 클라이언트 timeout(5초)으로 실패 화면이 된다. 실패해도 잠금은 유지된다.
   check("WP12. F2: load failure keeps send locked", (await appears(page.getByText("글을 불러오지 못했습니다", { exact: false }), 10000)) && (await sendBtn.isDisabled()));
   release();
-  await page.unroute("**/api/public/posts/first-post-1", hold);
+  await page.unroute(`**/api/public/posts/${slug1}`, hold);
   await page.reload();
   await page.locator("article h1").first().waitFor();
   await chat.getByLabel("메시지").fill("느린 공개 글 질문");
@@ -410,7 +549,7 @@ check("WP12. public post scope: bounded", await appears(chat.getByText("다음 �
     return route.continue().catch(() => {});
   };
   await page.route("**/api/public/posts/welcome-to-observatory", hold2);
-  await page.goto(U("/posts/first-post-1/"));
+  await page.goto(U(`/posts/${slug1}/`));
   await page.locator("article h1").first().waitFor();
   await page.getByRole("link", { name: "글 목록" }).first().click();
   await page.getByRole("link", { name: /Observatory에 오신 것을 환영합니다/ }).first().click();
@@ -472,7 +611,7 @@ await pub.getByRole("button", { name: "발행 취소", exact: true }).click();
 check("WP13. unpublished note", await appears(pub.getByText("발행을 취소했습니다", { exact: false })));
 {
   const anon = await (await browser.newContext()).newPage();
-  await anon.goto(U("/posts/first-post-1/"));
+  await anon.goto(U(`/posts/${slug1}/`));
   check("WP13. unpublished post not found publicly", await appears(anon.getByText("글을 찾을 수 없습니다")));
   check("WP13. unpublished image no longer public", (await anon.request.get(U(`/api/media/post-images/${IMG}`))).status() === 404);
   await anon.context().close();
