@@ -48,6 +48,22 @@ async function contrast(page) {
   });
 }
 
+// 공개 글 응답에 YouTube 블록을 더해 영상 카드(어두운 고정 카드)도 검사한다(리뷰 #38 slice1 round1)
+const EMBED_POST = "/posts/welcome-to-observatory/";
+async function withEmbed(page) {
+  await page.route(/\/api\/public\/posts\/welcome-to-observatory\/?(\?|$)/, async (route) => {
+    try {
+      const res = await route.fetch();
+      const body = await res.json();
+      const blocks = body?.latestVersion?.content?.blocks ?? body?.content?.blocks;
+      if (Array.isArray(blocks)) blocks.push({ id: "00000000-0000-4000-8000-00000000e3b0", type: "embed", provider: "youtube", resourceId: "dQw4w9WgXcQ", caption: [{ text: "영상 설명", marks: [] }] });
+      await route.fulfill({ response: res, json: body });
+    } catch {
+      await route.continue().catch(() => {});
+    }
+  });
+}
+
 const browser = await chromium.launch();
 for (const scheme of ["light", "dark"]) {
   const ctx = await browser.newContext({ colorScheme: scheme, viewport: { width: 1280, height: 900 } });
@@ -76,6 +92,15 @@ for (const scheme of ["light", "dark"]) {
     const bad = await contrast(page);
     check(`T. ${scheme} ${name}: no WCAG AA color-contrast violations`, bad.length === 0, bad.slice(0, 4).map((b) => `${b.target} ${b.ratio} ${b.fg}/${b.bg}`).join(" | "));
   }
+  // 영상 카드가 있는 글
+  await withEmbed(page);
+  await page.goto(U(EMBED_POST), { waitUntil: "domcontentloaded" });
+  const card = page.getByRole("button", { name: /눌러서 재생/ });
+  const shown = await card.waitFor({ timeout: 10000 }).then(() => true, () => false);
+  await page.screenshot({ path: `${SHOTS}/theme-${scheme}-post-embed.png`, fullPage: true });
+  const bad = await contrast(page);
+  check(`T. ${scheme} post with a YouTube card: card shown, no AA color-contrast violations`, shown && bad.length === 0, `shown=${shown} ${bad.slice(0, 4).map((b) => `${b.target} ${b.ratio} ${b.fg}/${b.bg}`).join(" | ")}`);
+  await page.unrouteAll({ behavior: "ignoreErrors" });
   await ctx.close();
 }
 await browser.close();
