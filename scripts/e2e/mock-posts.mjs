@@ -1,6 +1,8 @@
 // #28 글(post) 모의 API(api-contracts/issue28-posts.md, #31 issue31-write-ux.md). mock-research.mjs가 문서·자료 조회 함수를 넘겨 호출한다.
 // 실제 backend를 대체하지 않으며 front가 쓰는 계약 경로와 409/422 갈래만 흉내 낸다.
+// #32: 본문은 post-blocks 문서다(형식만 확인, 응답에 textProjection을 붙인다). Codex 제안 비교(comparison)도 흉내 낸다.
 import crypto from "node:crypto";
+import { changes, doc, fromMarkdown, imageIds, isDoc, projection, visible } from "./mock-blocks.mjs";
 
 const BASE = process.env.BASE_PATH ?? "";
 const now = () => new Date().toISOString();
@@ -36,7 +38,7 @@ function textFields(b, strict) {
     if (typeof b[k] !== "string" || b[k].length > max) f.push({ path: `body.${k}`, message: `string<=${max}` });
   };
   str("title", 300);
-  str("content", 200000);
+  if (!isDoc(b.content)) f.push({ path: "body.content", message: "post-blocks document" });
   str("description", 1000);
   if (b.slug !== undefined && (typeof b.slug !== "string" || b.slug.length > 100)) f.push({ path: "body.slug", message: "string<=100" });
   if (b.materialIds !== undefined && b.materialIds !== null && !idList(b.materialIds)) f.push({ path: "body.materialIds", message: "unique uuids<=50" });
@@ -48,7 +50,7 @@ function textFields(b, strict) {
     f.push({ path: "body.documentIds", message: "unique uuids<=50" });
   if (strict && f.length === 0) {
     if (!b.title.trim()) f.push({ path: "body.title", message: "required" });
-    if (!b.content.trim()) f.push({ path: "body.content", message: "required" });
+    if (!visible(b.content)) f.push({ path: "body.content", message: "required" });
   }
   return f;
 }
@@ -91,15 +93,14 @@ function textWith(owner, b, docs) {
 /** 기존 글: 빈 값·생략은 저장된 주소, 다른 값은 422. */
 const slugMismatch = (b, p) => typeof b.slug === "string" && b.slug !== "" && b.slug !== p.slug;
 
-const OWN_IMAGE = new RegExp(`\\]\\(${BASE.replace(/\./g, "\\.")}/api/media/post-images/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\\)`, "g");
-/** 본문의 자체 이미지 ID(정규 형태만, 모의 추출). */
-const contentImages = (content) => [...content.matchAll(OWN_IMAGE)].map((m) => m[1]);
-const imageIdsOf = (t) => [...new Set([...(t.coverImageId ? [t.coverImageId] : []), ...contentImages(t.content ?? "")])];
+/** 본문의 구조적 이미지 참조(type=image의 imageId)와 표지. */
+const contentImages = (content) => (isDoc(content) ? imageIds(content) : []);
+const imageIdsOf = (t) => [...new Set([...(t.coverImageId ? [t.coverImageId] : []), ...contentImages(t.content)])];
 
 /** commit/accept/publish 재검증: 문서는 본인 활성, 표지·본문 이미지는 본인 이미지. */
 function refsFields(owner, t, docs) {
   const f = [];
-  for (const id of contentImages(t.content ?? "")) if (images.get(id)?.owner !== owner) f.push({ path: "body.content", message: `unknown image: ${id}` });
+  for (const id of contentImages(t.content)) if (images.get(id)?.owner !== owner) f.push({ path: "body.content", message: `unknown image: ${id}` });
   for (const id of t.documentIds) {
     const d = docs.get(owner, id);
     if (!d || d.archived) f.push({ path: "body.documentIds", message: `not an active document: ${id}` });
@@ -116,7 +117,7 @@ function refsFields(owner, t, docs) {
 
 const latest = (p) => p.versions.at(-1);
 function versionView(p, v, withContent = true) {
-  const out = { ...v, postId: p.id };
+  const out = { ...v, postId: p.id, textProjection: projection(v.content) };
   if (!withContent) delete out.content;
   return out;
 }
@@ -133,7 +134,7 @@ function postView(p, withContent = true) {
   };
 }
 function draftView(d, withContent = true) {
-  const out = { ...d };
+  const out = { ...d, textProjection: projection(d.content) };
   delete out.owner;
   if (!withContent) delete out.content;
   return out;
@@ -150,6 +151,7 @@ function publicView(p, withContent = true) {
     title: v.title,
     description: v.description,
     content: v.content,
+    textProjection: projection(v.content),
     tags: v.tags,
     coverImageUrl: v.coverImageId ? imageUrl(v.coverImageId) : null,
     author: { login: pub.authorLogin, name: pub.authorName },
@@ -163,8 +165,10 @@ function publicView(p, withContent = true) {
 
 // ---- 기존 MDX 3개 이관(0006 seed 흉내: owner 없음, login null) ----
 
-function seed(slug, title, description, date, author, tags, content) {
+function seed(slug, title, description, date, author, tags, markdown) {
   const id = uuid();
+  // 0007 이관 흉내: 기존 Markdown을 블록으로 바꿔 둔다
+  const content = fromMarkdown(markdown);
   const v = { id: uuid(), number: 1, title, content, description, slug, tags, coverImageId: null, documentIds: [], materialIds: [], materialSources: [], createdAt: `${date}T00:00:00Z` };
   posts.set(id, {
     id, owner: null, legacy: true, version: 1, archived: false, createdAt: v.createdAt, updatedAt: v.createdAt,
@@ -178,7 +182,8 @@ seed("welcome-to-observatory", "Observatory에 오신 것을 환영합니다", "
 seed("understanding-transformer-architecture", "Transformer 아키텍처 이해하기", "Attention Is All You Need 논문의 핵심 개념을 정리합니다.", "2026-03-18", "김스터디", ["AI", "논문리뷰", "딥러닝"],
   "## Self-Attention\n\n```python\nscores = q @ k.T / sqrt(d)\n```\n\n| 구성 | 역할 |\n|---|---|\n| Encoder | 입력 표현 |\n| Decoder | 출력 생성 |\n");
 seed("docker-basics-for-developers", "개발자를 위한 Docker 기초", "Docker의 핵심 개념과 실무에서 자주 쓰는 명령어를 정리합니다.", "2026-03-17", "박개발", ["DevOps", "Docker", "인프라"],
-  "## 컨테이너란?\n\n`docker run --rm hello-world`\n\n<b>raw html</b>은 렌더하지 않습니다. ![외부](https://example.com/x.png)\n");
+  // #32: 0007 이관은 raw HTML·외부 이미지가 있으면 중단한다. 여기 글자는 HTML이 아니라 문단 텍스트다.
+  "## 컨테이너란?\n\n`docker run --rm hello-world`\n\n<b>raw html</b>은 렌더하지 않습니다.\n");
 
 const published = () =>
   [...posts.values()]
@@ -233,7 +238,7 @@ function previewOf(owner, p, v, docs) {
   const { id: versionId, title, content, description, slug, tags, coverImageId, documentIds, materialIds, materialSources } = v;
   return {
     postId: p.id, versionId, expectedVersion: p.version, previewToken, publishable,
-    title, content, description, slug, tags, coverImageId, documentIds, materialIds, materialSources,
+    title, content, textProjection: projection(content), description, slug, tags, coverImageId, documentIds, materialIds, materialSources,
     author: { login: p.authorLogin }, documents, materials, images: imgs,
     currentPublication: p.publication ? publicView(p) : null,
   };
@@ -461,7 +466,7 @@ export function handlePostMutation(owner, method, path, b, user, docs) {
 export function createPostProposal(owner, target, patch, docs) {
   const t = now();
   let base = { postId: null, basePostVersion: null, baseVersionId: null, baseDraftId: null, baseDraftRevision: null };
-  let from = { title: "", content: "", description: "", tags: [], coverImageId: null, documentIds: [], materialIds: [] };
+  let from = { title: "", content: doc([]), description: "", tags: [], coverImageId: null, documentIds: [], materialIds: [] };
   let slug = "";
   const pick = ({ title, content, description, tags, coverImageId, documentIds, materialIds }) => ({ title, content, description, tags, coverImageId, documentIds, materialIds });
   if (target.postId) {
@@ -479,9 +484,36 @@ export function createPostProposal(owner, target, patch, docs) {
   // 새 글 제안의 slug는 보내도 무시한다(#31 W1)
   const next = { ...from, ...patch(from) };
   const sel = materialsOf(owner, next.documentIds, next.materialIds, docs);
-  const row = { id: uuid(), owner, ...base, version: 1, ...next, ...sel, slug, origin: "codex", status: "pending", acceptedPostId: null, acceptedVersionId: null, createdAt: t, updatedAt: t };
+  const row = {
+    id: uuid(), owner, ...base, version: 1, ...next, ...sel, slug, origin: "codex", status: "pending", acceptedPostId: null, acceptedVersionId: null,
+    baseTextProjection: projection(from.content), formatChanges: changes(from.content, next.content), conversionWarnings: next.conversionWarnings ?? [],
+    createdAt: t, updatedAt: t,
+  };
   proposals.set(row.id, row);
   return draftView(row, false);
+}
+
+/** POST /research/post-proposals/{id}/comparison: 지금 기준(현재 글 head 또는 새 글 연결 초안)과 후보 비교. 저장하지 않는다. */
+export function comparePostProposal(owner, path, b) {
+  const m = /^\/research\/post-proposals\/([^/]+)\/comparison$/.exec(path);
+  if (!m) return null;
+  const row = proposals.get(m[1]);
+  if (!row || row.owner !== owner) return notFound();
+  if (!b || Object.keys(b).join() !== "content") return fail(422, "validation_error", "Only content is accepted");
+  if (!isDoc(b.content)) return fail(422, "invalid_block_document", "Invalid block document", { details: { path: "/content", code: "invalid_block_document" } });
+  const post = row.postId ? ownedPost(owner, row.postId) : null;
+  const draft = !post && row.baseDraftId ? drafts.get(row.baseDraftId) : null;
+  const base = post ? latest(post).content : draft ? draft.content : doc([]);
+  const hash = (v) => crypto.createHash("sha256").update(JSON.stringify(v)).digest("hex");
+  return ok(200, {
+    baseVersionId: post ? latest(post).id : null,
+    baseDraftRevision: draft ? draft.revision : null,
+    baseContentHash: hash(base),
+    candidateHash: hash(b.content),
+    baseTextProjection: projection(base),
+    textProjection: projection(b.content),
+    formatChanges: changes(base, b.content),
+  });
 }
 
 /** POST /research/post-material-options/resolve: 연결 문서가 가리키는 자료(직접 관계만, 보관 자료는 excluded). 읽기 전용. */

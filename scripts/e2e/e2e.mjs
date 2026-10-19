@@ -214,12 +214,13 @@ check("J. post detail shows like/comment 준비 중", await appears(page.getByTe
   await page.waitForURL(U("/posts/docker-basics-for-developers/"));
   await page.locator("article h1").first().waitFor();
   check("P. detail title", (await page.locator("article h1").innerText()) === "개발자를 위한 Docker 기초");
-  check("P. raw HTML not rendered", (await page.locator("article b").count()) === 0);
-  check("P. external image stays a link (not loaded)", (await page.locator("article img").count()) === 0 && (await page.locator("article a", { hasText: "[이미지: 외부]" }).count()) === 1);
+  // #32 블록 본문: HTML처럼 보이는 글자도 텍스트 노드로만 그린다
+  check("P. HTML-looking text stays text", (await page.locator("article b").count()) === 0 && (await page.locator("article").innerText()).includes("<b>raw html</b>은 렌더하지 않습니다."));
+  check("P. no image loaded for a post without own images", (await page.locator("article img").count()) === 0);
   check("P. tab title from post", (await page.title()).startsWith("개발자를 위한 Docker 기초"), await page.title());
   await page.goto(U("/posts/understanding-transformer-architecture/"));
   await page.locator("article table").first().waitFor();
-  check("P. markdown table rendered", (await page.locator("article table").count()) === 1);
+  check("P. table block rendered (header row as th)", (await page.locator("article table").count()) === 1 && (await page.locator("article table th").count()) === 2);
   await page.getByRole("link", { name: "AI", exact: true }).first().click();
   await page.waitForURL(U("/tags/AI/"));
   check("P. tag page lists tagged post", await appears(page.getByRole("link", { name: /Transformer 아키텍처 이해하기/ })));

@@ -1,8 +1,9 @@
 // M3 모의 API (api-contracts/m3-research-data.md). 화면 검증용 메모리 구현이며 실제 backend·DB·Codex가 아니다.
 // 계약의 소유권(타인 ID 404), Origin/CSRF, Idempotency-Key 재생, expectedVersion 충돌, 정책 대기 응답을 흉내 낸다.
 import crypto from "node:crypto";
+import { paragraph } from "./mock-blocks.mjs";
 import {
-  IMAGE_LIMIT, createPostProposal, resolvePostMaterials, handleImageDelete, handleImageRead, handlePostMutation, handlePostRead, handlePublicPosts,
+  IMAGE_LIMIT, comparePostProposal, createPostProposal, resolvePostMaterials, handleImageDelete, handleImageRead, handlePostMutation, handlePostRead, handlePublicPosts,
   mediaBytes, newPostDraftOf, postTitle, publicPostTitle, uploadImage,
 } from "./mock-posts.mjs";
 
@@ -708,7 +709,8 @@ function handleMutation(owner, method, path, b, user) {
           const target = scope.page.kind === "post" ? { postId: scope.page.resourceId } : scope.page.draftId ? { draftId: scope.page.draftId } : {};
           const p = createPostProposal(owner, target, (from) => ({
             title: from.title ? `${from.title} (제안)` : "Codex가 쓴 새 글",
-            content: `${from.content ? `${from.content}\n` : ""}Codex가 덧붙인 문단`,
+            // research_post_propose는 Markdown(contentInput)을 받아 서버가 블록으로 바꾼다(#32). 모의: 기존 블록 뒤에 문단 하나
+            content: { ...from.content, blocks: [...from.content.blocks.filter((x) => !(x.type === "paragraph" && x.runs.length === 0)), paragraph("Codex가 덧붙인 문단")] },
             description: from.description || "Codex 요약",
             tags: [...from.tags, "codex"].filter((t, i, a) => a.indexOf(t) === i),
           }), postDocs);
@@ -1045,6 +1047,11 @@ export async function handleResearch(req, res, path, url, session) {
 
   if (req.headers.origin !== `http://${req.headers.host}`) return send(res, 403, { error: { code: "origin_not_allowed", message: "Origin not allowed" } });
   if (researchMode.csrf === "reject" || req.headers["x-csrf-token"] !== session.csrf) return send(res, 403, { error: { code: "csrf_invalid", message: "Invalid CSRF token" } });
+  // #32 제안 비교: 읽기 전용이라 Idempotency-Key를 요구하지 않는다(cookie+Origin/CSRF만).
+  if (req.method === "POST" && /^\/research\/post-proposals\/[^/]+\/comparison$/.test(path)) {
+    const r = comparePostProposal(owner, path, await readBody(req));
+    return send(res, r.status, r.body);
+  }
   // #31 W3 자료 찾기: 읽기 전용이라 Idempotency-Key를 요구하지 않는다(cookie+Origin/CSRF만).
   if (req.method === "POST" && path === "/research/post-material-options/resolve") {
     const r = resolvePostMaterials(owner, await readBody(req), postDocs);

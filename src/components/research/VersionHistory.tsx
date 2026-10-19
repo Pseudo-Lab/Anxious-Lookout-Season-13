@@ -23,14 +23,19 @@ export interface VersionSource<V extends VersionLike> {
   // 본문 비교 위에 보일 메타 변경(슬러그·태그 등)
   metaDiff?: (before: V, after: V) => ReactNode;
   ownImages?: boolean;
+  // 본문 표시·비교를 바꾼다(#32 글은 블록 문서). 없으면 Markdown 본문으로 다룬다(자료·문서).
+  body?: (v: V) => ReactNode;
+  bodyDiff?: (before: V, after: V) => ReactNode;
 }
 interface VersionLike {
   id: string;
   number: number;
   title: string;
-  content?: string;
+  content?: unknown;
   createdAt: string;
 }
+
+const markdownOf = (v: VersionLike) => (typeof v.content === "string" ? v.content : "");
 
 function VersionBody<V extends VersionLike>({
   source,
@@ -49,7 +54,7 @@ function VersionBody<V extends VersionLike>({
     <div className="space-y-3 rounded-lg bg-stone-50 p-4">
       <p className="font-medium text-stone-900">{v.title}</p>
       {source.meta?.(v)}
-      <SafeMarkdown content={v.content ?? ""} ownImages={source.ownImages} />
+      {source.body ? source.body(v) : <SafeMarkdown content={markdownOf(v)} ownImages={source.ownImages} />}
       {onRestore && (
         // 되돌리기 = 이 내용을 편집기에 불러와 새 버전으로 저장. 원래 버전·공개본은 지우거나 바꾸지 않는다.
         <button onClick={() => onRestore(v)} className="text-sm font-medium text-indigo-600 hover:text-indigo-800">
@@ -70,13 +75,17 @@ function VersionCompare<V extends VersionLike>({ source, beforeId, afterId }: { 
   return (
     <>
       {source.metaDiff?.(before.data, after.data)}
-      <TextDiff
-        key={`${beforeId}:${afterId}`}
-        before={before.data.content ?? ""}
-        after={after.data.content ?? ""}
-        beforeTitle={before.data.title}
-        afterTitle={after.data.title}
-      />
+      {source.bodyDiff ? (
+        source.bodyDiff(before.data, after.data)
+      ) : (
+        <TextDiff
+          key={`${beforeId}:${afterId}`}
+          before={markdownOf(before.data)}
+          after={markdownOf(after.data)}
+          beforeTitle={before.data.title}
+          afterTitle={after.data.title}
+        />
+      )}
     </>
   );
 }

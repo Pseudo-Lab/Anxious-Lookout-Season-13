@@ -1,6 +1,8 @@
 // #32 고정 블록 문서(post-blocks v1) 저장·렌더 경계 타입(api-contracts/issue32-blocks-draft.md v0.2).
 // 편집기 내부 모델(Tiptap JSON)은 저장하지 않는다. 편집기 <-> 이 형식 변환은 adapter가 맡는다.
 
+import { uuidV4 } from "@/lib/research/idempotency";
+
 export const BLOCKS_FORMAT = "post-blocks";
 export const BLOCKS_VERSION = 1;
 
@@ -114,6 +116,13 @@ export interface BlockDocument {
   version: typeof BLOCKS_VERSION;
   blocks: Block[];
 }
+
+/** 빈 문서: 빈 paragraph 하나(id는 새로 만든다). */
+export const emptyDocument = (): BlockDocument => ({
+  format: BLOCKS_FORMAT,
+  version: BLOCKS_VERSION,
+  blocks: [{ id: uuidV4(), type: "paragraph", runs: [], align: "left" }],
+});
 
 /** 계약 §3 상한(착수 첫 inventory 후 재조정 예정). front 사전 검사와 서버가 같은 값을 쓴다. */
 export const LIMITS = {

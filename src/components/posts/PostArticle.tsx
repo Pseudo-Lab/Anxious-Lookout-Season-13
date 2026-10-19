@@ -1,5 +1,6 @@
 import type { PublicPost } from "@/lib/posts/types";
-import SafeMarkdown, { isOwnImage } from "@/components/research/SafeMarkdown";
+import { isOwnImage } from "@/components/research/SafeMarkdown";
+import BlockRenderer from "@/components/blocks/BlockRenderer";
 import { formatDate } from "@/lib/posts/format";
 import { SourceLink } from "./MaterialLinks";
 import TagBadge from "./TagBadge";
@@ -52,7 +53,7 @@ function BasedOnMaterials({ materials }: { materials: ArticleData["materials"] }
   );
 }
 
-/** 발행본(또는 발행 미리보기) 본문. 본문은 SafeMarkdown 규칙으로만 렌더하고 자체 업로드 이미지만 띄운다. */
+/** 발행본(또는 발행 미리보기) 본문. 본문은 블록 renderer(#32)로만 그리고 자체 업로드 이미지만 띄운다. */
 export default function PostArticle({ post }: { post: ArticleData }) {
   const cover = post.coverImageUrl && isOwnImage(post.coverImageUrl) ? post.coverImageUrl : null;
   return (
@@ -76,7 +77,7 @@ export default function PostArticle({ post }: { post: ArticleData }) {
           </div>
         </div>
       </header>
-      <SafeMarkdown content={post.content ?? ""} ownImages />
+      <BlockRenderer content={post.content} />
       <BasedOn documents={post.documents} />
       <BasedOnMaterials materials={post.materials} />
     </article>

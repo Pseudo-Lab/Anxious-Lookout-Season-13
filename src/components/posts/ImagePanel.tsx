@@ -14,8 +14,8 @@ import { isOwnImage } from "@/components/research/SafeMarkdown";
 
 const KB = 1024;
 const sizeText = (n: number) => (n >= KB * KB ? `${(n / KB / KB).toFixed(1)} MiB` : `${Math.max(1, Math.round(n / KB))} KiB`);
-/** Markdown 대체 텍스트로 쓸 수 있게 괄호·대괄호·줄바꿈을 정리한다. */
-const altOf = (name: string) => name.replace(/\.[^.]+$/, "").replace(/[[\]()\n\r]/g, " ").trim().slice(0, 100) || "이미지";
+/** 파일 이름에서 대체 텍스트를 만든다(확장자·줄바꿈 제거). */
+const altOf = (name: string) => name.replace(/\.[^.]+$/, "").replace(/[\n\r]+/g, " ").trim().slice(0, 100) || "이미지";
 
 function Thumb({ url, alt, className = "" }: { url: string; alt: string; className?: string }) {
   if (!isOwnImage(url)) return null;
@@ -31,8 +31,8 @@ export default function ImagePanel({
   readOnly,
 }: {
   coverImageId: string | null;
-  // 본문 커서 위치에 Markdown을 넣는다
-  onInsert: (markdown: string) => void;
+  // 본문 커서 위치에 이미지 블록을 넣는다(#32: 주소가 아니라 imageId로 넣는다)
+  onInsert: (image: { id: string; alt: string }) => void;
   onCover: (id: string | null) => void;
   // 업로드 시작·끝(편집기가 저장·닫기를 잠근다)
   onUploading?: (uploading: boolean) => void;
@@ -86,7 +86,7 @@ export default function ImagePanel({
     if (latestReadOnly.current) {
       setNote("올렸지만 편집기가 잠겨 있어 본문에 넣지 않았습니다. 내 이미지에서 다시 넣을 수 있습니다.");
     } else {
-      onInsert(`![${altOf(f.name)}](${res.data.url})`);
+      onInsert({ id: res.data.id, alt: altOf(f.name) });
       setNote(`올렸습니다(${res.data.width}×${res.data.height}, ${sizeText(res.data.size)}). 본문 커서 위치에 넣었습니다. 발행하기 전에는 나만 볼 수 있습니다.`);
     }
     setOpen(true);
@@ -164,7 +164,7 @@ export default function ImagePanel({
                 </p>
                 {!readOnly && (
                   <p className="flex flex-wrap gap-2">
-                    <button type="button" onClick={() => onInsert(`![이미지](${img.url})`)} className="font-medium text-indigo-600 hover:text-indigo-800">
+                    <button type="button" onClick={() => onInsert({ id: img.id, alt: "" })} className="font-medium text-indigo-600 hover:text-indigo-800">
                       본문에 넣기
                     </button>
                     <button type="button" onClick={() => onCover(img.id)} disabled={coverImageId === img.id} className="text-indigo-600 hover:text-indigo-800 disabled:text-stone-400">
