@@ -85,3 +85,30 @@ retention and atomic migration/replay. The restore probe compares full database
 row signatures plus independently restored image bytes. These do not establish
 live provider operation or browser rendering equivalence. Frontend integration,
 legacy/public browser comparison and actual operator rollout remain explicit gates.
+
+## Contract revision 1.1 client gate (#36)
+
+See `contracts/post-blocks-v1/README.md` for additive fontSize/image/table widths,
+normalization, renderer bounds and unchanged wire version1. Post draft create/update,
+proposal accept and draft commit require `X-Post-Contract-Revision: 1.1` for new
+writes; incompatible/missing declarations return409 `post_contract_upgrade_required`.
+Exact successful cached retries remain non-mutating and replay normally. This
+prevents old cached bundles from silently dropping new fields during saves.
+No migration or rewriting of 0007 content is needed. After new-feature writes,
+rollback requires a v1.1-capable image; #32-only runtime rollback is unsupported.
+
+## Image list usage (#36 F8)
+
+`GET /api/research/post-images` adds `usage` to each owned, non-deleted image:
+an ordered, duplicate-free subset of `draft`, `proposal`, `version`, `publication`.
+No references means `[]`. The predicate is shared with DELETE's retained
+`image_ids` check (body plus cover), including closed drafts/proposals, old versions
+and withdrawn/superseded publication snapshots. It exposes no counts, target IDs
+or content. Correlated EXISTS flags are read with the paginated images in one SQL
+statement; cache policy stays no-store. Upload/preview responses are unchanged,
+so clients must accept missing usage on those responses and older servers.
+
+This is a UI hint, not deletion permission: concurrent writes can change references
+after listing, and unsaved editor references are only known to the client. DELETE's
+owner/graph lock and final image_in_use409 remain authoritative. Public media
+permissions and schema/migrations are unchanged.

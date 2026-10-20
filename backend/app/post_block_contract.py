@@ -24,12 +24,23 @@ class ColorMark(Shape):
     color: Color
 
 
-Mark = Union[Literal['bold', 'italic', 'underline', 'strike', 'code'], ColorMark]
+class FontSizeMark(Shape):
+    fontSize: Literal[10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36]
+
+    @field_validator('fontSize', mode='before')
+    @classmethod
+    def integer_points(cls, value):
+        if type(value) is not int:
+            raise ValueError('Font size must be integer points')
+        return value
+
+
+Mark = Union[Literal['bold', 'italic', 'underline', 'strike', 'code'], ColorMark, FontSizeMark]
 
 
 class CaptionRun(Shape):
     text: Annotated[str, Field(min_length=1, max_length=20000)]
-    marks: Annotated[list[Mark], Field(max_length=6)] = Field(default_factory=list)
+    marks: Annotated[list[Mark], Field(max_length=7)] = Field(default_factory=list)
 
 
 class Run(CaptionRun):
@@ -90,7 +101,7 @@ class Image(Node):
     imageId: UUIDText
     alt: Annotated[str, Field(max_length=1000)] = ''
     caption: Annotated[list[CaptionRun], Field(max_length=10000)] = Field(default_factory=list)
-    widthPercent: Literal[25, 50, 75, 100] = 100
+    widthPercent: Annotated[int, Field(ge=10, le=100)] = 100
     align: Align = 'left'
 
 
@@ -108,6 +119,7 @@ class Row(Node):
 class Table(Node):
     type: Literal['table']
     rows: Annotated[list[Row], Field(min_length=1, max_length=100)]
+    columnWidths: Annotated[list[Annotated[int, Field(ge=1, le=1000)]], Field(min_length=1, max_length=20)] | None = None
 
 
 class Embed(Node):

@@ -3,13 +3,14 @@ from collections import Counter, defaultdict
 from copy import deepcopy
 import hashlib
 import json
+from math import gcd
 import re
 from urllib.parse import urlsplit
 from pydantic import ValidationError
 from .post_block_contract import Document
 from .research import fail
 
-ORDER = ['bold', 'italic', 'underline', 'strike', 'code', 'color']
+ORDER = ['bold', 'italic', 'underline', 'strike', 'code', 'color', 'fontSize']
 CHILDREN = ('blocks', 'items', 'rows', 'cells', 'columns')
 CONTROL = re.compile(r'[\x00-\x09\x0b-\x1f\x7f-\x9f]')
 
@@ -67,8 +68,8 @@ def canonicalize(raw, root=('content',)):
         invalid((*root, 'version'), 'unsupported_schema_version')
     try: value = Document.model_validate_json(json.dumps(raw)).model_dump(mode='json', exclude_none=True)
     except ValidationError as exc:
-        paths = [_shape_path(error, raw, root) for error in exc.errors(include_input=False, include_context=False)]
-        invalid(max(paths, key=lambda p: (len(p), p[-1:] == ['type'])))
+        paths = [(_shape_path(error, raw, root), error['type'] != 'missing') for error in exc.errors(include_input=False, include_context=False)]
+        invalid(max(paths, key=lambda item: (len(item[0]), item[0][-1:] == ['type'], item[1]))[0])
     counts = Counter(); identities = set()
     def text(value, path, limit=None, multiline=True):
         value = value.replace('\r\n', '\n')
@@ -85,9 +86,10 @@ def canonicalize(raw, root=('content',)):
             run['text'] = text(run['text'], (*rp, 'text')); total += len(run['text'])
             seen = set(); marks = {}
             for j, mark in enumerate(run['marks']):
-                kind = 'color' if isinstance(mark, dict) else mark
+                kind = next(iter(mark)) if isinstance(mark, dict) else mark
                 if kind in seen: invalid((*rp, 'marks', j))
-                seen.add(kind); marks[kind] = {'color': mark['color'].upper()} if kind == 'color' else kind
+                seen.add(kind)
+                marks[kind] = {'color': mark['color'].upper()} if kind == 'color' else mark
             run['marks'] = [marks[k] for k in ORDER if k in marks]
             if 'link' in run and (caption or not safe_link(run['link'])): invalid((*rp, 'link'))
             if result and {k:v for k,v in result[-1].items() if k!='text'} == {k:v for k,v in run.items() if k!='text'}:
@@ -120,6 +122,13 @@ def canonicalize(raw, root=('content',)):
             counts['tables'] += 1
             if counts['tables'] > 20: invalid(path,'content_limit_exceeded')
             width = len(node['rows'][0]['cells'])
+            if 'columnWidths' in node:
+                weights = node['columnWidths']
+                if len(weights) != width: invalid((*path,'columnWidths'))
+                divisor = gcd(*weights)
+                normalized = [weight // divisor for weight in weights]
+                if len(set(normalized)) == 1: node.pop('columnWidths')
+                else: node['columnWidths'] = normalized
             for i,row in enumerate(node['rows']):
                 if i and row['header']: invalid((*path,'rows',i,'header'))
                 if len(row['cells']) != width: invalid((*path,'rows',i,'cells'))
@@ -212,7 +221,7 @@ def format_changes(base, candidate):
         if reparented: keys.append('parent')
         if moved: keys.append('position')
         if keys or moved or ambiguous:
-            kind = 'ambiguous' if ambiguous else 'layout' if reparented or any(k in keys for k in ('width','type','ordered','start')) else 'moved' if moved else 'format-only'
+            kind = 'ambiguous' if ambiguous else 'layout' if reparented or any(k in keys for k in ('width','columnWidths','type','ordered','start')) else 'moved' if moved else 'format-only'
             changes.append({'baseBlockId':old['id'],'candidateBlockId':node['id'],'kind':kind,'changedProperties':keys or ['structure']})
     for node in left:
         if node['id'] not in used: changes.append({'baseBlockId':node['id'],'candidateBlockId':None,'kind':'removed','changedProperties':['structure']})
@@ -265,5 +274,5 @@ def markdown_projection(document, base_path=''):
 
 
 def format_summary(document):
-    return {'lossy':True,'omittedProperties':['color','underline','align','widthPercent','caption','background','columns','cellParagraphLayout','headerlessTableLayout'],
+    return {'lossy':True,'omittedProperties':['color','fontSize','underline','align','widthPercent','columnWidths','caption','background','columns','cellParagraphLayout','headerlessTableLayout'],
             'message':'Markdown projection cannot preserve all block formatting; compare formatChanges before accepting.'}

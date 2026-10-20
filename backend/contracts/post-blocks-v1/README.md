@@ -1,9 +1,77 @@
-# Post blocks v1 — contract 0.3
+# Post blocks v1 — contract revision 1.1
 
 `input.schema.json` is the Pydantic export from `app/post_block_contract.py`.
 `golden.json` is the common frontend/backend expectation set. These files are the
 adapter's input contract. The API uses post_blocks.canonicalize at all post input
 boundaries. See backend/BLOCK_POSTS.md for storage and 0007 migration details.
+
+## Additive revision 1.1 (#36)
+
+The wire envelope stays `version: 1` (strict integer); `1.1` is the contract
+revision, not a new document version. No migration or persisted row rewrite is
+needed: all prior documents retain exactly the same canonical content and digest.
+Unspecified font size inherits the surrounding typography; no mark is inserted.
+Unspecified/null table column widths use the renderer default (currently
+content-based automatic layout) and remain omitted, preserving existing tables.
+
+- A `{fontSize: pt}` mark accepts only integer points in
+  `10,11,12,14,16,18,20,24,28,32,36`, including image/embed captions. It may coexist
+  with all prior marks/link (caption links remain forbidden). At most one fontSize
+  and one color per run; maximum 7 marks. Sort fontSize after color. Equal adjacent
+  runs merge only when all marks/link match. String/float/bool/null sizes fail422.
+  Editors and renderers use `pt` or exactly `pt * 4 / 3` CSS pixels, not rounded
+  persisted pixels. Validate against the allowlist, then bound display to10..36pt;
+  unsupported marks/values must not be silently discarded before saving.
+- `image.widthPercent` accepts strict integers10..100 inclusive, default100.
+  Render width relative to the containing column/content box, max-width100%,
+  height auto, with display clamp10..100. Dragging rounds to an integer and clamps
+  before submission; server rejects invalid values instead of clamping stored
+  input. Width is a percentage of the column on desktop and its stacked container
+  on mobile. Columns already permitted Image in v1's shape; this revision supplies
+  explicit shared fixtures. Images still cannot be placed inside quote/list/table
+  child slots. Nested columns/tables inside columns remain forbidden.
+- `table.columnWidths` is optional/null or a list of1..20 strict integer weights,
+  each1..1000. Its length must equal the rectangular table's cell count per row.
+  Normalize by the greatest common divisor (`[400,600]`→`[2,3]`); omit any equal
+  vector (`[20,20]`→absent). A one-column vector is therefore always omitted.
+  Only explicit canonical weights use fixed table layout and column percentages
+  `100*w/sum(weights)`; absent weights use the renderer default (currently
+  content-based automatic layout), per PM decision D-36-1. Because equal vectors
+  are omitted, choosing equal weights returns to automatic layout after saving;
+  persisted fixed equal widths would require a separate contract change.
+  Wrap cell content/overflow within the available
+  width. Drag UI clamps/rounds weights before submit. Do not store measured pixel
+  widths or require weights to total100. Merged cells remain forbidden.
+
+Text projection and structural image authority are unchanged. Markdown projection
+omits fontSize and columnWidths and lists both in formatSummary.omittedProperties.
+Font size appears as changedProperties `runs`/`caption` (format-only); image width
+as `widthPercent` (format-only); table weights as `columnWidths` (layout).
+Equivalent canonical weights produce no diff. Existing global budgets stay:
+2000 IDs, depth8, list depth3, image occurrences100, distinct body+cover images50,
+tables20/cells1000 and bytes/text/runs limits. A direct image inside a column has
+node depth3; marks and weights add no IDs or node depth but still count as bytes.
+
+### Client capability and rollback
+
+Human post draft create/update, proposal accept and draft commit require HTTP
+`X-Post-Contract-Revision: 1.1` before a new write. Missing/other values return409
+`post_contract_upgrade_required` with `details.requiredRevision: "1.1"`, before
+any post/cache row write. Exact successful idempotent retries still replay under
+the original owner/operation/body fingerprint without this header (no mutation).
+Authentication/CSRF/owner checks remain. This capability declaration is not an
+authorization secret; it fences old cached bundles that cannot preserve new data.
+The new client must implement v1.1 before sending it, show upgrade/read-only UI on
+that error or unsupported content, and never silently drop fields. Old clients
+may still read, but cannot save draft content or commit it. Codex Markdown propose,
+research documents/materials and body-free post archive/discard/publication do not
+require this header. No CORS configuration change: the application is same-origin.
+
+Backward data compatibility does **not** imply old servers accept newly written
+v1.1 marks/widths. Rollback is supported before new-feature writes, or to another
+v1.1-capable image; no lossless rollback to #32 after such writes is promised.
+PM accepted this forward-only constraint. Deploy matching API/editor/public
+renderer together; a cached old client failing the gate must reload.
 
 ## Consuming fixtures
 
@@ -38,7 +106,7 @@ Other required fields cannot be null. Background is transparent when unset.
 Canonical output materializes the above defaults except cell paragraph align,
 which is always omitted; input cell paragraph align may only be absent/left.
 Colors become uppercase. CRLF becomes LF before control validation. Mark order:
-bold, italic, underline, strike, code, color. Duplicate marks/color are errors;
+bold, italic, underline, strike, code, color, fontSize. Duplicate mark kinds are errors;
 identical adjacent runs merge after normalization. Code may coexist with color
 and link; image/embed captions forbid links. Empty document is one explicitly
 identified paragraph with empty runs; no random ID creation during normalization.

@@ -18,7 +18,7 @@ const KIND_TEXT: Record<FormatChange["kind"], string> = {
 };
 
 const PROP_TEXT: Record<string, string> = {
-  runs: "글자·글자 서식·링크",
+  runs: "글자·글자 서식(크기 포함)·링크",
   align: "정렬",
   level: "제목 수준",
   language: "코드 언어",
@@ -32,6 +32,7 @@ const PROP_TEXT: Record<string, string> = {
   background: "칸 배경",
   header: "머리글 행",
   width: "단 비율",
+  columnWidths: "표 열 폭",
   ordered: "목록 종류",
   start: "번호 시작",
   type: "블록 종류",

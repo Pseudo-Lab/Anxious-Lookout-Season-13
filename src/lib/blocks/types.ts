@@ -1,4 +1,4 @@
-// #32 고정 블록 문서(post-blocks v1) 저장·렌더 경계 타입(api-contracts/issue32-blocks-draft.md v0.2).
+// #32 고정 블록 문서(post-blocks v1) 저장·렌더 경계 타입(api-contracts/issue32-blocks-draft.md v0.2, #36 계약 revision 1.1).
 // 편집기 내부 모델(Tiptap JSON)은 저장하지 않는다. 편집기 <-> 이 형식 변환은 adapter가 맡는다.
 
 import { uuidV4 } from "@/lib/research/idempotency";
@@ -8,10 +8,18 @@ export const BLOCKS_VERSION = 1;
 
 export type Align = "left" | "center" | "right";
 
-/** mark 순서는 이 배열 순서로 고정한다(color는 마지막). */
+/** 이 클라이언트가 지키는 문서 계약 revision. 본문 쓰기 요청의 X-Post-Contract-Revision 값이다(#36). */
+export const CONTRACT_REVISION = "1.1";
+
+/** mark 순서는 이 배열 순서로 고정한다(그 뒤 color, 마지막 fontSize). */
 export const SIMPLE_MARKS = ["bold", "italic", "underline", "strike", "code"] as const;
 export type SimpleMark = (typeof SIMPLE_MARKS)[number];
-export type Mark = SimpleMark | { color: string };
+/** #36 글자 크기(pt). 생략하면 주변 글자 크기를 따른다. */
+export const FONT_SIZES = [10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36] as const;
+export type FontSize = (typeof FONT_SIZES)[number];
+export type Mark = SimpleMark | { color: string } | { fontSize: FontSize };
+/** pt → CSS px(정확히 pt*4/3, 반올림하지 않는다). 편집기와 renderer가 같이 쓴다. */
+export const ptToPx = (pt: number) => (Math.min(36, Math.max(10, pt)) * 4) / 3;
 
 /** run.text의 LF는 문단 안 줄바꿈(renderer br)이다. 빈 text는 허용하지 않는다. */
 export interface Run {
@@ -26,8 +34,12 @@ export const CODE_LANGUAGES = [
 ] as const;
 export type CodeLanguage = (typeof CODE_LANGUAGES)[number];
 
-export const IMAGE_WIDTHS = [25, 50, 75, 100] as const;
-export type ImageWidth = (typeof IMAGE_WIDTHS)[number];
+/** #36 이미지 폭: 부모(본문·단) 폭에 대한 정수 %. */
+export const IMAGE_WIDTH = { min: 10, max: 100 } as const;
+/** 편집·표시용 폭: 정수로 반올림하고 10..100으로 제한한다(저장 값 자체는 서버가 엄격히 검사한다). */
+export const clampImageWidth = (w: number) => Math.min(IMAGE_WIDTH.max, Math.max(IMAGE_WIDTH.min, Math.round(Number.isFinite(w) ? w : IMAGE_WIDTH.max)));
+/** #36 표 열 폭 가중치(원소 1..1000). 생략하면 균등. */
+export const COLUMN_WEIGHT = { min: 1, max: 1000 } as const;
 
 export const EMBED_PROVIDERS = ["youtube"] as const;
 export type EmbedProvider = (typeof EMBED_PROVIDERS)[number];
@@ -76,7 +88,7 @@ export interface ImageBlock extends Base {
   imageId: string;
   alt: string;
   caption: Run[];
-  widthPercent: ImageWidth;
+  widthPercent: number;
   align: Align;
 }
 export interface TableCell extends Base {
@@ -91,6 +103,8 @@ export interface TableRow extends Base {
 export interface TableBlock extends Base {
   type: "table";
   rows: TableRow[];
+  /** 열별 정수 가중치(GCD로 나눈 값). 모두 같으면 생략한다. */
+  columnWidths?: number[];
 }
 export interface Column extends Base {
   width: 1 | 2 | 3 | 4;

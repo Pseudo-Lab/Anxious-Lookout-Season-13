@@ -542,7 +542,8 @@ export function mutate<T>(
   method: "POST" | "PATCH" | "PUT" | "DELETE",
   body: unknown,
   parse: (v: unknown) => T | null,
-  ctx: MutationContext
+  ctx: MutationContext,
+  extraHeaders?: Record<string, string>
 ): Promise<FetchResult<T>> {
   return fetchJson(apiUrl(path), parse, {
     method,
@@ -550,6 +551,7 @@ export function mutate<T>(
       "Content-Type": "application/json",
       "X-CSRF-Token": ctx.csrfToken,
       "Idempotency-Key": ctx.idempotencyKey,
+      ...extraHeaders,
     },
     body: JSON.stringify(body),
   });

@@ -180,6 +180,16 @@ html[data-chat-resizing] body {
 .prose .table-scroll td {
   vertical-align: top;
 }
+/* #36 열 폭 가중치가 있는 표: 영역 폭에 맞춘 고정 배치(열 % = colgroup). 칸 내용은 그 폭 안에서 줄바꿈한다. */
+.prose .table-scroll > table.pb-weighted {
+  table-layout: fixed;
+  width: 100%;
+  min-width: 0;
+}
+.prose .table-scroll > table.pb-weighted .cell {
+  min-width: 0;
+  max-width: none;
+}
 
 .prose .table-scroll:focus-visible,
 .prose pre:focus-visible {
@@ -314,6 +324,11 @@ html[data-chat-resizing] body {
 .pb-editor th p,
 .pb-editor td p {
   margin: 0;
+}
+/* #36 F6: 표 칸 오른쪽 가장자리에서 열 폭을 끈다 */
+.pb-col-resize,
+.pb-col-resize * {
+  cursor: col-resize !important;
 }
 .pb-editor td[data-align="center"],
 .pb-editor th[data-align="center"] {
