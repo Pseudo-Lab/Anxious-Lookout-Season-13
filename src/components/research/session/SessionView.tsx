@@ -59,7 +59,7 @@ function RawItem({ sessionId, itemId, label = "저장된 원본 전체" }: { ses
   if (!result.ok) return <ErrorNotice failure={result.failure} prefix="원본 기록을 불러오지 못했습니다." />;
   return (
     <div className="space-y-1">
-      <p className="text-xs font-medium text-stone-600">{label}</p>
+      <p className="text-xs font-medium text-stone-900">{label}</p>
       <Inert value={result.data.raw} />
     </div>
   );
@@ -132,7 +132,7 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
       >
         <span className="min-w-0 break-words">
           <span className="mr-2 text-xs text-stone-500">{shell ? "명령 실행" : "도구"}</span>
-          <span className="font-mono text-stone-800">{shell ? commandPreview(shell.command) || item.name : item.name}</span>
+          <span className="font-mono text-stone-900">{shell ? commandPreview(shell.command) || item.name : item.name}</span>
         </span>
         <span className={`shrink-0 text-xs ${warn ? "font-medium text-amber-700" : "text-stone-500"}`}>{label ?? item.status}</span>
       </button>
@@ -142,7 +142,7 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
           {code && ` (${code})`}
         </p>
       )}
-      {shell?.truncated && <p className="px-3 pb-2 text-xs text-stone-600">출력이 길어 저장 상한까지만 남았습니다.</p>}
+      {shell?.truncated && <p className="px-3 pb-2 text-xs text-stone-900">출력이 길어 저장 상한까지만 남았습니다.</p>}
       {proposal && (
         <p className="px-3 pb-2 text-xs text-indigo-800">
           {proposal.text}{" "}
@@ -162,25 +162,25 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
           {shell ? (
             <>
               <div className="space-y-1">
-                <p className="text-xs font-medium text-stone-600">명령 (작업 공간 {shell.cwd ?? "."})</p>
+                <p className="text-xs font-medium text-stone-900">명령 (작업 공간 {shell.cwd ?? "."})</p>
                 <Inert value={shell.command ?? item.input} />
               </div>
-              {shell.exitCode !== null && <p className="text-xs text-stone-600">종료 코드 {shell.exitCode}</p>}
+              {shell.exitCode !== null && <p className="text-xs text-stone-900">종료 코드 {shell.exitCode}</p>}
               {shell.stdout !== null && (
                 <div className="space-y-1">
-                  <p className="text-xs font-medium text-stone-600">표준 출력</p>
+                  <p className="text-xs font-medium text-stone-900">표준 출력</p>
                   <Inert value={shell.stdout} />
                 </div>
               )}
               {shell.stderr !== null && shell.stderr !== "" && (
                 <div className="space-y-1">
-                  <p className="text-xs font-medium text-stone-600">오류 출력</p>
+                  <p className="text-xs font-medium text-stone-900">오류 출력</p>
                   <Inert value={shell.stderr} />
                 </div>
               )}
               {shell.stdout === null && (
                 <div className="space-y-1">
-                  <p className="text-xs font-medium text-stone-600">출력</p>
+                  <p className="text-xs font-medium text-stone-900">출력</p>
                   <Inert value={item.output} />
                 </div>
               )}
@@ -188,11 +188,11 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
           ) : (
             <>
               <div className="space-y-1">
-                <p className="text-xs font-medium text-stone-600">입력</p>
+                <p className="text-xs font-medium text-stone-900">입력</p>
                 <Inert value={item.input} />
               </div>
               <div className="space-y-1">
-                <p className="text-xs font-medium text-stone-600">출력</p>
+                <p className="text-xs font-medium text-stone-900">출력</p>
                 <Inert value={item.output} />
               </div>
             </>
@@ -248,7 +248,7 @@ function Message({ sessionId, item }: { sessionId: string; item: Extract<Session
         platform ? "border border-dashed border-amber-400" : ""
       }`}
     >
-      <p className="mb-1 flex flex-wrap items-center gap-1.5 text-[11px] font-medium text-stone-500">
+      <p className="mb-1 flex flex-wrap items-center gap-1.5 text-[13px] font-medium text-stone-500">
         {mine ? "나" : "Codex"}
         {mine && item.scope && <ScopeBadge scope={item.scope} />}
         {platform && item.status && (
@@ -256,7 +256,7 @@ function Message({ sessionId, item }: { sessionId: string; item: Extract<Session
         )}
       </p>
       {mine ? (
-        <p className="whitespace-pre-wrap text-sm text-stone-800 [overflow-wrap:anywhere]">{item.text}</p>
+        <p className="whitespace-pre-wrap text-sm text-stone-900 [overflow-wrap:anywhere]">{item.text}</p>
       ) : (
         <SafeMarkdown content={item.text} compact />
       )}
@@ -272,7 +272,7 @@ function Message({ sessionId, item }: { sessionId: string; item: Extract<Session
         {raw ? (
           <RawItem sessionId={sessionId} itemId={item.id} label={platform ? "보존된 입력 기록 (Codex 원본 아님)" : undefined} />
         ) : (
-          <button onClick={() => setRaw(true)} className="text-[11px] text-stone-500 hover:text-stone-700">
+          <button onClick={() => setRaw(true)} className="text-[13px] text-stone-500 hover:text-stone-700">
             {platform ? "보존된 입력 기록" : "원본 기록"}
           </button>
         )}
@@ -287,7 +287,7 @@ function NextScope({ page }: { page: PageDescriptor }) {
   const text = kindText(page.kind);
   return (
     <p className="min-w-0 flex-1 truncate text-xs text-stone-500" title={text.can} aria-live="polite">
-      <span className="font-medium text-stone-700">{scopeLabel(page.kind, "next")}</span>
+      <span className="font-medium text-stone-900">{scopeLabel(page.kind, "next")}</span>
     </p>
   );
 }

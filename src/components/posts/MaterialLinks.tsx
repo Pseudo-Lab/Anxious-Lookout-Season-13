@@ -113,7 +113,7 @@ export default function MaterialLinks({
   return (
     <section aria-label="바탕이 된 자료" className="space-y-3 rounded-lg p-3 ring-1 ring-stone-200">
       <div className="flex items-baseline justify-between gap-2">
-        <h2 className="text-sm font-semibold text-stone-700">바탕이 된 자료 ({ids.length})</h2>
+        <h2 className="text-sm font-semibold text-stone-900">바탕이 된 자료 ({ids.length})</h2>
         {!readOnly && (
           <button type="button" onClick={() => setAdding(!adding)} className="text-xs font-medium text-indigo-600 hover:text-indigo-800">
             {adding ? "찾기 닫기" : "자료 추가"}

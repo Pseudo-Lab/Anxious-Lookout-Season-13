@@ -90,15 +90,15 @@ function RelationRow({ rel, self, onChanged }: { rel: Relation; self: Endpoint; 
             <span title={dir.text} aria-label={dir.text} className="mr-2 font-mono text-indigo-600">
               {dir.symbol}
             </span>
-            <span className="mr-2 rounded bg-stone-100 px-1.5 py-0.5 text-xs text-stone-600">{ITEM_TYPE_LABELS[other.type]}</span>
+            <span className="mr-2 rounded bg-stone-100 px-1.5 py-0.5 text-xs text-stone-900">{ITEM_TYPE_LABELS[other.type]}</span>
             <Link href={itemHref(other.type, other.id)} className="font-medium text-stone-900 hover:text-indigo-700">
               {other.title || "(제목 없음)"}
             </Link>
           </p>
           {!editing && (
             <p className="mt-1 text-xs text-stone-500">
-              <span className="font-medium text-stone-700">{rel.kind}</span> · {dir.text}
-              {rel.description && <span className="mt-1 block whitespace-pre-wrap text-stone-600">{rel.description}</span>}
+              <span className="font-medium text-stone-900">{rel.kind}</span> · {dir.text}
+              {rel.description && <span className="mt-1 block whitespace-pre-wrap text-stone-900">{rel.description}</span>}
             </p>
           )}
         </div>
@@ -144,7 +144,7 @@ function RelationRow({ rel, self, onChanged }: { rel: Relation; self: Endpoint; 
             <button type="submit" disabled={busy} className="rounded-lg bg-indigo-600 px-3 py-1 text-white disabled:opacity-50">
               저장
             </button>
-            <button type="button" onClick={() => setEditing(false)} className="rounded-lg px-3 py-1 text-stone-600 hover:bg-stone-100">
+            <button type="button" onClick={() => setEditing(false)} className="rounded-lg px-3 py-1 text-stone-900 hover:bg-stone-100">
               취소
             </button>
           </div>
@@ -196,7 +196,7 @@ function AddRelationForm({ self, onAdded }: { self: Endpoint; onAdded: () => voi
   const selectClass = "rounded-lg border border-stone-300 px-3 py-1.5 text-sm";
   return (
     <form onSubmit={submit} className="space-y-3 rounded-lg bg-stone-50 p-4">
-      <p className="text-sm font-medium text-stone-700">관계 추가</p>
+      <p className="text-sm font-medium text-stone-900">관계 추가</p>
       <div className="flex flex-wrap gap-2">
         <select
           value={otherType}
@@ -241,7 +241,7 @@ function AddRelationForm({ self, onAdded }: { self: Endpoint; onAdded: () => voi
       {fixed ? (
         <p className="text-xs text-stone-500">문서와 자료의 관계는 항상 문서 → 자료 방향입니다.</p>
       ) : (
-        <fieldset className="flex flex-wrap gap-4 text-sm text-stone-700">
+        <fieldset className="flex flex-wrap gap-4 text-sm text-stone-900">
           <legend className="sr-only">방향</legend>
           {(
             [
@@ -297,7 +297,7 @@ export default function RelationPanel({ self, editable }: { self: Endpoint; edit
 
   return (
     <section className="space-y-3">
-      <h2 className="text-lg font-semibold text-stone-800">연결된 자료·문서</h2>
+      <h2 className="text-lg font-semibold text-stone-900">연결된 자료·문서</h2>
       {list.failure && <ErrorNotice failure={list.failure} prefix="관계를 불러오지 못했습니다." />}
       {list.loaded && !list.failure && list.items.length === 0 && <p className="text-sm text-stone-500">아직 연결된 항목이 없습니다.</p>}
       {list.items.length > 0 && (

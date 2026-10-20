@@ -108,7 +108,7 @@ export default function SafeMarkdown({
   ownImages?: boolean;
 }) {
   return (
-    <div className={`prose max-w-none break-words ${compact ? "prose-compact text-sm text-stone-800" : ""}`}>
+    <div className={`prose max-w-none break-words ${compact ? "prose-compact text-sm text-stone-900" : ""}`}>
       <Markdown
         remarkPlugins={[remarkGfm]}
         skipHtml

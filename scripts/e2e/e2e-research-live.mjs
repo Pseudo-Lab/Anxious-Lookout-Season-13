@@ -419,11 +419,18 @@ const publicSessionUrl = U(`/research/session/?id=${publicSessionId}`);
 }
 
 // L9. 세션: 실제 Codex 미연결 상태 표시, 전송 실패 시 입력 보존
-await page.goto(U("/research/?tab=sessions"));
-check("L9. codex status not shown as available", await appears(main.getByText(/새 대화를 진행할 수 없지만|실제 응답은 아직 확인되지 않았습니다/)));
-check("L9. fixed model shown from real status", await appears(main.getByText("모델: gpt-6.1-sol (서버에서 고정)")));
-await main.getByLabel("새 대화 제목").fill("실물 세션");
-await main.getByRole("button", { name: "새 대화" }).click();
+// #44: 내 연구에 대화 탭이 없다. Codex 안내·새 대화 폼은 공통 대화창에 있다.
+await page.goto(U("/research/"));
+for (let i = 0; i < 50 && !(await chatPanel.isVisible()); i++) {
+  const button = page.getByRole("button", { name: "Codex 대화창 열기" });
+  if (await button.isVisible()) await button.click({ timeout: 2000 }).catch(() => {});
+  await page.waitForTimeout(200);
+}
+await chatPanel.getByRole("heading", { name: "Codex 대화" }).waitFor();
+check("L9. codex status not shown as available", await appears(chatPanel.getByText(/새 대화를 진행할 수 없지만|실제 응답은 아직 확인되지 않았습니다/)));
+check("L9. fixed model shown from real status", await appears(chatPanel.getByText("모델: gpt-6.1-sol (서버에서 고정)")));
+await chatPanel.getByLabel("새 대화 제목").fill("실물 세션");
+await chatPanel.getByRole("button", { name: "새 대화" }).click();
 // #9부터 새 대화는 이동 없이 대화창에서 열린다.
 await chatPanel.getByLabel("메시지").waitFor();
 const sid = await page.evaluate(() => {

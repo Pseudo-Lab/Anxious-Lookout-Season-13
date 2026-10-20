@@ -229,7 +229,7 @@ export default function DocumentEditor({
       </Field>
       <MarkdownEditor value={values.content} onChange={(content) => editor.setValues({ ...values, content })} readOnly={locked} />
       {locked && (
-        <p role="status" className="text-xs text-stone-600">
+        <p role="status" className="text-xs text-stone-900">
           {finishing === "commit" ? "저장하는 중에는 입력을 고칠 수 없습니다." : finishing === "discard" ? "초안을 버리는 중입니다." : "초안을 저장하고 닫는 중입니다."}
         </p>
       )}
@@ -306,7 +306,7 @@ export default function DocumentEditor({
       )}
       {doc && comparing && (
         <div className="space-y-2 rounded-lg p-3 ring-1 ring-indigo-200">
-          <p className="text-xs text-stone-600">현재 문서(v{doc.latestVersion.number})에서 내 초안으로 바뀌는 내용입니다.</p>
+          <p className="text-xs text-stone-900">현재 문서(v{doc.latestVersion.number})에서 내 초안으로 바뀌는 내용입니다.</p>
           <TextDiff before={doc.content} after={values.content} beforeTitle={doc.title} afterTitle={values.title} />
         </div>
       )}
@@ -324,17 +324,17 @@ export default function DocumentEditor({
           {finishing === "commit" ? "저장 중..." : doc ? (baseChanged && comparing ? "비교했고 이 내용으로 저장" : "새 버전으로 저장") : "문서 저장"}
         </button>
         {onClose && (
-          <button type="button" onClick={() => void finish("close", close)} disabled={busy || locked} className="rounded-lg px-4 py-2 text-sm text-stone-600 hover:bg-stone-100">
+          <button type="button" onClick={() => void finish("close", close)} disabled={busy || locked} className="rounded-lg px-4 py-2 text-sm text-stone-900 hover:bg-stone-100">
             편집 닫기(초안 보관)
           </button>
         )}
         {confirmDiscard ? (
           <span className="flex items-center gap-2 text-sm">
-            <span className="text-stone-600">{doc ? "초안을 버리고 저장된 문서로 돌아갈까요?" : "이 초안을 버릴까요?"}</span>
+            <span className="text-stone-900">{doc ? "초안을 버리고 저장된 문서로 돌아갈까요?" : "이 초안을 버릴까요?"}</span>
             <button type="button" onClick={() => void finish("discard", discard)} disabled={busy || locked} className="font-medium text-red-700 underline hover:no-underline">
               초안 버리기
             </button>
-            <button type="button" onClick={() => setConfirmDiscard(false)} className="text-stone-600 underline hover:no-underline">
+            <button type="button" onClick={() => setConfirmDiscard(false)} className="text-stone-900 underline hover:no-underline">
               취소
             </button>
           </span>

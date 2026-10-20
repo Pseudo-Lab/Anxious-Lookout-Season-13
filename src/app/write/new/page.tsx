@@ -27,7 +27,7 @@ function ReviewNewProposal({ id }: { id: string }) {
   const router = useRouter();
   return (
     <section className="space-y-3">
-      <p className="text-sm text-stone-600">Codex가 대화에서 제안한 새 글입니다. 비교해 보고 수락하거나 버리세요.</p>
+      <p className="text-sm text-stone-900">Codex가 대화에서 제안한 새 글입니다. 비교해 보고 수락하거나 버리세요.</p>
       <ProposalReview
         summary={{ id, version: 0 }}
         target={{ kind: "new" }}

@@ -149,7 +149,7 @@ export function ProposalReview({
         </div>
       )}
       {pending && target.kind === "new" && (
-        <p className="text-xs text-stone-600">
+        <p className="text-xs text-stone-900">
           {baseDraft
             ? `작성 중인 새 글 초안(${formatDateTime(baseDraft.updatedAt)} 자동 저장)에서 이 제안으로 바뀌는 내용입니다. 수락하면 이 제안으로 새 글이 만들어지고 그 초안은 닫힙니다(초안 내용은 기록으로 보존).`
             : "Codex가 새 글로 제안한 내용입니다. 수락하면 이 내용으로 새 글과 첫 버전이 만들어지고 공개 주소가 자동으로 정해집니다(발행은 따로 합니다)."}
@@ -182,13 +182,13 @@ export function ProposalReview({
       {failure && <ErrorNotice failure={failure} prefix="처리하지 못했습니다." describe={postErrorMessage} />}
       {pending &&
         (editing ? (
-          <p className="text-xs text-stone-600">편집 중에는 수락할 수 없습니다. 편집을 닫은 뒤(초안은 그대로 남습니다) 다시 검토하세요.</p>
+          <p className="text-xs text-stone-900">편집 중에는 수락할 수 없습니다. 편집을 닫은 뒤(초안은 그대로 남습니다) 다시 검토하세요.</p>
         ) : (
           <div className="flex flex-wrap items-center gap-3">
             {!baseClosed &&
               (confirm ? (
                 <>
-                  <span className="text-sm text-stone-700">
+                  <span className="text-sm text-stone-900">
                     {target.kind === "new"
                       ? "수락하면 이 내용으로 새 글이 만들어집니다."
                       : draft
@@ -203,7 +203,7 @@ export function ProposalReview({
                   >
                     수락 확인
                   </button>
-                  <button type="button" onClick={() => setConfirm(false)} className="text-sm text-stone-600 underline hover:no-underline">
+                  <button type="button" onClick={() => setConfirm(false)} className="text-sm text-stone-900 underline hover:no-underline">
                     취소
                   </button>
                 </>
@@ -217,7 +217,7 @@ export function ProposalReview({
                   제안 수락
                 </button>
               ))}
-            <button type="button" onClick={() => void discard()} disabled={busy} className="text-sm text-stone-600 hover:text-red-700">
+            <button type="button" onClick={() => void discard()} disabled={busy} className="text-sm text-stone-900 hover:text-red-700">
               제안 버리기
             </button>
           </div>
@@ -282,7 +282,7 @@ export default function PostProposalPanel({
       >
         <span className="min-w-0 break-words">
           <span className="mr-2 text-xs font-medium text-indigo-700">Codex 제안</span>
-          <span className="text-stone-800">{p.title}</span>
+          <span className="text-stone-900">{p.title}</span>
         </span>
         <span className="shrink-0 text-xs text-stone-500">
           {STATUS_LABELS[p.status]} · {formatDateTime(p.createdAt)}
@@ -306,7 +306,7 @@ export default function PostProposalPanel({
 
   return (
     <section id="proposals" ref={section} className="scroll-mt-4">
-      <h2 className="mb-1 text-lg font-semibold text-stone-800">Codex 제안</h2>
+      <h2 className="mb-1 text-lg font-semibold text-stone-900">Codex 제안</h2>
       <p className="mb-3 text-xs text-stone-500">
         대화에서 Codex가 이 글을 고치면 제안으로 남습니다. 수락하기 전에는 글이 바뀌지 않으며, 비교한 뒤 수락하면 새 버전이 됩니다(발행은 따로).
       </p>
@@ -314,7 +314,7 @@ export default function PostProposalPanel({
       {pending.length > 0 ? <ul className="space-y-2">{pending.map(row)}</ul> : !list.failure && <p className="text-sm text-stone-500">검토할 제안이 없습니다.</p>}
       {closed.length > 0 && (
         <div className="mt-3">
-          <button onClick={() => setHistory(!history)} aria-expanded={history} className="text-sm text-stone-600 hover:text-stone-900">
+          <button onClick={() => setHistory(!history)} aria-expanded={history} className="text-sm text-stone-900 hover:text-stone-900">
             지난 제안 {closed.length}건 {history ? "접기" : "보기"}
           </button>
           {history && <ul className="mt-2 space-y-2">{closed.map(row)}</ul>}

@@ -1,7 +1,7 @@
 // #38 흰 바탕 + 시스템 다크 모드. 라이트·다크(prefers-color-scheme) 각각 주요 화면을 열어
 // - 바탕이 단색(라이트 흰색, 다크 어두운 색)이고 그라데이션이 없는지,
 // - axe-core color-contrast(WCAG AA) 위반이 없는지 확인하고,
-// - slice 3: 편집기(#36 선택 툴바·크기 목록·열 폭 손잡이·이미지 폭 손잡이·패널 접기·사용 중 표시)와
+// - slice 3: 편집기(#36 선택 툴바·크기 목록·열 폭 손잡이·이미지 폭 손잡이, #44 도구 막대 이미지 버튼)와
 //   D-38-1 사용자 색(다크 글자색 밝기 보정, 배경 칸은 어두운 글자, 저장 값 불변, 편집기 = 글 화면 색)을 확인하고,
 // - 화면 사진을 SHOTS_DIR에 남긴다(theme-<모드>-<화면>.png).
 import { createRequire } from "node:module";
@@ -336,9 +336,8 @@ async function editorScreens(page, scheme, send, csrf) {
   await page.goto(U(`/write/new/?draft=${draft.id}`), { waitUntil: "domcontentloaded" });
   const editor = main.locator(".ProseMirror");
   const toolbar = main.getByRole("toolbar", { name: "서식", exact: true });
-  const panel = main.getByRole("region", { name: "이미지" });
   const img = editor.locator('img[alt="대비 그림"]');
-  if (!(await ready(page, "editor", scheme, [editor, toolbar, panel, editor.getByText("선택할 문장입니다"), editor.locator("table td").first(), img, editor.locator(".pb-color").first()]))) return;
+  if (!(await ready(page, "editor", scheme, [editor, toolbar, editor.getByText("선택할 문장입니다"), editor.locator("table td").first(), img, editor.locator(".pb-color").first()]))) return;
   await img.evaluate((el) => (el.complete && el.naturalWidth > 0 ? null : new Promise((ok) => el.addEventListener("load", ok, { once: true })))).catch(() => {});
   await helpers(page);
   await injectFault(page);
@@ -410,22 +409,13 @@ async function editorScreens(page, scheme, send, csrf) {
     check(`F3. ${tag}: image width handle stands out from the surface (≥3:1)`, r >= 3, String(r));
   }
 
-  // #36 F7·F8 이미지 패널: 내 이미지 목록(사용 중 표시)과 접은 상태
-  const mine = panel.getByRole("button", { name: "내 이미지", exact: true });
-  if (await reach(page, `F8. ${tag} my images`, mine)) {
-    const inUse = panel.getByText(/^사용 중\(이 글/).first();
-    const listed = await inUse.waitFor({ timeout: 10000 }).then(() => true, () => false);
-    check(`F8. ${tag}: my images list shows the in-use label for this post's image`, listed, "");
-    if (listed) await scan(page, `${tag} image list`, scheme);
-  }
-  const fold = panel.getByRole("button", { name: "이미지·표지 접기" });
-  if (await reach(page, `F7. ${tag} collapse`, fold)) {
-    const folded = await panel.getByRole("button", { name: "이미지·표지 펼치기" }).waitFor({ timeout: 5000 }).then(() => true, () => false);
-    check(`F7. ${tag}: image panel collapses`, folded, "");
-    if (folded) await scan(page, `${tag} panel collapsed`, scheme);
-    const unfold = panel.getByRole("button", { name: "이미지·표지 펼치기" });
-    if (folded && (await reach(page, `F7. ${tag} expand`, unfold))) await panel.getByRole("button", { name: "이미지·표지 접기" }).waitFor({ timeout: 5000 }).catch(() => {});
-  }
+  // #44: 이미지·표지 패널은 없고, 이미지는 도구 막대 '이미지 올리기'(글자가 보이는 버튼)로 넣는다. 대비는 위 편집기 검사(axe)에 든다.
+  const imageButton = toolbar.getByRole("button", { name: "이미지 올리기" });
+  check(
+    `#44. ${tag}: no image/cover panel; the toolbar image button is shown with its label`,
+    (await main.getByRole("region", { name: "이미지" }).count()) === 0 && (await imageButton.isVisible()) && (await imageButton.innerText()).includes("이미지"),
+    ""
+  );
 
   // 저장 값 불변: 편집기 상태와 서버 초안의 글자색·칸 배경이 처음 보낸 값과 같다
   // 편집기 JSON: textStyle attrs.color, 칸 attrs.background(null은 없음)

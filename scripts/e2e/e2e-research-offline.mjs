@@ -142,10 +142,25 @@ const directFixtureDocs = async (p = api) =>
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 const userMsgs = (m, text) => m.locator("li[data-role=user]", { hasText: text });
 
+// #44: 내 연구에 대화 탭이 없다. 대화 목록·Codex 안내·새 대화 폼은 공통 대화창의 목록 화면에 있다.
+async function chatList(p) {
+  const c = chatOf(p);
+  // 새로고침·이동 뒤 대화창은 기억한 열림 상태로 다시 그려진다: 정착할 때까지 보고 나서 연다
+  const button = p.getByRole("button", { name: "Codex 대화창 열기" });
+  for (let i = 0; i < 50 && !(await c.isVisible()); i++) {
+    if (await button.isVisible()) await button.click({ timeout: 2000 }).catch(() => {});
+    await p.waitForTimeout(200);
+  }
+  await c.getByRole("heading", { name: "Codex 대화" }).waitFor();
+  const back = c.getByRole("button", { name: "← 대화 목록" });
+  if (await back.isVisible()) await back.click();
+  await c.getByLabel("새 대화 제목").waitFor();
+  return c;
+}
 // 새 대화는 페이지 이동 없이 대화창에 열린다. 그 뒤 질문할 페이지(기본: 문서 작업 공간)로 옮긴다. 반환값은 기존 대화 링크.
 async function newSession(p, title, at = DOCS) {
-  await p.goto(U("/research/?tab=sessions"));
-  const m = p.locator("main");
+  await p.goto(U("/research/"));
+  const m = await chatList(p);
   await m.getByLabel("새 대화 제목").fill(title);
   await m.getByRole("button", { name: "새 대화" }).click();
   await chatOf(p).getByRole("heading", { name: title }).waitFor();
@@ -171,9 +186,12 @@ async function settled(m) {
 }
 
 // O1. 상태: fixture 연결을 실제 모델처럼 표시하지 않는다
-await page.goto(U("/research/?tab=sessions"));
-check("O1. codex status shown as fixture (not real)", await appears(main.getByText("테스트용 모의 Codex")));
-check("O1. server-fixed model shown display-only", await appears(main.getByText("모델: gpt-6.1-sol (서버에서 고정)")));
+await page.goto(U("/research/"));
+{
+  const c = await chatList(page);
+  check("O1. codex status shown as fixture (not real)", await appears(c.getByText("테스트용 모의 Codex")));
+  check("O1. server-fixed model shown display-only", await appears(c.getByText("모델: gpt-6.1-sol (서버에서 고정)")));
+}
 
 // O2. 일반 메시지: 실제 adapter → 실제 storage tool callback → 전체 도구 입력·출력과 원본
 const s1 = await newSession(page, "오프라인 세션 1");
@@ -780,12 +798,12 @@ async function dropFirstSend(p) {
 
 // O9. 계정 격리: B는 A 세션·도구 문서 404, B 목록에 A 세션 없음
 {
-  const bm = B.page.locator("main");
   await B.page.goto(s1);
   check("O9. B cannot open A session (panel 404)", await appears(chatOf(B.page).getByText("항목을 찾을 수 없습니다")));
   const bDocs = await fixtureDocs(apiClient(B.page));
   check("O9. B has exactly its own tool document", bDocs === 1, String(bDocs));
-  await B.page.goto(U("/research/?tab=sessions"));
+  await B.page.goto(U("/research/"));
+  const bm = await chatList(B.page);
   check("O9. B list lacks A sessions", (await appears(bm.getByText("B 세션"))) && (await bm.getByText("오프라인 세션 1").count()) === 0);
 }
 
@@ -797,10 +815,10 @@ console.log(`INFO dropped message POST timings: ${JSON.stringify(postTimings)}`)
   const bApi = apiClient(B.page);
   const bDocsBefore = await fixtureDocs(bApi);
   // 대화 목록 클릭은 페이지를 옮기지 않고 대화창에 연다
-  await B.page.goto(U("/research/?tab=sessions"));
-  await B.page.locator("main").getByRole("link", { name: "B 세션" }).click();
+  await B.page.goto(U("/research/"));
+  await (await chatList(B.page)).getByRole("link", { name: "B 세션" }).click();
   await bm.getByRole("heading", { name: "B 세션" }).waitFor();
-  check("O11. list click opens conversation in panel (no navigation)", B.page.url().includes("tab=sessions"));
+  check("O11. list click opens conversation in panel (no navigation)", new URL(B.page.url()).pathname.endsWith("/research/"));
   const bSessionUrl = U(`/research/session/?id=${(await chatUi(B.page)).sessionId}`);
   await B.page.goto(DOCS);
   await bm.getByLabel("메시지").waitFor();

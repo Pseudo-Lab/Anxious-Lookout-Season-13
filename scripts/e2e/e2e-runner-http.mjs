@@ -385,7 +385,7 @@ await step("E3", async () => {
 
 // ---------- E4. 세션 소실 401: 기존 인증 처리, 반복 POST 없음 [real] ----------
 await step("E4", async () => {
-  await B.page.goto(U("/research/?tab=sessions"));
+  await B.page.goto(U("/research/"));
   if (!(await B.chat.isVisible())) await B.page.getByRole("button", { name: "Codex 대화창 열기" }).click();
   await appears(B.chat.getByText("환경 활성화 중"));
   const p0 = B.net.posts.length;
@@ -422,7 +422,7 @@ await step("A1", async () => {
   const switched = await meOf(tab);
   await tab.close();
   check("A1 [hybrid]. setup: switched to another (unapproved) account", switched?.accountId && switched.accountId !== userC.accountId);
-  await C.page.goto(U("/research/?tab=sessions"));
+  await C.page.goto(U("/research/"));
   await sleep(6000);
   const text = await C.page.locator("body").innerText();
   check("A1 [hybrid]. after re-entry, no C runner state shown to the new account", !/환경 활성화 중|환경 연결 확인 중/.test(text), `${text.replace(/\s+/g, " ").slice(0, 120)} (delayed delivered=${delayed.delivered} dropped=${delayed.dropped})`);

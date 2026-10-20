@@ -34,7 +34,7 @@ export default function TagInput({ tags, onChange, readOnly }: { tags: string[];
 
   return (
     <div>
-      <label htmlFor={id} className="mb-1 block text-sm font-medium text-stone-700">
+      <label htmlFor={id} className="mb-1 block text-sm font-medium text-stone-900">
         태그
       </label>
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-stone-300 px-2 py-1.5">

@@ -96,12 +96,12 @@ function Review({
       {failure && <ErrorNotice failure={failure} prefix="처리하지 못했습니다." />}
       {pending &&
         (editing ? (
-          <p className="text-xs text-stone-600">편집 중에는 수락할 수 없습니다. 편집을 닫은 뒤(초안은 보관됩니다) 다시 검토하세요.</p>
+          <p className="text-xs text-stone-900">편집 중에는 수락할 수 없습니다. 편집을 닫은 뒤(초안은 보관됩니다) 다시 검토하세요.</p>
         ) : (
           <div className="flex flex-wrap items-center gap-3">
             {confirm ? (
               <>
-                <span className="text-sm text-stone-700">
+                <span className="text-sm text-stone-900">
                   {draft
                     ? "수락하면 이 제안이 새 버전이 되고, 작성 중인 초안은 닫힙니다(초안 내용은 기록으로 보존)."
                     : "수락하면 이 제안이 새 버전이 됩니다."}
@@ -114,7 +114,7 @@ function Review({
                 >
                   수락 확인
                 </button>
-                <button type="button" onClick={() => setConfirm(false)} className="text-sm text-stone-600 underline hover:no-underline">
+                <button type="button" onClick={() => setConfirm(false)} className="text-sm text-stone-900 underline hover:no-underline">
                   취소
                 </button>
               </>
@@ -128,7 +128,7 @@ function Review({
                 제안 수락
               </button>
             )}
-            <button type="button" onClick={() => void discard()} disabled={busy} className="text-sm text-stone-600 hover:text-red-700">
+            <button type="button" onClick={() => void discard()} disabled={busy} className="text-sm text-stone-900 hover:text-red-700">
               제안 버리기
             </button>
           </div>
@@ -190,7 +190,7 @@ export default function ProposalPanel({
       >
         <span className="min-w-0 break-words">
           <span className="mr-2 text-xs font-medium text-indigo-700">Codex 제안</span>
-          <span className="text-stone-800">{p.title}</span>
+          <span className="text-stone-900">{p.title}</span>
         </span>
         <span className="shrink-0 text-xs text-stone-500">
           {STATUS_LABELS[p.status]} · {formatDateTime(p.createdAt)}
@@ -216,7 +216,7 @@ export default function ProposalPanel({
 
   return (
     <section id="proposals" ref={section} className="scroll-mt-4">
-      <h2 className="mb-1 text-lg font-semibold text-stone-800">Codex 제안</h2>
+      <h2 className="mb-1 text-lg font-semibold text-stone-900">Codex 제안</h2>
       <p className="mb-3 text-xs text-stone-500">
         대화에서 Codex가 이 문서를 고치면 제안으로 남습니다. 수락하기 전에는 문서가 바뀌지 않으며, 비교한 뒤 수락하면 새 버전이 됩니다.
       </p>
@@ -228,7 +228,7 @@ export default function ProposalPanel({
       )}
       {closed.length > 0 && (
         <div className="mt-3">
-          <button onClick={() => setHistory(!history)} aria-expanded={history} className="text-sm text-stone-600 hover:text-stone-900">
+          <button onClick={() => setHistory(!history)} aria-expanded={history} className="text-sm text-stone-900 hover:text-stone-900">
             지난 제안 {closed.length}건 {history ? "접기" : "보기"}
           </button>
           {history && <ul className="mt-2 space-y-2">{closed.map(row)}</ul>}

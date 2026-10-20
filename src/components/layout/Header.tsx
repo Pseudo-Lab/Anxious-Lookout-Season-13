@@ -54,7 +54,7 @@ export default function Header() {
         {/* Mobile hamburger */}
         <button
           onClick={() => setMobileOpen(!mobileOpen)}
-          className="flex h-9 w-9 items-center justify-center rounded-lg text-stone-600 hover:bg-stone-100 @3xl:hidden"
+          className="flex h-9 w-9 items-center justify-center rounded-lg text-stone-900 hover:bg-stone-100 @3xl:hidden"
         >
           {mobileOpen ? (
             <svg className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
@@ -77,7 +77,7 @@ export default function Header() {
                 key={link.href}
                 href={link.href}
                 onClick={() => setMobileOpen(false)}
-                className="rounded-lg px-3 py-2 text-sm font-medium text-stone-600 transition-colors hover:bg-stone-50 hover:text-indigo-600"
+                className="rounded-lg px-3 py-2 text-sm font-medium text-stone-900 transition-colors hover:bg-stone-50 hover:text-indigo-600"
               >
                 {link.label}
               </Link>

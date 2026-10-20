@@ -59,17 +59,17 @@ function Preview({ preview }: { preview: PostPublicationPreview }) {
       )}
       <div role="group" aria-label="미리보기 방식" className="flex gap-1 text-xs">
         {cur && (
-          <button type="button" aria-pressed={mode === "diff"} onClick={() => setMode("diff")} className={`rounded px-2 py-1 ${mode === "diff" ? "bg-indigo-100 font-medium text-indigo-800" : "text-stone-600"}`}>
+          <button type="button" aria-pressed={mode === "diff"} onClick={() => setMode("diff")} className={`rounded px-2 py-1 ${mode === "diff" ? "bg-indigo-100 font-medium text-indigo-800" : "text-stone-900"}`}>
             현재 공개본과 비교
           </button>
         )}
-        <button type="button" aria-pressed={mode === "page"} onClick={() => setMode("page")} className={`rounded px-2 py-1 ${mode === "page" ? "bg-indigo-100 font-medium text-indigo-800" : "text-stone-600"}`}>
+        <button type="button" aria-pressed={mode === "page"} onClick={() => setMode("page")} className={`rounded px-2 py-1 ${mode === "page" ? "bg-indigo-100 font-medium text-indigo-800" : "text-stone-900"}`}>
           공개 화면 미리보기
         </button>
       </div>
       {mode === "diff" && cur ? (
         <div className="space-y-2">
-          <p className="text-xs text-stone-600">현재 공개본({formatDateTime(cur.publishedAt)} 발행)에서 이번 발행으로 바뀌는 내용입니다.</p>
+          <p className="text-xs text-stone-900">현재 공개본({formatDateTime(cur.publishedAt)} 발행)에서 이번 발행으로 바뀌는 내용입니다.</p>
           <PostMetaDiff
             before={{
               ...cur,
@@ -173,9 +173,9 @@ export default function PublishPanel({ post, onChanged }: { post: Post; onChange
 
   return (
     <section aria-label="발행" className="space-y-3 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-stone-200/60">
-      <h2 className="font-semibold text-stone-800">발행</h2>
+      <h2 className="font-semibold text-stone-900">발행</h2>
       {pub ? (
-        <p className="text-sm text-stone-700">
+        <p className="text-sm text-stone-900">
           <span className="font-medium text-emerald-700">발행 중</span> · {pubVersion ? `v${pubVersion.number}` : "발행한 버전"} · {formatDateTime(pub.publishedAt)} ·{" "}
           <Link href={`/posts/${encodeURIComponent(pub.slug)}/`} className="text-indigo-600 hover:text-indigo-800">
             공개 글 보기
@@ -183,14 +183,14 @@ export default function PublishPanel({ post, onChanged }: { post: Post; onChange
           {pub.versionId !== post.latestVersion.id && <span className="ml-1 text-xs text-amber-800">(최신 버전 v{post.latestVersion.number}은 아직 발행하지 않았습니다)</span>}
         </p>
       ) : (
-        <p className="text-sm text-stone-600">발행하지 않은 글입니다. 내 글 목록에서만 보입니다.</p>
+        <p className="text-sm text-stone-900">발행하지 않은 글입니다. 내 글 목록에서만 보입니다.</p>
       )}
       {post.archived ? (
         <p className="text-xs text-stone-500">삭제한 글은 발행할 수 없습니다.</p>
       ) : (
         <div className="flex flex-wrap items-center gap-2 text-sm">
           <label className="flex items-center gap-1">
-            <span className="text-stone-600">발행할 버전</span>
+            <span className="text-stone-900">발행할 버전</span>
             <select
               value={versionId}
               onChange={(e) => {
@@ -238,11 +238,11 @@ export default function PublishPanel({ post, onChanged }: { post: Post; onChange
       {pub &&
         (confirmUnpublish ? (
           <span className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="text-stone-600">발행을 취소할까요? 공개 주소가 바로 닫힙니다(글과 버전은 그대로).</span>
+            <span className="text-stone-900">발행을 취소할까요? 공개 주소가 바로 닫힙니다(글과 버전은 그대로).</span>
             <button type="button" onClick={() => void unpublish()} disabled={busy} className="font-medium text-red-700 underline hover:no-underline">
               발행 취소
             </button>
-            <button type="button" onClick={() => setConfirmUnpublish(false)} className="text-stone-600 underline hover:no-underline">
+            <button type="button" onClick={() => setConfirmUnpublish(false)} className="text-stone-900 underline hover:no-underline">
               그대로 두기
             </button>
           </span>

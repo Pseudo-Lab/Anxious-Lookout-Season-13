@@ -691,7 +691,7 @@ F4: {
   check("F4. saved order matches the editor", saved.problem === 0 && (saved.doc?.blocks ?? []).map((b) => b.type).join(",") === "paragraph,image,paragraph", JSON.stringify(saved.doc?.blocks?.map((b) => b.type)));
 }
 
-// F5. 단 안 이미지: 단 안에서 파일로 올리거나 이미지 패널에서 넣으면 그 단 안에 이미지 블록이 들어가고, 계약대로 저장된다
+// F5. 단 안 이미지: 단 안에서 파일로 올리거나 도구 막대 '이미지 올리기'(#44, 이미지 패널 대신)로 넣으면 그 단 안에 이미지 블록이 들어가고, 계약대로 저장된다
 F5: {
   await H.fresh();
   await H.tb.getByRole("combobox", { name: "단 나누기" }).selectOption({ label: "1:1" });
@@ -702,13 +702,14 @@ F5: {
   await H.blocks();
   if (!(await reach(page, "F5. right column", H.editor.locator(".pb-column").nth(1)))) break F5;
   await page.keyboard.type("right");
-  // 이미지 패널에서 올리면 본문 커서 위치(오른쪽 단)에 넣는다
-  await H.main.getByRole("region", { name: "이미지" }).getByLabel("이미지 파일").setInputFiles({ name: "오른쪽.png", mimeType: "image/png", buffer: PNG });
+  // 도구 막대 버튼은 파일 선택 창을 열고, 고른 파일을 본문 커서 위치(오른쪽 단)에 넣는다
+  const [chooser] = await Promise.all([page.waitForEvent("filechooser", { timeout: 10000 }), H.tb.getByRole("button", { name: "이미지 올리기" }).click()]);
+  await chooser.setFiles({ name: "오른쪽.png", mimeType: "image/png", buffer: PNG });
   await H.editor.locator("figure[data-type=post-image]").nth(1).waitFor({ timeout: 10000 }).catch(() => {});
   await page.waitForTimeout(300);
   const cols = (await H.doc()).content.find((b) => b.type === "columns");
   const kinds = (cols?.content ?? []).map((c) => (c.content ?? []).filter((b) => !(b.type === "paragraph" && !b.content)).map((b) => b.type).join("+"));
-  check("F5. picked file goes into the left column, panel upload into the right column", kinds.join(" | ") === "paragraph+postImage | paragraph+postImage", kinds.join(" | "));
+  check("F5. picked file goes into the left column, toolbar upload into the right column", kinds.join(" | ") === "paragraph+postImage | paragraph+postImage", kinds.join(" | "));
   const saved = await H.blocks();
   const sc = saved.doc?.blocks?.find((b) => b.type === "columns");
   check("F5. saved as columns > column > image (depth 3)", saved.problem === 0 && sc?.columns?.every((c) => c.blocks.some((b) => b.type === "image")), JSON.stringify(sc?.columns?.map((c) => c.blocks.map((b) => b.type))));
