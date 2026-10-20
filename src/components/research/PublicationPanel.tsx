@@ -120,7 +120,7 @@ function PublishForm({ doc, onDone, onCancel }: { doc: ResearchDocument; onDone:
   return (
     <div className="space-y-4 rounded-lg bg-stone-50 p-4">
       <label className="block text-sm">
-        <span className="mb-1 block font-medium text-stone-700">공개할 문서 버전</span>
+        <span className="mb-1 block font-medium text-stone-900">공개할 문서 버전</span>
         <select
           value={versionId}
           onChange={(e) => {
@@ -146,7 +146,7 @@ function PublishForm({ doc, onDone, onCancel }: { doc: ResearchDocument; onDone:
       {versions.failure && <ErrorNotice failure={versions.failure} prefix="버전 목록을 불러오지 못했습니다." />}
 
       <section className="space-y-2 text-sm">
-        <h3 className="font-medium text-stone-700">함께 공개될 참고 자료</h3>
+        <h3 className="font-medium text-stone-900">함께 공개될 참고 자료</h3>
         <p className="text-xs text-stone-500">
           이 글에 직접 연결된 모든 자료가 지금의 저장 내용(전체·발췌·요약)과 출처로 함께 공개됩니다. 자료끼리의 연결은 따라가지
           않습니다. 공개 후 자료나 연결을 바꿔도 공개된 내용은 다시 공개하기 전까지 그대로입니다.
@@ -186,7 +186,7 @@ function PublishForm({ doc, onDone, onCancel }: { doc: ResearchDocument; onDone:
         >
           {busy ? "공개 중..." : p ? `글과 참고 자료 ${p.materials.length}개 공개` : "공개"}
         </button>
-        <button type="button" onClick={onCancel} className="rounded-lg px-3 py-1.5 text-stone-600 hover:bg-stone-100">
+        <button type="button" onClick={onCancel} className="rounded-lg px-3 py-1.5 text-stone-900 hover:bg-stone-100">
           취소
         </button>
       </div>
@@ -211,9 +211,9 @@ export default function PublicationPanel({ doc, onChanged }: { doc: ResearchDocu
 
   return (
     <section className="space-y-3">
-      <h2 className="text-lg font-semibold text-stone-800">공개</h2>
+      <h2 className="text-lg font-semibold text-stone-900">공개</h2>
       {pub ? (
-        <div className="space-y-1 text-sm text-stone-600">
+        <div className="space-y-1 text-sm text-stone-900">
           <p>
             <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">공개 중</span>{" "}
             {formatDateTime(pub.publishedAt)}에 공개 · 참고 자료 {pub.materialIds.length}개
@@ -229,7 +229,7 @@ export default function PublicationPanel({ doc, onChanged }: { doc: ResearchDocu
           </Link>
         </div>
       ) : (
-        <p className="text-sm text-stone-600">비공개 문서입니다. 공개하기 전까지 본인만 볼 수 있습니다.</p>
+        <p className="text-sm text-stone-900">비공개 문서입니다. 공개하기 전까지 본인만 볼 수 있습니다.</p>
       )}
       {doc.archived && pub && (
         <p className="text-xs text-amber-700">

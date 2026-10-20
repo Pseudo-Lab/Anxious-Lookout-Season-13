@@ -419,22 +419,31 @@ const publishButton = () => main.getByRole("button", { name: /글과 참고 자�
 }
 
 // R9. 세션: Codex 미연결 안내 → 전송 실패 시 입력 보존 → 모의 연결 후 이어하기·도구 이력·원본
-await page.goto(U("/research/?tab=sessions"));
-check("R9. codex unavailable banner", await appears(main.getByText("새 대화를 진행할 수 없지만")));
+// #44: 내 연구에 대화 탭이 없다. 대화는 공통 대화창에서만 시작한다(Codex 안내·새 대화 폼도 대화창에 있다).
+const chat = page.locator("#chat-panel");
+async function openChatPanel() {
+  if (!(await chat.isVisible())) await page.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  await chat.getByRole("heading", { name: "Codex 대화" }).waitFor();
+}
+await page.goto(U("/research/"));
+check("R9. #44: research page has no conversation tab", (await main.getByRole("navigation", { name: "내 연구 구분" }).getByRole("link", { name: "대화" }).count()) === 0 && !(await main.innerText()).includes("나눈 대화"));
+await openChatPanel();
+check("R9. codex unavailable banner", await appears(chat.getByText("새 대화를 진행할 수 없지만")));
 // R9a. 계약에 아직 없는 사유 코드와 서버 고정 모델: 형식 오류로 막지 않고 일반 안내 + 모델 표시(실제 응답 성공으로 표시하지 않음)
 await setMock("codex=auth_expired");
 await page.reload();
-check("R9a. auth_expired reason explained (operator reconnect)", await appears(main.getByText("서버의 Codex 인증이 만료되어 재연결이 필요합니다")));
-check("R9a. fixed model shown, no auto switch", await appears(main.getByText("모델: gpt-6.1-sol (서버에서 고정)")) && (await appears(main.getByText("다른 모델로 자동 전환하지 않습니다"))));
-check("R9a. no login/API-key input offered", (await main.getByLabel(/API|키|ChatGPT/).count()) === 0);
+await openChatPanel();
+check("R9a. auth_expired reason explained (operator reconnect)", await appears(chat.getByText("서버의 Codex 인증이 만료되어 재연결이 필요합니다")));
+check("R9a. fixed model shown, no auto switch", await appears(chat.getByText("모델: gpt-6.1-sol (서버에서 고정)")) && (await appears(chat.getByText("다른 모델로 자동 전환하지 않습니다"))));
+check("R9a. no login/API-key input offered", (await chat.getByLabel(/API|키|ChatGPT/).count()) === 0);
 await setMock("codex=unavailable");
 await page.reload();
-await main.getByLabel("새 대화 제목").fill("세션 1");
-await main.getByRole("button", { name: "새 대화" }).click();
+await openChatPanel();
+await chat.getByLabel("새 대화 제목").fill("세션 1");
+await chat.getByRole("button", { name: "새 대화" }).click();
 // 새 대화는 페이지를 옮기지 않고 공통 대화창에서 열린다. 기존 대화 링크는 그 대화를 대화창에 여는 호환 진입점이다.
-const chat = page.locator("#chat-panel");
 await chat.getByLabel("메시지").waitFor();
-check("R9. new session opens in chat panel without navigation", page.url().includes("tab=sessions") && (await chat.getByRole("heading", { name: "세션 1" }).count()) === 1, page.url());
+check("R9. new session opens in chat panel without navigation", new URL(page.url()).pathname.endsWith("/research/") && (await chat.getByRole("heading", { name: "세션 1" }).count()) === 1, page.url());
 const chatUi = () =>
   page.evaluate(() => {
     const k = Object.keys(sessionStorage).find((key) => key.endsWith(":chat-ui"));
@@ -1464,7 +1473,7 @@ let docEUrl;
 
   // R23b. 계정 X의 대화 생성 201 보류 → 같은 탭이 계정 Y로 바뀜 → X 응답 전달: Y의 대화창 선택·화면은 그대로
   const before = (await rapi.get("/auth/me")).user.accountId;
-  await rp.goto(U("/research/?tab=sessions"));
+  await rp.goto(U("/research/"));
   // 대화창은 마지막 대화를 기억하므로 목록으로 돌린 뒤 닫는다(다시 열면 새 대화 폼이 보이게).
   await rc.getByRole("button", { name: "← 대화 목록" }).click();
   await rc.getByRole("button", { name: "대화창 닫기" }).click();

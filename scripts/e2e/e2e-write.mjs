@@ -94,6 +94,12 @@ async function pasteHtml(html) {
   }, html);
 }
 const blockTypes = (content) => (content?.blocks ?? []).map((b) => b.type);
+// #44: 이미지는 본문 도구 막대의 '이미지 올리기'로 넣는다(파일 선택 창 → 업로드 → 커서 위치). 버튼이 실제로 파일 선택을 여는지까지 본다.
+async function uploadViaToolbar(file) {
+  const button = main.getByRole("toolbar", { name: "서식", exact: true }).getByRole("button", { name: "이미지 올리기" });
+  const [chooser] = await Promise.all([page.waitForEvent("filechooser", { timeout: 10000 }), button.click()]);
+  await chooser.setFiles(file);
+}
 async function send(text) {
   await chat.getByLabel("메시지").fill(text);
   await chat.getByRole("button", { name: "보내기" }).click();
@@ -134,12 +140,18 @@ const matA = await material("문서 A의 자료", "https://example.com/source-a"
 const matB = await material("직접 고른 자료", "https://example.com/source-b", "자료 B 본문 비밀 메모");
 check("WP3. setup: materials + document->material relation", !!matA.id && !!matB.id && (await relate(docA.id, matA.id)).status === 201);
 
-// WP3. 새 글: 주소 입력 없음(#31 W1), 요약은 접힘(W2), 태그, 문서 연결·열람과 자료 자동 포함·직접 추가(W3), 자체 이미지 미리보기, 자동 저장·복구, 저장
+// WP3. 새 글: 주소 입력 없음(#31 W1), 요약 입력 없음(#44), 태그, 문서 연결·열람과 자료 자동 포함·직접 추가(W3), 자체 이미지 미리보기, 자동 저장·복구, 저장
 await main.getByRole("link", { name: "새 글 쓰기" }).click();
 await page.waitForURL(U("/write/new/"));
 await main.getByLabel("제목").fill("첫 글");
 check("WP3. #37: editor shows no public address (input or note)", (await main.getByLabel(/주소/).count()) === 0 && !(await main.innerText()).includes("공개 주소"));
-check("WP3. W2: summary collapsed by default", (await main.getByRole("button", { name: "요약 추가(선택)" }).isVisible()) && (await main.getByLabel("요약").count()) === 0);
+check(
+  "WP3. #44: no summary input and no image/cover panel",
+  (await main.getByRole("button", { name: "요약 추가(선택)" }).count()) === 0 &&
+    (await main.getByLabel("요약").count()) === 0 &&
+    (await main.getByRole("region", { name: "이미지" }).count()) === 0 &&
+    (await main.getByText("표지", { exact: false }).count()) === 0
+);
 const tagBox = main.getByLabel("태그", { exact: true });
 await tagBox.fill("AI,");
 await tagBox.fill("테스트");
@@ -147,8 +159,6 @@ await tagBox.press("Enter");
 await tagBox.fill("AI");
 await tagBox.press("Enter");
 check("WP3. tags added, duplicate ignored", (await main.getByRole("button", { name: /^태그 .* 빼기$/ }).count()) === 2);
-await main.getByRole("button", { name: "요약 추가(선택)" }).click();
-await main.getByLabel("요약").fill("첫 글 요약");
 // 자료 찾기는 읽기 전용 POST: CSRF만 보내고 Idempotency-Key는 보내지 않는다
 const resolveRequests = [];
 page.on("request", (r) => {
@@ -177,10 +187,9 @@ await writeBody(["# 첫 글 본문"]);
 await page.keyboard.press("Enter");
 // 외부 이미지·iframe이 섞인 HTML을 붙여 넣어도 글자만 들어온다(이미지는 자체 업로드 imageId로만)
 await pasteHtml('<p>붙인 글<img src="https://example.com/x.png"></p><iframe src="https://example.com/frame"></iframe>');
-// 이미지 올리기: 원본 바이트 POST → 본문 커서 위치에 이미지 블록(imageId) 삽입
-const imageBox = main.getByRole("region", { name: "이미지" });
-await imageBox.getByLabel("이미지 파일").setInputFiles({ name: "그림 (1).png", mimeType: "image/png", buffer: PNG });
-check("WP3. upload inserted note", await appears(imageBox.getByText("올렸습니다", { exact: false })));
+// 이미지 올리기(#44 도구 막대): 원본 바이트 POST → 본문 커서 위치에 이미지 블록(imageId) 삽입
+await uploadViaToolbar({ name: "그림 (1).png", mimeType: "image/png", buffer: PNG });
+check("WP3. #44: toolbar upload inserts an image block", await appears(bodyBox().locator("figure[data-type=post-image]")));
 const uploads = await api.get("/research/post-images");
 const IMG = uploads.items[0]?.id;
 check("WP3. upload stored (raw bytes, own image)", uploads.items.length === 1 && uploads.items[0].url === `${BASE}/api/media/post-images/${IMG}`, JSON.stringify(uploads.items));
@@ -190,11 +199,9 @@ const imgs = await bodyBox().locator("img").evaluateAll((els) => els.map((e) => 
 check("WP3. #32: image block inserted by imageId (own image loads for owner)", imgs.length === 1 && imgs[0][0] === `${BASE}/api/media/post-images/${IMG}` && imgs[0][1] > 0, JSON.stringify(imgs));
 check("WP3. #32: alt text taken from the file name", (await figure.getByLabel("대체 텍스트").inputValue()) === "그림 (1)");
 check("WP3. #32: pasted external image/iframe not inserted, text kept", (await bodyBox().locator("iframe").count()) === 0 && (await bodyBox().innerText()).includes("붙인 글"));
-await imageBox.getByRole("button", { name: "표지로" }).first().click();
-check("WP3. cover set from my images", await appears(imageBox.locator('img[alt="표지"]')));
 // 올릴 수 없는 형식은 보내기 전에 막는다
-await imageBox.getByLabel("이미지 파일").setInputFiles({ name: "a.gif", mimeType: "image/gif", buffer: Buffer.from("GIF89a") });
-check("WP3. gif refused client-side", await appears(imageBox.getByText("PNG, JPEG, WebP 이미지만", { exact: false })));
+await uploadViaToolbar({ name: "a.gif", mimeType: "image/gif", buffer: Buffer.from("GIF89a") });
+check("WP3. gif refused client-side", await appears(main.getByText("PNG, JPEG, WebP 이미지만", { exact: false })));
 check("WP3. gif not uploaded", (await api.get("/research/post-images")).items.length === 1);
 await saved();
 const draftId = await draftParam();
@@ -211,20 +218,19 @@ check(
 check(
   "WP3. autosave: all post fields in draft (no slug, explicit materials)",
   d1.slug === "" &&
-    d1.coverImageId === IMG &&
+    d1.coverImageId === null &&
     JSON.stringify(d1.tags) === JSON.stringify(["AI", "테스트"]) &&
     JSON.stringify(d1.documentIds) === JSON.stringify([docA.id]) &&
     JSON.stringify(d1.materialIds) === JSON.stringify([matA.id, matB.id]) &&
-    d1.description === "첫 글 요약" &&
+    d1.description === "" &&
     d1.postId === null,
   JSON.stringify({ slug: d1.slug, tags: d1.tags, documentIds: d1.documentIds, materialIds: d1.materialIds })
 );
 await page.reload();
 await main.getByLabel("제목").waitFor();
 check(
-  "WP3. reload restores draft (title, summary, tags, documents, materials)",
+  "WP3. reload restores draft (title, tags, documents, materials)",
   (await main.getByLabel("제목").inputValue()) === "첫 글" &&
-    (await main.getByLabel("요약").inputValue()) === "첫 글 요약" &&
     (await appears(bodyBox().getByRole("heading", { name: "첫 글 본문" }))) &&
     (await main.getByRole("button", { name: "태그 테스트 빼기" }).count()) === 1 &&
     (await appears(links.getByText("바탕 문서 A"))) &&
@@ -259,18 +265,15 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
     return route.continue().catch(() => {});
   };
   await page.route("**/api/research/post-images", hold);
-  const box = main.getByRole("region", { name: "이미지" });
-  await box.getByLabel("이미지 파일").setInputFiles({ name: "slow.png", mimeType: "image/png", buffer: PNG });
+  await uploadViaToolbar({ name: "slow.png", mimeType: "image/png", buffer: PNG });
   await main.getByText("이미지를 올리는 중입니다", { exact: false }).waitFor();
   check("WP3b. save/discard locked during upload", (await main.getByRole("button", { name: "글 저장" }).isDisabled()) && (await main.getByRole("button", { name: "초안 버리기…" }).isDisabled()));
   await main.getByLabel("제목").fill("업로드 중 바꾼 제목");
   await writeBody(["업로드 중 바꾼 본문"]);
-  await main.getByRole("button", { name: "요약 추가(선택)" }).click();
-  await main.getByLabel("요약").fill("업로드 중 요약");
   await main.getByLabel("태그", { exact: true }).fill("업로드중");
   await main.getByLabel("태그", { exact: true }).press("Enter");
   release();
-  await box.getByText("올렸습니다", { exact: false }).waitFor();
+  await bodyBox().locator("figure[data-type=post-image]").waitFor({ timeout: 15000 });
   await page.unroute("**/api/research/post-images", hold);
   const body = await bodyBox().innerText();
   check(
@@ -278,7 +281,6 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
     (await main.getByLabel("제목").inputValue()) === "업로드 중 바꾼 제목" &&
       body.startsWith("업로드 중 바꾼 본문") &&
       (await bodyBox().locator("figure[data-type=post-image]").getByLabel("대체 텍스트").inputValue()) === "slow" &&
-      (await main.getByLabel("요약").inputValue()) === "업로드 중 요약" &&
       (await main.getByRole("button", { name: "태그 업로드중 빼기" }).count()) === 1,
     JSON.stringify(body)
   );
@@ -287,7 +289,7 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   const d = await api.get(`/research/post-drafts/${await draftParam()}`);
   check(
     "WP3b. server draft has the latest input",
-    d.title === "업로드 중 바꾼 제목" && d.description === "업로드 중 요약" && d.textProjection.startsWith("업로드 중 바꾼 본문") && blockTypes(d.content).includes("image"),
+    d.title === "업로드 중 바꾼 제목" && d.description === "" && d.textProjection.startsWith("업로드 중 바꾼 본문") && blockTypes(d.content).includes("image"),
     JSON.stringify({ projection: d.textProjection, types: blockTypes(d.content) })
   );
   await main.getByRole("button", { name: "초안 버리기…" }).click();
@@ -567,34 +569,6 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   }
 }
 
-// WP3g. 리뷰 round5 F8: 본문이 상한을 넘어 저장하지 못하는 동안 넣은 이미지(화면의 편집기에만 있고 서버는 아직 모름)도
-// '사용 중(이 글)'로 보여 지울 수 없다.
-{
-  await page.goto(U("/write/new/"));
-  await main.getByLabel("제목").fill("상한 중 이미지");
-  await writeBody(["valid-base"]);
-  await saved();
-  const draftId = await draftParam();
-  await page.keyboard.insertText("x".repeat(20001));
-  await main.getByText("저장할 수 있는 크기·개수 상한을 넘었습니다", { exact: false }).waitFor({ timeout: 10000 });
-  const panel = main.getByRole("region", { name: "이미지" });
-  await panel.getByLabel("이미지 파일").setInputFiles({ name: "상한중.png", mimeType: "image/png", buffer: PNG });
-  await panel.getByText("올렸습니다", { exact: false }).waitFor({ timeout: 10000 });
-  const newest = (await api.get("/research/post-images")).items[0];
-  const row = panel.locator("li").filter({ has: page.locator(`img[src$="${newest.id}"]`) });
-  await row.waitFor({ timeout: 10000 }).catch(() => {});
-  const inBody = (await bodyBox().locator("figure[data-type=post-image]").count()) === 1;
-  const server = await api.get(`/research/post-drafts/${draftId}`);
-  check(
-    "WP3g. image inserted while the body is over the limit shows '사용 중(이 글)' and no delete (server does not reference it yet)",
-    inBody && (await row.getByText("사용 중(이 글)").count()) === 1 && (await row.getByRole("button", { name: "지우기" }).count()) === 0 && !JSON.stringify(server.content).includes(newest.id),
-    `inBody=${inBody} row=${(await row.innerText().catch(() => "")).replace(/\s+/g, " ")}`
-  );
-  await main.getByRole("button", { name: "초안 버리기…" }).click();
-  await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
-  await main.getByText("초안을 버렸습니다").waitFor();
-}
-
 // WP4. #31: 자료만 바탕으로 한 글, 보관 자료 제외, 문서 해제 뒤에도 자료 유지, 요약 없는 글의 목록 발췌(W2)
 {
   const docB = (await api.send("POST", "/research/documents", { title: "바탕 문서 B", content: "문서 B" })).body;
@@ -750,7 +724,7 @@ check("WP6. status shows published v1 not latest", await appears(pub.getByText("
   check("WP6. public page lists based-on document title, no link, no body", text.includes("바탕이 된 참고 문서") && text.includes("바탕 문서 A") && !text.includes("문서 A 본문 비밀 문장") && (await anon.getByRole("link", { name: "바탕 문서 A" }).count()) === 0);
   await anon.locator("article .prose img").first().waitFor().catch(() => {});
   const pubImgs = await anon.locator("article img").evaluateAll((els) => els.map((e) => [e.getAttribute("src"), e.naturalWidth]));
-  check("WP6. public page: cover + one own body image, both load anonymously", pubImgs.length === 2 && pubImgs.every(([src, w]) => src === `${BASE}/api/media/post-images/${IMG}` && w > 0), JSON.stringify(pubImgs));
+  check("WP6. public page: one own body image (no cover, #44), loads anonymously", pubImgs.length === 1 && pubImgs.every(([src, w]) => src === `${BASE}/api/media/post-images/${IMG}` && w > 0), JSON.stringify(pubImgs));
   const media = await anon.request.get(U(`/api/media/post-images/${IMG}`));
   check("WP6. published image public (revalidate cache)", media.status() === 200 && (media.headers()["cache-control"] ?? "").includes("must-revalidate"), `${media.status()} ${media.headers()["cache-control"]}`);
   await anon.goto(U("/"));
@@ -919,25 +893,12 @@ check("WP12. public post scope: bounded", await appears(chat.getByText("다음 �
   await chat.getByLabel("메시지").fill("");
 }
 
-// WP12b. 쓰는 이미지는 지울 수 없고, 쓰지 않는 이미지는 지울 수 있다
-// #36 F8: 앞부분은 usage가 없는 구형 서버 응답으로 본다(이 글 판정 + 삭제 409 안내 fallback). 뒤에서 usage가 있는 목록을 본다.
-const stripUsage = async (route) => {
-  // 가로채기를 풀 때 진행 중이던 요청이 있으면 이미 처리된 route가 되므로 오류를 삼킨다
-  try {
-    const res = await route.fetch();
-    const body = await res.json();
-    for (const it of body.items ?? []) delete it.usage;
-    await route.fulfill({ response: res, json: body });
-  } catch {
-    await route.continue().catch(() => {});
-  }
-};
-const IMAGE_LIST = /\/api\/research\/post-images\?/;
-await page.route(IMAGE_LIST, stripUsage);
+// WP12b. 기존 글 편집 중 도구 막대 업로드(#44): 응답을 기다리는 동안 '편집 닫기'·저장도 잠긴다(F1 terminal action).
+// 이미지 목록·지우기 화면은 없다(#44). 쓰는 이미지 보호는 서버(409 image_in_use)에 남는다.
 await page.goto(U(`/write/?id=${postId}`));
 await main.getByRole("button", { name: "내용 수정" }).click();
-const imgPanel = main.getByRole("region", { name: "이미지" });
-// 기존 글 편집 중 업로드: 응답을 기다리는 동안 '편집 닫기'도 잠긴다(F1 terminal action).
+await bodyBox().waitFor({ timeout: 15000 });
+check("WP12b. #44: editing an existing post shows no summary input or image/cover panel", (await main.getByRole("region", { name: "이미지" }).count()) === 0 && (await main.getByLabel("요약").count()) === 0);
 let releaseSpare;
 const heldSpare = new Promise((r) => (releaseSpare = r));
 const holdSpare = async (route) => {
@@ -945,61 +906,24 @@ const holdSpare = async (route) => {
   return route.continue().catch(() => {});
 };
 await page.route("**/api/research/post-images", holdSpare);
-await imgPanel.getByLabel("이미지 파일").setInputFiles({ name: "spare.webp", mimeType: "image/webp", buffer: Buffer.from("RIFF0000WEBPVP8 ") });
+await bodyBox().click();
+await page.keyboard.press("Control+End");
+await uploadViaToolbar({ name: "spare.webp", mimeType: "image/webp", buffer: Buffer.from("RIFF0000WEBPVP8 ") });
 await main.getByText("이미지를 올리는 중입니다", { exact: false }).waitFor();
 check(
   "WP12b. close/save locked while uploading in an existing post",
   (await main.getByRole("button", { name: "편집 닫기(초안 유지)" }).isDisabled()) && (await main.getByRole("button", { name: "새 버전으로 저장" }).isDisabled())
 );
 releaseSpare();
-await imgPanel.getByText("올렸습니다", { exact: false }).waitFor();
+await main.getByText("이미지를 올리는 중입니다", { exact: false }).waitFor({ state: "detached", timeout: 15000 });
 await page.unroute("**/api/research/post-images", holdSpare);
 check("WP12b. close unlocked after upload", !(await main.getByRole("button", { name: "편집 닫기(초안 유지)" }).isDisabled()));
-// 방금 넣은 이미지 블록은 본문에서 다시 빼서 쓰지 않는 이미지로 만든다(본문을 새로 쓴다)
-check("WP12b. spare image block inserted", (await bodyBox().locator("figure[data-type=post-image]").count()) === 1);
-const spare = (await api.get("/research/post-images")).items.find((i) => i.mimeType === "image/webp");
-const rowOf = (id) => imgPanel.locator("li").filter({ has: page.locator(`img[src$="${id}"]`) });
-// #36 F8: 이 글의 본문·표지에서 쓰는 이미지는 '지우기' 대신 '사용 중(이 글)'
-await rowOf(spare.id).waitFor({ timeout: 10000 }).catch(() => {});
-check(
-  "WP12b. F8: images used in this post show '사용 중(이 글)' instead of delete (body and cover)",
-  (await rowOf(spare.id).getByText("사용 중(이 글)").count()) === 1 && (await rowOf(spare.id).getByRole("button", { name: "지우기" }).count()) === 0 &&
-    (await rowOf(IMG).getByText("사용 중(이 글)").count()) === 1 && (await rowOf(IMG).getByRole("button", { name: "지우기" }).count()) === 0
-);
-await writeBody(["두 번째 버전 문장"]);
-await saved();
-// 표지에서 빼면 이 화면은 다른 곳(이전 버전)의 쓰임을 모르므로 지우기가 보이고, 서버가 이유와 함께 거절한다
-await imgPanel.getByRole("button", { name: "표지 빼기" }).click();
-await rowOf(IMG).getByRole("button", { name: "지우기" }).click();
-check("WP12b. in-use image delete refused", await appears(imgPanel.getByText("쓰고 있는 이미지라 지울 수 없습니다", { exact: false })));
-await rowOf(spare.id).getByRole("button", { name: "지우기" }).click();
-let spareGone = false;
-for (let i = 0; i < 20 && !spareGone; i++) {
-  spareGone = !(await api.get("/research/post-images")).items.some((x) => x.id === spare.id);
-  if (!spareGone) await page.waitForTimeout(300);
+check("WP12b. uploaded image block inserted in the existing post", (await bodyBox().locator("figure[data-type=post-image]").count()) === 1);
+{
+  const del = await api.send("DELETE", `/research/post-images/${IMG}`, {});
+  check("WP12b. in-use image delete still refused by the server", del.status === 409 && del.body?.error?.details?.reason === "image_in_use", JSON.stringify(del));
 }
-check("WP12b. unused image deleted", spareGone);
-await page.unroute(IMAGE_LIST, stripUsage);
-await page.waitForTimeout(300);
-// #36 F7: 이미지·표지 패널 접기. 접힘은 이 브라우저에 기억되어 다시 열어도 접혀 있다
-await imgPanel.getByRole("button", { name: "이미지·표지 접기" }).click();
-check("WP12b. F7: collapsed panel hides the cover row and image list, keeps upload", (await imgPanel.getByText("표지:").count()) === 0 && (await imgPanel.getByRole("button", { name: "이미지 올리기" }).count()) === 1);
 await saved();
-await page.reload();
-await main.getByRole("button", { name: "초안 이어서 편집" }).click();
-await bodyBox().waitFor({ timeout: 15000 });
-check("WP12b. F7: the panel stays collapsed after reopening", (await imgPanel.getByRole("button", { name: "이미지·표지 펼치기" }).getAttribute("aria-expanded")) === "false" && (await imgPanel.getByText("표지:").count()) === 0);
-await imgPanel.getByRole("button", { name: "이미지·표지 펼치기" }).click();
-check("WP12b. F7: expanding shows the panel again", (await imgPanel.getByText("표지:").count()) === 1);
-// #36 F8: 서버가 알려 준 사용처(usage). 표지에서 뺀 이미지도 이전 버전·발행본에 남아 있으면 지우기 대신 그 이유를 보인다
-await imgPanel.getByRole("button", { name: "내 이미지" }).click();
-await rowOf(IMG).waitFor({ timeout: 10000 }).catch(() => {});
-check(
-  // 앞선 시험의 종료된 초안·제안도 계약대로 사용처에 든다(초안·제안·버전·발행본 순서)
-  "WP12b. F8: an image kept by past versions and the publication shows its usage kinds without delete",
-  /사용 중\((초안·)?(제안·)?버전·발행본\)/.test(await rowOf(IMG).innerText()) && (await rowOf(IMG).getByRole("button", { name: "지우기" }).count()) === 0,
-  (await rowOf(IMG).innerText().catch(() => "")).replace(/\s+/g, " ")
-);
 await main.getByRole("button", { name: "초안 버리기…" }).click();
 await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
 await main.getByRole("button", { name: "내용 수정" }).waitFor();

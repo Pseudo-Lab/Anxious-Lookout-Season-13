@@ -135,7 +135,7 @@ function ImageView({ node, updateAttributes, selected, editor, getPos }: ReactNo
         />
       )}
       {editable && (
-        <div contentEditable={false} className="mt-1 flex flex-wrap items-center gap-2 text-xs text-stone-600">
+        <div contentEditable={false} className="mt-1 flex flex-wrap items-center gap-2 text-xs text-stone-900">
           <label className="flex flex-1 items-center gap-1">
             <span>대체 텍스트</span>
             <input
@@ -168,7 +168,7 @@ function EmbedView({ node, selected, editor, getPos }: ReactNodeViewProps) {
         <YouTubeCard resourceId={node.attrs.resourceId as string} activatable={false} />
       </div>
       {editor.isEditable && (
-        <div contentEditable={false} className="mt-1 flex justify-end text-xs text-stone-600">
+        <div contentEditable={false} className="mt-1 flex justify-end text-xs text-stone-900">
           <MoveButtons editor={editor} getPos={getPos} what="영상" />
         </div>
       )}

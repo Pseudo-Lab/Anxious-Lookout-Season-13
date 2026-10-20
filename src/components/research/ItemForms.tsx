@@ -13,7 +13,7 @@ export const inputClass = "w-full rounded-lg border border-stone-300 px-3 py-2 t
 export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-sm font-medium text-stone-700">{label}</span>
+      <span className="mb-1 block text-sm font-medium text-stone-900">{label}</span>
       {children}
       {hint && <span className="mt-1 block text-xs text-stone-500">{hint}</span>}
     </label>
@@ -31,7 +31,7 @@ function FormActions({ busy, submitLabel, onCancel }: { busy: boolean; submitLab
         {busy ? "저장 중..." : submitLabel}
       </button>
       {onCancel && (
-        <button type="button" onClick={onCancel} disabled={busy} className="rounded-lg px-4 py-2 text-sm text-stone-600 hover:bg-stone-100">
+        <button type="button" onClick={onCancel} disabled={busy} className="rounded-lg px-4 py-2 text-sm text-stone-900 hover:bg-stone-100">
           취소
         </button>
       )}
@@ -174,7 +174,7 @@ export function MarkdownEditor({
   return (
     <div className="@container block">
       <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-        <label htmlFor={id} className="text-sm font-medium text-stone-700">
+        <label htmlFor={id} className="text-sm font-medium text-stone-900">
           본문
         </label>
         <div role="group" aria-label="편집 화면" className="flex rounded-lg bg-stone-100 p-0.5 text-xs">
@@ -184,7 +184,7 @@ export function MarkdownEditor({
               type="button"
               aria-pressed={view === v}
               onClick={() => setView(v)}
-              className={`rounded-md px-2.5 py-1 ${view === v ? "bg-white font-medium text-stone-900 shadow-sm" : "text-stone-600 hover:text-stone-900"}`}
+              className={`rounded-md px-2.5 py-1 ${view === v ? "bg-white font-medium text-stone-900 shadow-sm" : "text-stone-900 hover:text-stone-900"}`}
             >
               {VIEW_LABELS[v]}
             </button>

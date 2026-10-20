@@ -89,16 +89,16 @@ export default function TextDiff({
           두 본문의 차이가 너무 커서 줄 단위로 비교하지 못했습니다. 각 버전을 펼쳐 직접 확인하세요.
         </p>
       ) : diff.added === 0 && diff.removed === 0 ? (
-        <p role="status" className="text-sm text-stone-600">
+        <p role="status" className="text-sm text-stone-900">
           본문이 같습니다{titleChanged ? "(제목만 다릅니다)" : ""}.
         </p>
       ) : (
         <>
-          <p className="text-xs text-stone-600">
+          <p className="text-xs text-stone-900">
             <span className="font-medium text-emerald-700">+{diff.added}줄</span>{" "}
             <span className="font-medium text-rose-700">−{diff.removed}줄</span>
           </p>
-          <div className="overflow-hidden rounded-lg font-mono text-xs leading-5 text-stone-800 ring-1 ring-stone-200">
+          <div className="overflow-hidden rounded-lg font-mono text-xs leading-5 text-stone-900 ring-1 ring-stone-200">
             {(() => {
               let shown = 0;
               const out: ReactNode[] = [];

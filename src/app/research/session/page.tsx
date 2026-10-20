@@ -41,8 +41,9 @@ function SessionPageInner() {
 export default function SessionPage() {
   return (
     <div className="mx-auto max-w-3xl">
-      <Link href="/research/?tab=sessions" className="mb-4 inline-block text-sm text-stone-500 hover:text-stone-800">
-        ← 대화 목록
+      {/* #44: 대화 목록 탭이 없어졌다(대화 목록은 공통 대화창에 있다) */}
+      <Link href="/research/" className="mb-4 inline-block text-sm text-stone-500 hover:text-stone-800">
+        ← 내 연구
       </Link>
       <AuthGate>
         <Suspense>

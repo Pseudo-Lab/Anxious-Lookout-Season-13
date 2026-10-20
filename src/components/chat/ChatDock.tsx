@@ -325,7 +325,7 @@ export default function ChatDock() {
             </div>
           )}
           <div className="flex shrink-0 items-center gap-1 border-b border-stone-100 py-1 pl-4 pr-2">
-            <h2 id="chat-panel-title" ref={headingRef} tabIndex={-1} className="flex-1 text-sm font-semibold text-stone-800 outline-none">
+            <h2 id="chat-panel-title" ref={headingRef} tabIndex={-1} className="flex-1 text-sm font-semibold text-stone-900 outline-none">
               Codex 대화
             </h2>
             {!isMobile && canWiden && (

@@ -48,7 +48,7 @@ function Btn({ label, onClick, active, disabled, children }: { label: string; on
       // 버튼을 눌러도 편집기 선택(커서)이 사라지지 않게 한다
       onMouseDown={(e) => e.preventDefault()}
       onClick={onClick}
-      className={`min-w-8 rounded px-2 py-1 text-sm ${active ? "bg-indigo-100 text-indigo-800" : "text-stone-700 hover:bg-stone-100"} disabled:opacity-40`}
+      className={`min-w-8 rounded px-2 py-1 text-sm ${active ? "bg-indigo-100 text-indigo-800" : "text-stone-900 hover:bg-stone-100"} disabled:opacity-40`}
     >
       {children}
     </button>
@@ -316,7 +316,8 @@ function Toolbar({ editor, onPickImage, uploading }: { editor: Editor; onPickIma
       <Btn label="인용" active={s.quote} disabled={s.inCell} onClick={() => c().toggleBlockquote().run()}>❝</Btn>
       <Btn label="구분선" disabled={s.inCell} onClick={() => c().setHorizontalRule().run()}>—</Btn>
       <Sep />
-      <Btn label="이미지 올리기" disabled={uploading || s.inCell} onClick={onPickImage}>🖼</Btn>
+      {/* #44: 이미지 패널을 없앴으므로 이미지 넣기는 이 버튼(파일 선택 → 업로드 → 커서 위치)·붙여넣기·끌어놓기로 한다 */}
+      <Btn label="이미지 올리기" disabled={uploading || s.inCell} onClick={onPickImage}>🖼 이미지</Btn>
       <Btn label="YouTube 영상" disabled={s.inCell} onClick={insertYouTube}>▶</Btn>
       <Btn label="표 넣기" disabled={s.inTable || s.inColumns} onClick={() => c().insertTableAfterBlock({ rows: 3, cols: 3, withHeaderRow: true }).run()}>▦</Btn>
       {!s.inColumns && !s.inTable && (

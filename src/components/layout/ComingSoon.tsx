@@ -14,7 +14,7 @@ export default function ComingSoon({ title, description }: ComingSoonProps) {
         준비 중
       </span>
       <h1 className="mt-4 text-2xl font-bold text-stone-900">{title}</h1>
-      <p className="mt-3 text-stone-600">{description}</p>
+      <p className="mt-3 text-stone-900">{description}</p>
       <p className="mt-2 text-sm text-stone-500">
         새 서버로 옮기는 중이라 지금은 이용할 수 없습니다. 기존 기능은 단계적으로 다시 제공됩니다.
       </p>

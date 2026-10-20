@@ -48,7 +48,7 @@ export function NewDocumentProposalReview({ id, onDone }: { id: string; onDone: 
   const pending = p.status === "pending";
   return (
     <div className="space-y-3">
-      <p className="text-sm text-stone-600">
+      <p className="text-sm text-stone-900">
         {pending
           ? "Codex가 대화에서 새 문서로 제안한 내용입니다. 수락하면 이 내용으로 문서와 첫 버전이 만들어지고, 버리면 아무것도 만들어지지 않습니다."
           : p.status === "accepted"
@@ -65,7 +65,7 @@ export function NewDocumentProposalReview({ id, onDone }: { id: string; onDone: 
           <button type="button" onClick={() => void accept()} disabled={busy} className="rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50">
             제안 수락(새 문서 만들기)
           </button>
-          <button type="button" onClick={() => void discard()} disabled={busy} className="text-sm text-stone-600 hover:text-red-700">
+          <button type="button" onClick={() => void discard()} disabled={busy} className="text-sm text-stone-900 hover:text-red-700">
             제안 버리기
           </button>
         </div>

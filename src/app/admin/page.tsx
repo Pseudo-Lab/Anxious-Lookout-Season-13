@@ -89,7 +89,7 @@ function AccountRow({ initial, selfId }: { initial: AdminAccount; selfId: string
       </div>
       {action && (
         <form onSubmit={submit} className="space-y-2 rounded-lg bg-stone-50 p-3">
-          <p className="text-sm text-stone-700">
+          <p className="text-sm text-stone-900">
             <span className="font-medium">{account.login}</span> — {ACTIONS[action].label}
           </p>
           <input
@@ -105,7 +105,7 @@ function AccountRow({ initial, selfId }: { initial: AdminAccount; selfId: string
             <button type="submit" disabled={busy || !reason.trim()} className="rounded-lg bg-indigo-600 px-3 py-1 text-white disabled:opacity-50">
               {busy ? "적용 중..." : "적용"}
             </button>
-            <button type="button" onClick={() => setAction(null)} className="rounded-lg px-3 py-1 text-stone-600 hover:bg-stone-100">
+            <button type="button" onClick={() => setAction(null)} className="rounded-lg px-3 py-1 text-stone-900 hover:bg-stone-100">
               취소
             </button>
           </div>
@@ -123,7 +123,7 @@ function AccountList({ selfId }: { selfId: string }) {
   return (
     <section className="space-y-3">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-stone-800">회원</h2>
+        <h2 className="text-lg font-semibold text-stone-900">회원</h2>
         <button onClick={() => setRev((r) => r + 1)} className="text-sm text-stone-500 hover:text-stone-800">
           새로고침
         </button>

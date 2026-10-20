@@ -158,7 +158,7 @@ export function VersionHistoryView<V extends VersionLike>({
   return (
     <section>
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="text-lg font-semibold text-stone-800">버전 기록</h2>
+        <h2 className="text-lg font-semibold text-stone-900">버전 기록</h2>
         {items.length >= 2 && !compare && (
           <button
             onClick={() => openCompare(items[1].id, items[0].id)}
@@ -173,7 +173,7 @@ export function VersionHistoryView<V extends VersionLike>({
         <div ref={panel} tabIndex={-1} role="region" aria-label="버전 비교" className="mb-4 scroll-mt-4 space-y-3 rounded-lg p-4 ring-1 ring-indigo-200 focus:outline-none focus-visible:ring-2">
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <label className="flex items-center gap-1">
-              <span className="text-stone-600">기준</span>
+              <span className="text-stone-900">기준</span>
               <select
                 value={compare.before}
                 onChange={(e) => setCompare({ ...compare, before: e.target.value })}
@@ -188,7 +188,7 @@ export function VersionHistoryView<V extends VersionLike>({
             </label>
             <span aria-hidden="true" className="text-stone-500">→</span>
             <label className="flex items-center gap-1">
-              <span className="text-stone-600">비교</span>
+              <span className="text-stone-900">비교</span>
               <select
                 value={compare.after}
                 onChange={(e) => setCompare({ ...compare, after: e.target.value })}
@@ -216,7 +216,7 @@ export function VersionHistoryView<V extends VersionLike>({
             {list.nextCursor && " 더 이전 버전은 아래 '이전 버전 더 보기'로 불러온 뒤 고를 수 있습니다."}
           </p>
           {compare.before === compare.after ? (
-            <p className="text-sm text-stone-600">같은 버전을 골랐습니다. 다른 버전을 고르세요.</p>
+            <p className="text-sm text-stone-900">같은 버전을 골랐습니다. 다른 버전을 고르세요.</p>
           ) : (
             <VersionCompare source={source} beforeId={compare.before} afterId={compare.after} />
           )}
@@ -232,7 +232,7 @@ export function VersionHistoryView<V extends VersionLike>({
             >
               <span>
                 <span className="font-mono text-xs text-stone-500">v{v.number}</span>{" "}
-                <span className="text-stone-800">{v.title}</span>
+                <span className="text-stone-900">{v.title}</span>
                 {v.id === latestVersionId && <span className="ml-2 text-xs text-indigo-600">현재</span>}
               </span>
               <span className="shrink-0 text-xs text-stone-500">{formatDateTime(v.createdAt)}</span>

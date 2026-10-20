@@ -33,7 +33,7 @@ function OtherDrafts({ current, reload }: { current: string | null; reload: stri
   if (!drafts.length && !searching && !list.failure) return null;
   return (
     <section className="rounded-lg p-3 ring-1 ring-stone-200">
-      <h2 className="mb-2 text-sm font-semibold text-stone-700">작성 중인 새 문서 초안</h2>
+      <h2 className="mb-2 text-sm font-semibold text-stone-900">작성 중인 새 문서 초안</h2>
       {list.failure && <ErrorNotice failure={list.failure} prefix="초안 목록을 불러오지 못했습니다." />}
       <ul className="space-y-1 text-sm">
         {drafts.map((d) => (

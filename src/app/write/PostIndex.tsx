@@ -18,7 +18,7 @@ function NewDrafts() {
   if (!list.failure && !drafts.length && !list.nextCursor) return null;
   return (
     <section className="space-y-2">
-      <h2 className="text-sm font-semibold text-stone-700">작성 중인 새 글</h2>
+      <h2 className="text-sm font-semibold text-stone-900">작성 중인 새 글</h2>
       {list.failure && <ErrorNotice failure={list.failure} prefix="초안 목록을 불러오지 못했습니다." describe={postErrorMessage} />}
       <ul className="divide-y divide-stone-100 rounded-xl bg-white text-sm ring-1 ring-stone-200">
         {drafts.map((d) => (
@@ -43,7 +43,7 @@ function MyPosts() {
   const list = usePagedList("write:posts", (cursor) => listPosts(cursor));
   return (
     <section className="space-y-2">
-      <h2 className="text-sm font-semibold text-stone-700">내 글</h2>
+      <h2 className="text-sm font-semibold text-stone-900">내 글</h2>
       {list.failure && <ErrorNotice failure={list.failure} prefix="글 목록을 불러오지 못했습니다." describe={postErrorMessage} />}
       {list.loaded && !list.failure && list.items.length === 0 && <Notice tone="info">아직 저장한 글이 없습니다. ‘새 글 쓰기’로 시작하세요.</Notice>}
       {list.items.length > 0 && (

@@ -160,6 +160,23 @@
   }
 }
 
+/*
+ * #44 글자 크기 +2pt: 기본 본문 16px → 18.67px(= 14pt, +2pt). 모든 글자 단계를 같은 비율(7/6)로 키워 제목 단계 비율을 유지한다.
+ * 간격(spacing)은 그대로 둔다(rem 전체를 키우지 않는다). 줄 높이는 Tailwind 기본 비율 그대로다.
+ */
+@theme {
+  --text-xs: calc(0.75rem * 7 / 6);
+  --text-sm: calc(0.875rem * 7 / 6);
+  --text-base: calc(1rem * 7 / 6);
+  --text-lg: calc(1.125rem * 7 / 6);
+  --text-xl: calc(1.25rem * 7 / 6);
+  --text-2xl: calc(1.5rem * 7 / 6);
+  --text-3xl: calc(1.875rem * 7 / 6);
+  --text-4xl: calc(2.25rem * 7 / 6);
+  --text-5xl: calc(3rem * 7 / 6);
+  --text-6xl: calc(3.75rem * 7 / 6);
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -176,6 +193,8 @@ body {
   background: var(--background);
   min-height: 100vh;
   color: var(--foreground);
+  /* #44: 글자 크기 단계가 없는 글(본문 prose·편집기 포함)도 같은 +2pt */
+  font-size: calc(1rem * 7 / 6);
 }
 
 /* 넓은 화면에서 공통 대화창이 열려 있으면 본문이 가려지지 않게 대화창 폭(ChatDock이 정함)만큼 오른쪽을 비운다. */

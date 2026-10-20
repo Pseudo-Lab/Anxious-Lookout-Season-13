@@ -47,7 +47,6 @@ const LIST_HREF = `${BASE_PATH}/write/`;
 const versionMeta = (v: PostVersion) => (
   <p className="text-xs text-stone-500">
     주소 /posts/{v.slug}/{v.tags.length > 0 && ` · 태그 ${v.tags.join(", ")}`} · 연결 문서 {v.documentIds.length}개 · 자료 {v.materialIds.length}개
-    {v.description && <span className="mt-1 block text-stone-600">{v.description}</span>}
   </p>
 );
 
@@ -146,7 +145,6 @@ export default function PostDetail({ id }: { id: string }) {
       ) : (
         <section className="space-y-3">
           {refreshFailure && <ErrorNotice failure={refreshFailure} prefix="최신 상태를 불러오지 못했습니다. 마지막으로 받은 내용을 표시합니다." />}
-          {v.description && <p className="text-stone-600">{v.description}</p>}
           {v.tags.length > 0 && (
             <div className="flex flex-wrap gap-2">
               {v.tags.map((t) => (

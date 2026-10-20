@@ -47,7 +47,7 @@ export default function LoginButton() {
 
   return (
     <div className="flex flex-wrap items-center gap-3">
-      <span className="text-sm font-medium text-stone-600">{user.login}</span>
+      <span className="text-sm font-medium text-stone-900">{user.login}</span>
       {!user.isApproved && (
         <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
           승인 대기
