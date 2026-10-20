@@ -410,6 +410,44 @@ html[data-chat-resizing] body {
   padding: 0.375em 0.625em;
 }
 
+/*
+ * #38 D-38-1 사용자 선택 색(userColor.ts). 저장 값은 그대로 두고 그릴 때만 고른다.
+ * - 글자색(pb-color): inline color는 저장 값, --pb-cd는 같은 색상으로 밝기만 올린 다크 모드 값.
+ * - 배경이 있는 칸(pb-on-light / pb-on-dark): 칸 배경은 저장 값 그대로, 칸 안 글자·링크·코드는 그 배경에 맞는 색.
+ *   밝은 배경 칸은 다크 모드에서도 어두운 글자와 저장된 글자색을 쓴다.
+ */
+@media (prefers-color-scheme: dark) {
+  .pb-color {
+    color: var(--pb-cd) !important;
+  }
+  .pb-swatch {
+    background-color: var(--pb-cd) !important;
+  }
+}
+.pb-swatch {
+  background-color: var(--pb-c);
+}
+.pb-on-light {
+  color: #1c1917;
+  --color-accent: #4f46e5;
+  --accent-strong: #3730a3;
+  --color-accent-light: #e0e7ff;
+  --color-muted: #78716c;
+}
+.pb-on-light .pb-color {
+  color: var(--pb-c) !important;
+}
+.pb-on-dark {
+  color: #fafaf9;
+  --color-accent: oklch(78.5% 0.115 274.713);
+  --accent-strong: oklch(87% 0.065 274.039);
+  --color-accent-light: oklch(25.7% 0.09 281.288);
+  --color-muted: oklch(70.9% 0.01 56.259);
+}
+.pb-on-dark .pb-color {
+  color: var(--pb-cd) !important;
+}
+
 /* #32 블록 편집기(Tiptap). 공개 renderer와 같은 배치를 쓰도록 클래스 이름(pb-*)을 맞춘다. */
 .pb-editor p.is-editor-empty:first-child::before,
 .pb-caption:empty::before {

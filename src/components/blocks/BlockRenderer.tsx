@@ -3,6 +3,7 @@
 import { Fragment, type CSSProperties, type ReactNode } from "react";
 import { parseBlockDocument } from "@/lib/blocks/document";
 import { clampImageWidth, ptToPx, type Align, type Block, type FlowBlock, type ListBlock, type Mark, type Run, type TableBlock } from "@/lib/blocks/types";
+import { cellBackgroundClass, textColorStyle, TEXT_COLOR_CLASS } from "@/lib/blocks/userColor";
 import { ownImageUrl } from "@/lib/posts/api";
 import ScrollBox from "@/components/research/ScrollBox";
 import YouTubeCard from "./YouTubeCard";
@@ -29,9 +30,15 @@ function lines(text: string) {
 
 function wrap(node: ReactNode, mark: Mark, key: number): ReactNode {
   if (typeof mark !== "string") {
-    const style: CSSProperties = "color" in mark ? { color: mark.color } : { fontSize: `${ptToPx(mark.fontSize)}px` };
+    // #38 D-38-1: 글자색은 다크 모드에서 밝기만 올린 색으로 그린다(userColor)
+    if ("color" in mark)
+      return (
+        <span key={key} className={TEXT_COLOR_CLASS} style={textColorStyle(mark.color)}>
+          {node}
+        </span>
+      );
     return (
-      <span key={key} style={style}>
+      <span key={key} style={{ fontSize: `${ptToPx(mark.fontSize)}px` }}>
         {node}
       </span>
     );
@@ -171,7 +178,7 @@ function BlockView({ block }: { block: Block }) {
                   {row.cells.map((cell) => {
                     const Cell = row.header ? "th" : "td";
                     return (
-                      <Cell key={cell.id} style={{ textAlign: TEXT_ALIGN[cell.align], backgroundColor: cell.background }}>
+                      <Cell key={cell.id} className={cell.background ? cellBackgroundClass(cell.background) : undefined} style={{ textAlign: TEXT_ALIGN[cell.align], backgroundColor: cell.background }}>
                         <span className="cell">
                           {cell.blocks.map((p) => (
                             <p key={p.id} className="my-0">

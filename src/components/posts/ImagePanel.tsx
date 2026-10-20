@@ -212,7 +212,7 @@ export default function ImagePanel({
             )}
           </>
         ) : (
-          <span className="text-stone-400">없음 (내 이미지에서 ‘표지로’를 누르세요)</span>
+          <span className="text-stone-500">없음 (내 이미지에서 ‘표지로’를 누르세요)</span>
         )}
       </div>
       <p className="text-xs text-stone-500">PNG·JPEG·WebP, 5 MiB까지. 올린 이미지는 사진 정보(EXIF 등)를 지운 뒤 저장되며, 발행한 글에 쓰인 것만 공개됩니다.</p>
