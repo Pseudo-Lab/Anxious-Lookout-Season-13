@@ -30,8 +30,10 @@ page.on("pageerror", (e) => pageErrors.push(e.message));
 // 대화상자는 기본으로 수락한다. dismissNext면 다음 하나만 취소한다(떠날 때 확인에서 "머무르기" 선택).
 let dismissNext = false;
 const dialogsSeen = [];
+const dialogMessages = [];
 page.on("dialog", (d) => {
   dialogsSeen.push(d.type());
+  dialogMessages.push(d.message());
   if (dismissNext) {
     dismissNext = false;
     void d.dismiss();
@@ -136,7 +138,7 @@ check("WP3. setup: materials + document->material relation", !!matA.id && !!matB
 await main.getByRole("link", { name: "새 글 쓰기" }).click();
 await page.waitForURL(U("/write/new/"));
 await main.getByLabel("제목").fill("첫 글");
-check("WP3. W1: no slug input; address is assigned on first save", (await main.getByLabel(/주소\(slug\)/).count()) === 0 && (await appears(main.getByText("처음 저장할 때 자동으로 정해지며", { exact: false }))));
+check("WP3. #37: editor shows no public address (input or note)", (await main.getByLabel(/주소/).count()) === 0 && !(await main.innerText()).includes("공개 주소"));
 check("WP3. W2: summary collapsed by default", (await main.getByRole("button", { name: "요약 추가(선택)" }).isVisible()) && (await main.getByLabel("요약").count()) === 0);
 const tagBox = main.getByLabel("태그", { exact: true });
 await tagBox.fill("AI,");
@@ -694,10 +696,11 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   await main.getByText("초안을 버렸습니다").waitFor();
 }
 
-// WP5. 기존 글 수정: 주소는 읽기 전용, 새 버전, 버전 비교에 글 정보 변경
+// WP5. 기존 글 수정: 편집기에 주소 없음(#37), 새 버전, 버전 비교에 글 정보 변경
 await page.goto(U(`/write/?id=${postId}`));
 await main.getByRole("button", { name: "내용 수정" }).click();
-check("WP5. W1: public address read-only for saved post", (await main.getByLabel("공개 주소").inputValue()) === `/posts/${slug1}/` && (await main.getByLabel("공개 주소").getAttribute("readonly")) !== null);
+await bodyBox().waitFor({ timeout: 15000 });
+check("WP5. #37: editor of a saved post shows no public address", (await main.getByLabel(/주소/).count()) === 0 && !(await main.innerText()).includes("공개 주소"));
 // 직접 추가한 자료를 빼면 다음 버전에서 빠진다(자동 포함 자료도 같은 방식으로 뺄 수 있다)
 await main.getByRole("region", { name: "바탕이 된 자료" }).locator("li", { hasText: "직접 고른 자료" }).getByRole("button", { name: "자료 빼기" }).click();
 await writeBody(["# 첫 글 본문", "두 번째 버전 문장"]);
@@ -946,12 +949,12 @@ await imgPanel.getByLabel("이미지 파일").setInputFiles({ name: "spare.webp"
 await main.getByText("이미지를 올리는 중입니다", { exact: false }).waitFor();
 check(
   "WP12b. close/save locked while uploading in an existing post",
-  (await main.getByRole("button", { name: "편집 닫기(초안 보관)" }).isDisabled()) && (await main.getByRole("button", { name: "새 버전으로 저장" }).isDisabled())
+  (await main.getByRole("button", { name: "편집 닫기(초안 유지)" }).isDisabled()) && (await main.getByRole("button", { name: "새 버전으로 저장" }).isDisabled())
 );
 releaseSpare();
 await imgPanel.getByText("올렸습니다", { exact: false }).waitFor();
 await page.unroute("**/api/research/post-images", holdSpare);
-check("WP12b. close unlocked after upload", !(await main.getByRole("button", { name: "편집 닫기(초안 보관)" }).isDisabled()));
+check("WP12b. close unlocked after upload", !(await main.getByRole("button", { name: "편집 닫기(초안 유지)" }).isDisabled()));
 // 방금 넣은 이미지 블록은 본문에서 다시 빼서 쓰지 않는 이미지로 만든다(본문을 새로 쓴다)
 check("WP12b. spare image block inserted", (await bodyBox().locator("figure[data-type=post-image]").count()) === 1);
 const spare = (await api.get("/research/post-images")).items.find((i) => i.mimeType === "image/webp");
@@ -1001,7 +1004,7 @@ await main.getByRole("button", { name: "초안 버리기…" }).click();
 await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
 await main.getByRole("button", { name: "내용 수정" }).waitFor();
 
-// WP13. 발행 취소·보관
+// WP13. 발행 취소, 다시 발행한 글 삭제(#37: 확인 → 목록에서 사라짐 → 공개 404)
 await page.goto(U(`/write/?id=${postId}`));
 await pub.getByRole("button", { name: "발행 취소…" }).click();
 await pub.getByRole("button", { name: "발행 취소", exact: true }).click();
@@ -1013,12 +1016,35 @@ check("WP13. unpublished note", await appears(pub.getByText("발행을 취소했
   check("WP13. unpublished image no longer public", (await anon.request.get(U(`/api/media/post-images/${IMG}`))).status() === 404);
   await anon.context().close();
 }
-await main.getByRole("button", { name: "보관", exact: true }).click();
-check("WP13. archived: notice on the post page", await appears(main.getByText("보관한 글입니다", { exact: false })));
-await page.goto(U("/write/"));
+await pub.getByRole("button", { name: "발행 미리보기" }).click();
+await pub.getByRole("button", { name: "이 버전 발행" }).click();
+check("WP13. #37 setup: published again", await appears(pub.getByText("발행했습니다", { exact: false })));
+// 발행 뒤 글을 다시 불러온 상태(새 version)에서 지운다
+await pub.getByText("발행 중", { exact: true }).waitFor({ timeout: 10000 }).catch(() => {});
+check("WP13. #37: no '보관' wording on the post page", (await main.getByRole("button", { name: "보관", exact: true }).count()) === 0);
+{
+  const before = dialogMessages.length;
+  await main.getByRole("button", { name: "삭제", exact: true }).click();
+  await main.getByText("글을 삭제했습니다", { exact: false }).waitFor({ timeout: 10000 }).catch(() => {});
+  const asked = dialogMessages.slice(before).join(" | ");
+  check("WP13. #37: delete asks first and says publishing is cancelled too", asked.includes("삭제할까요") && asked.includes("발행도 함께 취소됩니다"), asked);
+}
+check("WP13. #37: done notice and the post now reads as deleted", (await appears(main.getByText("글을 삭제했습니다", { exact: false }))) && (await appears(main.getByText("삭제한 글입니다", { exact: false }))));
+await main.getByRole("link", { name: "내 글 목록으로" }).click();
 await main.getByRole("heading", { name: "내 글" }).waitFor();
 await main.getByText("불러오는 중...").waitFor({ state: "detached" }).catch(() => {});
-check("WP13. archived post leaves the list", !(await main.innerText()).includes("첫 글 (제안)"));
+check("WP13. #37: deleted post leaves the list", !(await main.innerText()).includes("첫 글 (제안)"));
+{
+  const anon = await (await browser.newContext()).newPage();
+  await anon.goto(U(`/posts/${slug1}/`));
+  check("WP13. #37: deleted post not found publicly", await appears(anon.getByText("글을 찾을 수 없습니다")));
+  await anon.context().close();
+}
+await page.goto(U(`/write/?id=${postId}`));
+check("WP13. #37: a deleted post opened by address says it was deleted", await appears(main.getByText("삭제한 글입니다", { exact: false })));
+// 주소로 바로 연 글 화면에서도 "← 내 글"이 목록으로 간다(Next 16.2 정적 경로의 client 이동이 주소를 바꾸지 않던 문제)
+await main.getByRole("link", { name: "← 내 글" }).click();
+check("WP13. #37: back link from a directly opened post reaches the list", await appears(main.getByRole("heading", { name: "내 글" }), 15000), page.url());
 
 check("no page errors", pageErrors.length === 0, pageErrors.join(" | "));
 await browser.close();
