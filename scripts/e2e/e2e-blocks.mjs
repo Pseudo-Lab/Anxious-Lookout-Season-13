@@ -128,6 +128,30 @@ function outline(node) {
       return node.type;
   }
 }
+/**
+ * 선택 메뉴처럼 화면에 고정된(스크롤을 따라 다시 놓이는) 요소를 누른다. Playwright의 자동 scroll-into-view와 메뉴 재배치가
+ * 맞물려 "outside of the viewport"로 맴도는 일을 피하려고, 화면 안에서 그 점의 실제 요소가 대상인지 확인한 뒤 그 좌표를 누른다.
+ * ok()가 참이 될 때까지(화면 정착) 다시 잰다. 끝내 맞지 않으면 누르지 않고 이유를 돌려준다(리뷰 full round7).
+ */
+async function stableClick(p, locator, ok = async () => true) {
+  let last = "";
+  for (let i = 0; i < 30; i++) {
+    const b = await locator.boundingBox().catch(() => null);
+    const hit =
+      b &&
+      (await locator
+        .evaluate((el, [x, y]) => x >= 0 && y >= 0 && x <= innerWidth && y <= innerHeight && (document.elementFromPoint(x, y) === el || el.contains(document.elementFromPoint(x, y))), [b.x + b.width / 2, b.y + b.height / 2])
+        .catch(() => false));
+    if (hit && (await ok())) {
+      await p.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+      return null;
+    }
+    last = `box=${JSON.stringify(b)} hit=${hit}`;
+    await p.waitForTimeout(100);
+  }
+  return last || "not reachable";
+}
+
 async function editingRegressions(p, h, tag) {
   const shape = async () => outline(await h.doc());
   const kb = p.keyboard;
@@ -213,15 +237,22 @@ async function editingRegressions(p, h, tag) {
   for (const where of ["menu", "toolbar"]) {
     await h.fresh();
     await kb.type("hello world");
+    // 리뷰 full round7: 자동 저장·주소(?draft=) 교체가 끝난 뒤에 줄을 화면 가운데로 옮기고 선택한다(그 사이 스크롤·좌표가 바뀌지 않게)
+    await h.blocks();
+    await h.editor.getByText("hello world").evaluate((el) => el.scrollIntoView({ block: "center" }));
+    await h.editor.getByText("hello world").click();
     // 단어 선택은 키보드로 한다(브라우저마다 더블클릭 단어 판정이 다르다). 마우스를 누르지 않았으므로 선택 메뉴가 뜬다.
     await kb.press("End");
     for (let i = 0; i < 5; i++) await kb.press("Shift+ArrowLeft");
-    await h.editor.evaluate((el) => new Promise((ok) => { const t0 = Date.now(); const tick = () => (el.editor.state.selection.to - el.editor.state.selection.from === 5 || Date.now() - t0 > 3000 ? ok() : setTimeout(tick, 30)); tick(); }));
+    const selected = () => h.editor.evaluate((el) => el.editor.state.doc.textBetween(el.editor.state.selection.from, el.editor.state.selection.to));
     const scope = where === "menu" ? h.main.getByRole("toolbar", { name: "선택한 글자 서식" }) : h.tb;
     await scope.waitFor({ timeout: 5000 }).catch(() => {});
-    // 고정 위치 메뉴는 스크롤하면 따라 움직이므로, 화면에 보이는 자리를 재서 그 좌표를 실제로 누른다
-    const sb = await scope.getByLabel("글자 크기").boundingBox();
-    await p.mouse.click(sb.x + sb.width / 2, sb.y + sb.height / 2);
+    // 누르기 직전 확인: 목록 가운데가 화면 안이고, 그 점의 실제 요소가 바로 그 목록이며, 선택이 "world"다.
+    const why = await stableClick(p, scope.getByLabel("글자 크기"), async () => (await selected()) === "world");
+    if (why) {
+      check(`F1k. ${tag} ${where}: size list reachable at a stable on-screen point with "world" selected`, false, `selected=${await selected()} ${why}`);
+      continue;
+    }
     const steps = [];
     for (let i = 0; i < 6; i++) {
       await kb.press("ArrowDown");
@@ -237,7 +268,7 @@ async function editingRegressions(p, h, tag) {
     const back = await p.evaluate(() => document.activeElement?.classList.contains("ProseMirror"));
     check(
       `F1k. ${tag} ${where}: keyboard size choice keeps focus in the list, applies 18pt to the word only, Enter adds no paragraph and returns to the editor`,
-      !steps.includes("DIV") && size === 18 && !runs.find((n) => n.text === "hello ")?.marks?.length && paragraphs === 1 && back,
+      steps.length === 6 && steps.every((x) => x === "SELECT") && size === 18 && !runs.find((n) => n.text === "hello ")?.marks?.length && paragraphs === 1 && back,
       `active=${steps.join(",")} size=${size} paragraphs=${paragraphs} back=${back}`
     );
   }
@@ -748,10 +779,11 @@ await editingRegressions(page, H, "chromium");
   });
   const mb = await menu.boundingBox().catch(() => null);
   check("F1. double-click selection shows the menu right above the selection", selRect.text === "world" && !!mb && mb.y + mb.height <= selRect.top + 1 && mb.y + mb.height >= selRect.top - 40, `${JSON.stringify(selRect)} ${JSON.stringify(mb)}`);
-  await menu.getByRole("button", { name: "굵게" }).click();
+  check("F1. menu bold reachable", (await stableClick(page, menu.getByRole("button", { name: "굵게" }))) === null);
   // 리뷰 round2 M2: 실제로 목록을 눌러 포커스가 메뉴로 옮겨 가도 메뉴·선택이 남고, 키보드로 고른 크기가 선택한 글자에 적용된다
   const size = menu.getByLabel("글자 크기");
-  await size.click();
+  const sizeWhy = await stableClick(page, size);
+  check("F1. menu size list reachable", sizeWhy === null, sizeWhy ?? "");
   check("F1. clicking the size list keeps the menu open", (await menu.count()) === 1);
   for (let i = 0; i < 6; i++) await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Enter");
