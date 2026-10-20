@@ -58,6 +58,8 @@ export function useServerDraft<V, D extends DraftLike, B>({
   draft: initialDraft,
   base,
   onDraft,
+  start: restoredStart,
+  onSaved,
 }: {
   adapter: DraftAdapter<V, D, B>;
   // 초안이 없을 때의 시작 내용(기존 대상 본문 또는 빈 새 내용)
@@ -68,24 +70,33 @@ export function useServerDraft<V, D extends DraftLike, B>({
   base: B | null;
   // 서버 초안이 만들어지거나 바뀔 때마다
   onDraft?: (draft: D) => void;
+  // 저장하지 못하고 떠났다가 되살린 입력(#36 리뷰 M1). 화면은 이것으로 시작하고, 서버 기준은 초안(또는 initial) 그대로 두어 다시 저장한다.
+  start?: V | null;
+  // 저장 요청이 성공할 때마다(화면이 닫힌 뒤 늦게 끝난 응답 포함). 저장된 초안, 보낸 내용, 그 요청의 기준 초안(새로 만들면 null).
+  onSaved?: (draft: D, saved: V, base: D | null) => void;
 }) {
   const A = adapter;
   const same = (a: V | null, b: V) => !!a && A.same(a, b);
-  const start: V = initialDraft ? A.fromDraft(initialDraft) : initial;
+  const saved: V = initialDraft ? A.fromDraft(initialDraft) : initial;
+  const start: V = restoredStart ?? saved;
+  const startsDirty = !A.same(saved, start);
   const [values, setValuesState] = useState<V>(start);
   const [draft, setDraftState] = useState<D | null>(initialDraft);
-  const [status, setStatusState] = useState<SaveStatus<D>>(initialDraft ? { kind: "saved", at: initialDraft.updatedAt } : { kind: "clean" });
+  const [status, setStatusState] = useState<SaveStatus<D>>(
+    startsDirty ? { kind: "dirty" } : initialDraft ? { kind: "saved", at: initialDraft.updatedAt } : { kind: "clean" }
+  );
   const { run } = useMutation();
 
   const valuesRef = useRef(start);
   const draftRef = useRef(initialDraft);
   // 서버에 있는 것으로 확인된 내용(초안이 없으면 시작 내용)
-  const savedRef = useRef<V>(start);
+  const savedRef = useRef<V>(saved);
   // 결과를 모르는 요청의 내용. 다음 저장은 이것부터 같은 key로 다시 보낸다
   const pendingRef = useRef<V | null>(null);
   const statusRef = useRef<SaveStatus<D>>(status);
   const baseRef = useRef(base);
   const onDraftRef = useRef(onDraft);
+  const onSavedRef = useRef(onSaved);
   const runRef = useRef(run);
   const inflight = useRef<Promise<void> | null>(null);
   const again = useRef(false);
@@ -99,6 +110,7 @@ export function useServerDraft<V, D extends DraftLike, B>({
   useEffect(() => {
     baseRef.current = base;
     onDraftRef.current = onDraft;
+    onSavedRef.current = onSaved;
     runRef.current = run;
   });
 
@@ -144,6 +156,7 @@ export function useServerDraft<V, D extends DraftLike, B>({
       retries.current = 0;
       savedRef.current = body;
       setDraft(res.data);
+      onSavedRef.current?.(res.data, body, d);
       if (same(body, valuesRef.current)) setStatus({ kind: "saved", at: res.data.updatedAt });
       else again.current = true;
       return;
@@ -289,6 +302,8 @@ export function useServerDraft<V, D extends DraftLike, B>({
       }
     };
     window.addEventListener("beforeunload", warn);
+    // 되살린 입력으로 시작했으면 바로 저장을 예약한다
+    if (startsDirty) schedule();
     return () => {
       window.removeEventListener("beforeunload", warn);
       alive.current = false;

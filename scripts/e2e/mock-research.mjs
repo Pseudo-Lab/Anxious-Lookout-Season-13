@@ -32,6 +32,8 @@ const WIDE_ANSWER = [
 const GATED_REASONS = ["not_enabled_for_account", "auth_expired", "auth_revoked", "model_unavailable", "policy_refused", "budget_exhausted"];
 
 export const researchMode = {
+  // #36 서버가 요구하는 글 본문 계약 revision(X-Post-Contract-Revision). 다른 값으로 바꾸면 구형 화면 차단을 흉내 낸다.
+  postRevision: "1.1",
   // "approved": 승인 계정 허용 / "pending": 모든 개인 API 503 policy_pending
   access: "approved",
   // 확정 정책(0004 이후): 공개 쓰기 허용. "pending"은 이전 정책 대기 상태 재현용.
@@ -1087,14 +1089,29 @@ export async function handleResearch(req, res, path, url, session) {
     if (prev.fp !== fp) return send(res, 409, { error: { code: "idempotency_conflict", message: "Idempotency conflict" } });
     return send(res, prev.status, prev.body);
   }
+  // #36 본문 쓰기(초안 만들기·저장, 명시 저장, 제안 수락)는 계약 revision 선언이 맞아야 한다. 같은 key의 성공 재생은 위에서 이미 끝났다.
+  // 거절은 쓰기 전이라 재생 대상으로 남기지 않는다.
+  const bodyWrite =
+    (req.method === "POST" && path === "/research/post-drafts") ||
+    (req.method === "PUT" && /^\/research\/post-drafts\/[^/]+$/.test(path)) ||
+    (req.method === "POST" && /^\/research\/post-drafts\/[^/]+\/commit$/.test(path)) ||
+    (req.method === "POST" && /^\/research\/post-proposals\/[^/]+\/accept$/.test(path));
+  if (bodyWrite && req.headers["x-post-contract-revision"] !== researchMode.postRevision) {
+    postRevisionRejects.push(`${req.method} ${path}`);
+    return send(res, 409, { error: { code: "post_contract_upgrade_required", message: "Reload with a compatible post editor before saving", details: { requiredRevision: researchMode.postRevision } } });
+  }
   const r = handleMutation(owner, req.method, path, body, session.user);
   // 일시적 정책/연결 실패는 재생 대상으로 저장하지 않는다.
   if (r.status !== 503) idem.set(`${owner}:${key}`, { fp, status: r.status, body: r.body });
   return send(res, r.status, r.body);
 }
 
+/** #36 revision 선언이 맞지 않아 거절한 본문 쓰기(시험 확인용). */
+export const postRevisionRejects = [];
+
 export function researchCounts() {
   return {
+    postRevisionRejects: postRevisionRejects.length,
     materials: [...items.values()].filter((i) => i.type === "material").length,
     documents: [...items.values()].filter((i) => i.type === "document").length,
     relations: [...relations.values()].filter((r) => !r.archived).length,

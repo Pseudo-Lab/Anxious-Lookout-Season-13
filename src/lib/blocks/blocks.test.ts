@@ -4,11 +4,11 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { getSchema } from "@tiptap/core";
 import { Node as PMNode } from "@tiptap/pm/model";
-import { blockExtensions } from "@/components/blocks/editor/schema";
+import { blockExtensions, resizedWeights } from "@/components/blocks/editor/schema";
 import { fromEditor, toEditor, type EditorNode } from "./adapter";
 import { BLOCK_LIMITS, canonicalBytes, isAllowedLink, parseBlockDocument } from "./document";
 import { formatChanges, formattingChanges, hasVisibleContent, imageIds, textProjection } from "./projection";
-import type { BlockDocument } from "./types";
+import { CONTRACT_REVISION, type BlockDocument } from "./types";
 
 interface Golden {
   contractVersion: string;
@@ -18,7 +18,15 @@ interface Golden {
   invalid: { name: string; input: unknown; stage: string; status: number; code: string; path: string }[];
   limits: Record<string, number>;
 }
-const golden: Golden = JSON.parse(readFileSync("backend/contracts/post-blocks-v1/golden.json", "utf8"));
+const goldenText = readFileSync("backend/contracts/post-blocks-v1/golden.json", "utf8");
+const golden: Golden = JSON.parse(goldenText);
+// 정수 값의 실수 표기(14.0)를 쓰는 fixture. JSON.parse 뒤에는 정수 14와 구별할 수 없어 JS 클라이언트는 이 입력을 만들 수도,
+// 받아도 알아볼 수도 없다(JSON.stringify는 항상 14로 쓴다). 서버가 원문 JSON에서 거절한다. 여기서는 그 사실만 확인한다.
+const FLOAT_FIXTURES = new Set(
+  (JSON.parse(goldenText, (_k, v, ctx?: { source?: string }) => (typeof v === "number" && ctx?.source?.includes(".") ? { __float: ctx.source } : v)) as Golden).invalid
+    .filter((f) => JSON.stringify(f.input).includes("__float"))
+    .map((f) => f.name)
+);
 const schema = getSchema(blockExtensions());
 
 function canonical(input: unknown): BlockDocument {
@@ -43,9 +51,14 @@ const para = (runs: unknown[] = []) => ({ id: nextId(), type: "paragraph", runs 
 const code = (text: string) => ({ id: nextId(), type: "code", text });
 
 describe("golden contract", () => {
-  it("is contract 0.3 and front limits match", () => {
-    expect(golden.contractVersion).toBe("0.3");
+  it("is contract revision 1.1 and front limits match", () => {
+    expect(golden.contractVersion).toBe(CONTRACT_REVISION);
     expect(BLOCK_LIMITS).toEqual(golden.limits);
+  });
+
+  it("float-literal fixtures are the only ones JS cannot represent, and JS never writes them", () => {
+    expect([...FLOAT_FIXTURES].sort()).toEqual(["font-size-invalid-float", "image-width-invalid-float", "table-widths-invalid-float"]);
+    expect(JSON.stringify({ fontSize: 14.0, widthPercent: 37.0, columnWidths: [1.0, 2] })).toBe('{"fontSize":14,"widthPercent":37,"columnWidths":[1,2]}');
   });
 
   describe.each(golden.valid)("valid: $name", (f) => {
@@ -65,7 +78,7 @@ describe("golden contract", () => {
     });
   });
 
-  describe.each(golden.invalid)("invalid: $name ($stage)", (f) => {
+  describe.each(golden.invalid.filter((f) => !FLOAT_FIXTURES.has(f.name)))("invalid: $name ($stage)", (f) => {
     it(`rejects with ${f.code} at ${f.path}`, () => {
       const r = parseBlockDocument(f.input);
       expect(r.ok).toBe(false);
@@ -255,5 +268,58 @@ describe("editor adapter details", () => {
     const cell = (colspan: number) => ({ type: "tableCell", attrs: { id: nextId(), colspan, rowspan: 1, align: "left" }, content: [{ type: "paragraph", attrs: { id: nextId() } }] });
     const r = fromEditor({ type: "doc", content: [{ type: "table", attrs: { id: nextId() }, content: [{ type: "tableRow", attrs: { id: nextId() }, content: [cell(2)] }] }] });
     expect(r.ok ? null : r.error.path).toBe("/blocks/0/rows/0/cells/0/colspan");
+  });
+});
+
+describe("table column resize buttons (#36 review round4 M3)", () => {
+  const norm = (w: number[]) => {
+    const g = w.reduce((a, b) => (b ? norm2(b, a % b) : a));
+    return w.map((x) => x / g);
+  };
+  const norm2 = (a: number, b: number): number => (b ? norm2(b, a % b) : a);
+  it("changes small canonical weights in both directions and keeps the other columns' ratio", () => {
+    const wide = resizedWeights([1, 2, 2], 0, 1);
+    const narrow = resizedWeights([1, 2, 2], 0, -1);
+    expect(wide[0] / wide[1]).toBeGreaterThan(1 / 2);
+    expect(narrow[0] / narrow[1]).toBeLessThan(1 / 2);
+    expect(wide[1]).toBe(wide[2]);
+    expect(narrow[1]).toBe(narrow[2]);
+    expect([...wide, ...narrow].every((x) => Number.isInteger(x) && x >= 1 && x <= 1000)).toBe(true);
+  });
+  it("keeps changing on repeated presses after normalization (no fixed point)", () => {
+    let w = [1, 2, 2];
+    for (let i = 0; i < 5; i++) {
+      const next = norm(resizedWeights(w, 0, 1));
+      expect(next[0] / next[1]).toBeGreaterThan(w[0] / w[1]);
+      w = next;
+    }
+  });
+  const share = (w: number[], i: number) => w[i] / w.reduce((a, b) => a + b, 0);
+  it("changes asymmetric weights where rounding alone would stay put (review round5)", () => {
+    // [1,600,600]: 공통 배수 1, 1×1.25 → 1 이었다
+    expect(share(resizedWeights([1, 600, 600], 0, 1), 0)).toBeGreaterThan(share([1, 600, 600], 0));
+    expect(share(resizedWeights([2, 601, 601], 0, -1), 0)).toBeLessThan(share([2, 601, 601], 0));
+  });
+  it("moves the other columns when the column itself is at a bound", () => {
+    expect(share(resizedWeights([1000, 500], 0, 1), 0)).toBeGreaterThan(share([1000, 500], 0));
+    expect(share(resizedWeights([1, 2], 0, -1), 0)).toBeLessThan(share([1, 2], 0));
+  });
+  it("every press inside the valid range changes the share in the asked direction", () => {
+    for (const w of [[1, 2, 2], [1, 600, 600], [2, 601, 601], [7, 993], [1000, 999], [3, 1000, 1], [500, 500, 500]]) {
+      for (let i = 0; i < w.length; i++) {
+        for (const dir of [1, -1] as const) {
+          const next = resizedWeights(w, i, dir);
+          expect(next.every((x) => Number.isInteger(x) && x >= 1 && x <= 1000)).toBe(true);
+          const before = share(w, i);
+          const after = share(next, i);
+          const atBound = dir === 1 ? next.every((x, j) => (j === i ? true : x === 1)) && w[i] * Math.max(1, Math.min(Math.ceil(100 / Math.min(...w)), Math.floor(1000 / Math.max(...w)))) === 1000 : false;
+          if (!atBound) expect(dir === 1 ? after > before : after < before, `${JSON.stringify(w)} col ${i} dir ${dir} → ${JSON.stringify(next)}`).toBe(true);
+        }
+      }
+    }
+  });
+  it("only stops when every column is at its bound", () => {
+    expect(resizedWeights([1000, 1], 0, 1)).toEqual([1000, 1]);
+    expect(resizedWeights([1, 1000], 0, -1)).toEqual([1, 1000]);
   });
 });

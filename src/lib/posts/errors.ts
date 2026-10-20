@@ -7,14 +7,21 @@ const POST_REASONS: Record<string, string> = {
   active_draft_exists: "이 글에는 이미 작성 중인 초안이 있습니다. 그 초안을 불러와 이어서 쓰세요.",
   post_version: "글이 그사이 바뀌었습니다(다른 저장·발행 등). 현재 상태를 다시 불러온 뒤 시도하세요.",
   base_changed: "초안을 시작한 뒤 글이 바뀌었습니다. 현재 버전과 비교한 뒤 다시 저장하세요.",
-  archived: "보관한 글이라 저장·수락·발행할 수 없습니다. 입력은 그대로 있습니다.",
+  archived: "삭제한 글이라 저장·수락·발행할 수 없습니다. 입력은 그대로 있습니다.",
   slug_taken: "공개 주소를 정하지 못했습니다. 잠시 뒤 다시 저장하세요.",
   preview_changed: "미리보기 뒤에 글·연결 문서·이미지 상태가 바뀌었습니다. 미리보기를 다시 확인한 뒤 발행하세요.",
   image_in_use: "초안·제안·버전·발행본 중 어딘가에서 쓰고 있는 이미지라 지울 수 없습니다.",
 };
 
+// #36: 이 화면보다 새 문서 계약이 필요하거나(서버 거절) 이 화면이 모르는 형식의 글·초안을 받은 경우. 저장하지 않았고 입력은 남아 있다.
+export const UNKNOWN_FORMAT_MESSAGE = "이 화면이 알지 못하는 형식의 글·초안을 받았습니다. 새 버전의 편집기가 있을 수 있으니 새로고침해 주세요.";
+export const UPGRADE_MESSAGE = "새 버전의 편집기가 있습니다. 새로고침해 주세요(이 화면에서는 저장하지 않았습니다).";
+
 export function postErrorMessage(failure: FetchFailure): string | null {
+  // 2xx인데 읽지 못한 응답: 요청이 처리됐을 수 있으므로 "저장하지 않았다"고 말하지 않는다
+  if (failure.kind === "invalid") return UNKNOWN_FORMAT_MESSAGE;
   if (failure.kind === "http") {
+    if (failure.status === 409 && failure.code === "post_contract_upgrade_required") return UPGRADE_MESSAGE;
     if (failure.code === "conflict") {
       const text = own(POST_REASONS, failure.reason ?? "");
       if (text) return text;

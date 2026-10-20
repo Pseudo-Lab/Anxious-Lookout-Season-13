@@ -8,7 +8,7 @@ describe("body buffer ownership", () => {
   it("keeps a buffer for the signed-in account and its draft", () => {
     setBodyBufferOwner("A");
     saveBodyBuffer("A", "d1", buf("secret A"));
-    expect(loadBodyBuffer("A", "d1")?.editor.content?.[0].content?.[0].text).toBe("secret A");
+    expect(loadBodyBuffer("A", "d1")?.editor?.content?.[0].content?.[0].text).toBe("secret A");
     expect(loadBodyBuffer("B", "d1")).toBeNull();
   });
 

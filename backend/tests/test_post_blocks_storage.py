@@ -211,3 +211,59 @@ def test_legacy_propose_tool_retry_before_new_shape_validation(client,admin):
     assert client.post('/api/internal/research/tools',json={'sessionId':session['id'],'requestId':runner.last['requestId'],
         'name':'research_post_propose','arguments':legacy}).status_code in (401,403)
     assert post_storage_snapshot(admin)==before
+
+
+@pytest.mark.parametrize('operation',['create','update','accept','commit'])
+def test_v11_client_revision_gate_prevents_old_bundle_writes(client,admin,operation):
+    from tests.test_posts import proposal_content
+    owner,auth=identity(client,admin)
+    method='POST';path=ROOT;body=content();status=201
+    if operation in ('update','commit'):
+        draft=make_draft(client,auth)
+        path=ROOT+'/'+draft['id'];status=200
+        if operation=='update':
+            method='PUT';body['expectedDraftRevision']=1
+        else:
+            path+='/commit';body={'expectedDraftRevision':1}
+    elif operation=='accept':
+        session,runner=turn(client,auth,owner)
+        proposed=callback(client,session,runner,'research_post_propose',{
+            **proposal_content(),'mutationId':str(uuid.uuid4())})
+        assert proposed.status_code==200,proposed.text
+        path='/api/research/post-proposals/'+proposed.json()['id']+'/accept'
+        body['expectedProposalVersion']=1;status=200
+    key=str(uuid.uuid4());old_headers={**auth,'Idempotency-Key':key}
+    before=post_storage_snapshot(admin)
+    for revision in (None,'1','1.0','1.2'):
+        request_headers={**old_headers}
+        if revision is not None: request_headers['X-Post-Contract-Revision']=revision
+        result=client.request(method,path,json=body,headers=request_headers)
+        assert result.status_code==409,result.text
+        assert result.json()['error']['code']=='post_contract_upgrade_required'
+        assert result.json()['error']['details']['requiredRevision']=='1.1'
+        assert post_storage_snapshot(admin)==before
+    accepted=client.request(method,path,json=body,headers=headers(auth,key))
+    assert accepted.status_code==status,accepted.text
+    before=post_storage_snapshot(admin)
+    replay=client.request(method,path,json=body,headers=old_headers)
+    assert replay.status_code==status and replay.json()==accepted.json()
+    assert post_storage_snapshot(admin)==before
+
+
+def test_v11_content_survives_draft_version_and_public_snapshot(client,admin):
+    from pathlib import Path
+    fixture=json.loads((Path(__file__).resolve().parents[1]/'contracts/post-blocks-v1/golden.json').read_text())
+    font=next(c for c in fixture['valid'] if c['name']=='font-size-color-order-merge')
+    table=next(c for c in fixture['valid'] if c['name']=='table-widths-ratio')
+    raw={**font['input'],'blocks':font['input']['blocks']+table['input']['blocks']}
+    expected={**font['canonical'],'blocks':font['canonical']['blocks']+table['canonical']['blocks']}
+    _,auth=identity(client,admin)
+    draft=make_draft(client,auth,content=raw)
+    assert draft['content']==expected
+    post=commit(client,auth,draft)
+    assert post['latestVersion']['content']==expected
+    from tests.test_post_publications import publish
+    published=publish(client,auth,post)
+    assert published['content']==expected
+    public=client.get('/api/public/posts/'+post['latestVersion']['slug'])
+    assert public.status_code==200 and public.json()['content']==expected

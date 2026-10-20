@@ -30,8 +30,10 @@ page.on("pageerror", (e) => pageErrors.push(e.message));
 // 대화상자는 기본으로 수락한다. dismissNext면 다음 하나만 취소한다(떠날 때 확인에서 "머무르기" 선택).
 let dismissNext = false;
 const dialogsSeen = [];
+const dialogMessages = [];
 page.on("dialog", (d) => {
   dialogsSeen.push(d.type());
+  dialogMessages.push(d.message());
   if (dismissNext) {
     dismissNext = false;
     void d.dismiss();
@@ -57,7 +59,8 @@ const api = {
     const r = await page.request.fetch(U(`/api${path}`), {
       method,
       data,
-      headers: { Origin: ORIGIN, "X-CSRF-Token": await csrf(), "Idempotency-Key": crypto.randomUUID() },
+      // #36 본문 쓰기는 계약 revision을 밝힌다(다른 요청에는 영향 없음)
+      headers: { Origin: ORIGIN, "X-CSRF-Token": await csrf(), "Idempotency-Key": crypto.randomUUID(), "X-Post-Contract-Revision": "1.1" },
     });
     return { status: r.status(), body: await r.json() };
   },
@@ -135,7 +138,7 @@ check("WP3. setup: materials + document->material relation", !!matA.id && !!matB
 await main.getByRole("link", { name: "새 글 쓰기" }).click();
 await page.waitForURL(U("/write/new/"));
 await main.getByLabel("제목").fill("첫 글");
-check("WP3. W1: no slug input; address is assigned on first save", (await main.getByLabel(/주소\(slug\)/).count()) === 0 && (await appears(main.getByText("처음 저장할 때 자동으로 정해지며", { exact: false }))));
+check("WP3. #37: editor shows no public address (input or note)", (await main.getByLabel(/주소/).count()) === 0 && !(await main.innerText()).includes("공개 주소"));
 check("WP3. W2: summary collapsed by default", (await main.getByRole("button", { name: "요약 추가(선택)" }).isVisible()) && (await main.getByLabel("요약").count()) === 0);
 const tagBox = main.getByLabel("태그", { exact: true });
 await tagBox.fill("AI,");
@@ -380,6 +383,218 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   check("WP3d. round4: explicit discard releases the leave confirmation", !(await leaveGuarded()));
 }
 
+// WP3e. #36 리뷰 M1: 서버가 새 문서 계약을 요구해 저장을 거절한 동안의 입력(제목·본문·글 정보)은 앱 안 이동·뒤로가기 뒤에도
+// 되살아나고, 새로고침·닫기는 확인으로 막는다. 서버가 다시 받으면 저장되고 확인이 풀린다. 새 글·기존 초안 모두.
+{
+  const upgrade = () => main.getByText("새 버전의 편집기가 있습니다", { exact: false });
+  const notice = () => main.getByText("저장하지 못하고 떠났던 입력", { exact: false });
+  const bodyText = async () => (await bodyBox().innerText()).replace(/\s+/g, " ").trim();
+  const viaHome = async () => {
+    const before = dialogsSeen.length;
+    await page.locator("header").getByRole("link").first().click();
+    await page.waitForURL(U("/"));
+    const asked = dialogsSeen.length !== before;
+    const guarded = await leaveGuarded();
+    await page.goBack();
+    await bodyBox().waitFor({ timeout: 15000 });
+    return { asked, guarded };
+  };
+  await setMock("postRevision=1.2");
+  try {
+    // 새 글
+    await page.goto(U("/write/new/"));
+    await main.getByLabel("제목").fill("거절 제목");
+    await writeBody(["거절 본문"]);
+    await upgrade().waitFor({ timeout: 15000 });
+    await main.getByLabel("제목").fill("거절 제목 고침");
+    await main.getByLabel("태그", { exact: true }).fill("보존태그");
+    await main.getByLabel("태그", { exact: true }).press("Enter");
+    await bodyBox().click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type(" 추가");
+    await page.waitForTimeout(300);
+    const nav = await viaHome();
+    check("WP3e. new post: in-app link leaves without a dialog; leaving the site from there still asks", !nav.asked && nav.guarded, JSON.stringify(nav));
+    check(
+      "WP3e. new post: title, body and tags are restored after Back, with a notice",
+      (await main.getByLabel("제목").inputValue()) === "거절 제목 고침" && (await bodyText()) === "거절 본문 추가" && (await main.getByText("보존태그").count()) > 0 && (await notice().count()) === 1,
+      `${await main.getByLabel("제목").inputValue()} | ${await bodyText()}`
+    );
+    await upgrade().waitFor({ timeout: 15000 });
+    const before = dialogsSeen.length;
+    dismissNext = true;
+    await page.reload({ timeout: 5000 }).catch(() => {});
+    dismissNext = false;
+    check("WP3e. new post: cancelling a reload asks and keeps the input", dialogsSeen.slice(before).includes("beforeunload") && (await main.getByLabel("제목").inputValue()) === "거절 제목 고침");
+    // 서버가 다시 받으면: 다시 열 때 되살린 입력이 저장되고 버퍼·떠날 때 확인이 풀린다
+    await setMock("postRevision=1.1");
+    await viaHome();
+    await page.waitForURL(/[?&]draft=/, { timeout: 15000 }).catch(() => {});
+    await saved();
+    const made = await api.get(`/research/post-drafts/${await draftParam()}`);
+    check("WP3e. new post: once accepted, the restored input is what the server saved", made.title === "거절 제목 고침" && made.textProjection === "거절 본문 추가" && made.tags.includes("보존태그"), JSON.stringify({ t: made.title, p: made.textProjection, tags: made.tags }));
+    check("WP3e. new post: after saving, leaving no longer asks", !(await leaveGuarded()));
+    await main.getByRole("button", { name: "초안 버리기…" }).click();
+    await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+    await main.getByText("초안을 버렸습니다").waitFor();
+
+    // 기존 초안
+    const content = { format: "post-blocks", version: 1, blocks: [{ id: crypto.randomUUID(), type: "paragraph", runs: [{ text: "초안 기준", marks: [] }], align: "left" }] };
+    const base = await api.send("POST", "/research/post-drafts", { title: "기존 초안", content, description: "", tags: [], coverImageId: null, documentIds: [] });
+    check("WP3e. existing draft: setup", base.status === 201, String(base.status));
+    await page.goto(U(`/write/new/?draft=${base.body.id}`));
+    await bodyBox().waitFor({ timeout: 15000 });
+    await setMock("postRevision=1.2");
+    await main.getByLabel("제목").fill("기존 초안 고침");
+    await bodyBox().click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type(" 거절됨");
+    await upgrade().waitFor({ timeout: 15000 });
+    const nav2 = await viaHome();
+    check(
+      "WP3e. existing draft: after an in-app link and Back, the rejected edits are restored over the saved draft",
+      !nav2.asked && nav2.guarded && (await main.getByLabel("제목").inputValue()) === "기존 초안 고침" && (await bodyText()) === "초안 기준 거절됨",
+      `${JSON.stringify(nav2)} ${await bodyText()}`
+    );
+    check("WP3e. existing draft: the server draft is unchanged while rejected", (await api.get(`/research/post-drafts/${base.body.id}`)).title === "기존 초안");
+    await upgrade().waitFor({ timeout: 15000 });
+    // 명시적으로 버리면 버퍼와 떠날 때 확인도 풀린다
+    await main.getByRole("button", { name: "초안 버리기…" }).click();
+    await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+    await main.getByText("초안을 버렸습니다").waitFor();
+    check("WP3e. existing draft: discarding releases the leave confirmation", !(await leaveGuarded()));
+  } finally {
+    await setMock("postRevision=1.1");
+  }
+}
+
+// WP3f. 리뷰 round2 M1: 되살린 입력을 다시 저장하는 요청이 끝나기 전에 또 떠나도 입력을 잃지 않는다.
+// 그 요청이 409·네트워크 실패로 끝나면 버퍼(그 사이 고친 입력 포함)가 남아 다시 되살아나고, 늦게라도 성공하면 버퍼와 떠날 때 확인이 풀린다.
+{
+  const upgrade = () => main.getByText("새 버전의 편집기가 있습니다", { exact: false });
+  const bodyText = async () => (await bodyBox().innerText()).replace(/\s+/g, " ").trim();
+  const leave = async () => {
+    await page.locator("header").getByRole("link").first().click();
+    await page.waitForURL(U("/"));
+  };
+  const back = async () => {
+    await page.goBack();
+    await bodyBox().waitFor({ timeout: 15000 });
+  };
+  // 초안 저장(PUT)을 잡아 두었다가 원하는 결과로 돌려준다
+  let held = [];
+  // 네트워크 실패로 끝낸 요청은 닫힌 편집기가 같은 key로 다시 보낸다. 그 재시도는 바로 실패시켜 뒤 단계와 섞이지 않게 한다.
+  const failedKeys = new Set();
+  const hold = (route) => {
+    if (route.request().method() !== "PUT") return route.continue();
+    if (failedKeys.has(route.request().headers()["idempotency-key"])) return route.abort("failed");
+    held.push(route);
+  };
+  const waitHeld = async () => {
+    for (let i = 0; i < 100 && !held.length; i++) await page.waitForTimeout(100);
+    return held.length > 0;
+  };
+  const content = { format: "post-blocks", version: 1, blocks: [{ id: crypto.randomUUID(), type: "paragraph", runs: [{ text: "saved-base", marks: [] }], align: "left" }] };
+  const base = await api.send("POST", "/research/post-drafts", { title: "느린 저장", content, description: "", tags: [], coverImageId: null, documentIds: [] });
+  const draftUrl = /\/research\/post-drafts\/[^/]+$/;
+  await page.goto(U(`/write/new/?draft=${base.body.id}`));
+  await bodyBox().waitFor({ timeout: 15000 });
+  await setMock("postRevision=1.2");
+  try {
+    await bodyBox().click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type(" UNSAVED-NEW-TEXT");
+    await upgrade().waitFor({ timeout: 15000 });
+    await leave();
+    await setMock("postRevision=1.1");
+    // (1) 되살린 입력의 저장을 잡아 둔 채 고치고 다시 떠난다 → 409로 끝낸다 → 돌아오면 고친 것까지 남아 있다
+    await page.route(draftUrl, hold);
+    await back();
+    const sent = await waitHeld();
+    await bodyBox().click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type(" MORE");
+    await page.waitForTimeout(300);
+    await leave();
+    check("WP3f. leaving while the restored save is pending keeps the leave guard", sent && (await leaveGuarded()), `held=${held.length}`);
+    for (const r of held.splice(0)) await r.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: { code: "post_contract_upgrade_required", message: "x", details: { requiredRevision: "1.2" } } }) });
+    await page.waitForTimeout(500);
+    check("WP3f. after that save is refused (409), the guard is still on", await leaveGuarded());
+    await back();
+    check("WP3f. back again: the input including edits made during the pending save is restored", (await bodyText()) === "saved-base UNSAVED-NEW-TEXT MORE", await bodyText());
+    // (2) 같은 상황에서 네트워크 실패
+    await waitHeld();
+    await leave();
+    for (const r of held.splice(0)) {
+      failedKeys.add(r.request().headers()["idempotency-key"]);
+      await r.abort("failed");
+    }
+    await page.waitForTimeout(500);
+    check("WP3f. after a network failure of the pending save, the guard is still on", await leaveGuarded());
+    await back();
+    check("WP3f. back again after the network failure: input restored", (await bodyText()) === "saved-base UNSAVED-NEW-TEXT MORE", await bodyText());
+    // (4) 리뷰 round3: 잡아 둔 저장(A) 중에 더 고치고 떠난다 → A는 늦게 성공, 이어 보낸 최신 저장(B)은 409 → 돌아오면 더 고친 입력까지 남는다
+    await waitHeld();
+    await bodyBox().click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type(" MORE2");
+    await page.waitForTimeout(300);
+    await leave();
+    for (const r of held.splice(0)) await r.continue();
+    const followUp = await waitHeld();
+    for (const r of held.splice(0)) await r.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: { code: "post_contract_upgrade_required", message: "x", details: { requiredRevision: "1.2" } } }) });
+    await page.waitForTimeout(500);
+    const mid = await api.get(`/research/post-drafts/${base.body.id}`);
+    check("WP3f. earlier save succeeded late, the follow-up save was refused, the guard is still on", followUp && mid.textProjection === "saved-base UNSAVED-NEW-TEXT MORE" && (await leaveGuarded()), `${followUp} ${mid.textProjection}`);
+    await back();
+    check("WP3f. back again: the newer input (after the late success) is restored, not dropped as another tab's", (await bodyText()) === "saved-base UNSAVED-NEW-TEXT MORE MORE2", await bodyText());
+    // (3) 늦게 성공: 떠난 뒤 저장이 끝나면 버퍼와 확인이 풀리고, 서버 초안에 그 입력이 있다
+    await waitHeld();
+    await leave();
+    for (const r of held.splice(0)) await r.continue();
+    await page.waitForTimeout(1000);
+    const after = await api.get(`/research/post-drafts/${base.body.id}`);
+    check("WP3f. a late successful save stores the input and releases the guard", after.textProjection === "saved-base UNSAVED-NEW-TEXT MORE MORE2" && !(await leaveGuarded()), `${after.textProjection} guard=${await leaveGuarded()}`);
+    await page.unroute(draftUrl, hold);
+    await back();
+    check("WP3f. re-opened after the late save: the server draft is shown without a stale restore", (await bodyText()) === "saved-base UNSAVED-NEW-TEXT MORE MORE2" && (await main.getByText("저장하지 못하고 떠났던 입력", { exact: false }).count()) === 0, await bodyText());
+    await main.getByRole("button", { name: "초안 버리기…" }).click();
+    await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+    await main.getByText("초안을 버렸습니다").waitFor();
+  } finally {
+    await page.unroute(draftUrl, hold).catch(() => {});
+    await setMock("postRevision=1.1");
+  }
+}
+
+// WP3g. 리뷰 round5 F8: 본문이 상한을 넘어 저장하지 못하는 동안 넣은 이미지(화면의 편집기에만 있고 서버는 아직 모름)도
+// '사용 중(이 글)'로 보여 지울 수 없다.
+{
+  await page.goto(U("/write/new/"));
+  await main.getByLabel("제목").fill("상한 중 이미지");
+  await writeBody(["valid-base"]);
+  await saved();
+  const draftId = await draftParam();
+  await page.keyboard.insertText("x".repeat(20001));
+  await main.getByText("저장할 수 있는 크기·개수 상한을 넘었습니다", { exact: false }).waitFor({ timeout: 10000 });
+  const panel = main.getByRole("region", { name: "이미지" });
+  await panel.getByLabel("이미지 파일").setInputFiles({ name: "상한중.png", mimeType: "image/png", buffer: PNG });
+  await panel.getByText("올렸습니다", { exact: false }).waitFor({ timeout: 10000 });
+  const newest = (await api.get("/research/post-images")).items[0];
+  const row = panel.locator("li").filter({ has: page.locator(`img[src$="${newest.id}"]`) });
+  await row.waitFor({ timeout: 10000 }).catch(() => {});
+  const inBody = (await bodyBox().locator("figure[data-type=post-image]").count()) === 1;
+  const server = await api.get(`/research/post-drafts/${draftId}`);
+  check(
+    "WP3g. image inserted while the body is over the limit shows '사용 중(이 글)' and no delete (server does not reference it yet)",
+    inBody && (await row.getByText("사용 중(이 글)").count()) === 1 && (await row.getByRole("button", { name: "지우기" }).count()) === 0 && !JSON.stringify(server.content).includes(newest.id),
+    `inBody=${inBody} row=${(await row.innerText().catch(() => "")).replace(/\s+/g, " ")}`
+  );
+  await main.getByRole("button", { name: "초안 버리기…" }).click();
+  await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+  await main.getByText("초안을 버렸습니다").waitFor();
+}
+
 // WP4. #31: 자료만 바탕으로 한 글, 보관 자료 제외, 문서 해제 뒤에도 자료 유지, 요약 없는 글의 목록 발췌(W2)
 {
   const docB = (await api.send("POST", "/research/documents", { title: "바탕 문서 B", content: "문서 B" })).body;
@@ -481,10 +696,11 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   await main.getByText("초안을 버렸습니다").waitFor();
 }
 
-// WP5. 기존 글 수정: 주소는 읽기 전용, 새 버전, 버전 비교에 글 정보 변경
+// WP5. 기존 글 수정: 편집기에 주소 없음(#37), 새 버전, 버전 비교에 글 정보 변경
 await page.goto(U(`/write/?id=${postId}`));
 await main.getByRole("button", { name: "내용 수정" }).click();
-check("WP5. W1: public address read-only for saved post", (await main.getByLabel("공개 주소").inputValue()) === `/posts/${slug1}/` && (await main.getByLabel("공개 주소").getAttribute("readonly")) !== null);
+await bodyBox().waitFor({ timeout: 15000 });
+check("WP5. #37: editor of a saved post shows no public address", (await main.getByLabel(/주소/).count()) === 0 && !(await main.innerText()).includes("공개 주소"));
 // 직접 추가한 자료를 빼면 다음 버전에서 빠진다(자동 포함 자료도 같은 방식으로 뺄 수 있다)
 await main.getByRole("region", { name: "바탕이 된 자료" }).locator("li", { hasText: "직접 고른 자료" }).getByRole("button", { name: "자료 빼기" }).click();
 await writeBody(["# 첫 글 본문", "두 번째 버전 문장"]);
@@ -704,6 +920,20 @@ check("WP12. public post scope: bounded", await appears(chat.getByText("다음 �
 }
 
 // WP12b. 쓰는 이미지는 지울 수 없고, 쓰지 않는 이미지는 지울 수 있다
+// #36 F8: 앞부분은 usage가 없는 구형 서버 응답으로 본다(이 글 판정 + 삭제 409 안내 fallback). 뒤에서 usage가 있는 목록을 본다.
+const stripUsage = async (route) => {
+  // 가로채기를 풀 때 진행 중이던 요청이 있으면 이미 처리된 route가 되므로 오류를 삼킨다
+  try {
+    const res = await route.fetch();
+    const body = await res.json();
+    for (const it of body.items ?? []) delete it.usage;
+    await route.fulfill({ response: res, json: body });
+  } catch {
+    await route.continue().catch(() => {});
+  }
+};
+const IMAGE_LIST = /\/api\/research\/post-images\?/;
+await page.route(IMAGE_LIST, stripUsage);
 await page.goto(U(`/write/?id=${postId}`));
 await main.getByRole("button", { name: "내용 수정" }).click();
 const imgPanel = main.getByRole("region", { name: "이미지" });
@@ -719,31 +949,62 @@ await imgPanel.getByLabel("이미지 파일").setInputFiles({ name: "spare.webp"
 await main.getByText("이미지를 올리는 중입니다", { exact: false }).waitFor();
 check(
   "WP12b. close/save locked while uploading in an existing post",
-  (await main.getByRole("button", { name: "편집 닫기(초안 보관)" }).isDisabled()) && (await main.getByRole("button", { name: "새 버전으로 저장" }).isDisabled())
+  (await main.getByRole("button", { name: "편집 닫기(초안 유지)" }).isDisabled()) && (await main.getByRole("button", { name: "새 버전으로 저장" }).isDisabled())
 );
 releaseSpare();
 await imgPanel.getByText("올렸습니다", { exact: false }).waitFor();
 await page.unroute("**/api/research/post-images", holdSpare);
-check("WP12b. close unlocked after upload", !(await main.getByRole("button", { name: "편집 닫기(초안 보관)" }).isDisabled()));
+check("WP12b. close unlocked after upload", !(await main.getByRole("button", { name: "편집 닫기(초안 유지)" }).isDisabled()));
 // 방금 넣은 이미지 블록은 본문에서 다시 빼서 쓰지 않는 이미지로 만든다(본문을 새로 쓴다)
 check("WP12b. spare image block inserted", (await bodyBox().locator("figure[data-type=post-image]").count()) === 1);
+const spare = (await api.get("/research/post-images")).items.find((i) => i.mimeType === "image/webp");
+const rowOf = (id) => imgPanel.locator("li").filter({ has: page.locator(`img[src$="${id}"]`) });
+// #36 F8: 이 글의 본문·표지에서 쓰는 이미지는 '지우기' 대신 '사용 중(이 글)'
+await rowOf(spare.id).waitFor({ timeout: 10000 }).catch(() => {});
+check(
+  "WP12b. F8: images used in this post show '사용 중(이 글)' instead of delete (body and cover)",
+  (await rowOf(spare.id).getByText("사용 중(이 글)").count()) === 1 && (await rowOf(spare.id).getByRole("button", { name: "지우기" }).count()) === 0 &&
+    (await rowOf(IMG).getByText("사용 중(이 글)").count()) === 1 && (await rowOf(IMG).getByRole("button", { name: "지우기" }).count()) === 0
+);
 await writeBody(["두 번째 버전 문장"]);
 await saved();
-const spare = (await api.get("/research/post-images")).items.find((i) => i.mimeType === "image/webp");
-await imgPanel.locator("li").filter({ has: page.locator(`img[src$="${IMG}"]`) }).getByRole("button", { name: "지우기" }).click();
+// 표지에서 빼면 이 화면은 다른 곳(이전 버전)의 쓰임을 모르므로 지우기가 보이고, 서버가 이유와 함께 거절한다
+await imgPanel.getByRole("button", { name: "표지 빼기" }).click();
+await rowOf(IMG).getByRole("button", { name: "지우기" }).click();
 check("WP12b. in-use image delete refused", await appears(imgPanel.getByText("쓰고 있는 이미지라 지울 수 없습니다", { exact: false })));
-await imgPanel.locator("li").filter({ has: page.locator(`img[src$="${spare.id}"]`) }).getByRole("button", { name: "지우기" }).click();
+await rowOf(spare.id).getByRole("button", { name: "지우기" }).click();
 let spareGone = false;
 for (let i = 0; i < 20 && !spareGone; i++) {
   spareGone = !(await api.get("/research/post-images")).items.some((x) => x.id === spare.id);
   if (!spareGone) await page.waitForTimeout(300);
 }
 check("WP12b. unused image deleted", spareGone);
+await page.unroute(IMAGE_LIST, stripUsage);
+await page.waitForTimeout(300);
+// #36 F7: 이미지·표지 패널 접기. 접힘은 이 브라우저에 기억되어 다시 열어도 접혀 있다
+await imgPanel.getByRole("button", { name: "이미지·표지 접기" }).click();
+check("WP12b. F7: collapsed panel hides the cover row and image list, keeps upload", (await imgPanel.getByText("표지:").count()) === 0 && (await imgPanel.getByRole("button", { name: "이미지 올리기" }).count()) === 1);
+await saved();
+await page.reload();
+await main.getByRole("button", { name: "초안 이어서 편집" }).click();
+await bodyBox().waitFor({ timeout: 15000 });
+check("WP12b. F7: the panel stays collapsed after reopening", (await imgPanel.getByRole("button", { name: "이미지·표지 펼치기" }).getAttribute("aria-expanded")) === "false" && (await imgPanel.getByText("표지:").count()) === 0);
+await imgPanel.getByRole("button", { name: "이미지·표지 펼치기" }).click();
+check("WP12b. F7: expanding shows the panel again", (await imgPanel.getByText("표지:").count()) === 1);
+// #36 F8: 서버가 알려 준 사용처(usage). 표지에서 뺀 이미지도 이전 버전·발행본에 남아 있으면 지우기 대신 그 이유를 보인다
+await imgPanel.getByRole("button", { name: "내 이미지" }).click();
+await rowOf(IMG).waitFor({ timeout: 10000 }).catch(() => {});
+check(
+  // 앞선 시험의 종료된 초안·제안도 계약대로 사용처에 든다(초안·제안·버전·발행본 순서)
+  "WP12b. F8: an image kept by past versions and the publication shows its usage kinds without delete",
+  /사용 중\((초안·)?(제안·)?버전·발행본\)/.test(await rowOf(IMG).innerText()) && (await rowOf(IMG).getByRole("button", { name: "지우기" }).count()) === 0,
+  (await rowOf(IMG).innerText().catch(() => "")).replace(/\s+/g, " ")
+);
 await main.getByRole("button", { name: "초안 버리기…" }).click();
 await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
 await main.getByRole("button", { name: "내용 수정" }).waitFor();
 
-// WP13. 발행 취소·보관
+// WP13. 발행 취소, 다시 발행한 글 삭제(#37: 확인 → 목록에서 사라짐 → 공개 404)
 await page.goto(U(`/write/?id=${postId}`));
 await pub.getByRole("button", { name: "발행 취소…" }).click();
 await pub.getByRole("button", { name: "발행 취소", exact: true }).click();
@@ -755,12 +1016,35 @@ check("WP13. unpublished note", await appears(pub.getByText("발행을 취소했
   check("WP13. unpublished image no longer public", (await anon.request.get(U(`/api/media/post-images/${IMG}`))).status() === 404);
   await anon.context().close();
 }
-await main.getByRole("button", { name: "보관", exact: true }).click();
-check("WP13. archived: notice on the post page", await appears(main.getByText("보관한 글입니다", { exact: false })));
-await page.goto(U("/write/"));
+await pub.getByRole("button", { name: "발행 미리보기" }).click();
+await pub.getByRole("button", { name: "이 버전 발행" }).click();
+check("WP13. #37 setup: published again", await appears(pub.getByText("발행했습니다", { exact: false })));
+// 발행 뒤 글을 다시 불러온 상태(새 version)에서 지운다
+await pub.getByText("발행 중", { exact: true }).waitFor({ timeout: 10000 }).catch(() => {});
+check("WP13. #37: no '보관' wording on the post page", (await main.getByRole("button", { name: "보관", exact: true }).count()) === 0);
+{
+  const before = dialogMessages.length;
+  await main.getByRole("button", { name: "삭제", exact: true }).click();
+  await main.getByText("글을 삭제했습니다", { exact: false }).waitFor({ timeout: 10000 }).catch(() => {});
+  const asked = dialogMessages.slice(before).join(" | ");
+  check("WP13. #37: delete asks first and says publishing is cancelled too", asked.includes("삭제할까요") && asked.includes("발행도 함께 취소됩니다"), asked);
+}
+check("WP13. #37: done notice and the post now reads as deleted", (await appears(main.getByText("글을 삭제했습니다", { exact: false }))) && (await appears(main.getByText("삭제한 글입니다", { exact: false }))));
+await main.getByRole("link", { name: "내 글 목록으로" }).click();
 await main.getByRole("heading", { name: "내 글" }).waitFor();
 await main.getByText("불러오는 중...").waitFor({ state: "detached" }).catch(() => {});
-check("WP13. archived post leaves the list", !(await main.innerText()).includes("첫 글 (제안)"));
+check("WP13. #37: deleted post leaves the list", !(await main.innerText()).includes("첫 글 (제안)"));
+{
+  const anon = await (await browser.newContext()).newPage();
+  await anon.goto(U(`/posts/${slug1}/`));
+  check("WP13. #37: deleted post not found publicly", await appears(anon.getByText("글을 찾을 수 없습니다")));
+  await anon.context().close();
+}
+await page.goto(U(`/write/?id=${postId}`));
+check("WP13. #37: a deleted post opened by address says it was deleted", await appears(main.getByText("삭제한 글입니다", { exact: false })));
+// 주소로 바로 연 글 화면에서도 "← 내 글"이 목록으로 간다(Next 16.2 정적 경로의 client 이동이 주소를 바꾸지 않던 문제)
+await main.getByRole("link", { name: "← 내 글" }).click();
+check("WP13. #37: back link from a directly opened post reaches the list", await appears(main.getByRole("heading", { name: "내 글" }), 15000), page.url());
 
 check("no page errors", pageErrors.length === 0, pageErrors.join(" | "));
 await browser.close();

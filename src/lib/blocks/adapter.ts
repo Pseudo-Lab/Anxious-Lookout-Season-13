@@ -29,12 +29,15 @@ export interface EditorNode {
 
 // ---- 블록 → 편집기 ----
 
+// 색과 글자 크기(#36)는 편집기에서 한 textStyle mark의 두 속성이다.
 function editorMarks(run: Run): EditorNode["marks"] {
   const marks: NonNullable<EditorNode["marks"]> = [];
+  let style: Record<string, unknown> | null = null;
   for (const m of run.marks) {
     if (typeof m === "string") marks.push({ type: m });
-    else marks.push({ type: "textStyle", attrs: { color: m.color } });
+    else style = { color: null, fontSize: null, ...(style ?? {}), ...m };
   }
+  if (style) marks.push({ type: "textStyle", attrs: style });
   if (run.link) marks.push({ type: "link", attrs: { href: run.link } });
   return marks;
 }
@@ -91,7 +94,7 @@ function blockNode(b: Block): EditorNode {
     case "table":
       return {
         type: "table",
-        attrs: { id: b.id },
+        attrs: { id: b.id, columnWidths: b.columnWidths ?? null },
         content: b.rows.map((row) => ({
           type: "tableRow",
           attrs: { id: row.id },
@@ -130,6 +133,8 @@ function runsOf(n: EditorNode): Run[] {
       if (m.type === "link") link = String(m.attrs?.href ?? "");
       else if (m.type === "textStyle") {
         if (m.attrs?.color) marks.push({ color: String(m.attrs.color) });
+        // 글자 크기는 숫자 그대로 넘겨 검사가 허용 집합을 확인한다(조용히 고치거나 버리지 않는다)
+        if (m.attrs?.fontSize !== null && m.attrs?.fontSize !== undefined) marks.push({ fontSize: m.attrs.fontSize as 14 });
       } else marks.push(m.type as Mark);
     }
     // 줄바꿈은 그 노드 자신의 marks·link를 가진 "\n" run이다(같은 서식의 인접 run은 검사 단계에서 합쳐진다)
@@ -185,7 +190,7 @@ function fromNode(n: EditorNode): Block {
         imageId: String(attr(n, "imageId")),
         alt: String(attr(n, "alt") ?? ""),
         caption: runsOf(n),
-        widthPercent: Number(attr(n, "widthPercent")) as 100,
+        widthPercent: Number(attr(n, "widthPercent")),
         align: alignOf(n, "align"),
       };
     case "embed":
@@ -194,6 +199,7 @@ function fromNode(n: EditorNode): Block {
       return {
         id,
         type: "table",
+        ...(Array.isArray(attr(n, "columnWidths")) ? { columnWidths: attr(n, "columnWidths") as number[] } : {}),
         rows: (n.content ?? []).map((row) => {
           const cells = row.content ?? [];
           return {
