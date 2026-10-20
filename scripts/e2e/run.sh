@@ -84,7 +84,7 @@ STATUS=0
 mkdir -p "$WORK/shots"
 docker run --rm --network "container:$NAME" --ipc=host -e HOME=/tmp \
   -e ORIGIN="http://$ORIGIN_HOST:8080" -e EXPECT_INSECURE="$EXPECT_INSECURE" -e BASE_PATH="$BASE" -e EXPECT_SHA="$SHA" \
-  -e SHOTS_DIR=/shots -v "$WORK/shots:/shots" \
+  -e SHOTS_DIR=/shots -e THEME_FAULT="${THEME_FAULT:-}" -v "$WORK/shots:/shots" \
   -v "$E2E_DIR:/e2e:ro" "$PW_IMAGE" sh -c "
     mkdir -p /tmp/t && cd /tmp/t && npm i --silent playwright@$PW_VERSION axe-core@$AXE_VERSION >/dev/null 2>&1 &&
     rc=0; for s in $SCRIPTS; do echo \"== \$s\"; cp /e2e/\$s . && node \$s || rc=1; done;
