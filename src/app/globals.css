@@ -413,12 +413,19 @@ html[data-chat-resizing] body {
 /*
  * #38 D-38-1 사용자 선택 색(userColor.ts). 저장 값은 그대로 두고 그릴 때만 고른다.
  * - 글자색(pb-color): inline color는 저장 값, --pb-cd는 같은 색상으로 밝기만 올린 다크 모드 값.
- * - 배경이 있는 칸(pb-on-light / pb-on-dark): 칸 배경은 저장 값 그대로, 칸 안 글자·링크·코드는 그 배경에 맞는 색.
- *   밝은 배경 칸은 다크 모드에서도 어두운 글자와 저장된 글자색을 쓴다.
+ * - 배경이 있는 칸(pb-cell-bg): 칸 배경은 저장 값 그대로, 칸 안 기본 글자(--pb-cell-fg)·링크(--pb-cell-link)는
+ *   그 실제 배경 위 AA 색(두 모드 같음). 인라인 코드는 칸 안에서 고정 짝(밝은 남색 바탕·짙은 남색 글자)을 쓴다.
+ * - 칸 안 사용자 글자색(pb-cell-color, --pb-cell-cd): 라이트는 저장 값(D-38-3), 다크는 그 칸 배경 위 AA로 옮긴 값.
+ *   편집기는 mark span 안쪽 또는 바깥쪽 장식 span에 붙고, renderer는 mark span 자체에 붙는다(세 경우 모두 같은 결과).
  */
 @media (prefers-color-scheme: dark) {
   .pb-color {
     color: var(--pb-cd) !important;
+  }
+  .pb-cell-color.pb-color,
+  .pb-cell-color .pb-color,
+  .pb-color .pb-cell-color {
+    color: var(--pb-cell-cd) !important;
   }
   .pb-swatch {
     background-color: var(--pb-cd) !important;
@@ -427,25 +434,14 @@ html[data-chat-resizing] body {
 .pb-swatch {
   background-color: var(--pb-c);
 }
-.pb-on-light {
-  color: #1c1917;
-  --color-accent: #4f46e5;
-  --accent-strong: #3730a3;
-  --color-accent-light: #e0e7ff;
-  --color-muted: #78716c;
+.pb-cell-bg {
+  color: var(--pb-cell-fg);
+  --color-accent: var(--pb-cell-link);
+  --accent-strong: var(--pb-cell-link);
 }
-.pb-on-light .pb-color {
-  color: var(--pb-c) !important;
-}
-.pb-on-dark {
-  color: #fafaf9;
-  --color-accent: oklch(78.5% 0.115 274.713);
-  --accent-strong: oklch(87% 0.065 274.039);
-  --color-accent-light: oklch(25.7% 0.09 281.288);
-  --color-muted: oklch(70.9% 0.01 56.259);
-}
-.pb-on-dark .pb-color {
-  color: var(--pb-cd) !important;
+.prose .pb-cell-bg code:not(pre code) {
+  background: #e0e7ff;
+  color: #3730a3;
 }
 
 /* #32 블록 편집기(Tiptap). 공개 renderer와 같은 배치를 쓰도록 클래스 이름(pb-*)을 맞춘다. */

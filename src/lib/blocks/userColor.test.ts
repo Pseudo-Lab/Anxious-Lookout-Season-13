@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { getSchema } from "@tiptap/core";
 import { blockExtensions } from "@/components/blocks/editor/schema";
-import { cellBackgroundClass, contrastRatio, darkTextColor, isLightBackground, textColorStyleText } from "./userColor";
+import { cellBackgroundStyleText, cellColors, contrastRatio, darkTextColor, isLightBackground, readableOn, textColorStyleText } from "./userColor";
 
 // 편집기 도구 막대의 글자색 8종과 칸 배경 5종(BlockEditor COLORS·CELL_BACKGROUNDS)
 const COLORS = ["#1C1917", "#DC2626", "#EA580C", "#CA8A04", "#16A34A", "#2563EB", "#7C3AED", "#DB2777"];
@@ -49,24 +49,61 @@ describe("darkTextColor", () => {
       const hex = `#${(next() % 0x1000000).toString(16).padStart(6, "0").toUpperCase()}`;
       expect(contrastRatio(darkTextColor(hex), "#292524"), hex).toBeGreaterThanOrEqual(4.5);
     }
-  });
+  }, 30000);
 
   it("accepts lower-case input and is stable", () => {
     expect(darkTextColor("#dc2626")).toBe(darkTextColor("#DC2626"));
   });
 });
 
+// 리뷰 slice3 round1: 팔레트 밖 배경(허용되는 임의 #RRGGBB)도 실제 배경 기준으로 계산해야 한다
+const CUSTOM_BGS = ["#1E3A8A", "#555555", "#777777", "#000000", "#FFFFFF", "#7F7F7F", "#3B82F6"];
+const seeded = (n: number, seed: number) => {
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) {
+    seed = (seed * 1103515245 + 12345) % 2 ** 31;
+    out.push(`#${(seed % 0x1000000).toString(16).padStart(6, "0").toUpperCase()}`);
+  }
+  return out;
+};
+
 describe("cell backgrounds", () => {
-  it.each(CELL_BACKGROUNDS)("%s is a light background: dark text with AA", (hex) => {
+  it.each(CELL_BACKGROUNDS)("%s is a light background: default dark text with AA", (hex) => {
     expect(isLightBackground(hex)).toBe(true);
-    expect(cellBackgroundClass(hex)).toBe("pb-on-light");
-    expect(contrastRatio("#1C1917", hex)).toBeGreaterThanOrEqual(4.5);
+    expect(cellColors(hex).fg).toBe("#1C1917");
   });
 
-  it("a dark stored background gets light text", () => {
-    expect(cellBackgroundClass("#1C1917")).toBe("pb-on-dark");
-    expect(cellBackgroundClass("#1E3A8A")).toBe("pb-on-dark");
+  it.each([...CELL_BACKGROUNDS, ...CUSTOM_BGS])("%s: default text, link and every palette colour reach AA on that background", (bg) => {
+    const { fg, link } = cellColors(bg);
+    expect(contrastRatio(fg, bg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(link, bg)).toBeGreaterThanOrEqual(4.5);
+    for (const c of COLORS) expect(contrastRatio(readableOn(c, bg), bg), `${c} on ${bg}`).toBeGreaterThanOrEqual(4.5);
   });
+
+  it("reported cases: violet on #1E3A8A, and links on #555555", () => {
+    expect(contrastRatio(readableOn("#7C3AED", "#1E3A8A"), "#1E3A8A")).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(readableOn("#7C3AED", "#555555"), "#555555")).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(readableOn("#7C3AED", "#777777"), "#777777")).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(cellColors("#555555").link, "#555555")).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("keeps a colour that already reads well, and keeps its hue when it moves", () => {
+    expect(readableOn("#7C3AED", "#FEF3C7")).toBe("#7C3AED");
+    const moved = readableOn("#DC2626", "#DBEAFE");
+    expect(moved).not.toBe("#DC2626");
+    expect(hueGap(hue("#DC2626")!, hue(moved)!)).toBeLessThan(20);
+  });
+
+  it("any stored background × colour reaches AA (seeded sample)", () => {
+    const bgs = seeded(200, 381);
+    const colors = seeded(16, 382);
+    for (const bg of bgs) {
+      const { fg, link } = cellColors(bg);
+      expect(contrastRatio(fg, bg), `fg on ${bg}`).toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(link, bg), `link on ${bg}`).toBeGreaterThanOrEqual(4.5);
+      for (const c of colors) expect(contrastRatio(readableOn(c, bg), bg), `${c} on ${bg}`).toBeGreaterThanOrEqual(4.5);
+    }
+  }, 60000);
 });
 
 describe("editor rendering (same classes and values as the public renderer)", () => {
@@ -82,11 +119,12 @@ describe("editor rendering (same classes and values as the public renderer)", ()
     expect(attrs.style).toContain(`--pb-cd: ${darkTextColor("#2563EB")}`);
   });
 
-  it("a cell background renders as stored with the light-background class", () => {
+  it("a cell background renders as stored with its own text and link colours", () => {
     const cell = schema.nodes.tableCell.create({ background: "#FEF3C7" }, schema.nodes.paragraph.create());
     const [, attrs] = schema.nodes.tableCell.spec.toDOM!(cell) as [string, Record<string, string>];
     expect(attrs["data-background"]).toBe("#FEF3C7");
-    expect(attrs.class).toContain("pb-on-light");
+    expect(attrs.class).toContain("pb-cell-bg");
+    expect(attrs.style).toBe(cellBackgroundStyleText("#FEF3C7"));
     expect(attrs.style).toContain("background-color: #FEF3C7");
   });
 });

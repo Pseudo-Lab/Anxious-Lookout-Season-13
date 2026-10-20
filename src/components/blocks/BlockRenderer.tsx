@@ -3,7 +3,7 @@
 import { Fragment, type CSSProperties, type ReactNode } from "react";
 import { parseBlockDocument } from "@/lib/blocks/document";
 import { clampImageWidth, ptToPx, type Align, type Block, type FlowBlock, type ListBlock, type Mark, type Run, type TableBlock } from "@/lib/blocks/types";
-import { cellBackgroundClass, textColorStyle, TEXT_COLOR_CLASS } from "@/lib/blocks/userColor";
+import { CELL_BG_CLASS, CELL_TEXT_COLOR_CLASS, cellBackgroundStyle, cellTextColorVar, textColorStyle, TEXT_COLOR_CLASS } from "@/lib/blocks/userColor";
 import { ownImageUrl } from "@/lib/posts/api";
 import ScrollBox from "@/components/research/ScrollBox";
 import YouTubeCard from "./YouTubeCard";
@@ -28,11 +28,15 @@ function lines(text: string) {
   ));
 }
 
-function wrap(node: ReactNode, mark: Mark, key: number): ReactNode {
+function wrap(node: ReactNode, mark: Mark, key: number, cellBg?: string): ReactNode {
   if (typeof mark !== "string") {
-    // #38 D-38-1: 글자색은 다크 모드에서 밝기만 올린 색으로 그린다(userColor)
+    // #38 D-38-1: 글자색은 다크 모드에서 밝기만 올린 색으로 그린다(userColor). 배경 칸 안에서는 그 배경 위 AA 값.
     if ("color" in mark)
-      return (
+      return cellBg ? (
+        <span key={key} className={`${TEXT_COLOR_CLASS} ${CELL_TEXT_COLOR_CLASS}`} style={{ ...textColorStyle(mark.color), "--pb-cell-cd": cellTextColorVar(mark.color, cellBg) } as CSSProperties}>
+          {node}
+        </span>
+      ) : (
         <span key={key} className={TEXT_COLOR_CLASS} style={textColorStyle(mark.color)}>
           {node}
         </span>
@@ -57,13 +61,13 @@ function wrap(node: ReactNode, mark: Mark, key: number): ReactNode {
   }
 }
 
-function Runs({ runs }: { runs: Run[] }) {
+function Runs({ runs, cellBg }: { runs: Run[]; cellBg?: string }) {
   return (
     <>
       {runs.map((run, i) => {
         // 바깥부터 bold → … → color → fontSize 순으로 감싼다(mark 순서는 canonical로 고정)
         let node: ReactNode = lines(run.text);
-        for (let m = run.marks.length - 1; m >= 0; m--) node = wrap(node, run.marks[m], m);
+        for (let m = run.marks.length - 1; m >= 0; m--) node = wrap(node, run.marks[m], m, cellBg);
         if (run.link) {
           const external = !run.link.startsWith("#");
           node = external ? (
@@ -178,11 +182,15 @@ function BlockView({ block }: { block: Block }) {
                   {row.cells.map((cell) => {
                     const Cell = row.header ? "th" : "td";
                     return (
-                      <Cell key={cell.id} className={cell.background ? cellBackgroundClass(cell.background) : undefined} style={{ textAlign: TEXT_ALIGN[cell.align], backgroundColor: cell.background }}>
+                      <Cell
+                        key={cell.id}
+                        className={cell.background ? CELL_BG_CLASS : undefined}
+                        style={{ textAlign: TEXT_ALIGN[cell.align], ...(cell.background ? cellBackgroundStyle(cell.background) : {}) }}
+                      >
                         <span className="cell">
                           {cell.blocks.map((p) => (
                             <p key={p.id} className="my-0">
-                              <Runs runs={p.runs} />
+                              <Runs runs={p.runs} cellBg={cell.background} />
                             </p>
                           ))}
                         </span>

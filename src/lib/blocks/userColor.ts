@@ -1,7 +1,8 @@
 // #38 D-38-1 사용자 선택 색의 다크 모드 규칙. 저장 값(#RRGGBB)은 바꾸지 않고 그릴 때만 쓴다.
 // - 글자색: 다크 모드에서는 같은 색상(hue)을 유지한 채 밝기만 올린 색으로 그린다(어두운 면에서 AA 4.5:1 이상).
-// - 칸 배경: 저장된 배경을 그대로 쓰고, 그 칸 안은 배경에 맞는 글자색(밝은 배경이면 어두운 글자)으로 그린다.
-// 편집기와 공개 renderer가 같은 함수와 같은 CSS 클래스(globals.css의 pb-color·pb-on-light·pb-on-dark)를 쓴다.
+// - 칸 배경: 저장된 배경을 그대로 쓰고, 그 칸 안의 기본 글자·링크는 그 실제 배경 위 AA 색으로 그린다(두 모드 같음).
+//   칸 안 사용자 글자색은 라이트 = 저장 값 그대로(D-38-3), 다크 = 그 칸 배경 위 AA로 옮긴 값(리뷰 slice3 round1).
+// 편집기와 공개 renderer가 같은 함수와 같은 CSS 클래스(globals.css의 pb-color·pb-cell-bg·pb-cell-color)를 쓴다.
 
 import type { CSSProperties } from "react";
 
@@ -123,6 +124,53 @@ export function isLightBackground(hex: string) {
   return contrastRatio(hex, LIGHT_TEXT) >= contrastRatio(hex, DARK_TEXT);
 }
 
+/** 칸 안 글자·링크의 목표 대비(AA). 검정·흰색 중 하나는 어떤 배경에서도 4.58:1 이상이라 항상 닿을 수 있다. */
+const CELL_TARGET = 4.5;
+
+/** 배경 bg 위에서 hex를 읽을 수 있게: 이미 AA면 그대로, 아니면 같은 색상으로 밝기를 더 적게 바꾸는 쪽(밝게·어둡게)으로 AA까지 옮긴다. */
+export function readableOn(hex: string, bg: string, target = CELL_TARGET): string {
+  const key = hex.toUpperCase();
+  const rgb = parse(key);
+  if (!rgb || !parse(bg) || contrastRatio(key, bg) >= target) return key;
+  const [L, a, b] = toOklab(rgb);
+  const at = (l: number) => toHex(atLightness(l, a, b));
+  const ok = (l: number) => contrastRatio(at(l), bg) >= target;
+  // 한쪽 끝(흰색·검정)까지 가도 모자라면 그 방향은 쓸 수 없다
+  const search = (from: number, to: number) => {
+    if (!ok(to)) return null;
+    let bad = from;
+    let good = to;
+    for (let i = 0; i < 24; i++) {
+      const mid = (bad + good) / 2;
+      if (ok(mid)) good = mid;
+      else bad = mid;
+    }
+    return good;
+  };
+  const up = search(L, 1);
+  const down = search(L, 0);
+  const l = up === null ? down : down === null ? up : Math.abs(up - L) <= Math.abs(L - down) ? up : down;
+  // 양 끝은 검정·흰색이라 4.5는 늘 닿는다(안전망)
+  return l === null ? (contrastRatio("#000000", bg) >= contrastRatio("#FFFFFF", bg) ? "#000000" : "#FFFFFF") : at(l);
+}
+
+/** 테마 링크색(라이트 --accent, 다크 --accent). 칸 안 링크는 배경에 가까운 쪽 테마의 링크색에서 시작한다. */
+const LINK_LIGHT = "#4F46E5";
+const LINK_DARK = "#A3B3FF";
+
+/**
+ * 배경이 있는 칸: 배경은 저장 값 그대로, 칸 안 기본 글자·링크는 테마와 무관하게 그 배경 위 AA 색으로 그린다.
+ * 기본 글자는 어두운/밝은 기본 글자 중 대비가 큰 쪽(AA 미달이면 검정·흰색).
+ */
+export function cellColors(bg: string): { fg: string; link: string } {
+  const light = isLightBackground(bg);
+  const base = light ? LIGHT_TEXT : DARK_TEXT;
+  // 회색 가운데(예: #777777)는 밝은 기본 글자로도 4.5에 못 미친다: 그때는 검정·흰색 중 대비가 큰 쪽
+  const pure = contrastRatio("#000000", bg) >= contrastRatio("#FFFFFF", bg) ? "#000000" : "#FFFFFF";
+  const fg = contrastRatio(base, bg) >= CELL_TARGET ? base : pure;
+  return { fg, link: readableOn(light ? LINK_LIGHT : LINK_DARK, bg) };
+}
+
 /** 글자색 mark를 그릴 때 붙이는 클래스와 inline 값(라이트 = 저장 값 그대로, 다크 = --pb-cd). */
 export const TEXT_COLOR_CLASS = "pb-color";
 export function textColorStyle(hex: string): CSSProperties {
@@ -133,7 +181,17 @@ export function textColorStyleText(hex: string) {
   return `color: ${hex}; --pb-c: ${hex}; --pb-cd: ${darkTextColor(hex)}`;
 }
 
-/** 배경이 있는 칸의 클래스: 그 칸 안은 배경에 맞는 글자색·링크색으로 그린다(테마와 무관). */
-export function cellBackgroundClass(hex: string) {
-  return isLightBackground(hex) ? "pb-on-light" : "pb-on-dark";
+/** 배경 칸 안 글자색: 다크 모드에서 쓸 값(--pb-cell-cd = 그 칸 배경 위 AA). 라이트는 저장 값 그대로(D-38-3). */
+export const CELL_TEXT_COLOR_CLASS = "pb-cell-color";
+export const cellTextColorVar = (hex: string, bg: string) => readableOn(hex, bg);
+
+/** 배경 칸의 클래스와 inline 값(배경 = 저장 값, 기본 글자·링크 = 그 배경 위 AA). */
+export const CELL_BG_CLASS = "pb-cell-bg";
+export function cellBackgroundStyle(bg: string): CSSProperties {
+  const { fg, link } = cellColors(bg);
+  return { backgroundColor: bg, "--pb-cell-fg": fg, "--pb-cell-link": link } as CSSProperties;
+}
+export function cellBackgroundStyleText(bg: string) {
+  const { fg, link } = cellColors(bg);
+  return `background-color: ${bg}; --pb-cell-fg: ${fg}; --pb-cell-link: ${link}`;
 }

@@ -77,8 +77,7 @@ async function contrast(page) {
         const el = document.querySelector(n.target[n.target.length - 1]);
         const span = el?.closest(".pb-color");
         const asStored = !!span && norm(getComputedStyle(el).color) === norm(span.style.getPropertyValue("--pb-c"));
-        const inLightCell = !!el?.closest(".pb-on-light");
-        return { target: n.target.join(" "), ratio: n.any[0]?.data?.contrastRatio, fg: n.any[0]?.data?.fgColor, bg: n.any[0]?.data?.bgColor, text: (n.html ?? "").slice(0, 80), asStored, inLightCell };
+        return { target: n.target.join(" "), ratio: n.any[0]?.data?.contrastRatio, fg: n.any[0]?.data?.fgColor, bg: n.any[0]?.data?.bgColor, text: (n.html ?? "").slice(0, 80), asStored };
       })
     );
   });
@@ -106,6 +105,8 @@ const report = (bad) => bad.slice(0, 4).map((b) => `${b.target} ${b.ratio} ${b.f
 // 편집기 도구 막대의 글자색 8종·칸 배경 5종(BlockEditor COLORS·CELL_BACKGROUNDS)
 const COLORS = ["#1C1917", "#DC2626", "#EA580C", "#CA8A04", "#16A34A", "#2563EB", "#7C3AED", "#DB2777"];
 const BGS = ["#FEF3C7", "#DCFCE7", "#DBEAFE", "#F3E8FF", "#F5F5F4"];
+// 리뷰 slice3 round1: 팔레트 밖 배경(계약은 임의 #RRGGBB 허용). 짙은 남색·중간 회색 2종
+const CUSTOM_BGS = ["#1E3A8A", "#555555", "#777777"];
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 const uid = () => crypto.randomUUID();
 const run = (text, marks = [], link) => (link ? { text, marks, link } : { text, marks });
@@ -127,11 +128,10 @@ function editorContent(imageId) {
         columnWidths: [2, 1, 1],
         rows: [
           { id: uid(), header: true, cells: [cell([run("머리 1")]), cell([run("머리 2")]), cell([run("머리 칸 배경")], BGS[0])] },
-          ...[0, 3].map((k) => ({
+          ...[BGS.slice(0, 3), [...BGS.slice(3), undefined], CUSTOM_BGS].map((row) => ({
             id: uid(),
             header: false,
-            cells: [0, 1, 2].map((j) => {
-              const bg = BGS[k + j];
+            cells: row.map((bg) => {
               return cell([run(bg ? `칸${bg.slice(1)} ` : "배경 없음 "), run("보라", [{ color: "#7C3AED" }]), run(" 링크", [], "https://example.com/"), run(" 빨강", [{ color: "#DC2626" }]), run(" 코드", ["code"])], bg);
             }),
           })),
@@ -211,22 +211,38 @@ function storedColors(content) {
   return out.sort().join(",");
 }
 
-/** 화면의 사용자 색: 글자색 span마다 [저장 값, 다크 값, 그려진 색, 밝은 배경 칸 안인지], 배경 칸마다 [저장 값, 그려진 배경, 그려진 글자색]. */
+/**
+ * 화면의 사용자 색. 글자색 span마다 [저장 값, 다크 값, 그려진 색, 배경 칸 안인지, 글자, 칸 다크 값(--pb-cell-cd), 놓인 바탕 위 대비],
+ * 배경 칸마다 [저장 값, 그려진 배경, 그려진 기본 글자색, 기본 글자 대비, 링크 최소 대비, 인라인 코드 최소 대비].
+ * 글자가 실제로 들어 있는 가장 안쪽 요소(편집기 장식 span이 있으면 그것)의 계산값을 잰다.
+ */
 const paintedColors = (root) =>
-  root.evaluate((r) => ({
-    text: [...r.querySelectorAll(".pb-color")].map((s) => [s.style.getPropertyValue("--pb-c").trim(), s.style.getPropertyValue("--pb-cd").trim(), window.__rgb(getComputedStyle(s).color).slice(0, 3).join(","), !!s.closest(".pb-on-light"), s.textContent]),
-    cells: [...r.querySelectorAll("td, th")].filter((c) => c.style.backgroundColor).map((c) => [c.getAttribute("data-background") ?? "", window.__rgb(getComputedStyle(c).backgroundColor).slice(0, 3).join(","), window.__rgb(getComputedStyle(c).color).slice(0, 3).join(",")]),
-  }));
+  root.evaluate((r) => {
+    const rgb = (el, prop = "color") => window.__rgb(getComputedStyle(el)[prop]).slice(0, 3);
+    const ratio = (el) => Number(window.__ratio(rgb(el), window.__under(el)).toFixed(2));
+    const min = (els) => (els.length ? Math.min(...els.map(ratio)) : null);
+    return {
+      text: [...r.querySelectorAll(".pb-color")].map((s) => {
+        const inner = s.querySelector(".pb-cell-color") ?? s;
+        const cell = s.closest("td, th");
+        return [s.style.getPropertyValue("--pb-c").trim(), s.style.getPropertyValue("--pb-cd").trim(), rgb(inner).join(","), !!cell?.style.backgroundColor, s.textContent, getComputedStyle(inner).getPropertyValue("--pb-cell-cd").trim(), ratio(inner)];
+      }),
+      cells: [...r.querySelectorAll("td, th")]
+        .filter((c) => c.style.backgroundColor)
+        .map((c) => [c.getAttribute("data-background") ?? "", rgb(c, "backgroundColor").join(","), rgb(c).join(","), Number(window.__ratio(rgb(c), rgb(c, "backgroundColor")).toFixed(2)), min([...c.querySelectorAll("a")]), min([...c.querySelectorAll("code")])]),
+    };
+  });
 const hexRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(",");
 
 /** 접근성 검사 한 번: 테마 결함(저장 값 그대로가 아닌 색)은 실패, 사용자가 고른 색이 저장 값 그대로 그려진 경우는 따로 적는다. */
-async function scan(page, label) {
+async function scan(page, label, scheme) {
   await page.screenshot({ path: `${SHOTS}/theme-${label.replace(/[^a-z0-9-]+/gi, "-")}.png`, fullPage: true });
   const bad = await contrast(page);
-  const theme = bad.filter((b) => !b.asStored);
-  const stored = bad.filter((b) => b.asStored);
+  // D-38-3: 저장 값 그대로 그린 사용자 색의 예외는 라이트 모드에만 있다. 다크는 모든 위반이 실패다.
+  const theme = scheme === "dark" ? bad : bad.filter((b) => !b.asStored);
+  const stored = scheme === "dark" ? [] : bad.filter((b) => b.asStored);
   check(`T. ${label}: no WCAG AA color-contrast violations from the theme`, theme.length === 0, report(theme));
-  if (stored.length) console.log(`NOTE  ${label}: user colours drawn as stored, below AA on their background (D-38-1 keeps stored values): ${stored.map((b) => `${b.text.match(/>([^<]*)</)?.[1] ?? ""} ${b.ratio} ${b.fg}/${b.bg}`).join(" | ")}`);
+  if (stored.length) console.log(`NOTE  ${label}: user colours drawn as stored, below AA on their background (D-38-3 light-mode exception): ${stored.map((b) => `${b.text.match(/>([^<]*)</)?.[1] ?? ""} ${b.ratio} ${b.fg}/${b.bg}`).join(" | ")}`);
   return stored;
 }
 
@@ -235,6 +251,34 @@ async function scan(page, label) {
 async function injectFault(page) {
   if (FAULT === "nomenu") await page.addStyleTag({ content: '[role="toolbar"][aria-label="선택한 글자 서식"] { display: none !important; }' });
   if (FAULT === "storedcolor") await page.addStyleTag({ content: ".pb-color { color: var(--pb-c) !important; }" });
+  // fixedcell = 리뷰 slice3 round1 결함 재현: 칸 글자·링크·칸 안 글자색을 실제 배경과 무관한 고정 값으로(사용자 지정 배경 검사가 실패해야 한다)
+  if (FAULT === "fixedcell")
+    await page.addStyleTag({ content: ".pb-cell-bg { color: #1c1917 !important; --color-accent: #4f46e5 !important; } .pb-cell-color.pb-color, .pb-cell-color .pb-color, .pb-color .pb-cell-color { color: var(--pb-cd) !important; }" });
+}
+
+/** D-38-1·D-38-3 사용자 색 규칙을 그려진 값으로 확인한다(편집기와 글 화면에 같이 쓴다). */
+function colourChecks(painted, tag, scheme) {
+  const dark = scheme === "dark";
+  const outside = painted.text.filter((t) => !t[3]);
+  const inCells = painted.text.filter((t) => t[3]);
+  // (a) 칸 밖 글자색: 라이트 = 저장 값, 다크 = 밝기 보정 값(--pb-cd)이며 바탕 위 AA
+  check(
+    `D. ${tag}: text colours outside cells are drawn ${dark ? "with the brightened dark value, AA on the surface" : "as stored"}`,
+    outside.length === COLORS.length + 2 && outside.every((t) => t[2] === hexRgb(dark ? t[1] : t[0]) && (!dark || t[6] >= 4.5)) && (!dark || outside.filter((t) => t[0] !== t[1]).length >= 5),
+    JSON.stringify(outside.map((t) => [t[0], t[1], t[2], t[6]]))
+  );
+  // (b) 배경 칸 안 글자색: 라이트 = 저장 값(D-38-3), 다크 = 그 칸 배경 위 AA 값(--pb-cell-cd). 팔레트 밖 배경 포함
+  check(
+    `D. ${tag}: text colours inside background cells are drawn ${dark ? "with the value computed for that cell's background, AA there" : "as stored"}`,
+    inCells.length === 2 * (BGS.length + CUSTOM_BGS.length) && inCells.every((t) => (dark ? t[5] !== "" && t[2] === hexRgb(t[5]) && t[6] >= 4.5 : t[2] === hexRgb(t[0]))),
+    JSON.stringify(inCells.map((t) => [t[0], t[5], t[2], t[6]]))
+  );
+  // (c) 배경 칸: 배경 = 저장 값, 기본 글자·링크·인라인 코드 = 그 배경 위 AA(두 모드)
+  check(
+    `D. ${tag}: background cells keep the stored background, with AA default text, links and inline code (palette and custom backgrounds)`,
+    painted.cells.length === 1 + BGS.length + CUSTOM_BGS.length && painted.cells.every(([hex, bg, , fg, link, code]) => (hex === "" || bg === hexRgb(hex)) && fg >= 4.5 && (link === null || link >= 4.5) && (code === null || code >= 4.5)),
+    JSON.stringify(painted.cells)
+  );
 }
 
 async function editorScreens(page, scheme, send, csrf) {
@@ -257,31 +301,9 @@ async function editorScreens(page, scheme, send, csrf) {
   await helpers(page);
   await injectFault(page);
 
-  // D-38-1 (a) 글자색: 라이트는 저장 값 그대로, 다크는 저장 값과 다른 밝기 보정 값(--pb-cd). 밝은 배경 칸 안은 두 모드 모두 저장 값.
   const painted = await paintedColors(editor);
-  const outside = painted.text.filter((t) => !t[3]);
-  const inCells = painted.text.filter((t) => t[3]);
-  const expect = (t, useDark) => hexRgb(useDark ? t[1] : t[0]);
-  check(
-    `D. ${tag}: text colours outside cells are drawn ${scheme === "dark" ? "with the brightened dark value (hue kept, stored hex not used)" : "as stored"}`,
-    outside.length === COLORS.length + 2 && outside.every((t) => t[2] === expect(t, scheme === "dark")) && (scheme === "light" || outside.filter((t) => t[0] !== t[1]).length >= 5),
-    JSON.stringify(outside.map((t) => [t[0], t[1], t[2]]))
-  );
-  check(`D. ${tag}: text colours inside light-background cells are drawn as stored`, inCells.length >= 4 && inCells.every((t) => t[2] === hexRgb(t[0])), JSON.stringify(inCells.map((t) => [t[0], t[2]])));
-  // D-38-1 (b) 칸 배경: 저장 값 그대로, 칸 기본 글자는 어두운 색(모드와 무관)
-  check(
-    `D. ${tag}: cell backgrounds drawn as stored with dark text`,
-    painted.cells.length === 6 && painted.cells.every(([hex, bg, fg]) => bg === hexRgb(hex) && fg === "28,25,23"),
-    JSON.stringify(painted.cells)
-  );
-  // 다크에서 글자색이 놓인 면 위 대비(보정 값이 AA를 넘는지 직접 잰다)
-  if (scheme === "dark") {
-    const ratios = await editor.evaluate((r) => [...r.querySelectorAll(".pb-color")].filter((s) => !s.closest(".pb-on-light")).map((s) => [s.textContent, Number(window.__ratio(window.__rgb(getComputedStyle(s).color), window.__under(s)).toFixed(2))]));
-    check(`D. ${tag}: brightened text colours reach AA on the editor surface`, ratios.length === COLORS.length + 2 && ratios.every(([, r]) => r >= 4.5), JSON.stringify(ratios));
-  }
-  const stored = await scan(page, `${tag}`);
-  // 저장 값 그대로 그려진 위반은 밝은 배경 칸 안이거나(두 모드 같은 값) 라이트 모드일 때만 생길 수 있다
-  if (scheme === "dark") check(`D. ${tag}: a below-AA user colour can only be a stored colour inside a light-background cell`, stored.every((b) => b.inLightCell), report(stored));
+  colourChecks(painted, tag, scheme);
+  await scan(page, `${tag}`, scheme);
 
   // #36 선택 툴바(F1)·크기 목록(F2): 검증된 문장을 눌러 커서를 두고 키보드로 선택한다
   const sentence = editor.locator("p", { hasText: "선택할 문장입니다" });
@@ -316,7 +338,7 @@ async function editorScreens(page, scheme, send, csrf) {
     check(`F2. ${tag}: font-size lists (toolbar and selection menu) have AA text`, selects.length === 2 && selects.every((r) => r >= 4.5), JSON.stringify(selects));
     const swatches = await toolbar.evaluate((t) => [...t.querySelectorAll(".pb-swatch")].map((b) => [b.getAttribute("aria-label"), window.__rgb(getComputedStyle(b).backgroundColor).slice(0, 3).join(","), b.style.getPropertyValue("--pb-c").trim(), b.style.getPropertyValue("--pb-cd").trim()]));
     check(`D. ${tag}: colour swatches show the colour text will be drawn in`, swatches.length === COLORS.length && swatches.every(([, got, c, cd]) => got === hexRgb(scheme === "dark" ? cd : c)), JSON.stringify(swatches));
-    if (shown) await scan(page, `${tag} selection toolbar`);
+    if (shown) await scan(page, `${tag} selection toolbar`, scheme);
   }
 
   // #36 F6 열 폭 손잡이: 첫 칸 오른쪽 가장자리를 실제로 누르면 안내선이 보이고, 놓으면(움직이지 않음) 폭은 그대로다
@@ -352,13 +374,13 @@ async function editorScreens(page, scheme, send, csrf) {
     const inUse = panel.getByText(/^사용 중\(이 글/).first();
     const listed = await inUse.waitFor({ timeout: 10000 }).then(() => true, () => false);
     check(`F8. ${tag}: my images list shows the in-use label for this post's image`, listed, "");
-    if (listed) await scan(page, `${tag} image list`);
+    if (listed) await scan(page, `${tag} image list`, scheme);
   }
   const fold = panel.getByRole("button", { name: "이미지·표지 접기" });
   if (await reach(page, `F7. ${tag} collapse`, fold)) {
     const folded = await panel.getByRole("button", { name: "이미지·표지 펼치기" }).waitFor({ timeout: 5000 }).then(() => true, () => false);
     check(`F7. ${tag}: image panel collapses`, folded, "");
-    if (folded) await scan(page, `${tag} panel collapsed`);
+    if (folded) await scan(page, `${tag} panel collapsed`, scheme);
     const unfold = panel.getByRole("button", { name: "이미지·표지 펼치기" });
     if (folded && (await reach(page, `F7. ${tag} expand`, unfold))) await panel.getByRole("button", { name: "이미지·표지 접기" }).waitFor({ timeout: 5000 }).catch(() => {});
   }
@@ -378,10 +400,11 @@ async function editorScreens(page, scheme, send, csrf) {
   await helpers(page);
   await injectFault(page);
   const rendered = await paintedColors(article);
+  colourChecks(rendered, `${scheme} post view`, scheme);
   // 글 화면 칸에는 data-background가 없으므로 그려진 배경·글자색만 비교한다
   const key = (p) => JSON.stringify({ text: p.text.map((t) => [t[0], t[2], t[3]]), cells: p.cells.map((c) => c.slice(1)) });
   check(`D. ${scheme}: the post view draws user colours exactly as the editor does`, key(rendered) === key(painted), `editor=${key(painted).slice(0, 300)} view=${key(rendered).slice(0, 300)}`);
-  await scan(page, `${scheme} post view with user colours`);
+  await scan(page, `${scheme} post view with user colours`, scheme);
 }
 
 // 검증용 결함 주입(로그인 화면): research404 = /api/research GET을 404로(실패해야 한다),
