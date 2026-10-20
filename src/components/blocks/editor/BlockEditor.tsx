@@ -76,6 +76,7 @@ function FormatButtons({ editor, compact }: { editor: Editor; compact?: boolean 
     }),
   });
   const c = () => editor.chain().focus();
+  const sizeByPointer = useRef(false);
   function setLink() {
     if (s.link) {
       c().unsetLink().run();
@@ -102,8 +103,21 @@ function FormatButtons({ editor, compact }: { editor: Editor; compact?: boolean 
         aria-label="글자 크기"
         value={s.fontSize ?? ""}
         disabled={off}
-        // 목록을 열어도 편집기 선택이 남는다(select는 포커스를 가져가지만 선택은 state에 남고 focus()로 돌아온다)
-        onChange={(e) => (e.target.value ? c().setTextSize(Number(e.target.value)).run() : c().unsetTextSize().run())}
+        // 목록에 포커스가 가도 편집기 선택은 state에 남아 크기는 그 선택에 바로 적용된다.
+        // 키보드로 고르는 동안(WebKit은 방향키마다 change)은 포커스를 목록에 두고, Enter·Escape로 끝낼 때 편집기로 돌아간다(리뷰 full round6).
+        // 마우스로 목록을 열어 고른 경우만 고르자마자 편집기로 돌아간다.
+        onPointerDown={() => (sizeByPointer.current = true)}
+        onKeyDown={() => (sizeByPointer.current = false)}
+        // 확정·취소 키를 뗄 때 편집기로 돌아간다(누를 때 막으면 열린 목록의 선택 확정까지 막힐 수 있다)
+        onKeyUp={(e) => {
+          if (e.key === "Enter" || e.key === "Escape") editor.commands.focus();
+        }}
+        onChange={(e) => {
+          const chain = sizeByPointer.current ? c() : editor.chain();
+          sizeByPointer.current = false;
+          if (e.target.value) chain.setTextSize(Number(e.target.value)).run();
+          else chain.unsetTextSize().run();
+        }}
         className="rounded border border-stone-300 px-1 py-1 text-sm"
       >
         <option value="">크기 기본</option>
@@ -205,7 +219,8 @@ function SelectionMenu({ editor }: { editor: Editor }) {
       // 메뉴 안을 눌러도 편집기 선택이 풀리지 않게 한다(select는 예외: 목록을 열어야 한다)
       onMouseDown={(e) => {
         // 목록(select)은 포커스를 가져가야 열린다. 편집기 blur로 메뉴가 먼저 사라지지 않게 포커스가 옮겨 가기 전에 표시해 둔다.
-        if (e.target instanceof HTMLSelectElement) setMenuFocused(true);
+        // Firefox는 목록을 누를 때 대상이 <option>일 수 있다
+        if (e.target instanceof Element && e.target.closest("select")) setMenuFocused(true);
         else e.preventDefault();
       }}
       className="fixed z-30 flex max-w-[calc(100vw-1rem)] flex-wrap items-center gap-0.5 rounded-lg bg-white p-1 shadow-lg ring-1 ring-stone-300"

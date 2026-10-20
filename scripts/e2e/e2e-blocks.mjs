@@ -208,6 +208,40 @@ async function editingRegressions(p, h, tag) {
   const saved = await h.blocks();
   check(`B1g. ${tag}: result saves as valid post-blocks`, saved.problem === 0 && saved.doc?.blocks?.[0]?.type === "quote", `problem=${saved.problem}`);
 
+  // F1k. 리뷰 full round6: 크기 목록을 실제로 눌러 연 뒤 키보드로 고르는 동안 포커스가 목록에 남고(본문으로 새지 않고),
+  //      Enter로 끝내면 고른 크기(18pt)가 선택한 단어에만 있고 본문에 새 문단이 생기지 않는다. 선택 메뉴와 고정 툴바 모두.
+  for (const where of ["menu", "toolbar"]) {
+    await h.fresh();
+    await kb.type("hello world");
+    // 단어 선택은 키보드로 한다(브라우저마다 더블클릭 단어 판정이 다르다). 마우스를 누르지 않았으므로 선택 메뉴가 뜬다.
+    await kb.press("End");
+    for (let i = 0; i < 5; i++) await kb.press("Shift+ArrowLeft");
+    await h.editor.evaluate((el) => new Promise((ok) => { const t0 = Date.now(); const tick = () => (el.editor.state.selection.to - el.editor.state.selection.from === 5 || Date.now() - t0 > 3000 ? ok() : setTimeout(tick, 30)); tick(); }));
+    const scope = where === "menu" ? h.main.getByRole("toolbar", { name: "선택한 글자 서식" }) : h.tb;
+    await scope.waitFor({ timeout: 5000 }).catch(() => {});
+    // 고정 위치 메뉴는 스크롤하면 따라 움직이므로, 화면에 보이는 자리를 재서 그 좌표를 실제로 누른다
+    const sb = await scope.getByLabel("글자 크기").boundingBox();
+    await p.mouse.click(sb.x + sb.width / 2, sb.y + sb.height / 2);
+    const steps = [];
+    for (let i = 0; i < 6; i++) {
+      await kb.press("ArrowDown");
+      steps.push(await p.evaluate(() => document.activeElement?.tagName));
+    }
+    await kb.press("Enter");
+    await p.waitForTimeout(300);
+    const d = await h.doc();
+    const runs = d.content?.[0]?.content ?? [];
+    const w = runs.find((n) => n.text === "world");
+    const size = w?.marks?.find((m) => m.type === "textStyle")?.attrs?.fontSize ?? null;
+    const paragraphs = (d.content ?? []).filter((b) => b.type === "paragraph").length;
+    const back = await p.evaluate(() => document.activeElement?.classList.contains("ProseMirror"));
+    check(
+      `F1k. ${tag} ${where}: keyboard size choice keeps focus in the list, applies 18pt to the word only, Enter adds no paragraph and returns to the editor`,
+      !steps.includes("DIV") && size === 18 && !runs.find((n) => n.text === "hello ")?.marks?.length && paragraphs === 1 && back,
+      `active=${steps.join(",")} size=${size} paragraphs=${paragraphs} back=${back}`
+    );
+  }
+
   // B2. 표는 커서가 있는 블록 뒤에 들어간다(문서 맨 위가 아니다)
   await h.fresh();
   await kb.type("one");
