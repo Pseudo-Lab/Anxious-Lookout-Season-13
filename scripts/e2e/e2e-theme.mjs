@@ -32,11 +32,17 @@ const PUBLIC = [
 
 // #38 slice2 round1: 준비 실패를 숨기지 않는다. 표시돼야 할 요소가 모두 보이고 "불러오는 중..."·오류 안내가 없어야 검사한다.
 async function ready(page, name, scheme, locators) {
+  // 리뷰 slice2 round2: 준비 조건 전체(필요한 요소가 모두 보임 + "불러오는 중..." 없음)를 하나의 제한 시간 안에서 기다리고,
+  // 그 마지막 상태로 한 번만 판정한다(본문이 먼저 뜨고 버전 기록이 조금 늦는 정상 화면을 실패로 만들지 않는다).
   const main = page.locator("main");
+  const deadline = Date.now() + 15000;
+  const left = () => Math.max(1, deadline - Date.now());
+  for (const l of locators) await l.waitFor({ state: "visible", timeout: left() }).catch(() => {});
+  await main.getByText("불러오는 중...").first().waitFor({ state: "detached", timeout: left() }).catch(() => {});
   const missing = [];
-  for (const l of locators) if (!(await l.waitFor({ state: "visible", timeout: 15000 }).then(() => true, () => false))) missing.push(String(l));
+  for (const l of locators) if (!(await l.isVisible().catch(() => false))) missing.push(String(l));
   const loading = await main.getByText("불러오는 중...").count();
-  const failed = await main.locator('[role="alert"]').filter({ hasText: /하지 못했습니다|HTTP \d{3}/ }).count();
+  const failed = await main.locator('[role="alert"]').filter({ hasText: /못했습니다|HTTP \d{3}/ }).count();
   const ok = missing.length === 0 && loading === 0 && failed === 0;
   check(`T. ${scheme} ${name}: the screen under test is shown (not loading or an error)`, ok, `missing=${missing.join(" ; ")} loading=${loading} error=${failed}`);
   return ok;
@@ -79,7 +85,8 @@ async function withEmbed(page) {
   });
 }
 
-// 검증용 결함 주입: THEME_FAULT=research404면 로그인 화면의 /api/research GET을 404로 돌려준다(준비 확인이 실패해야 한다)
+// 검증용 결함 주입(로그인 화면): research404 = /api/research GET을 404로(실패해야 한다),
+// slowversions = 버전 기록 조회를 3초 늦게(통과해야 한다), hangversions = 버전 기록 조회에 응답하지 않음(실패해야 한다)
 const FAULT = process.env.THEME_FAULT ?? "";
 
 const browser = await chromium.launch();
@@ -137,6 +144,14 @@ for (const scheme of ["light", "dark"]) {
   const draft = await send("POST", "/research/post-drafts", { title: "대비 글", content: { format: "post-blocks", version: 1, blocks: [para("첫 문단"), para("둘째 문단")] }, description: "요약", tags: ["테마"], coverImageId: null, documentIds: [] });
   const committed = await send("POST", `/research/post-drafts/${draft.id}/commit`, { expectedDraftRevision: draft.revision }, (b) => b?.post?.id);
   const postId = committed.post.id;
+  // slowversions: 버전 기록 조회만 3초 늦게(준비 확인이 기다려 통과해야 한다). hangversions: 끝내 응답하지 않음(실패해야 한다).
+  if (FAULT === "slowversions" || FAULT === "hangversions")
+    await page.route(/\/api\/research\/.*\/versions(\?|$)/, async (r) => {
+      if (r.request().method() !== "GET") return r.continue();
+      if (FAULT === "hangversions") return; // 응답하지 않는다
+      await new Promise((ok) => setTimeout(ok, 3000));
+      return r.continue().catch(() => {});
+    });
   if (FAULT === "research404") await page.route(/\/api\/research\//, (r) => (r.request().method() === "GET" ? r.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: { code: "not_found", message: "x" } }) }) : r.continue()));
   const PRIVATE = [
     ["write", "/write/", (m) => [m.getByRole("heading", { name: "내 글" }), m.getByRole("link", { name: /대비 글/ })]],
