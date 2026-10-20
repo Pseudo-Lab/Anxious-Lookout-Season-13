@@ -8,6 +8,7 @@ import { useMutation } from "@/lib/research/hooks";
 import { uuidV4 } from "@/lib/research/idempotency";
 import { TextSelection } from "@tiptap/pm/state";
 import { CODE_LANGUAGES, FONT_SIZES, type Align } from "@/lib/blocks/types";
+import { textColorStyle } from "@/lib/blocks/userColor";
 import { blockExtensions, isAllowedLink, youtubeIdFrom } from "./schema";
 import { EmbedWithView, PostImageWithView } from "./nodeViews";
 import { ImageUploads, endUpload, setUploadHandler, imageFileProblem, pendingUploads, startUpload, uploadPosition } from "./uploads";
@@ -136,8 +137,9 @@ function FormatButtons({ editor, compact }: { editor: Editor; compact?: boolean 
             disabled={off}
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => c().setTextColor(hex).run()}
-            className="h-4 w-4 rounded-full ring-1 ring-stone-300 disabled:opacity-40"
-            style={{ backgroundColor: hex }}
+            // 견본은 지금 테마에서 글자가 실제로 보일 색으로 칠한다(#38 D-38-1, 다크는 밝기 보정 색)
+            className="pb-swatch h-4 w-4 rounded-full ring-1 ring-stone-300 disabled:opacity-40"
+            style={textColorStyle(hex)}
           />
         ))}
         <Btn label="글자 색 지우기" disabled={off} onClick={() => c().unsetTextColor().run()}>⌀</Btn>

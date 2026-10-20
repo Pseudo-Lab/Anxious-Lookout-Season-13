@@ -25,7 +25,7 @@ function BasedOn({ documents }: { documents: ArticleData["documents"] }) {
               </a>
             ) : (
               <span className="text-stone-600">
-                {d.title || "(제목 없음)"} <span className="text-xs text-stone-400">(공개되지 않은 문서)</span>
+                {d.title || "(제목 없음)"} <span className="text-xs text-stone-500">(공개되지 않은 문서)</span>
               </span>
             )}
           </li>

@@ -44,7 +44,7 @@ export default function PostCard({ post }: { post: PublicPost }) {
         )}
       </Link>
       <div className="mt-4 flex flex-wrap items-center gap-3">
-        <span className="text-sm text-stone-400">
+        <span className="text-sm text-stone-500">
           {post.author.name ? `${post.author.name} · ` : ""}
           {formatDate(post.publishedAt)}
         </span>

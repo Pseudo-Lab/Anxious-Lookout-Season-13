@@ -83,7 +83,7 @@ function AccountRow({ initial, selfId }: { initial: AdminAccount; selfId: string
             </button>
           ))}
           {available.length === 0 && (
-            <span className="text-stone-400">{isSelf ? "본인 계정은 바꿀 수 없습니다" : "관리자 계정은 바꿀 수 없습니다"}</span>
+            <span className="text-stone-500">{isSelf ? "본인 계정은 바꿀 수 없습니다" : "관리자 계정은 바꿀 수 없습니다"}</span>
           )}
         </div>
       </div>

@@ -85,7 +85,7 @@ export default function LoginPage() {
           <LoginPanel />
         </Suspense>
 
-        <p className="mt-6 text-center text-xs text-stone-400">
+        <p className="mt-6 text-center text-xs text-stone-500">
           가입 후 관리자 승인이 필요합니다
         </p>
       </div>

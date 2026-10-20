@@ -248,7 +248,7 @@ function Message({ sessionId, item }: { sessionId: string; item: Extract<Session
         platform ? "border border-dashed border-amber-400" : ""
       }`}
     >
-      <p className="mb-1 flex flex-wrap items-center gap-1.5 text-[11px] font-medium text-stone-400">
+      <p className="mb-1 flex flex-wrap items-center gap-1.5 text-[11px] font-medium text-stone-500">
         {mine ? "나" : "Codex"}
         {mine && item.scope && <ScopeBadge scope={item.scope} />}
         {platform && item.status && (
@@ -272,7 +272,7 @@ function Message({ sessionId, item }: { sessionId: string; item: Extract<Session
         {raw ? (
           <RawItem sessionId={sessionId} itemId={item.id} label={platform ? "보존된 입력 기록 (Codex 원본 아님)" : undefined} />
         ) : (
-          <button onClick={() => setRaw(true)} className="text-[11px] text-stone-400 hover:text-stone-700">
+          <button onClick={() => setRaw(true)} className="text-[11px] text-stone-500 hover:text-stone-700">
             {platform ? "보존된 입력 기록" : "원본 기록"}
           </button>
         )}
@@ -294,7 +294,7 @@ function NextScope({ page }: { page: PageDescriptor }) {
 
 function ScopeHint({ page }: { page: PageDescriptor }) {
   return (
-    <p className="text-xs leading-relaxed text-stone-400">
+    <p className="text-xs leading-relaxed text-stone-500">
       {kindText(page.kind).can} 이전 대화 내용은 이 대화에 계속 이어집니다.
     </p>
   );

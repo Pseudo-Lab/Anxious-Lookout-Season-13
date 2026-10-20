@@ -217,7 +217,7 @@ export function MarkdownEditor({
             {preview.trim() ? (
               <SafeMarkdown content={preview} ownImages={ownImages} />
             ) : (
-              <p className="text-sm text-stone-400">본문을 쓰면 여기에 저장될 모습이 보입니다.</p>
+              <p className="text-sm text-stone-500">본문을 쓰면 여기에 저장될 모습이 보입니다.</p>
             )}
           </div>
         )}

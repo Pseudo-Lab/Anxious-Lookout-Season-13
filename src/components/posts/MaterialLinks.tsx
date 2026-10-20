@@ -15,7 +15,7 @@ export const MATERIAL_MAX = 50;
 /** 선택 자료 ID의 현재 제목(본인 자료). 읽지 못하면(보관·삭제·권한) 그렇다고 표시한다. */
 export function MaterialTitle({ id }: { id: string }) {
   const { result } = useLoad(`material:${id}`, () => getMaterial(id));
-  if (!result) return <span className="text-stone-400">자료 확인 중...</span>;
+  if (!result) return <span className="text-stone-500">자료 확인 중...</span>;
   if (!result.ok) return <span className="text-stone-500">(열 수 없는 자료)</span>;
   return (
     <span>

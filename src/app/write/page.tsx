@@ -23,7 +23,7 @@ export default function WritePage() {
           <WriteInner />
         </Suspense>
       </AuthGate>
-      <p className="mt-10 text-xs text-stone-400">
+      <p className="mt-10 text-xs text-stone-500">
         글은 <Link href="/research/" className="underline">내 연구</Link>의 문서를 바탕으로 씁니다. 자료 → 문서 → 글 순서로 정리하고, 어느 단계에서든 대화창의 Codex에게 도움을 받을 수 있습니다.
       </p>
     </div>

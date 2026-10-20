@@ -1,7 +1,7 @@
 import { Extension, Node, mergeAttributes, type Extensions } from "@tiptap/core";
 import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from "@tiptap/pm/state";
 import type { Node as PMNode } from "@tiptap/pm/model";
-import type { EditorView } from "@tiptap/pm/view";
+import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import Document from "@tiptap/extension-document";
 import Paragraph from "@tiptap/extension-paragraph";
 import Text from "@tiptap/extension-text";
@@ -26,6 +26,7 @@ import UniqueID from "@tiptap/extension-unique-id";
 import { uuidV4 } from "@/lib/research/idempotency";
 import { CODE_LANGUAGES, COLUMN_WEIGHT, FONT_SIZES, IMAGE_WIDTH, LIMITS, YOUTUBE_ID, ptToPx, type Align } from "@/lib/blocks/types";
 import { isAllowedLink } from "@/lib/blocks/document";
+import { CELL_BG_CLASS, CELL_TEXT_COLOR_CLASS, cellBackgroundStyleText, cellTextColorStyleText, textColorStyleText, TEXT_COLOR_CLASS } from "@/lib/blocks/userColor";
 import { ownImageUrl } from "@/lib/posts/api";
 
 // #32 편집기 스키마. 저장 계약(post-blocks v1)이 허용하는 구조만 편집기 안에서도 만들 수 있게 노드 content 식으로 제한한다.
@@ -107,7 +108,8 @@ const TextColor = Extension.create({
           color: {
             default: null,
             parseHTML: (el) => normalizeHex(el.style.color),
-            renderHTML: (attrs) => (attrs.color ? { style: `color: ${attrs.color}` } : {}),
+            // #38 D-38-1: 공개 renderer와 같은 클래스·값(다크 모드 밝기 보정은 CSS가 고른다)
+            renderHTML: (attrs) => (attrs.color ? { class: TEXT_COLOR_CLASS, style: textColorStyleText(attrs.color) } : {}),
           },
           fontSize: {
             default: null,
@@ -335,7 +337,9 @@ const cellAttrs = {
     default: null,
     parseHTML: (el: HTMLElement) => normalizeHex(el.getAttribute("data-background")),
     renderHTML: (attrs: Record<string, unknown>) =>
-      attrs.background ? { "data-background": attrs.background, style: `background-color: ${attrs.background}` } : {},
+      attrs.background
+        ? { "data-background": attrs.background, class: CELL_BG_CLASS, style: cellBackgroundStyleText(attrs.background as string) }
+        : {},
   },
 };
 const PostTableCell = TableCell.extend({
@@ -549,7 +553,7 @@ const ColumnResize = Extension.create({
               // 끄는 동안은 편집 DOM 밖의 안내선만 움직인다
               const guide = document.createElement("div");
               guide.setAttribute("data-testid", "column-resize-guide");
-              Object.assign(guide.style, { position: "fixed", top: `${box.top}px`, height: `${box.height}px`, width: "2px", left: `${edge0 - 1}px`, background: "#6366f1", zIndex: "40", pointerEvents: "none" });
+              Object.assign(guide.style, { position: "fixed", top: `${box.top}px`, height: `${box.height}px`, width: "2px", left: `${edge0 - 1}px`, background: "var(--accent)", zIndex: "40", pointerEvents: "none" });
               document.body.appendChild(guide);
               let cur = start;
               const move = (ev: MouseEvent) => {
@@ -572,6 +576,47 @@ const ColumnResize = Extension.create({
               window.addEventListener("mouseup", up);
               return true;
             },
+          },
+        },
+      }),
+    ];
+  },
+});
+
+/**
+ * #38 D-38-1(리뷰 slice3 round1): 배경 칸 안 글자색은 다크 모드에서 그 칸의 실제 배경 위 AA 값으로 그린다.
+ * mark는 자기가 놓인 칸을 모르므로, 배경 칸 안의 색 글자에 장식(--pb-cell-cd, 코드 안이면 --pb-cell-kd)을 붙인다. 문서·저장 값은 바꾸지 않는다.
+ */
+const CellTextColors = Extension.create({
+  name: "cellTextColors",
+  addProseMirrorPlugins() {
+    const build = (doc: PMNode) => {
+      const decos: Decoration[] = [];
+      doc.descendants((node, pos) => {
+        if (!CELL_TYPES.has(node.type.name)) return true;
+        const bg = node.attrs.background as string | null;
+        if (bg)
+          node.descendants((child, rel) => {
+            const color = child.isText ? (child.marks.find((m) => m.type.name === "textStyle")?.attrs.color as string | null | undefined) : null;
+            if (color) {
+              const from = pos + 1 + rel;
+              decos.push(Decoration.inline(from, from + child.nodeSize, { class: CELL_TEXT_COLOR_CLASS, style: cellTextColorStyleText(color, bg) }));
+            }
+          });
+        return false;
+      });
+      return DecorationSet.create(doc, decos);
+    };
+    return [
+      new Plugin<DecorationSet>({
+        key: new PluginKey("pb-cell-text-colors"),
+        state: {
+          init: (_, state) => build(state.doc),
+          apply: (tr, old) => (tr.docChanged ? build(tr.doc) : old),
+        },
+        props: {
+          decorations(state) {
+            return this.getState(state);
           },
         },
       }),
@@ -846,6 +891,7 @@ export function blockExtensions({ placeholder = "", onReject }: SchemaOptions = 
     // View: null — 크기 조절을 끈 표에 Tiptap이 쓰는 TableView(셀 colwidth로 colgroup을 만든다) 대신 renderHTML(가중치 colgroup)을 쓴다
     PostTable.configure({ resizable: false, allowTableNodeSelection: false, View: null }),
     ColumnResize,
+    CellTextColors,
     TableRow,
     PostTableHeader,
     PostTableCell,

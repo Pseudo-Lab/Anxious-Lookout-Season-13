@@ -25,16 +25,17 @@ export default function YouTubeCard({ resourceId, activatable = true }: { resour
       </div>
     );
   }
+  // 영상 자리라 라이트·다크 모두 같은 어두운 카드로 둔다(#38: 다크에서 뒤집히는 팔레트 변수를 쓰지 않는 고정 색, 대비 AA 이상)
   return (
-    <div className="flex aspect-video w-full flex-col items-center justify-center gap-2 rounded-lg bg-stone-800 p-4 text-center text-stone-100">
+    <div className="flex aspect-video w-full flex-col items-center justify-center gap-2 rounded-lg bg-[#292524] p-4 text-center text-[#f5f5f4]">
       <span className="text-sm font-semibold">YouTube 동영상</span>
-      <span className="font-mono text-xs text-stone-400">{resourceId}</span>
+      <span className="font-mono text-xs text-[#d6d3d1]">{resourceId}</span>
       {activatable ? (
-        <button type="button" onClick={() => setActive(true)} className="mt-1 rounded-full bg-white px-4 py-1.5 text-sm font-medium text-stone-900 hover:bg-stone-200">
+        <button type="button" onClick={() => setActive(true)} className="mt-1 rounded-full bg-[#ffffff] px-4 py-1.5 text-sm font-medium text-[#1c1917] hover:bg-[#e7e5e4]">
           눌러서 재생 (YouTube에 연결합니다)
         </button>
       ) : (
-        <span className="text-xs text-stone-400">편집 화면에서는 재생하지 않습니다.</span>
+        <span className="text-xs text-[#d6d3d1]">편집 화면에서는 재생하지 않습니다.</span>
       )}
     </div>
   );

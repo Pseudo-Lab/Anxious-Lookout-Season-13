@@ -15,7 +15,7 @@ export default function TagPosts() {
   return (
     <>
       <h1 className="mb-8 text-3xl font-bold tracking-tight">
-        <span className="text-stone-400">#</span> {tag}
+        <span className="text-stone-500">#</span> {tag}
       </h1>
       <PublicPostFeed tag={tag} />
     </>
