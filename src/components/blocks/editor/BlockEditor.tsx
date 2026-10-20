@@ -413,7 +413,8 @@ export default function BlockEditor({ initialContent, onChange, onUploading, onR
         continue;
       }
       if (at === null || !editor.isEditable) {
-        setNotice("올렸지만 넣을 자리가 없어져 본문에 넣지 않았습니다. 내 이미지에서 다시 넣을 수 있습니다.");
+        // #44: 내 이미지 목록이 없으므로 다시 올리도록 안내한다
+        setNotice("올렸지만 넣을 자리가 없어져 본문에 넣지 않았습니다. 이미지를 다시 올려 주세요.");
         continue;
       }
       const alt = f.name.replace(/\.[^.]+$/, "").replace(/[\r\n]+/g, " ").trim().slice(0, 100);

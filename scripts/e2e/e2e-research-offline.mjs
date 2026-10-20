@@ -145,7 +145,12 @@ const userMsgs = (m, text) => m.locator("li[data-role=user]", { hasText: text })
 // #44: 내 연구에 대화 탭이 없다. 대화 목록·Codex 안내·새 대화 폼은 공통 대화창의 목록 화면에 있다.
 async function chatList(p) {
   const c = chatOf(p);
-  if (!(await c.isVisible())) await p.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  // 새로고침·이동 뒤 대화창은 기억한 열림 상태로 다시 그려진다: 정착할 때까지 보고 나서 연다
+  const button = p.getByRole("button", { name: "Codex 대화창 열기" });
+  for (let i = 0; i < 50 && !(await c.isVisible()); i++) {
+    if (await button.isVisible()) await button.click({ timeout: 2000 }).catch(() => {});
+    await p.waitForTimeout(200);
+  }
   await c.getByRole("heading", { name: "Codex 대화" }).waitFor();
   const back = c.getByRole("button", { name: "← 대화 목록" });
   if (await back.isVisible()) await back.click();

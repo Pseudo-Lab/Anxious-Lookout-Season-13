@@ -72,10 +72,9 @@ export function describePage(pathname: string, search: URLSearchParams, extra?: 
       return draft && UUID.test(draft) ? { kind: "post_workspace", draftId: draft.toLowerCase() } : { kind: "post_workspace" };
     }
     case "/research/": {
-      // 내 연구 화면의 탭 기본값(자료)과 같은 규칙
+      // 내 연구 화면의 탭 기본값(자료)과 같은 규칙. #44: 대화 탭이 없어 예전 주소(?tab=sessions)도 자료 탭을 보이므로 자료 화면이다.
       const tab = search.get("tab");
       if (tab === "documents") return { kind: "document_workspace" };
-      if (tab === "sessions") return { kind: "general" };
       return { kind: "material_workspace" };
     }
     default:

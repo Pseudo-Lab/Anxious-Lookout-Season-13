@@ -269,7 +269,10 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   await main.getByText("이미지를 올리는 중입니다", { exact: false }).waitFor();
   check("WP3b. save/discard locked during upload", (await main.getByRole("button", { name: "글 저장" }).isDisabled()) && (await main.getByRole("button", { name: "초안 버리기…" }).isDisabled()));
   await main.getByLabel("제목").fill("업로드 중 바꾼 제목");
-  await writeBody(["업로드 중 바꾼 본문"]);
+  // #44: 도구 막대 업로드는 올리기 시작한 자리(자리표시)에 넣는다. 그 자리는 두고 앞에 글을 더 쓴다(자리를 지우는 경우는 WP3b2)
+  await bodyBox().click();
+  await page.keyboard.press("Control+Home");
+  await page.keyboard.type("업로드 중 바꾼 ");
   await main.getByLabel("태그", { exact: true }).fill("업로드중");
   await main.getByLabel("태그", { exact: true }).press("Enter");
   release();
@@ -279,7 +282,7 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   check(
     "WP3b. latest title/body/meta kept, image inserted",
     (await main.getByLabel("제목").inputValue()) === "업로드 중 바꾼 제목" &&
-      body.startsWith("업로드 중 바꾼 본문") &&
+      body.startsWith("업로드 중 바꾼 업로드 전 본문") &&
       (await bodyBox().locator("figure[data-type=post-image]").getByLabel("대체 텍스트").inputValue()) === "slow" &&
       (await main.getByRole("button", { name: "태그 업로드중 빼기" }).count()) === 1,
     JSON.stringify(body)
@@ -289,9 +292,34 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   const d = await api.get(`/research/post-drafts/${await draftParam()}`);
   check(
     "WP3b. server draft has the latest input",
-    d.title === "업로드 중 바꾼 제목" && d.description === "" && d.textProjection.startsWith("업로드 중 바꾼 본문") && blockTypes(d.content).includes("image"),
+    d.title === "업로드 중 바꾼 제목" && d.description === "" && d.textProjection.startsWith("업로드 중 바꾼 업로드 전 본문") && blockTypes(d.content).includes("image"),
     JSON.stringify({ projection: d.textProjection, types: blockTypes(d.content) })
   );
+  await main.getByRole("button", { name: "초안 버리기…" }).click();
+  await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
+  await main.getByText("초안을 버렸습니다").waitFor();
+}
+
+// WP3b2. #44: 업로드를 기다리는 동안 본문을 통째로 지워 넣을 자리가 없어지면 넣지 않고 다시 올리라고 안내한다(내 이미지 목록은 없다)
+{
+  await page.goto(U("/write/new/"));
+  await main.getByLabel("제목").fill("자리 없어짐");
+  await writeBody(["지울 본문"]);
+  let release;
+  const held = new Promise((r) => (release = r));
+  const hold = async (route) => {
+    if (route.request().method() === "POST") await held;
+    return route.continue().catch(() => {});
+  };
+  await page.route("**/api/research/post-images", hold);
+  await uploadViaToolbar({ name: "gone.png", mimeType: "image/png", buffer: PNG });
+  await main.getByText("이미지를 올리는 중입니다", { exact: false }).waitFor();
+  await writeBody(["새로 쓴 본문"]);
+  release();
+  const told = await appears(main.getByText("넣을 자리가 없어져 본문에 넣지 않았습니다. 이미지를 다시 올려 주세요."));
+  await page.unroute("**/api/research/post-images", hold);
+  check("WP3b2. upload whose place was deleted is not inserted, and asks to upload again", told && (await bodyBox().locator("figure[data-type=post-image]").count()) === 0 && !(await main.innerText()).includes("내 이미지"));
+  await saved();
   await main.getByRole("button", { name: "초안 버리기…" }).click();
   await main.getByRole("button", { name: "초안 버리기", exact: true }).click();
   await main.getByText("초안을 버렸습니다").waitFor();
@@ -606,7 +634,8 @@ check("WP3. W1: post page shows the public address", await appears(main.getByTex
   await card.waitFor();
   check("WP4. W2: card without summary shows plain body excerpt", await appears(card.getByText("소제목 굵은 첫 문장과 링크 그리고 코드. 둘째 문단")));
   const legacy = anon.locator("main article", { hasText: "Observatory에 오신 것을 환영합니다" });
-  check("WP4. W2: existing summary still shown", await appears(legacy.getByText("스터디 그룹의 관찰과 기록을 위한 공간", { exact: false })));
+  await legacy.waitFor();
+  check("WP4. #44: a stored summary is not shown on the card", (await legacy.getByText("스터디 그룹의 관찰과 기록을 위한 공간", { exact: false }).count()) === 0);
   await anon.goto(U(`/posts/${p4.latestVersion.slug}/`));
   await anon.locator("article h1").first().waitFor();
   check("WP4. W2: article header has no summary line when empty", (await anon.locator("article header > p").count()) === 0);
