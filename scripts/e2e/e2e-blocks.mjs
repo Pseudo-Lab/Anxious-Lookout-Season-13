@@ -132,24 +132,42 @@ function outline(node) {
  * 선택 메뉴처럼 화면에 고정된(스크롤을 따라 다시 놓이는) 요소를 누른다. Playwright의 자동 scroll-into-view와 메뉴 재배치가
  * 맞물려 "outside of the viewport"로 맴도는 일을 피하려고, 화면 안에서 그 점의 실제 요소가 대상인지 확인한 뒤 그 좌표를 누른다.
  * ok()가 참이 될 때까지(화면 정착) 다시 잰다. 끝내 맞지 않으면 누르지 않고 이유를 돌려준다(리뷰 full round7).
+ * stablePoint는 그 점만 돌려준다(끌기 같은 다른 마우스 동작용, 리뷰 full round8 F3).
  */
-async function stableClick(p, locator, ok = async () => true) {
+async function stablePoint(p, locator, ok = async () => true) {
   let last = "";
   for (let i = 0; i < 30; i++) {
+    // 화면 밖이면 가운데로 옮긴다(Playwright click이 하던 스크롤을 대신한다). 화면에 고정된 메뉴는 그대로 둔다.
+    await locator
+      .evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        if (r.bottom <= 0 || r.top >= innerHeight || r.right <= 0 || r.left >= innerWidth) el.scrollIntoView({ block: "center", inline: "nearest" });
+      })
+      .catch(() => {});
     const b = await locator.boundingBox().catch(() => null);
     const hit =
       b &&
       (await locator
         .evaluate((el, [x, y]) => x >= 0 && y >= 0 && x <= innerWidth && y <= innerHeight && (document.elementFromPoint(x, y) === el || el.contains(document.elementFromPoint(x, y))), [b.x + b.width / 2, b.y + b.height / 2])
         .catch(() => false));
-    if (hit && (await ok())) {
-      await p.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
-      return null;
-    }
+    if (hit && (await ok())) return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
     last = `box=${JSON.stringify(b)} hit=${hit}`;
     await p.waitForTimeout(100);
   }
   return last || "not reachable";
+}
+async function stableClick(p, locator, ok = async () => true) {
+  const at = await stablePoint(p, locator, ok);
+  if (typeof at === "string") return at;
+  await p.mouse.click(at.x, at.y);
+  return null;
+}
+
+/** stableClick을 하고, 누르지 못했으면 그 이유를 실패로 남긴다. 구간은 false면 멈춘다(후속 입력이 본문에 새지 않게). */
+async function reach(p, name, locator, ok) {
+  const why = await stableClick(p, locator, ok);
+  if (why) check(`${name}: target reachable on screen`, false, why);
+  return !why;
 }
 
 async function editingRegressions(p, h, tag) {
@@ -622,39 +640,50 @@ check("I1. picked image uploads and inserts by imageId with alt from file name",
   await setWidth("250");
   const high = await widthOf();
   check("F3. width box rounds and clamps to 10..100", typed === 37 && low === 10 && high === 100, `${typed} ${low} ${high}`);
+  // 리뷰 full round8: 자동 저장·주소 교체가 끝난 뒤 이미지를 화면 가운데로 옮기고, 손잡이가 화면 안에서 실제로 잡히는 점에서만 끈다
+  await H.blocks();
+  await H.editor.locator("figure[data-type=post-image]").first().evaluate((el) => el.scrollIntoView({ block: "center" }));
   const handle = H.editor.getByTestId("image-resize");
-  const hb = await handle.boundingBox();
-  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(hb.x - 60, hb.y + hb.height / 2, { steps: 5 });
-  const during = await widthOf();
-  await page.mouse.move(hb.x - 120, hb.y + hb.height / 2, { steps: 5 });
-  await page.mouse.up();
-  const dragged = await widthOf();
-  check("F3. dragging the handle changes the width once, on release, as an integer %", during === 100 && Number.isInteger(dragged) && dragged >= 10 && dragged < 100, `during=${during} after=${dragged}`);
+  const at = await stablePoint(page, handle);
+  if (typeof at === "string") {
+    check("F3. resize handle reachable on screen", false, at);
+  } else {
+    await page.mouse.move(at.x, at.y);
+    await page.mouse.down();
+    await page.mouse.move(at.x - 60, at.y, { steps: 5 });
+    const during = await widthOf();
+    await page.mouse.move(at.x - 120, at.y, { steps: 5 });
+    await page.mouse.up();
+    const dragged = await widthOf();
+    check("F3. dragging the handle changes the width once, on release, as an integer %", during === 100 && Number.isInteger(dragged) && dragged >= 10 && dragged < 100, `during=${during} after=${dragged}`);
+  }
   const saved = await H.blocks();
-  check("F3. saved image width equals the editor value", saved.problem === 0 && saved.doc?.blocks?.find((b) => b.type === "image")?.widthPercent === dragged, JSON.stringify(saved.doc?.blocks?.map((b) => b.widthPercent)));
+  check("F3. saved image width equals the editor value", saved.problem === 0 && saved.doc?.blocks?.find((b) => b.type === "image")?.widthPercent === (await widthOf()), JSON.stringify(saved.doc?.blocks?.map((b) => b.widthPercent)));
 }
 
 // F4. 이미지 블록 위/아래 이동(블록 화면의 버튼). id는 그대로, 저장 순서도 같다
-{
+// 리뷰 full round8·PM: 모든 F 구간은 자동 저장·주소 교체 뒤, 화면에서 실제로 잡히는 대상만 누르고, 못 누르면 그 구간을 멈춘다
+F4: {
   await H.fresh();
   await page.keyboard.type("first");
   await page.keyboard.press("Enter");
   await page.keyboard.type("second");
   await H.main.getByLabel("본문 이미지 파일").setInputFiles({ name: "옮길.png", mimeType: "image/png", buffer: PNG });
   await H.editor.locator("figure[data-type=post-image] img").first().waitFor({ timeout: 10000 }).catch(() => {});
+  await H.blocks();
   const order = async () => outline(await H.doc());
   const start = await order();
   const imgId = async () => (await H.doc()).content.find((b) => b.type === "postImage")?.attrs?.id;
   const id0 = await imgId();
-  await H.editor.getByRole("button", { name: "이미지 위로" }).click();
+  const up = H.editor.getByRole("button", { name: "이미지 위로" });
+  const dn = H.editor.getByRole("button", { name: "이미지 아래로" });
+  if (!(await reach(page, "F4. up 1", up))) break F4;
   const up1 = await order();
-  await H.editor.getByRole("button", { name: "이미지 위로" }).click();
+  if (!(await reach(page, "F4. up 2", up))) break F4;
   const up2 = await order();
-  await H.editor.getByRole("button", { name: "이미지 위로" }).click();
+  if (!(await reach(page, "F4. up 3 (at the top)", up))) break F4;
   const stay = await order();
-  await H.editor.getByRole("button", { name: "이미지 아래로" }).click();
+  if (!(await reach(page, "F4. down", dn))) break F4;
   const down = await order();
   check("F4. image moves up/down one block at a time and stops at the top", start === "p(first),p(second),postImage" && up1 === "p(first),postImage,p(second)" && up2 === "postImage,p(first),p(second)" && stay === up2 && down === up1, [start, up1, up2, stay, down].join(" / "));
   check("F4. the moved image keeps its id", (await imgId()) === id0);
@@ -663,14 +692,15 @@ check("I1. picked image uploads and inserts by imageId with alt from file name",
 }
 
 // F5. 단 안 이미지: 단 안에서 파일로 올리거나 이미지 패널에서 넣으면 그 단 안에 이미지 블록이 들어가고, 계약대로 저장된다
-{
+F5: {
   await H.fresh();
   await H.tb.getByRole("combobox", { name: "단 나누기" }).selectOption({ label: "1:1" });
   await page.keyboard.type("left");
   check("F5. image upload is available inside columns", !(await H.tb.getByRole("button", { name: "이미지 올리기" }).isDisabled()));
   await H.main.getByLabel("본문 이미지 파일").setInputFiles({ name: "왼쪽.png", mimeType: "image/png", buffer: PNG });
   await H.editor.locator("figure[data-type=post-image] img").first().waitFor({ timeout: 10000 }).catch(() => {});
-  await H.editor.locator(".pb-column").nth(1).click();
+  await H.blocks();
+  if (!(await reach(page, "F5. right column", H.editor.locator(".pb-column").nth(1)))) break F5;
   await page.keyboard.type("right");
   // 이미지 패널에서 올리면 본문 커서 위치(오른쪽 단)에 넣는다
   await H.main.getByRole("region", { name: "이미지" }).getByLabel("이미지 파일").setInputFiles({ name: "오른쪽.png", mimeType: "image/png", buffer: PNG });
@@ -755,11 +785,14 @@ await editingRegressions(page, H, "chromium");
 }
 // F1·F2. 선택 툴바: 글자를 선택하면 선택 영역 위에 서식 메뉴가 뜨고, 굵게·글자 크기(pt)가 선택한 글자에만 적용된다.
 // 커서를 옮겨 선택이 풀리면 사라진다. 손가락 입력(모바일)에서는 띄우지 않고 고정 툴바의 글자 크기를 쓴다.
-{
+F1: {
   await H.fresh();
   await page.keyboard.type("hello world");
   const menu = H.main.getByRole("toolbar", { name: "선택한 글자 서식" });
   check("F1. no selection menu without a selection", (await menu.count()) === 0);
+  // 리뷰 full round8: F1k와 같은 준비. 자동 저장·주소(?draft=) 교체가 끝난 뒤 보이는 본문에서 선택한다
+  await H.blocks();
+  const selectedWord = () => H.editor.evaluate((el) => el.editor.state.doc.textBetween(el.editor.state.selection.from, el.editor.state.selection.to));
   // 고정(sticky) 툴바 아래에 가리지 않게 줄을 화면 가운데로 옮긴 뒤 누른다
   await H.editor.getByText("hello world").evaluate((el) => el.scrollIntoView({ block: "center" }));
   // 문단 상자는 편집기 폭 전체라 글자 자체("world")의 위치를 Range로 잰다
@@ -779,11 +812,14 @@ await editingRegressions(page, H, "chromium");
   });
   const mb = await menu.boundingBox().catch(() => null);
   check("F1. double-click selection shows the menu right above the selection", selRect.text === "world" && !!mb && mb.y + mb.height <= selRect.top + 1 && mb.y + mb.height >= selRect.top - 40, `${JSON.stringify(selRect)} ${JSON.stringify(mb)}`);
-  check("F1. menu bold reachable", (await stableClick(page, menu.getByRole("button", { name: "굵게" }))) === null);
+  const boldWhy = await stableClick(page, menu.getByRole("button", { name: "굵게" }), async () => (await selectedWord()) === "world");
+  check("F1. menu bold reachable with \"world\" selected", boldWhy === null, boldWhy ?? "");
   // 리뷰 round2 M2: 실제로 목록을 눌러 포커스가 메뉴로 옮겨 가도 메뉴·선택이 남고, 키보드로 고른 크기가 선택한 글자에 적용된다
   const size = menu.getByLabel("글자 크기");
-  const sizeWhy = await stableClick(page, size);
-  check("F1. menu size list reachable", sizeWhy === null, sizeWhy ?? "");
+  const sizeWhy = boldWhy ?? (await stableClick(page, size, async () => (await selectedWord()) === "world"));
+  check("F1. menu size list reachable with \"world\" selected", sizeWhy === null, `${sizeWhy ?? ""} selected=${await selectedWord()}`);
+  // 누르지 못했으면 이어서 키를 보내지 않는다(본문에 키가 들어가 뒤 검사가 연쇄로 틀리지 않게)
+  if (sizeWhy) break F1;
   check("F1. clicking the size list keeps the menu open", (await menu.count()) === 1);
   for (let i = 0; i < 6; i++) await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Enter");
@@ -823,32 +859,51 @@ await editingRegressions(page, H, "chromium");
 
 // F6. 표 열 폭: 넓게·좁게 버튼과 테두리 끌기는 열 가중치(columnWidths)로 저장되고, 편집기·공개 화면 모두 그 비율의 고정 배치로 그린다.
 // 열을 넣고 빼면 가중치 길이도 맞춰지고, "같게"는 가중치를 없앤다(균등 = 생략).
-{
+F6: {
   await H.fresh();
   await H.tb.getByRole("button", { name: "표 넣기" }).click();
   await page.keyboard.type("A");
+  await H.blocks();
   const tableAttr = async () => (await H.doc()).content.find((b) => b.type === "table")?.attrs?.columnWidths ?? null;
   const t = H.tb.getByRole("group", { name: "표" });
-  await t.getByRole("button", { name: "열 넓게" }).click();
-  await t.getByRole("button", { name: "열 넓게" }).click();
+  const inTable = async () => H.editor.evaluate((el) => el.editor.isActive("table"));
+  if (!(await reach(page, "F6. widen 1", t.getByRole("button", { name: "열 넓게" }), inTable))) break F6;
+  if (!(await reach(page, "F6. widen 2", t.getByRole("button", { name: "열 넓게" }), inTable))) break F6;
   const widened = await tableAttr();
   check("F6. widening the cursor column twice stores integer weights for 3 columns", JSON.stringify(widened) === "[156,100,100]", JSON.stringify(widened));
   const pct = await H.editor.locator("table colgroup col").evaluateAll((cs) => cs.map((c) => c.style.width));
   check("F6. editor draws the weights as colgroup percentages", pct.length === 3 && Math.abs(parseFloat(pct[0]) - 43.82) < 0.1, JSON.stringify(pct));
   // 열 추가(커서 열 오른쪽, 같은 가중치) → 열 삭제
-  await t.getByRole("button", { name: "오른쪽에 열 추가" }).click();
+  if (!(await reach(page, "F6. add column", t.getByRole("button", { name: "오른쪽에 열 추가" }), inTable))) break F6;
   const added = await tableAttr();
-  await t.getByRole("button", { name: "열 삭제" }).click();
+  if (!(await reach(page, "F6. delete column", t.getByRole("button", { name: "열 삭제" }), inTable))) break F6;
   const removed = await tableAttr();
   // 커서가 있던 첫 열("A")을 지웠으므로 남은 칸에 다시 쓴다(빈 본문은 저장할 수 없다)
   await page.keyboard.type("B");
   check("F6. adding/removing a column keeps weights in step", JSON.stringify(added) === "[156,156,100,100]" && JSON.stringify(removed) === "[156,100,100]", `${JSON.stringify(added)} ${JSON.stringify(removed)}`);
   // 테두리 끌기: 첫 칸 오른쪽 가장자리를 오른쪽으로 끌면 첫 열이 넓어지고 둘째 열이 좁아진다(표 폭 그대로)
+  await H.blocks();
   const cell = H.editor.locator("table tr").first().locator("th, td").first();
-  const cb = await cell.boundingBox();
-  await page.mouse.move(cb.x + cb.width - 2, cb.y + cb.height / 2);
+  await cell.evaluate((el) => el.scrollIntoView({ block: "center" }));
+  // 첫 칸 오른쪽 가장자리 점이 화면 안이고 그 칸에 잡힐 때까지 다시 잰다
+  let edge = null;
+  for (let i = 0; i < 30 && !edge; i++) {
+    edge = await cell.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const x = r.right - 2;
+      const y = r.top + r.height / 2;
+      const inView = x >= 0 && y >= 0 && x <= innerWidth && y <= innerHeight;
+      return inView && el.contains(document.elementFromPoint(x, y)) ? { x, y } : null;
+    });
+    if (!edge) await page.waitForTimeout(100);
+  }
+  if (!edge) {
+    check("F6. column border reachable on screen", false, JSON.stringify(await cell.boundingBox()));
+    break F6;
+  }
+  await page.mouse.move(edge.x, edge.y);
   await page.mouse.down();
-  await page.mouse.move(cb.x + cb.width + 60, cb.y + cb.height / 2, { steps: 6 });
+  await page.mouse.move(edge.x + 62, edge.y, { steps: 6 });
   const during = await tableAttr();
   const guide = await page.getByTestId("column-resize-guide").count();
   await page.mouse.up();
@@ -869,15 +924,16 @@ await editingRegressions(page, H, "chromium");
   check("F6. renderer uses a fixed layout with the same column percentages", rendered.cls.includes("pb-weighted") && rendered.cols.length === 3 && Math.abs(parseFloat(rendered.cols[0]) - (100 * sw[0]) / sum) < 0.01, JSON.stringify(rendered));
   // 같게: 가중치를 없앤다
   await H.main.getByRole("button", { name: "내용 수정" }).click();
-  await H.editor.locator("table td, table th").first().click();
-  await H.tb.getByRole("group", { name: "표" }).getByRole("button", { name: "열 폭 같게" }).click();
+  await H.editor.waitFor({ timeout: 15000 });
+  if (!(await reach(page, "F6. a table cell", H.editor.locator("table td, table th").first()))) break F6;
+  if (!(await reach(page, "F6. even", H.tb.getByRole("group", { name: "표" }).getByRole("button", { name: "열 폭 같게" }), inTable))) break F6;
   check("F6. 'even' removes the weights (equal = omitted)", (await tableAttr()) === null);
   await H.main.getByRole("button", { name: "초안 버리기…" }).click();
   await H.main.getByRole("button", { name: "초안 버리기", exact: true }).click();
 }
 
 // F6b. 리뷰 round4 M3: 정규화된 작은 가중치([1,2,2])의 표를 저장·새로고침한 뒤에도 넓게·좁게가 양방향으로 바뀐다
-{
+F6b: {
   const csrf = (await (await page.request.get(U("/api/auth/me"))).json()).csrfToken;
   const id = () => crypto.randomUUID();
   const cell = (t) => ({ id: id(), align: "left", blocks: [{ id: id(), type: "paragraph", runs: t ? [{ text: t, marks: [] }] : [] }] });
@@ -893,12 +949,13 @@ await editingRegressions(page, H, "chromium");
   const w = async () => (await H.doc()).content.find((b) => b.type === "table")?.attrs?.columnWidths ?? null;
   const ratio = (x) => (x ? x[0] / x[1] : null);
   const start = await w();
-  await H.editor.locator("table th").first().click();
+  if (!(await reach(page, "F6b. header cell", H.editor.locator("table th").first()))) break F6b;
   const t = H.tb.getByRole("group", { name: "표" });
-  await t.getByRole("button", { name: "열 넓게" }).click();
+  const inTable = async () => H.editor.evaluate((el) => el.editor.isActive("table"));
+  if (!(await reach(page, "F6b. widen", t.getByRole("button", { name: "열 넓게" }), inTable))) break F6b;
   const wide = await w();
-  await t.getByRole("button", { name: "열 좁게" }).click();
-  await t.getByRole("button", { name: "열 좁게" }).click();
+  if (!(await reach(page, "F6b. narrow 1", t.getByRole("button", { name: "열 좁게" }), inTable))) break F6b;
+  if (!(await reach(page, "F6b. narrow 2", t.getByRole("button", { name: "열 좁게" }), inTable))) break F6b;
   const narrow = await w();
   check("F6b. small canonical weights [1,2,2]: widen and narrow both change the first column", JSON.stringify(start) === "[1,2,2]" && ratio(wide) > 0.5 && ratio(narrow) < 0.5 && wide[1] === wide[2] && narrow[1] === narrow[2], `${JSON.stringify(start)} → ${JSON.stringify(wide)} → ${JSON.stringify(narrow)}`);
   const saved = await H.blocks();
