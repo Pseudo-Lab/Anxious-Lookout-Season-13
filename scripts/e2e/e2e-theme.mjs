@@ -122,6 +122,8 @@ function editorContent(imageId) {
       para([run("선택할 문장입니다")]),
       para(COLORS.map((hex) => run(`색${hex.slice(1)} `, [{ color: hex }]))),
       para([run("크기 18pt", [{ fontSize: 18 }]), run(" 링크", [], "https://example.com/"), run(" 코드", ["code"])]),
+      // 리뷰 slice3 round2: 인라인 코드 + 글자색(글자는 코드 바탕 위에 놓인다)
+      para(["#1C1917", "#DC2626", "#2563EB", "#7C3AED"].map((hex) => run(`코드${hex.slice(1)} `, ["code", { color: hex }]))),
       {
         id: uid(),
         type: "table",
@@ -132,7 +134,7 @@ function editorContent(imageId) {
             id: uid(),
             header: false,
             cells: row.map((bg) => {
-              return cell([run(bg ? `칸${bg.slice(1)} ` : "배경 없음 "), run("보라", [{ color: "#7C3AED" }]), run(" 링크", [], "https://example.com/"), run(" 빨강", [{ color: "#DC2626" }]), run(" 코드", ["code"])], bg);
+              return cell([run(bg ? `칸${bg.slice(1)} ` : "배경 없음 "), run("보라", [{ color: "#7C3AED" }]), run(" 링크", [], "https://example.com/"), run(" 빨강", [{ color: "#DC2626" }]), run(" 코드", ["code"]), run(" 코드보라", ["code", { color: "#7C3AED" }])], bg);
             }),
           })),
         ],
@@ -212,20 +214,34 @@ function storedColors(content) {
 }
 
 /**
- * 화면의 사용자 색. 글자색 span마다 [저장 값, 다크 값, 그려진 색, 배경 칸 안인지, 글자, 칸 다크 값(--pb-cell-cd), 놓인 바탕 위 대비],
- * 배경 칸마다 [저장 값, 그려진 배경, 그려진 기본 글자색, 기본 글자 대비, 링크 최소 대비, 인라인 코드 최소 대비].
+ * 화면의 사용자 색. 글자색 span마다 [저장 값, 그 위치의 다크 값(일반·코드·칸·칸 코드), 그려진 색, 배경 칸 안인지, 글자, 코드 안인지, 실제 바탕 위 대비],
+ * 배경 칸마다 [저장 값, 그려진 배경, 그려진 기본 글자색, 기본 글자 대비, 링크 최소 대비, 인라인 코드 최소 대비(사용자 색 없는 글자)].
  * 글자가 실제로 들어 있는 가장 안쪽 요소(편집기 장식 span이 있으면 그것)의 계산값을 잰다.
  */
 const paintedColors = (root) =>
   root.evaluate((r) => {
     const rgb = (el, prop = "color") => window.__rgb(getComputedStyle(el)[prop]).slice(0, 3);
     const ratio = (el) => Number(window.__ratio(rgb(el), window.__under(el)).toFixed(2));
-    const min = (els) => (els.length ? Math.min(...els.map(ratio)) : null);
+    // 링크·코드는 글자를 직접 담은 요소만 잰다(색 글자 span이 안에 있으면 그 글자는 text 항목에서 잰다, 리뷰 slice3 round2)
+    const textHolders = (els) => els.flatMap((el) => {
+      const out = [];
+      const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      for (let n = w.nextNode(); n; n = w.nextNode()) if (n.textContent.trim() && !n.parentElement.closest(".pb-color")) out.push(n.parentElement);
+      return out;
+    });
+    const min = (els) => {
+      const held = textHolders(els);
+      return held.length ? Math.min(...held.map(ratio)) : null;
+    };
     return {
       text: [...r.querySelectorAll(".pb-color")].map((s) => {
-        const inner = s.querySelector(".pb-cell-color") ?? s;
+        // 글자를 실제로 담은 요소(편집기는 span > code > 장식 span일 수 있다)와 그 위치에서 다크 모드가 쓸 값
+        const inner = document.createTreeWalker(s, NodeFilter.SHOW_TEXT).nextNode()?.parentElement ?? s;
         const cell = s.closest("td, th");
-        return [s.style.getPropertyValue("--pb-c").trim(), s.style.getPropertyValue("--pb-cd").trim(), rgb(inner).join(","), !!cell?.style.backgroundColor, s.textContent, getComputedStyle(inner).getPropertyValue("--pb-cell-cd").trim(), ratio(inner)];
+        const inBg = !!cell?.style.backgroundColor;
+        const inCode = !!inner.closest("code");
+        const want = inCode ? (inBg ? "--pb-cell-kd" : "--pb-kd") : inBg ? "--pb-cell-cd" : "--pb-cd";
+        return [s.style.getPropertyValue("--pb-c").trim(), getComputedStyle(inner).getPropertyValue(want).trim(), rgb(inner).join(","), inBg, s.textContent, inCode, ratio(inner)];
       }),
       cells: [...r.querySelectorAll("td, th")]
         .filter((c) => c.style.backgroundColor)
@@ -252,33 +268,59 @@ async function injectFault(page) {
   if (FAULT === "nomenu") await page.addStyleTag({ content: '[role="toolbar"][aria-label="선택한 글자 서식"] { display: none !important; }' });
   if (FAULT === "storedcolor") await page.addStyleTag({ content: ".pb-color { color: var(--pb-c) !important; }" });
   // fixedcell = 리뷰 slice3 round1 결함 재현: 칸 글자·링크·칸 안 글자색을 실제 배경과 무관한 고정 값으로(사용자 지정 배경 검사가 실패해야 한다)
+  // codebg = 리뷰 slice3 round2 결함 재현: 코드 안 글자색을 코드 바탕이 아닌 칸/일반 바탕 기준 값으로(코드 + 색 검사가 실패해야 한다)
+  if (FAULT === "codebg")
+    await page.addStyleTag({ content: "@media (prefers-color-scheme: dark) { .prose code .pb-color, .prose .pb-color code:not(pre code) { color: var(--pb-cd) !important; } .prose .pb-cell-bg code .pb-color, .prose .pb-cell-bg code .pb-cell-color { color: var(--pb-cell-cd) !important; } }" });
   if (FAULT === "fixedcell")
     await page.addStyleTag({ content: ".pb-cell-bg { color: #1c1917 !important; --color-accent: #4f46e5 !important; } .pb-cell-color.pb-color, .pb-cell-color .pb-color, .pb-color .pb-cell-color { color: var(--pb-cd) !important; }" });
 }
 
 /** D-38-1·D-38-3 사용자 색 규칙을 그려진 값으로 확인한다(편집기와 글 화면에 같이 쓴다). */
-function colourChecks(painted, tag, scheme) {
+function colourChecks(painted, tag, scheme, expected) {
   const dark = scheme === "dark";
   const outside = painted.text.filter((t) => !t[3]);
   const inCells = painted.text.filter((t) => t[3]);
-  // (a) 칸 밖 글자색: 라이트 = 저장 값, 다크 = 밝기 보정 값(--pb-cd)이며 바탕 위 AA
+  // 라이트 = 저장 값(D-38-3). 다크 = 그 위치의 값(일반 바탕 --pb-cd, 코드 바탕 --pb-kd, 칸 --pb-cell-cd, 칸 코드 --pb-cell-kd)이며 실제 바탕 위 AA
+  const drawn = (t) => (dark ? t[1] !== "" && t[2] === hexRgb(t[1]) && t[6] >= 4.5 : t[2] === hexRgb(t[0]));
+  const show = (ts) => JSON.stringify(ts.map((t) => [t[0], t[5] ? "code" : "", t[1], t[2], t[6]]));
   check(
-    `D. ${tag}: text colours outside cells are drawn ${dark ? "with the brightened dark value, AA on the surface" : "as stored"}`,
-    outside.length === COLORS.length + 2 && outside.every((t) => t[2] === hexRgb(dark ? t[1] : t[0]) && (!dark || t[6] >= 4.5)) && (!dark || outside.filter((t) => t[0] !== t[1]).length >= 5),
-    JSON.stringify(outside.map((t) => [t[0], t[1], t[2], t[6]]))
+    `D. ${tag}: text colours outside cells (plain and inline code) are drawn ${dark ? "with the dark value for their real background, AA there" : "as stored"}`,
+    outside.length === expected.outside && outside.filter((t) => t[5]).length === expected.outsideCode && outside.every(drawn) && (!dark || outside.filter((t) => t[0] !== t[1]).length >= 5),
+    show(outside)
   );
-  // (b) 배경 칸 안 글자색: 라이트 = 저장 값(D-38-3), 다크 = 그 칸 배경 위 AA 값(--pb-cell-cd). 팔레트 밖 배경 포함
   check(
-    `D. ${tag}: text colours inside background cells are drawn ${dark ? "with the value computed for that cell's background, AA there" : "as stored"}`,
-    inCells.length === 2 * (BGS.length + CUSTOM_BGS.length) && inCells.every((t) => (dark ? t[5] !== "" && t[2] === hexRgb(t[5]) && t[6] >= 4.5 : t[2] === hexRgb(t[0]))),
-    JSON.stringify(inCells.map((t) => [t[0], t[5], t[2], t[6]]))
+    `D. ${tag}: text colours inside background cells (plain and inline code) are drawn ${dark ? "with the value computed for their real background, AA there" : "as stored"}`,
+    inCells.length === expected.inCells && inCells.filter((t) => t[5]).length === expected.inCellsCode && inCells.every(drawn),
+    show(inCells)
   );
-  // (c) 배경 칸: 배경 = 저장 값, 기본 글자·링크·인라인 코드 = 그 배경 위 AA(두 모드)
+  // 배경 칸: 배경 = 저장 값, 기본 글자·링크·인라인 코드 = 그 배경 위 AA(두 모드)
   check(
     `D. ${tag}: background cells keep the stored background, with AA default text, links and inline code (palette and custom backgrounds)`,
     painted.cells.length === 1 + BGS.length + CUSTOM_BGS.length && painted.cells.every(([hex, bg, , fg, link, code]) => (hex === "" || bg === hexRgb(hex)) && fg >= 4.5 && (link === null || link >= 4.5) && (code === null || code >= 4.5)),
     JSON.stringify(painted.cells)
   );
+}
+
+/** fixture의 글자색 run 수: 배경 칸 밖/안, 그중 인라인 코드와 함께 쓴 것. */
+function colourRuns(content) {
+  const out = { outside: 0, outsideCode: 0, inCells: 0, inCellsCode: 0 };
+  const walk = (v, inBg) => {
+    if (Array.isArray(v)) return v.forEach((x) => walk(x, inBg));
+    if (!v || typeof v !== "object") return;
+    if (Array.isArray(v.marks) && v.marks.some((m) => typeof m === "object" && m.color)) {
+      const code = v.marks.includes("code");
+      if (inBg) {
+        out.inCells++;
+        if (code) out.inCellsCode++;
+      } else {
+        out.outside++;
+        if (code) out.outsideCode++;
+      }
+    }
+    for (const x of Object.values(v)) walk(x, inBg || typeof v.background === "string");
+  };
+  walk(content, false);
+  return out;
 }
 
 async function editorScreens(page, scheme, send, csrf) {
@@ -302,7 +344,7 @@ async function editorScreens(page, scheme, send, csrf) {
   await injectFault(page);
 
   const painted = await paintedColors(editor);
-  colourChecks(painted, tag, scheme);
+  colourChecks(painted, tag, scheme, colourRuns(content));
   await scan(page, `${tag}`, scheme);
 
   // #36 선택 툴바(F1)·크기 목록(F2): 검증된 문장을 눌러 커서를 두고 키보드로 선택한다
@@ -400,10 +442,17 @@ async function editorScreens(page, scheme, send, csrf) {
   await helpers(page);
   await injectFault(page);
   const rendered = await paintedColors(article);
-  colourChecks(rendered, `${scheme} post view`, scheme);
+  colourChecks(rendered, `${scheme} post view`, scheme, colourRuns(content));
   // 글 화면 칸에는 data-background가 없으므로 그려진 배경·글자색만 비교한다
   const key = (p) => JSON.stringify({ text: p.text.map((t) => [t[0], t[2], t[3]]), cells: p.cells.map((c) => c.slice(1)) });
-  check(`D. ${scheme}: the post view draws user colours exactly as the editor does`, key(rendered) === key(painted), `editor=${key(painted).slice(0, 300)} view=${key(rendered).slice(0, 300)}`);
+  const diff = (a, b) => {
+    const [x, y] = [JSON.parse(key(a)), JSON.parse(key(b))];
+    const d = [];
+    for (const part of ["text", "cells"]) for (let i = 0; i < Math.max(x[part].length, y[part].length); i++) if (JSON.stringify(x[part][i]) !== JSON.stringify(y[part][i])) d.push(`${part}[${i}] editor=${JSON.stringify(x[part][i])} view=${JSON.stringify(y[part][i])}`);
+    return d;
+  };
+  const differs = diff(painted, rendered);
+  check(`D. ${scheme}: the post view draws user colours exactly as the editor does`, differs.length === 0, `${painted.text.length} runs, ${painted.cells.length} cells; ${differs.slice(0, 4).join(" | ")}`);
   await scan(page, `${scheme} post view with user colours`, scheme);
 }
 

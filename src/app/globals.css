@@ -416,6 +416,7 @@ html[data-chat-resizing] body {
  * - 배경이 있는 칸(pb-cell-bg): 칸 배경은 저장 값 그대로, 칸 안 기본 글자(--pb-cell-fg)·링크(--pb-cell-link)는
  *   그 실제 배경 위 AA 색(두 모드 같음). 인라인 코드는 칸 안에서 고정 짝(밝은 남색 바탕·짙은 남색 글자)을 쓴다.
  * - 칸 안 사용자 글자색(pb-cell-color, --pb-cell-cd): 라이트는 저장 값(D-38-3), 다크는 그 칸 배경 위 AA로 옮긴 값.
+ * - 인라인 코드 안 사용자 글자색: 라이트는 저장 값, 다크는 실제 바탕인 코드 바탕 위 AA 값(--pb-kd, 칸 안은 --pb-cell-kd).
  *   편집기는 mark span 안쪽 또는 바깥쪽 장식 span에 붙고, renderer는 mark span 자체에 붙는다(세 경우 모두 같은 결과).
  */
 @media (prefers-color-scheme: dark) {
@@ -430,6 +431,15 @@ html[data-chat-resizing] body {
   .pb-swatch {
     background-color: var(--pb-cd) !important;
   }
+  /* 코드 + 글자색(리뷰 slice3 round2): 글자는 코드 바탕 위에 있다. renderer는 code > span, 편집기는 span > code(칸 안은 > 장식 span) */
+  .prose code .pb-color,
+  .prose .pb-color code:not(pre code) {
+    color: var(--pb-kd) !important;
+  }
+  .prose .pb-cell-bg code .pb-color,
+  .prose .pb-cell-bg code .pb-cell-color {
+    color: var(--pb-cell-kd) !important;
+  }
 }
 .pb-swatch {
   background-color: var(--pb-c);
@@ -442,6 +452,10 @@ html[data-chat-resizing] body {
 .prose .pb-cell-bg code:not(pre code) {
   background: #e0e7ff;
   color: #3730a3;
+}
+/* 편집기는 글자색 span이 code를 감싼다: renderer(code 안 span)처럼 코드 글자도 사용자 색으로 그린다(칸 코드 색보다 뒤에 둔다) */
+.prose .pb-color code:not(pre code) {
+  color: var(--pb-c);
 }
 
 /* #32 블록 편집기(Tiptap). 공개 renderer와 같은 배치를 쓰도록 클래스 이름(pb-*)을 맞춘다. */

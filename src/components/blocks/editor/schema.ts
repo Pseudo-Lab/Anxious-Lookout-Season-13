@@ -26,7 +26,7 @@ import UniqueID from "@tiptap/extension-unique-id";
 import { uuidV4 } from "@/lib/research/idempotency";
 import { CODE_LANGUAGES, COLUMN_WEIGHT, FONT_SIZES, IMAGE_WIDTH, LIMITS, YOUTUBE_ID, ptToPx, type Align } from "@/lib/blocks/types";
 import { isAllowedLink } from "@/lib/blocks/document";
-import { CELL_BG_CLASS, CELL_TEXT_COLOR_CLASS, cellBackgroundStyleText, cellTextColorVar, textColorStyleText, TEXT_COLOR_CLASS } from "@/lib/blocks/userColor";
+import { CELL_BG_CLASS, CELL_TEXT_COLOR_CLASS, cellBackgroundStyleText, cellTextColorStyleText, textColorStyleText, TEXT_COLOR_CLASS } from "@/lib/blocks/userColor";
 import { ownImageUrl } from "@/lib/posts/api";
 
 // #32 편집기 스키마. 저장 계약(post-blocks v1)이 허용하는 구조만 편집기 안에서도 만들 수 있게 노드 content 식으로 제한한다.
@@ -585,7 +585,7 @@ const ColumnResize = Extension.create({
 
 /**
  * #38 D-38-1(리뷰 slice3 round1): 배경 칸 안 글자색은 다크 모드에서 그 칸의 실제 배경 위 AA 값으로 그린다.
- * mark는 자기가 놓인 칸을 모르므로, 배경 칸 안의 색 글자에 장식(--pb-cell-cd)을 붙인다. 문서·저장 값은 바꾸지 않는다.
+ * mark는 자기가 놓인 칸을 모르므로, 배경 칸 안의 색 글자에 장식(--pb-cell-cd, 코드 안이면 --pb-cell-kd)을 붙인다. 문서·저장 값은 바꾸지 않는다.
  */
 const CellTextColors = Extension.create({
   name: "cellTextColors",
@@ -600,7 +600,7 @@ const CellTextColors = Extension.create({
             const color = child.isText ? (child.marks.find((m) => m.type.name === "textStyle")?.attrs.color as string | null | undefined) : null;
             if (color) {
               const from = pos + 1 + rel;
-              decos.push(Decoration.inline(from, from + child.nodeSize, { class: CELL_TEXT_COLOR_CLASS, style: `--pb-cell-cd: ${cellTextColorVar(color, bg)}` }));
+              decos.push(Decoration.inline(from, from + child.nodeSize, { class: CELL_TEXT_COLOR_CLASS, style: cellTextColorStyleText(color, bg) }));
             }
           });
         return false;

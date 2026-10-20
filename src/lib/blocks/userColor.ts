@@ -171,19 +171,44 @@ export function cellColors(bg: string): { fg: string; link: string } {
   return { fg, link: readableOn(light ? LINK_LIGHT : LINK_DARK, bg) };
 }
 
-/** 글자색 mark를 그릴 때 붙이는 클래스와 inline 값(라이트 = 저장 값 그대로, 다크 = --pb-cd). */
+/**
+ * 인라인 코드 바탕(globals.css .prose code와 같은 값). 코드와 글자색을 함께 쓰면 글자는 이 바탕 위에 놓인다(리뷰 slice3 round2).
+ * 다크 = --accent-light 다크 값(oklch 25.7% 0.09 281.288), 칸 안 = 칸 고정 코드 바탕.
+ */
+export const DARK_CODE_BG = "#1E1B4B";
+export const CELL_CODE_BG = "#E0E7FF";
+
+/**
+ * 글자색 mark를 그릴 때 붙이는 클래스와 inline 값. 라이트 = 저장 값 그대로(D-38-3).
+ * 다크: --pb-cd = 일반 바탕 위 값, --pb-kd = 인라인 코드 바탕 위 값(같은 색상, AA).
+ */
 export const TEXT_COLOR_CLASS = "pb-color";
+function textColorVars(hex: string) {
+  const dark = darkTextColor(hex);
+  return { "--pb-c": hex, "--pb-cd": dark, "--pb-kd": readableOn(dark, DARK_CODE_BG) };
+}
+const styleText = (vars: Record<string, string>) =>
+  Object.entries(vars)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join("; ");
 export function textColorStyle(hex: string): CSSProperties {
-  return { color: hex, "--pb-c": hex, "--pb-cd": darkTextColor(hex) } as CSSProperties;
+  return { color: hex, ...textColorVars(hex) } as CSSProperties;
 }
 /** 편집기 renderHTML용 같은 값(style 문자열). 값은 검증된 #RRGGBB에서만 만든다. */
 export function textColorStyleText(hex: string) {
-  return `color: ${hex}; --pb-c: ${hex}; --pb-cd: ${darkTextColor(hex)}`;
+  return `color: ${hex}; ${styleText(textColorVars(hex))}`;
 }
 
-/** 배경 칸 안 글자색: 다크 모드에서 쓸 값(--pb-cell-cd = 그 칸 배경 위 AA). 라이트는 저장 값 그대로(D-38-3). */
+/**
+ * 배경 칸 안 글자색의 다크 값: --pb-cell-cd = 그 칸 배경 위 AA, --pb-cell-kd = 칸 안 인라인 코드 바탕 위 AA.
+ * 라이트는 저장 값 그대로(D-38-3).
+ */
 export const CELL_TEXT_COLOR_CLASS = "pb-cell-color";
-export const cellTextColorVar = (hex: string, bg: string) => readableOn(hex, bg);
+function cellTextColorVars(hex: string, bg: string) {
+  return { "--pb-cell-cd": readableOn(hex, bg), "--pb-cell-kd": readableOn(hex, CELL_CODE_BG) };
+}
+export const cellTextColorStyle = (hex: string, bg: string) => cellTextColorVars(hex, bg) as CSSProperties;
+export const cellTextColorStyleText = (hex: string, bg: string) => styleText(cellTextColorVars(hex, bg));
 
 /** 배경 칸의 클래스와 inline 값(배경 = 저장 값, 기본 글자·링크 = 그 배경 위 AA). */
 export const CELL_BG_CLASS = "pb-cell-bg";

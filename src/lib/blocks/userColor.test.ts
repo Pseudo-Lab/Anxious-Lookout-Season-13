@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { getSchema } from "@tiptap/core";
 import { blockExtensions } from "@/components/blocks/editor/schema";
-import { cellBackgroundStyleText, cellColors, contrastRatio, darkTextColor, isLightBackground, readableOn, textColorStyleText } from "./userColor";
+import { CELL_CODE_BG, DARK_CODE_BG, cellBackgroundStyleText, cellColors, cellTextColorStyle, contrastRatio, darkTextColor, isLightBackground, readableOn, textColorStyle, textColorStyleText } from "./userColor";
 
 // 편집기 도구 막대의 글자색 8종과 칸 배경 5종(BlockEditor COLORS·CELL_BACKGROUNDS)
 const COLORS = ["#1C1917", "#DC2626", "#EA580C", "#CA8A04", "#16A34A", "#2563EB", "#7C3AED", "#DB2777"];
@@ -104,6 +104,29 @@ describe("cell backgrounds", () => {
       for (const c of colors) expect(contrastRatio(readableOn(c, bg), bg), `${c} on ${bg}`).toBeGreaterThanOrEqual(4.5);
     }
   }, 60000);
+});
+
+// 리뷰 slice3 round2: 인라인 코드 + 글자색이면 글자는 코드 바탕 위에 놓인다
+describe("text colours inside inline code", () => {
+  const vars = (style: object) => style as Record<string, string>;
+  it.each(COLORS)("%s: dark value on the dark code background reaches AA and keeps its hue", (hex) => {
+    const kd = vars(textColorStyle(hex))["--pb-kd"];
+    expect(contrastRatio(kd, DARK_CODE_BG)).toBeGreaterThanOrEqual(4.5);
+    const h0 = hue(hex);
+    if (h0 !== null) expect(hueGap(h0, hue(kd)!)).toBeLessThan(20);
+  });
+
+  it.each([...CELL_BACKGROUNDS, ...CUSTOM_BGS])("cell %s: code colours are computed for the code background, not the cell", (bg) => {
+    for (const hex of COLORS) {
+      const v = vars(cellTextColorStyle(hex, bg));
+      expect(contrastRatio(v["--pb-cell-kd"], CELL_CODE_BG), `${hex} in code on ${bg}`).toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(v["--pb-cell-cd"], bg), `${hex} on ${bg}`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it("reported cases: violet code text in #1E3A8A and #555555 cells", () => {
+    for (const bg of ["#1E3A8A", "#555555"]) expect(contrastRatio(vars(cellTextColorStyle("#7C3AED", bg))["--pb-cell-kd"], CELL_CODE_BG)).toBeGreaterThanOrEqual(4.5);
+  });
 });
 
 describe("editor rendering (same classes and values as the public renderer)", () => {

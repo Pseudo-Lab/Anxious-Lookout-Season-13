@@ -3,7 +3,7 @@
 import { Fragment, type CSSProperties, type ReactNode } from "react";
 import { parseBlockDocument } from "@/lib/blocks/document";
 import { clampImageWidth, ptToPx, type Align, type Block, type FlowBlock, type ListBlock, type Mark, type Run, type TableBlock } from "@/lib/blocks/types";
-import { CELL_BG_CLASS, CELL_TEXT_COLOR_CLASS, cellBackgroundStyle, cellTextColorVar, textColorStyle, TEXT_COLOR_CLASS } from "@/lib/blocks/userColor";
+import { CELL_BG_CLASS, CELL_TEXT_COLOR_CLASS, cellBackgroundStyle, cellTextColorStyle, textColorStyle, TEXT_COLOR_CLASS } from "@/lib/blocks/userColor";
 import { ownImageUrl } from "@/lib/posts/api";
 import ScrollBox from "@/components/research/ScrollBox";
 import YouTubeCard from "./YouTubeCard";
@@ -33,7 +33,7 @@ function wrap(node: ReactNode, mark: Mark, key: number, cellBg?: string): ReactN
     // #38 D-38-1: 글자색은 다크 모드에서 밝기만 올린 색으로 그린다(userColor). 배경 칸 안에서는 그 배경 위 AA 값.
     if ("color" in mark)
       return cellBg ? (
-        <span key={key} className={`${TEXT_COLOR_CLASS} ${CELL_TEXT_COLOR_CLASS}`} style={{ ...textColorStyle(mark.color), "--pb-cell-cd": cellTextColorVar(mark.color, cellBg) } as CSSProperties}>
+        <span key={key} className={`${TEXT_COLOR_CLASS} ${CELL_TEXT_COLOR_CLASS}`} style={{ ...textColorStyle(mark.color), ...cellTextColorStyle(mark.color, cellBg) }}>
           {node}
         </span>
       ) : (
