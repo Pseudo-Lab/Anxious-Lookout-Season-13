@@ -75,7 +75,13 @@ def run_batch(role, argv):
             failed = True
     for line in output.getvalue().splitlines():
         item = json.loads(line)
-        require(set(item) == {'owner', 'stage', 'result'} and str(UUID(item['owner'])) == item['owner']
+        fields = {'owner', 'stage', 'result'}
+        if 'reason' in item:
+            from ops.runner_supply_diagnostics import CODES
+            require(item['stage'] == 'host-supply' and item['result'] in {'auth_expired','supply_refused'}
+                    and item['reason'] in CODES)
+            fields.add('reason')
+        require(set(item) == fields and str(UUID(item['owner'])) == item['owner']
                 and item['stage'] in {'provision', 'termination', 'host-supply'}
                 and item['result'] in {'processed', 'observed', 'already_available', 'supplied', 'excluded',
                                        'reconciliation_required', 'auth_expired', 'supply_refused'})

@@ -22,6 +22,10 @@ from runner.auth import write_private
 SOURCE = '/home/opc/.codex/auth.json'
 
 
+def snapshot_id(owner, state, source):
+    return uuid5(NAMESPACE_URL,str(owner)+'/'+str(state.state_id)+'/'+str(state.generation)+'/'+str(state.pod_uid)+'/'+hashlib.sha256(source[0].encode()).hexdigest())
+
+
 class Supply:
     def __init__(self, engine, pool, *, account, source_uid, kubeconfig, attempt_root, kubectl='/usr/local/bin/kubectl',
                  source_reader=selected_file, run=subprocess.run, runner=Runner):
@@ -39,6 +43,10 @@ class Supply:
                 and self.attempt_root.is_dir() and self.attempt_root.stat().st_uid == 0
                 and not self.attempt_root.stat().st_mode & 0o077)
         self.source_reader,self.run,self.runner = source_reader,run,runner
+
+    def diagnose(self, owner):
+        from ops.runner_supply_diagnostics import diagnose
+        return diagnose(self,owner)
 
     def process(self, owner):
         require(isinstance(owner,UUID) and allowed(owner))
@@ -65,7 +73,7 @@ class Supply:
             require(health.get('available') is False and health.get('reason') in {'not_configured','auth_expired','auth_revoked'})
             source = self.source_reader(SOURCE,expected_uid=self.source_uid)
             # Stable identity makes retry of the same source idempotent in the service ledger.
-            snapshot = uuid5(NAMESPACE_URL,str(owner)+'/'+str(state.state_id)+'/'+str(state.generation)+'/'+str(state.pod_uid)+'/'+hashlib.sha256(source[0].encode()).hexdigest())
+            snapshot = snapshot_id(owner,state,source)
             envelope = service_envelope(source,{'ownerId':str(owner),'stateId':str(state.state_id),
                 'snapshotId':str(snapshot),'expectedAccountId':self.account})
             # Durable no-replay permit. Unknown/rejected delivery of this exact
@@ -101,6 +109,45 @@ class Supply:
             return 'supplied'
 
 
+def diagnostic_command(args):
+    from sqlalchemy import create_engine
+    from app.settings import secret
+    from app.runner_pool import Pool
+    from ops.runner_one_shot import private_file
+    from ops.runner_supply_diagnostics import ReadOnlyEngine, diagnose_observer
+    from ops.runner_stop_observer import Observer
+    from ops.runner_termination import HostTermination
+    engine = None
+    results = []
+    try:
+        engine = create_engine(secret('OBSERVER_DATABASE_URL'),hide_parameters=True)
+        readonly = ReadOnlyEngine(engine)
+        for stage, path in [('host-supply-diagnose',args.inputs),('termination-diagnose',args.observer_inputs)]:
+            if path is None: continue
+            code = 'input_invalid'
+            try:
+                config = json.loads(private_file(Path(path)))
+                if stage == 'host-supply-diagnose':
+                    require(set(config) == {'pool','account','sourceUid','kubeconfig','kubectl','attemptRoot'})
+                    worker = Supply(engine,Pool(readonly,config['pool']),account=config['account'],source_uid=config['sourceUid'],
+                                    kubeconfig=config['kubeconfig'],kubectl=config['kubectl'],attempt_root=config['attemptRoot'])
+                    code = worker.diagnose(args.owner)
+                else:
+                    require(os.geteuid() == 0 and set(config) == {'pool','host','storageRoot'})
+                    observer = Observer(engine,Pool(readonly,config['pool']),HostTermination(**config['host']),config['storageRoot'])
+                    code = diagnose_observer(observer,args.owner)
+            except Exception:
+                pass
+            results.append({'owner':str(args.owner),'stage':stage,'result':code})
+    except Exception:
+        results = [{'owner':str(args.owner),'stage':stage,'result':'input_invalid'}
+                   for stage in ['host-supply-diagnose']+(['termination-diagnose'] if args.observer_inputs else [])]
+    finally:
+        if engine is not None: engine.dispose()
+    for result in results: print(json.dumps(result))
+    return 0 if all(r['result'] in {'already_available','ready_for_supply','no_stop','ready_for_observation','retained_receipt_ready','awaiting_pod_deletion'} for r in results) else 1
+
+
 def main():
     import argparse
     from sqlalchemy import create_engine
@@ -112,7 +159,14 @@ def main():
     parser.add_argument('--owner',type=UUID)
     parser.add_argument('--cursor-file')
     parser.add_argument('--limit',type=int,default=10)
+    parser.add_argument('--diagnose',action='store_true',help='Read-only single-owner preflight; no exec or state changes')
+    parser.add_argument('--observer-inputs',help='Also diagnose stop preconditions using private observer inputs')
     args = parser.parse_args()
+    if args.diagnose:
+        if args.owner is None or args.cursor_file is not None:
+            parser.error('--diagnose requires --owner and forbids --cursor-file')
+        return diagnostic_command(args)
+    if args.observer_inputs is not None: parser.error('--observer-inputs requires --diagnose')
     engine = None
     try:
         require(1 <= args.limit <= 100 and (args.owner is not None or args.cursor_file is not None))
@@ -141,7 +195,19 @@ def main():
                 failed = True
                 outcome = 'supply_refused'
             if cursor is not None: write_private(cursor,{'after':str(owner)})
-            print(json.dumps({'owner':str(owner),'stage':'host-supply','result':outcome}))
+            from ops.runner_supply_diagnostics import emit_failure, clear_failure
+            import time
+            item = {'owner':str(owner),'stage':'host-supply','result':outcome}
+            if outcome in {'auth_expired','supply_refused'}:
+                # A fresh preflight explains current blockers, not historical exec errors.
+                reason = worker.diagnose(owner)
+                if reason in {'ready_for_supply','already_available'}: reason = 'delivery_uncertain'
+                item['reason'] = reason
+                if cursor is not None and not emit_failure(cursor.parent,owner,outcome,reason,now=time.time()):
+                    continue
+            elif cursor is not None:
+                clear_failure(cursor.parent,owner)
+            print(json.dumps(item))
         if failed:
             parser.exit(1,'Host supply batch has refused owners; operator attention required\n')
     except Exception:
@@ -151,4 +217,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

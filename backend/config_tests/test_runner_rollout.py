@@ -345,3 +345,27 @@ def test_storage_class_schema_agrees(values):
             rollout.checked(candidate)
         else:
             with pytest.raises(ValueError): rollout.checked(candidate)
+
+
+@pytest.mark.parametrize('reason', ['running_conversation', 'SECRET-EXCEPTION'])
+def test_supply_wrapper_only_accepts_fixed_reason(monkeypatch,capsys,reason):
+    worker = load_worker()
+    monkeypatch.setattr(sys,'argv',[])
+    monkeypatch.setattr(worker.runpy,'run_module',lambda *a,**kw:print(json.dumps({
+        'owner':'00000000-0000-4000-8000-000000000001','stage':'host-supply',
+        'result':'supply_refused','reason':reason})))
+    if reason == 'running_conversation':
+        assert worker.run_batch('supply',[]) == 1
+        assert json.loads(capsys.readouterr().out)['reason'] == reason
+    else:
+        with pytest.raises(ValueError): worker.run_batch('supply',[])
+        assert capsys.readouterr().out == ''
+
+
+def test_suppressed_failure_remains_wrapper_failure(monkeypatch,capsys):
+    worker = load_worker()
+    monkeypatch.setattr(sys,'argv',[])
+    def failed(*args,**kwargs): raise SystemExit(1)
+    monkeypatch.setattr(worker.runpy,'run_module',failed)
+    assert worker.run_batch('supply',[]) == 1
+    assert capsys.readouterr().out == ''
