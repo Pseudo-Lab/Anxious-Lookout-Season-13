@@ -2,6 +2,7 @@ import base64
 import json
 import time
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -144,7 +145,7 @@ def test_private_stdin_socket_client_receipt_never_prints_input(tmp_path):
     envelope = {'syntheticPrivate': 'SYNTHETIC_PRIVATE_VALUE'}
     try:
         result = subprocess.run([sys.executable, '-B', '-m', 'runner.access_supply', str(receiver.path)],
-                                input=json.dumps(envelope), text=True, capture_output=True, timeout=10, cwd='/source')
+                                input=json.dumps(envelope), text=True, capture_output=True, timeout=10, cwd=Path(__file__).resolve().parents[1])
         assert result.returncode == 0 and result.stdout.strip() == '{"accepted":true}' and result.stderr == ''
         assert seen == [envelope]
     finally:
