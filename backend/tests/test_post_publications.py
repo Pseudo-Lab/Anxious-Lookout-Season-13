@@ -133,7 +133,7 @@ def test_legacy_seed_import_is_exact_and_migration_replay_is_idempotent(admin, m
             rows = db.execute(text('SELECT snapshot FROM research.post_publications')).scalars().all()
             assert len(rows) == 3
             for snapshot in rows:
-                raw = (Path('/source/db/legacy-posts')/(snapshot['slug']+'.mdx')).read_text()
+                raw = (Path(__file__).resolve().parents[1]/'db/legacy-posts'/(snapshot['slug']+'.mdx')).read_text()
                 _, header, body = raw.split('---', 2)
                 assert snapshot['content'] == body.lstrip('\n')
                 assert snapshot['author']['login'] is None
