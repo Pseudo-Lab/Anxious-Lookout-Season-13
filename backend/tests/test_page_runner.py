@@ -21,7 +21,7 @@ HTTP_CLIENT = httpx.Client
 
 @pytest.fixture(scope="module", autouse=True)
 def runner_schema(schema):
-    migrate("0006_posts")
+    migrate("0007_post_blocks")
 
 
 @pytest.mark.parametrize('public_kind', ['public_document', 'public_post'])

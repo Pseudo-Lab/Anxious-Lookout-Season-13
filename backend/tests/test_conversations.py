@@ -14,7 +14,7 @@ from tests.test_research import identity, headers
 
 @pytest.fixture(scope="module", autouse=True)
 def conversation_schema(schema):
-    migrate("0006_posts")
+    migrate("0007_post_blocks")
 
 
 class FixtureRunner:

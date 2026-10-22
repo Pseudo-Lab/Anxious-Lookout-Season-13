@@ -267,7 +267,7 @@ def test_missing_publication_grant_or_tampered_membership_authority_fails_closed
 
 def test_membership_revocation_waits_for_admitted_tool_then_denies_later_calls(client, admin, monkeypatch):
     from app import document_proposals
-    migrate('0006_posts')
+    migrate('0007_post_blocks')
     _, auth = identity(client, admin, role="admin")
     manager_cookie = dict(client.cookies)
     target, target_auth = identity(client, admin, "222222")
