@@ -11,15 +11,19 @@ from common_chatbot_image_audit import audit
 
 @pytest.fixture
 def images(tmp_path):
+    return synthetic(tmp_path)
+
+
+def synthetic(tmp_path, architecture="arm64"):
     source, repository = "a" * 40, "docker.io/library/anxious-s13-chatbot-api-aaaaaaa"
     build, imported = tmp_path / "build", tmp_path / "imported"
-    build.mkdir(); imported.mkdir()
+    build.mkdir(parents=True); imported.mkdir()
     def encoded(value): return json.dumps(value, sort_keys=True).encode()
     def hashed(data): return "sha256:" + hashlib.sha256(data).hexdigest()
-    config = encoded({"architecture": "arm64", "os": "linux", "config": {"Labels": {"org.opencontainers.image.revision": source}}})
+    config = encoded({"architecture": architecture, "os": "linux", "config": {"Labels": {"org.opencontainers.image.revision": source}}})
     layer = b"synthetic compressed layer bytes"
     manifest = encoded({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "config": {"digest": hashed(config)}, "layers": [{"digest": hashed(layer)}]})
-    index = encoded({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json", "manifests": [{"digest": hashed(manifest), "platform": {"os": "linux", "architecture": "arm64"}}]})
+    index = encoded({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json", "manifests": [{"digest": hashed(manifest), "platform": {"os": "linux", "architecture": architecture}}]})
     with tarfile.open(build / "api.tar", "w") as archive:
         for data in (config, layer, manifest, index):
             info = tarfile.TarInfo("blobs/sha256/" + hashed(data).split(":")[1]); info.size = len(data)
@@ -58,3 +62,14 @@ def test_modified_provenance_or_wrong_pod_refuses(images, damage):
     elif damage == "pod-spec": pod["specImage"] = "unreviewed:tag"
     else: pod["podImageId"] = "containerd://sha256:" + "0" * 64
     with pytest.raises((ValueError, KeyError)): audit("api", source, build, imported, reference, pod)
+
+
+def test_architecture_selects_the_platform_chain(tmp_path, images):
+    # Production default keeps its arm64 key; dev VM chains bind amd64 only on request.
+    assert "arm64Manifest" in audit("api", *images)
+    with pytest.raises(ValueError): audit("api", *images, architecture="amd64")
+    development = synthetic(tmp_path / "amd64", "amd64")
+    result = audit("api", *development, architecture="amd64")
+    assert result["amd64Manifest"] and "arm64Manifest" not in result
+    with pytest.raises(ValueError): audit("api", *development)
+    with pytest.raises(ValueError): audit("api", *development, architecture="s390x")

@@ -127,6 +127,14 @@ def test_root_audit_uses_root_policy_not_b19(tmp_path,monkeypatch):
     with pytest.raises(ValueError):image_audit.audit("api",reference,tmp_path)
 
 
+def test_root_audit_binds_the_requested_architecture(tmp_path,monkeypatch):
+    local,reference=chain_fixture(tmp_path)
+    monkeypatch.setitem(image_audit.POLICY,"root-web",("edff-source",local,"docker.io/library/anxious-s13-personal-web"))
+    assert "arm64Manifest" in image_audit.audit("root-web",reference,tmp_path)
+    for architecture in ("amd64","s390x"):
+        with pytest.raises(ValueError):image_audit.audit("root-web",reference,tmp_path,architecture=architecture)
+
+
 def test_root_audit_rejects_changed_layer_chain(tmp_path,monkeypatch):
     local,reference=chain_fixture(tmp_path)
     monkeypatch.setitem(image_audit.POLICY,"root-web",("edff-source",local,"docker.io/library/anxious-s13-personal-web"))
