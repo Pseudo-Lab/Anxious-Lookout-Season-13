@@ -70,6 +70,10 @@ def run_runner(root, origin, ca, settings, options, audit, permission_results):
                         command += ['-c', setting.replace('fixture_openai', 'access_only_openai')]
                 else:
                     command += ['-c', setting]
+        if access:
+            # Since #14 the production alias is named "OpenAI", for which native zstd-compresses
+            # request bodies. The loopback mock cannot decode zstd; transport encoding only.
+            command += ['-c', 'features.enable_request_compression=false']
         kwargs['env'] = {**kwargs['env'], 'CODEX_CA_CERTIFICATE': str(ca)}
         return original_popen(command, **kwargs)
 
@@ -126,7 +130,10 @@ def run_runner(root, origin, ca, settings, options, audit, permission_results):
                     session = messages[0][0]  # Actual web acceptance follows up the same conversation.
                 token = 'synthetic-tool-token-'+str(index)*40
                 authority[request] = {'token': token, 'session': session}
-                body = {'requestId': request, 'text': 'Synthetic explicit runner turn', 'tools': definitions(), 'toolToken': token}
+                # Since #9 the runner refuses every tool without the API-resolved page scope;
+                # a general page is what the API sends for an unscoped conversation.
+                body = {'requestId': request, 'text': 'Synthetic explicit runner turn', 'tools': definitions(), 'toolToken': token,
+                        'scope': {'page': {'kind': 'general'}}}
                 if access and index == 1:
                     body['expectedThreadId'] = successful[0]['threadId']
                 if index == 0:
