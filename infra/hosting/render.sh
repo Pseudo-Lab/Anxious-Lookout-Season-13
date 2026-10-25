@@ -60,7 +60,9 @@ data:
   OAUTH_MODE: disabled
   APP_BASE_PATH: ""
   GITHUB_CLIENT_ID: ""
-  # Trust only Cilium-selected Traefik pod sources; Traefik must overwrite forwarded proto.
+  # Whole Pod CIDR: since the issue #13 default-allow transition no policy limits API
+  # ingress to Traefik, so any Pod that reaches the API is trusted here (narrowing is #56).
+  # Traefik must overwrite forwarded proto.
   AUTH_TRUSTED_PROXY_CIDRS: "10.42.0.0/16"
 ---
 apiVersion: apps/v1

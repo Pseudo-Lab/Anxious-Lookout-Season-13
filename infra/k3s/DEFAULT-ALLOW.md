@@ -1,6 +1,18 @@
 # Issue #13: default-allow transition (decision C)
 
-> Since #54, `infra/hosting/render.sh` no longer renders `hosting-boundary`, so a node installed from current source never has it. This procedure remains the record of the live node's transition. On a new node, only step 3 (the Pod CIDR → TCP 6443 rule) and the step 4 checks still apply. If an older render applied the CNP, step 2 removes it. See [PARITY.md](PARITY.md).
+> **Existing node only.** This procedure is the record of the live node's transition. Do not run it on a new node:
+> - Its variables (`k`, `snapshot`, `cidr_rule`) are defined only in step 0, so step 3 alone fails under `set -u` with `cidr_rule: unbound variable`.
+> - Step 0 itself queries CNPs, ipsets and sync units that a new node never had.
+> - Since #54 `infra/hosting/render.sh` no longer renders `hosting-boundary`, so a node installed from current source already has the target policy state.
+>
+> A new node reaches the same end state with the standalone commands in [DEV-VM.md](DEV-VM.md), runner preparation step 1 (the Pod CIDR → TCP 6443 rule and absence checks). Of step 4 below, only these checks apply to a new or synthetic node:
+> - deleted objects absent (`--ignore-not-found`)
+> - codex-runner policies present
+> - Cilium forwarding/NAT chains and status
+> - the API Pod's verified-TLS request to `10.0.0.107:6443`
+> - DNS/HTTPS
+>
+> These do not apply: the old ipset/rule and sync-unit checks, the metrics outcome, and the real login → Codex response → logout run, which needs a real provider. See [PARITY.md](PARITY.md).
 
 PM executes only after source/plan review. Target: single node `anxious-lookout`, private API `10.0.0.107:6443`, Pod CIDR `10.42.0.0/16`, public firewalld zone. No backend/RBAC changes. Do not change codex-runner or codex-trial policy objects. The old A-plan is superseded.
 

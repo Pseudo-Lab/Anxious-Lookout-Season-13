@@ -260,7 +260,20 @@ The one runner Pod comes from the current production path, the #16/#18 pool roll
 1. **Network contract: issue #13 default allow** (PARITY.md rows for the m2-hosting CNPs and the 6443 rule). Since #54 `infra/hosting/render.sh` emits no CNP, so a guest rendered from current source already matches production's policy state. With the old `hosting-boundary` policy, PostgreSQL admitted only the hosting-api and ops Pods, and the host-network runner workers could not reach it.
    - Steps 0/1 of [DEFAULT-ALLOW.md](DEFAULT-ALLOW.md) do not apply on a new guest: the old ipsets, sync units and CCNPs never existed, because `render-policy.sh` emits an empty List. Record their absence with `kubectl get ccnp --ignore-not-found`.
    - Check `kubectl -n m2-hosting get cnp` is empty. Only a guest rendered before #54 (such as `anxious-dev` in #48 R4) still has `hosting-boundary`. Save it, then delete it once (`kubectl -n m2-hosting delete cnp hosting-boundary`). Touch nothing in codex-runner or codex-trial.
-   - Step 3: add the Pod CIDR → TCP 6443 rich rule (`rule family="ipv4" source address="10.42.0.0/16" port port="6443" protocol="tcp" accept`) to the runtime and `--permanent` configurations separately. **No reload.**
+   - Pod CIDR → TCP 6443 rule (DEFAULT-ALLOW.md step 3, standalone; do not run that document's steps on a new node). Add it to the runtime and permanent configurations separately. **No reload:**
+
+     ```sh
+     cidr_rule='rule family="ipv4" source address="10.42.0.0/16" port port="6443" protocol="tcp" accept'
+     sudo firewall-cmd --zone=public --query-rich-rule="$cidr_rule" || sudo firewall-cmd --zone=public --add-rich-rule="$cidr_rule"
+     sudo firewall-cmd --permanent --zone=public --query-rich-rule="$cidr_rule" || sudo firewall-cmd --permanent --zone=public --add-rich-rule="$cidr_rule"
+     ```
+
+   - Checks (the applicable part of DEFAULT-ALLOW.md step 4):
+     - `kubectl -n m2-hosting get cnp hosting-boundary hosting-access-web-link-v1 --ignore-not-found -o name` prints nothing.
+     - The codex-runner policies (step 2) are present.
+     - `iptables-save` shows `CILIUM_FORWARD` and `CILIUM_POST_nat`, and `cilium status` is OK.
+     - From the API Pod, a verified-TLS request to `https://10.0.0.107:6443/api/v1/namespaces/codex-runner` with its own token returns 200.
+     - Pod DNS/HTTPS works.
 2. **Runner namespace and policies:** apply only `infra/hosting/m3/user-runner-e2e/00-foundation.json` (Namespace `codex-runner`, KNP `runner-default-deny`, SA `runner-workload`) and `40-runner-network.json` (CNP `runner-callback-draft`, production's post-EGRESS-REPAIR policy). The worker checks that these exist and does not create them. Never apply that directory's full deployment `resources.json`, which would recreate `hosting-access-web-link-v1`.
 3. **Worker database URLs:** the postgres Service is headless (`clusterIP: None`), and host DNS cannot resolve cluster names. So the controller, observer and supply `database-url` files under `/etc/anxious-lookout/issue16/*/` address the **postgres-0 Pod IP** directly (`10.42.0.250` in R4), as on production.
    - Use the dedicated controller and observer logins, root 0600, with credentials only in private files.
