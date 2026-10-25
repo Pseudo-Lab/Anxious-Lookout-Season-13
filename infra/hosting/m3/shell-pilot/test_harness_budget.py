@@ -126,3 +126,11 @@ def test_a_crash_after_the_paid_call_leaves_an_unsettled_marker(env, monkeypatch
     assert budget(env)['inflight']
     with pytest.raises(SystemExit, match='never settled'):
         harness.run('slow-suite', 'B', 900)
+
+
+def test_completion_without_any_usage_report_is_unconfirmed(env, capsys):
+    FakeSession.script = [{'method': 'turn/completed', 'params': {'turn': {'status': 'completed'}}}]
+    harness.run('fix-failing-test', 'B', 900)
+    assert budget(env)['unknown'] and json.loads(capsys.readouterr().out)['settled'] is False
+    with pytest.raises(SystemExit, match='unconfirmed'):
+        harness.run('slow-suite', 'B', 900)

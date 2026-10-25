@@ -287,7 +287,8 @@ def run(task, config, wall_limit):
             budget['cachedInput'] += tokens['cachedInputTokens']
             budget['output'] += tokens['outputTokens']
             budget['runs'].append(run_id)
-            if not settled:
+            if not (settled and usage is not None):
+                # Confirmed only with both the completion event and a usage report; anything else blocks.
                 budget.setdefault('unknown', []).append(run_id)
             if status == 'budget_stop':
                 budget['halted'] = run_id  # The share was crossed: no further run in this Pod.
@@ -300,7 +301,7 @@ def run(task, config, wall_limit):
                 pass
     grade = pilot_tasks.grade(task, workspace)
     repeated = len(commands) - len(set(commands))
-    result = {'run': run_id, 'task': task, 'config': config, 'turnStatus': status, 'settled': settled,
+    result = {'run': run_id, 'task': task, 'config': config, 'turnStatus': status, 'settled': settled and usage is not None,
               'wallSeconds': round(wall, 1), **grade, **counters, 'repeatedCommands': repeated, 'tokens': tokens,
               'commands': commands}
     (RESULTS/(run_id+'.json')).write_text(json.dumps(result, indent=2))
