@@ -326,7 +326,7 @@ Every identifier marks itself as synthetic:
 | Field | Value |
 | --- | --- |
 | `auth.accounts.id` | `00000000-0000-4000-8000-000000000048` |
-| `github_id` | `synthetic-devvm-48` |
+| `github_id` | `900000000048` (the schema requires digits only, `^[0-9]+$`; far above real GitHub user IDs, and the UUID and login mark it as synthetic) |
 | `login` | `SYNTHETIC-DEVVM-NOT-A-USER` |
 | `role` / `is_approved` | `editor` / `true` |
 
@@ -337,7 +337,7 @@ Every identifier marks itself as synthetic:
 
    ```sql
    INSERT INTO auth.accounts (id, github_id, login, role, is_approved)
-   VALUES ('00000000-0000-4000-8000-000000000048', 'synthetic-devvm-48', 'SYNTHETIC-DEVVM-NOT-A-USER', 'editor', true);
+   VALUES ('00000000-0000-4000-8000-000000000048', '900000000048', 'SYNTHETIC-DEVVM-NOT-A-USER', 'editor', true);
    INSERT INTO auth.sessions (token_hash, account_id, csrf_token, expires_at)
    VALUES ('<token_hash>', '00000000-0000-4000-8000-000000000048', '<csrf>', now() + interval '1 hour');
    ```
@@ -360,7 +360,7 @@ Every identifier marks itself as synthetic:
      ```sql
      DELETE FROM auth.sessions WHERE account_id = '00000000-0000-4000-8000-000000000048';
      UPDATE auth.accounts SET is_approved = false, role = 'commenter'
-       WHERE id = '00000000-0000-4000-8000-000000000048' AND github_id = 'synthetic-devvm-48';
+       WHERE id = '00000000-0000-4000-8000-000000000048' AND github_id = '900000000048';
      ```
 
   3. Delete the guest token file.
