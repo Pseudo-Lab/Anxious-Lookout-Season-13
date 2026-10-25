@@ -391,3 +391,6 @@ def test_in_cluster_controller_namespace_rbac_and_deployment(values):
     assert env['CODEX_USER_RUNNER_MAX_PODS'] == '3'
     assert {'name': 'db', 'secret': {'secretName': 'runner-controller-db', 'defaultMode': 288}} in pod['volumes']
     assert container['securityContext']['readOnlyRootFilesystem'] is True and pod['securityContext']['runAsNonRoot'] is True
+    # The DB Secret is root:root 0440 without a group; fsGroup is safe because no volume here is a PV.
+    assert pod['securityContext']['fsGroup'] == 10001
+    assert {v['name'] for v in pod['volumes']} == {'db', 'tmp'} and not any('persistentVolumeClaim' in v for v in pod['volumes'])
