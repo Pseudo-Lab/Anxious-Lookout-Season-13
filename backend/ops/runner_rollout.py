@@ -218,7 +218,9 @@ def controller(v):
                  'template': {'metadata': {'labels': labels}, 'spec': {
                      'serviceAccountName': 'runner-controller', 'enableServiceLinks': False,
                      'securityContext': {'runAsUser': 10001, 'runAsGroup': 10001, 'runAsNonRoot': True,
-                                         'seccompProfile': {'type': 'RuntimeDefault'}},
+                                         # Secret files are root-owned 0440: the group lets UID 10001 read them. No PV is mounted
+                                         # here, so fsGroup cannot touch runner storage modes (#59).
+                                         'fsGroup': 10001, 'seccompProfile': {'type': 'RuntimeDefault'}},
                      'containers': [{'name': 'controller', 'image': v['runtimeImage'], 'imagePullPolicy': 'Never',
                          'command': ['python', '-B', '-m', 'ops.runner_controller_service'],
                          'env': [{'name': k, 'value': val} for k, val in env.items()],
