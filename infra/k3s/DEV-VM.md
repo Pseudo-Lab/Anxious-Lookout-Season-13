@@ -119,14 +119,67 @@ Measured guest network (NIC `enp0s3`):
 
 - Guest address `10.0.0.107/24` mirrors the production VCN address and node identity, so host guards (`initialize-rehearsal.sh`) and the API certificate SANs run unchanged. `10.0.0.0/24` exists only inside QEMU's SLIRP and is not used anywhere on the host. SLIRP keeps the gateway `.2` and DNS `.3` inside the subnet, unlike passt's off-link `192.168.0.1`.
 - **Inbound:** SLIRP gives no inbound path except `hostfwd`.
-- **Outbound to the host:** QEMU maps connections to the gateway address `10.0.0.2` onto the host's `127.0.0.1`. Left as is, the guest could reach every loopback-bound service on the development server: other projects' containers published on `127.0.0.1`, the anxious hosting ports and so on. Close that path inside the guest. Routing via `10.0.0.2` still works, because only traffic addressed to `10.0.0.2` itself is dropped, and DNS uses `10.0.0.3`:
+- **Outbound to the host:** QEMU maps connections to the gateway address `10.0.0.2` onto the host's `127.0.0.1`. Left as is, the guest could reach every loopback-bound service on the development server: other projects' containers published on `127.0.0.1`, the anxious hosting ports and so on. Close that path inside the guest for **new** connections only.
+  - SSH must keep working: the hostfwd SSH session's guest-side peer is `10.0.0.2` (`SSH_CONNECTION: 10.0.0.2 <port> 10.0.0.107 22`), so its replies go to `10.0.0.2`. A plain `-d 10.0.0.2 -j REJECT` cuts SSH (seen in R4).
+  - Routing via `10.0.0.2` and DNS on `10.0.0.3` are unaffected.
+
+  **Guest shell (OUTPUT), verified in R4 2026-10-25.** Add the rule to the runtime and permanent configurations separately. **Never run `firewall-cmd --reload`:** on this platform a reload removed Cilium's iptables chains (`README.md`).
 
   ```sh
-  sudo firewall-cmd --permanent --direct --add-rule ipv4 filter OUTPUT 0 -d 10.0.0.2/32 -j REJECT
-  sudo firewall-cmd --reload
+  sudo firewall-cmd --direct --add-rule ipv4 filter OUTPUT 0 -d 10.0.0.2/32 -m conntrack --ctstate NEW -j REJECT
+  sudo firewall-cmd --permanent --direct --add-rule ipv4 filter OUTPUT 0 -d 10.0.0.2/32 -m conntrack --ctstate NEW -j REJECT
   ```
 
-  Check it from the guest: `curl -m 5 http://10.0.0.2:12345/` must fail, and `curl -sSI https://get.k3s.io` must still return 200. This rule is development-VM only and was not part of the 2026-10-25 verification. Record its result with R4. Never add `restrict=on` to the netdev: it also cuts the guest off from the internet.
+  Verify with a positive control. Before adding the rule, `curl -sS -m 5 -o /dev/null -w '%{http_code}\n' http://10.0.0.2:5001/v2/` returns `200` (the host's existing registry, read only). Do not use a port without first confirming that it is open. After adding the rule:
+  - the same request fails (curl exit 7)
+  - an existing SSH session stays up
+  - a new `ssh -p 22107 opc@127.0.0.1` succeeds
+  - `curl -sSI https://get.k3s.io` returns 200
+  - `ip route` still shows `default via 10.0.0.2`
+  - name resolution through `10.0.0.3` works
+
+  The rule was added after snapshot `base-os`. After reverting to `base-os`, add it again.
+
+  **Pods and containers (FORWARD): draft, not yet verified by review.** Pod (Cilium) and Docker container traffic leaves through FORWARD, not OUTPUT. A firewalld direct rule in iptables `FORWARD` does not reliably catch it, because Cilium (`CILIUM_FORWARD`) and Docker (`DOCKER-USER`, `DOCKER-FORWARD`) insert ACCEPT jumps at the top of that chain, and the result depends on start order. The draft uses a separate nftables base chain instead. It runs at hook priority `-10`, before the iptables-nft filter chains at priority 0, and its reject is final whatever later chains accept. firewalld does not manage or flush foreign nftables tables. It needs no reload, and it can be loaded before or after k3s:
+
+  ```sh
+  sudo tee /etc/nftables/devvm-hostguard.nft >/dev/null <<'EOF'
+  # issue #48, development VM only: workloads must not open connections to the
+  # SLIRP gateway, which QEMU maps to the host's 127.0.0.1. Replies stay allowed.
+  table inet devvm_hostguard
+  delete table inet devvm_hostguard
+  table inet devvm_hostguard {
+  	chain forward {
+  		type filter hook forward priority -10; policy accept;
+  		ip daddr 10.0.0.2 ct state new counter reject with icmpx type admin-prohibited
+  	}
+  }
+  EOF
+  sudo tee /etc/systemd/system/devvm-hostguard.service >/dev/null <<'EOF'
+  [Unit]
+  Description=DEV-VM only (issue #48): refuse new workload connections to the SLIRP host gateway
+  Before=docker.service k3s.service
+
+  [Service]
+  Type=oneshot
+  RemainAfterExit=yes
+  ExecStart=/usr/sbin/nft -f /etc/nftables/devvm-hostguard.nft
+  ExecStop=/usr/sbin/nft delete table inet devvm_hostguard
+
+  [Install]
+  WantedBy=multi-user.target
+  EOF
+  sudo systemctl daemon-reload && sudo systemctl enable --now devvm-hostguard.service
+  ```
+
+  The file's first two lines make reloading idempotent. To verify, run the 5001 positive control from a Pod (for example a one-off `curlimages/curl` Pod) and from a Docker container (`docker run --rm`, default bridge), before and after enabling the unit. Also check:
+  - `nft list table inet devvm_hostguard` counters increase
+  - Pod DNS, Pod HTTPS to `https://get.k3s.io` and Cilium health stay unchanged
+  - the chain is still present after `systemctl restart k3s` and `systemctl restart docker`
+
+  Rollback: `sudo systemctl disable --now devvm-hostguard.service`, then delete the two files and `daemon-reload`.
+
+- Never add `restrict=on` to the netdev: it also cuts the guest off from the internet.
 - SSH reaches the guest only from the host loopback: `ssh -p 22107 opc@127.0.0.1`.
 - Ingress tests (Traefik 80/443 inside the guest) run from inside the guest with `curl --resolve`, or through an additional loopback-only forward on a free high port. Do not forward 80/443 or bind `0.0.0.0`.
 - Public origin for `infra/hosting/render.sh`: `M2_PUBLIC_ORIGIN=http://192.88.99.1`. `192.88.99.0/24` is the deprecated 6to4 relay anycast block (RFC 7526). It is not announced on the internet, and render.sh accepts it because it is outside the private and documentation ranges render.sh rejects. Use it only from inside the guest as a name-pinned target, for example `curl --resolve "192.88.99.1:80:127.0.0.1" http://192.88.99.1/`, so that no packet for it leaves the guest. Never query it from the host or from outside the guest. Optionally add a guest blackhole route (`ip route add blackhole 192.88.99.1/32`, or the NetworkManager equivalent) so that an unpinned request fails locally.
@@ -149,7 +202,8 @@ Measured guest network (NIC `enp0s3`):
    Then add the `xmlns:qemu` declaration and the `<qemu:commandline>` block above with `sudo virsh edit anxious-dev`, without adding an `<interface>` element. Set `OS_VARIANT` to the closest Oracle Linux 9 name `osinfo-query os` lists.
 3. In the guest: minimal install, hostname `simple`, SELinux enforcing, firewalld and NetworkManager enabled. Enable `ol9_UEKR8`, install the production kernel NVR if available for x86_64, reboot into it and record `uname -r`.
 4. Record `getenforce`, `firewall-cmd --get-active-zones`, `nmcli device` and `uname -m` (`x86_64`).
-5. Take snapshot `base-os` (below).
+5. Add the guest-shell host-gateway rule (Network, "Outbound to the host") and verify it with the 5001 positive control, so `base-os` already contains it. The existing `anxious-dev` received it after `base-os`.
+6. Take snapshot `base-os` (below).
 
 ## k3s and Cilium
 
