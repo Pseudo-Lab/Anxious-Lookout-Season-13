@@ -21,7 +21,16 @@
       {"matchLabels": {"k8s:io.kubernetes.pod.namespace": "codex-runner"}},
       {"matchLabels": {"k8s:io.kubernetes.pod.namespace": "codex-trial"}}
     ]}],
-    "egress": [{"toEntities": ["all"]}],
+    "egress": [
+      {
+        "toEndpoints": [{"matchLabels": {
+          "k8s:io.kubernetes.pod.namespace": "codex-broker",
+          "k8s:app": "codex-broker"
+        }}],
+        "toPorts": [{"ports": [{"port": "8080", "protocol": "TCP"}]}]
+      },
+      {"toEntities": ["all"]}
+    ],
     "egressDeny": [
       {"toEndpoints": [
         {"matchLabels": {"k8s:io.kubernetes.pod.namespace": "codex-runner"}},

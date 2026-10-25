@@ -11,7 +11,8 @@ acceptance and human merge are distinct decisions. Record failures as failures a
 stop at the affected gate. Never reset runtime UID/phase/ledger or recreate retained
 storage to make a step pass. Use the linked documents for exact tool inputs:
 [provisioning](PROVISIONING.md), [termination/recovery](TERMINATION.md),
-[host supply](HOST-SUPPLY.md).
+[host supply](HOST-SUPPLY.md) (retired by #60: operator access now comes from
+[codex-broker](../codex-broker/README.md); supply steps below are historical).
 
 ## 테스트 수준 경로 — D4, 이번 cutover의 기준
 

@@ -301,3 +301,21 @@ def test_pod_resources_transport_reference_and_grace(plan):
     assert {'name': 'tmp', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '64Mi'}} in spec['volumes']
     assert spec['initContainers'][0]['resources'] == {'requests': {'cpu': '10m', 'memory': '32Mi'},
                                                       'limits': {'cpu': '100m', 'memory': '64Mi'}}
+
+
+def test_broker_token_is_audience_bound_and_runner_only(plan):
+    # #60: automount stays off; one projected token for codex-broker, mounted in the runner only.
+    from app.runner_kube import ExecutorPlan, BROKER_URL
+    enabled = replace(plan, executor=ExecutorPlan('registry.invalid/executor@sha256:'+'b'*64))
+    for candidate in (plan, enabled):
+        spec = candidate.manifest('isolated')['spec']
+        assert spec['automountServiceAccountToken'] is False
+        assert {'name': 'broker-token', 'projected': {'defaultMode': 292, 'sources': [
+            {'serviceAccountToken': {'audience': 'codex-broker', 'expirationSeconds': 600, 'path': 'token'}}]}} in spec['volumes']
+        runner = spec['containers'][0]
+        assert {'name': 'broker-token', 'mountPath': '/run/codex-broker', 'readOnly': True} in runner['volumeMounts']
+        env = {entry['name']: entry.get('value') for entry in runner['env']}
+        assert (env['BROKER_URL'], env['BROKER_TOKEN_FILE']) == (BROKER_URL, '/run/codex-broker/token')
+        for other in spec['containers'][1:] + spec.get('initContainers', []):
+            assert not [mount for mount in other['volumeMounts'] if mount['name'] == 'broker-token']
+            assert not [entry for entry in other.get('env', []) if entry['name'].startswith('BROKER_')]

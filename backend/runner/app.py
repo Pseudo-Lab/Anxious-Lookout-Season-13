@@ -26,6 +26,7 @@ from .projection import PROJECTION_VERSION
 from .binding import canonical_uuid, require_binding
 from .access import AccessAuth, SupplySocket
 from .service_access import ServiceAccessAuth
+from .broker_client import BrokerClient, BrokerPull
 from app.page_scope import Scope, POLICIES, tool_allowed, turn_prompt, shell_allowed
 
 
@@ -472,6 +473,23 @@ class Native:
         if "method" in message and "id" in message:
             method, params = message["method"], message.get("params", {})
             if method == 'account/chatgptAuthTokens/refresh' and self.external:
+                refresher = getattr(self.auth, 'refresher', None)
+                if refresher is not None:
+                    # #60: renew from codex-broker. install() keeps the ledger's owner/account/expiry
+                    # and retired-token checks; the app-server receives only the access token.
+                    try:
+                        rejected = (self.auth.snapshot or {}).get('accessToken')
+                        envelope = refresher()
+                        if envelope['accessToken'] == rejected:
+                            raise CodexFailure('auth_revoked')  # The 401 token again: never loop on it.
+                        self.auth.install(envelope)
+                        snapshot = self.auth.snapshot
+                        self.send({'id': message['id'], 'result': {'accessToken': snapshot['accessToken'],
+                                   'chatgptAccountId': snapshot['chatgptAccountId'],
+                                   'chatgptPlanType': snapshot.get('chatgptPlanType')}})
+                        return message
+                    except Exception:
+                        pass  # Fall through: the same fixed refusal as without a broker.
                 self.send({'id': message['id'], 'error': {'code': -32001, 'message': 'Operator access resupply required'}})
                 self.auth.block('auth_revoked')
                 self.blocked_reason = 'auth_revoked'
@@ -874,7 +892,13 @@ def create_app():
                     def apply(envelope):
                         with lifecycle_lock:
                             return apply_locked(envelope)
-                    supply = SupplySocket(auth.control, apply)
+                    if mode == 'access-service':
+                        # #60: pull from codex-broker with this Pod's projected token; no host exec supply.
+                        broker = BrokerClient(os.environ['BROKER_URL'], os.environ['BROKER_TOKEN_FILE'], owner, state_id)
+                        auth.refresher = lambda: broker.fetch(refresh=True)
+                        supply = BrokerPull(broker.fetch, apply)
+                    else:
+                        supply = SupplySocket(auth.control, apply)
                 else:
                     app.state.native = start_native()
             except Exception as failure:

@@ -60,8 +60,8 @@ def restore_inventory(root=ROOT, storage=STORAGE):
 
 
 def run_batch(role, argv):
-    modules = {'controller': 'ops.runner_provision_worker', 'observer': 'ops.runner_stop_observer',
-               'supply': 'ops.runner_host_supply'}
+    # Host supply was replaced by codex-broker (#60).
+    modules = {'controller': 'ops.runner_provision_worker', 'observer': 'ops.runner_stop_observer'}
     require(role in modules)
     sys.argv = [modules[role], *argv]
     output = io.StringIO()
@@ -75,18 +75,11 @@ def run_batch(role, argv):
             failed = True
     for line in output.getvalue().splitlines():
         item = json.loads(line)
-        fields = {'owner', 'stage', 'result'}
-        if 'reason' in item:
-            from ops.runner_supply_diagnostics import CODES
-            require(item['stage'] == 'host-supply' and item['result'] in {'auth_expired','supply_refused'}
-                    and item['reason'] in CODES)
-            fields.add('reason')
-        require(set(item) == fields and str(UUID(item['owner'])) == item['owner']
-                and item['stage'] in {'provision', 'termination', 'host-supply'}
-                and item['result'] in {'processed', 'observed', 'already_available', 'supplied', 'excluded',
-                                       'reconciliation_required', 'auth_expired', 'supply_refused'})
+        require(set(item) == {'owner', 'stage', 'result'} and str(UUID(item['owner'])) == item['owner']
+                and item['stage'] in {'provision', 'termination'}
+                and item['result'] in {'processed', 'observed', 'excluded', 'reconciliation_required'})
         print(json.dumps(item))
-        failed |= item['result'] in {'reconciliation_required', 'auth_expired', 'supply_refused'}
+        failed |= item['result'] == 'reconciliation_required'
     return 1 if failed else 0
 
 
