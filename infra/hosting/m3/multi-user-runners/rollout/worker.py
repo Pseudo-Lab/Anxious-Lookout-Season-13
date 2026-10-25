@@ -60,8 +60,8 @@ def restore_inventory(root=ROOT, storage=STORAGE):
 
 
 def run_batch(role, argv):
-    # Host supply was replaced by codex-broker (#60).
-    modules = {'controller': 'ops.runner_provision_worker', 'observer': 'ops.runner_stop_observer'}
+    # Host supply was replaced by codex-broker (#60); the host observer by runner-controller (#61).
+    modules = {'controller': 'ops.runner_provision_worker'}
     require(role in modules)
     sys.argv = [modules[role], *argv]
     output = io.StringIO()
@@ -76,8 +76,8 @@ def run_batch(role, argv):
     for line in output.getvalue().splitlines():
         item = json.loads(line)
         require(set(item) == {'owner', 'stage', 'result'} and str(UUID(item['owner'])) == item['owner']
-                and item['stage'] in {'provision', 'termination'}
-                and item['result'] in {'processed', 'observed', 'excluded', 'reconciliation_required'})
+                and item['stage'] == 'provision'
+                and item['result'] in {'processed', 'excluded', 'reconciliation_required'})
         print(json.dumps(item))
         failed |= item['result'] == 'reconciliation_required'
     return 1 if failed else 0

@@ -13,7 +13,10 @@
         "toPorts": [{"ports": [{"port": "8080", "protocol": "TCP"}]}]
       },
       {
-        "fromEntities": ["host"],
+        "fromEndpoints": [{"matchLabels": {
+          "k8s:io.kubernetes.pod.namespace": "runner-control",
+          "k8s:app": "runner-controller"
+        }}],
         "toPorts": [{"ports": [{"port": "8080", "protocol": "TCP"}]}]
       }
     ],

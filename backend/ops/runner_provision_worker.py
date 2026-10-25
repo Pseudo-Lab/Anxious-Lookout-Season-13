@@ -1,7 +1,9 @@
-"""Finite new-owner preparation batch. Root host storage/controller identity only.
+"""Finite new-owner storage preparation. Root host storage identity only.
 
-No provider auth. Registry intents are created by authenticated HTTP; this worker
-publishes verified plans. Partial preparation is never silently recreated/reset.
+No provider auth. Registry intents are created by authenticated HTTP; this worker allocates
+storage and publishes the verified binding, then notifies the in-cluster runner controller,
+which creates the Pod (#61). Partial preparation is never silently recreated/reset. CSI
+provisioning replaces this worker in #63.
 """
 import argparse
 import fcntl
@@ -13,18 +15,15 @@ from uuid import UUID
 from sqlalchemy import bindparam, create_engine, text
 
 from app.runner_bindings import Bindings, validate
-from app.runner_registry import Registry
+from app.runner_registry import Registry, notify
 from app.runner_kube import KubePods
-from app.runner_controller import Controller
-from app.user_runner_runtime import clock
-from app.runner_limits import load_limits
 from app.settings import secret
 from app.user_runners import feature_enabled, selected_account, selected_allowlist
 from ops.user_runner_prepare import prepare
 from ops.runner_binding_import import import_binding, retained_file
 from ops.runner_storage import allocate
 from runner.auth import read_private
-from runner.lifecycle import Phase, Fence, require
+from runner.lifecycle import Phase, require
 
 
 def allowed(owner):
@@ -52,7 +51,8 @@ class Worker:
         query = '''SELECT r.owner_id FROM runner_runtime.registry r
                 JOIN auth.accounts a ON a.id=r.owner_id
                 WHERE r.phase IN ('provisioning','capacity_wait') AND r.pod_uid IS NULL
-                AND a.is_approved AND a.role IN ('editor','admin')'''
+                AND a.is_approved AND a.role IN ('editor','admin')
+                AND NOT EXISTS (SELECT 1 FROM runner_bindings.bindings b WHERE b.owner_id=r.owner_id)'''
         params = {'limit': limit}
         if owners is not None:
             query += ' AND r.owner_id IN :owners'
@@ -111,24 +111,12 @@ class Worker:
                                self.inputs['providerAccountId'], bounded=True)
             finally:
                 pods.close()
-        # Resolve again from DB, so only the published binding can create a Pod.
+        # The in-cluster controller creates the Pod from the published binding only (#61).
         with self.engine.begin() as db:
-            registry = Registry(db)
-            registry._eligible(owner)
-            state = registry._current(owner)
-            require(allowed(owner))
-            plan = Bindings(db).resolve(state, self.inputs['namespace'], UUID(self.inputs['namespaceUid']))
-            require(plan is not None)
-        bearer = read_private(Path(self.inputs['kubeTokenFile']), json_format=False).strip()
-        pods = self.port_factory(self.inputs['api'], self.inputs['namespace'], bearer, self.inputs['caFile'], [plan])
-        try:
-            from ops.runner_one_shot import request
-            ns = request(pods.client, 'GET', '/api/v1/namespaces/'+pods.namespace)
-            require(ns['metadata']['uid'] == self.inputs['namespaceUid']
-                    and not ns['metadata'].get('deletionTimestamp'))
-            return Controller(self.engine, pods, clock, max_pods=load_limits().max_pods).ensure(Fence.of(state))
-        finally:
-            pods.close()
+            state = Registry(db)._current(owner)
+            require(Bindings(db).resolve(state, self.inputs['namespace'], UUID(self.inputs['namespaceUid'])) is not None)
+            notify(db, owner)
+        return 'published'
 
 
 def main():

@@ -16,7 +16,8 @@ from config_tests.test_runner_bindings import binding_schema, plan_value
 from config_tests.test_runner_kube import Server, response
 
 
-def test_worker_consumes_published_plan_with_capacity_and_no_repreparation(admin, owner, t0, tmp_path, monkeypatch):
+def test_host_worker_leaves_bound_owners_to_the_controller_which_creates_pods_with_capacity(admin, owner, t0, tmp_path, monkeypatch):
+    # #61: the host worker only prepares storage and publishes; runner-controller creates the Pod.
     monkeypatch.setenv('CODEX_USER_RUNNERS_ENABLE', 'true')
     monkeypatch.setenv('CODEX_USER_RUNNER_MAX_PODS', '1')
     monkeypatch.delenv('CODEX_USER_RUNNER_ACCOUNT_ID', raising=False)
@@ -45,27 +46,38 @@ def test_worker_consumes_published_plan_with_capacity_and_no_repreparation(admin
         return KubePods(*args, **kwargs, _transport=httpx.MockTransport(handler))
     def no_preparation(*args, **kwargs): pytest.fail('existing binding must not be prepared again')
     worker = Worker(admin, inputs, root, preparer=no_preparation, port_factory=factory)
-    assert set(worker.pending()) == {owner,other}
+    assert worker.pending() == []  # Published bindings belong to runner-controller.
+    assert worker.process(owner) == 'published' and servers[owner].requests == []
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from ops.runner_controller_service import Service
+    class Pool:
+        @contextmanager
+        def bound(self, candidate):
+            with admin.begin() as db:
+                plan = Bindings(db).resolve(Registry(db).read(candidate), 'isolated', ns)
+            pods = factory('https://kube.invalid', 'isolated', 'k'*40, None, [plan])
+            try: yield SimpleNamespace(namespace=lambda: None, pods=pods)
+            finally: pods.close()
+    service = Service(admin, admin, Pool(), Pool(), node=None)
+    assert set(service.waiting()) == {owner, other}
     for flag in (None, 'false'):
         with monkeypatch.context() as patch:
             if flag is None:
                 patch.delenv('CODEX_USER_RUNNERS_ENABLE', raising=False)
             else:
                 patch.setenv('CODEX_USER_RUNNERS_ENABLE', flag)
-            assert worker.pending() == []
-            with pytest.raises(Refused): worker.process(owner)
-            assert servers[owner].requests == []
-            assert read(admin, owner).pod_uid is None
-    worker.process(owner)
+            with pytest.raises(Refused): service.ensure(owner)
+            assert servers[owner].requests == [] and read(admin, owner).pod_uid is None
+    service.ensure(owner)
     assert read(admin, owner).pod_uid is not None
-    worker.process(other)
-    assert read(admin, other).phase == Phase.WAITING
-    assert servers[other].pod is None
+    service.ensure(other)
+    assert read(admin, other).phase == Phase.WAITING and servers[other].pod is None
     assert sum(method == 'POST' for method,_ in servers[owner].requests) == 1
     with admin.begin() as db:
         db.execute(text('UPDATE auth.accounts SET is_approved=false WHERE id=:owner'), {'owner':other})
-    assert worker.pending() == []
-    with pytest.raises(Refused): worker.process(other)
+    assert other not in service.waiting()
+    with pytest.raises(Refused): service.ensure(other)
 
 
 @pytest.mark.parametrize('selector', ['CODEX_USER_RUNNER_ALLOWLIST', 'CODEX_USER_RUNNER_ACCOUNT_ID'])
