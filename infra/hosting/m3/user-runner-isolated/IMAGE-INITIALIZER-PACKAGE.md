@@ -99,12 +99,12 @@ docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-
   --user 10001:10001 --tmpfs /tmp:rw,nosuid,nodev \
   --tmpfs /state:rw,uid=10001,gid=10001,mode=0700 \
   --tmpfs /control:rw,uid=10001,gid=10001,mode=0700 \
-  --tmpfs /transport:rw,uid=10001,gid=10001,mode=0700 \
   -v "$PWD/backend/config_tests/runner_rehearsal_http.py:/checks/health.py:ro" \
   -e PYTHONPATH=/app --entrypoint python "$rehearsal_image_id" -B /checks/health.py
 ```
 
-The check uses fresh tmpfs synthetic state/token, executes the actual Plan uvicorn
+The check uses fresh tmpfs synthetic state and a synthetic `RUNNER_TOKEN` env (the
+Plan references the transport Secret that way since #59), executes the actual Plan uvicorn
 command, and verifies HTTP200 with matching owner/state/synthetic podUid,
 unverified/available=false/not_configured; wrong bearer401, wrong/missing state503,
 no auth.json and clean shutdown. Docker network none leaves only loopback, so

@@ -28,7 +28,8 @@ When the command ends, times out or loses its client connection, PID 1 sends
 SIGKILL to every other process in its own PID namespace and reaps adopted children,
 including setsid/double-fork descendants. The lease is not released until `/proc`
 contains only PID 1. Failure to prove cleanup in five seconds exits the executor
-instead of accepting another command. Container termination kills its PID namespace.
+instead of accepting another command. On SIGTERM (Pod deletion) PID 1 runs the same
+cleanup and exits 0; without a handler PID 1 would ignore SIGTERM and wait for SIGKILL.
 Commands have no inherited service variables/fds or stdin; Bash starts without
 profile/rc files. Core dumps are disabled and child RLIMIT_NOFILE=128,
 RLIMIT_NPROC=64. RLIMIT_NPROC counts a real UID's processes and is not a per-Pod

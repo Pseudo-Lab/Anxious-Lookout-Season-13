@@ -33,7 +33,7 @@ Protocol references: [official App Server](https://learn.chatgpt.com/docs/app-se
 ## Required reviewed inputs
 
 - RUNNER_ACCOUNT_ID: one auth.accounts UUID, matching the API's operator-owned mapping.
-- RUNNER_TOKEN_FILE: separate private >=32-char secret for each runner; API mapping points to its private copy. Do not reuse between accounts.
+- RUNNER_TOKEN (Kubernetes Pods: `secretKeyRef` to the transport Secret, read once and removed from the environment) or RUNNER_TOKEN_FILE (local runs): separate private >=32-char secret for each runner; API mapping points to its private copy. Do not reuse between accounts.
 - CODEX_MODEL: exactly `gpt-6.1-sol`; other values fail, with no model/API-key fallback. Start/resume/turn/config and reported response/reroute are checked. This does not prove model entitlement or unseen provider behavior.
 - CODEX_AUTH_MODE: none(default) or personal-cache(candidate). None does not consume a restored auth.json. Personal-cache requires APP_ENV=personal-test, CODEX_EXECUTION_SCOPE=personal-private and a private CODEX_PERSONAL_CONTROL_DIR. CODEX_API_KEY_FILE is rejected. See [PERSONAL-CODEX-TEST.md](../PERSONAL-CODEX-TEST.md) for actual provisioning gates, refresh responsibility, max3 durable budget and cleanup. No current host cache is discovered/shared. Real credentials/inference remain unexecuted.
 - RESEARCH_TOOL_CALLBACK_URL: fixed internal API URL, normally `http://api:8080/api/internal/research/tools`; include APP_BASE_PATH when present.

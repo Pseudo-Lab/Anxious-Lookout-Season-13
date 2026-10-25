@@ -125,6 +125,19 @@ app/auth config remain as captured. Re-export after scaling to zero/mutator stop
 do not remove a stale test to force application. `api-candidate.json` is for diff,
 not apply: applying that snapshot could restore stale replicas/metadata.
 
+**Runner Pod manifest gate.** API and workers accept a runner Pod only if it equals
+the manifest their own code renders (`KubePods._pod`). A release that changes that
+manifest (#59: resources, executor `/tmp`, transport token as an env reference)
+refuses Pods created by the previous release, so roll it out only while
+`codex-runner` has no runner Pod:
+
+```sh
+kubectl -n codex-runner get pods -l anxious.io/managed=user-runner -o name   # must print nothing
+```
+
+If a runner is running, stop it through `DELETE /api/research/codex/runner` and let the
+observer finish first. Do not delete the Pod by hand.
+
 ```sh
 kubectl diff -f /private-rollout/candidate/resources.json
 kubectl diff -f /private-rollout/candidate/api-candidate.json

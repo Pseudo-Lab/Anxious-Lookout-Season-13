@@ -64,6 +64,11 @@ def clean_namespace():
         time.sleep(.01)
 
 
+def terminate(signum, frame):
+    clean_namespace()
+    os._exit(0)
+
+
 class Executor:
     def __init__(self):
         self.wall = setting('SHELL_WALL_SECONDS', 30, 1, 300)
@@ -180,6 +185,9 @@ class Executor:
         if os.getpid() != 1 or os.getuid() != EXECUTOR_UID:
             raise RuntimeError('Executor must be dedicated non-root PID 1')
         WORKSPACE.resolve(strict=True)
+        # PID 1 ignores SIGTERM without a handler, so Pod deletion used to wait for
+        # SIGKILL. Kill and reap every command descendant first, then exit cleanly.
+        signal.signal(signal.SIGTERM, terminate)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
             if os.path.lexists(SOCKET):
                 os.unlink(SOCKET)

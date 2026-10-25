@@ -38,7 +38,9 @@ An explicit v2 plan adds exactly:
 
 Limits: wallSeconds integer 1–300; outputBytes integer 1024–1048576. These become
 SHELL_WALL_SECONDS/SHELL_OUTPUT_BYTES in the reviewed Pod. CPU/memory limits are
-500m/128Mi for executor and 1/1Gi for runner. Separate PID namespaces are required.
+1/512Mi for executor (requests 100m/128Mi) and 500m/768Mi for runner (requests
+100m/192Mi); the executor `/tmp` is a disk-backed 256Mi emptyDir. Values and their
+measurements are in #58 E. Separate PID namespaces are required.
 Do not patch a live Pod or alter existing binding JSON directly.
 
 For new owners, optional `executor` in rollout values is validated and copied to

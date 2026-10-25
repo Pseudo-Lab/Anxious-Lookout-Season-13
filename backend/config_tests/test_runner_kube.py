@@ -156,8 +156,12 @@ def test_narrow_server_defaults_are_accepted(port, server, plan):
     spec.update(nodeName='node-one', schedulerName='default-scheduler', serviceAccount='runner', priority=0,
                 preemptionPolicy='PreemptLowerPriority', tolerations=[{'key': 'node.kubernetes.io/not-ready',
                 'operator': 'Exists', 'effect': 'NoExecute', 'tolerationSeconds': 300}])
-    spec['containers'][0].update(terminationMessagePath='/dev/termination-log', terminationMessagePolicy='File', resources={})
+    spec['containers'][0].update(terminationMessagePath='/dev/termination-log', terminationMessagePolicy='File')
     assert port.lookup(plan.identity) == original
+    # The runner declares resources (#59); an API-side empty value is a different spec.
+    spec['containers'][0]['resources'] = {}
+    with pytest.raises(Refused):
+        port.lookup(plan.identity)
 
 
 @pytest.mark.parametrize('field', ['hostNetwork', 'hostPID', 'hostIPC'])
@@ -260,7 +264,7 @@ def test_executor_plan_is_opt_in_and_confined(plan):
     assert spec['shareProcessNamespace'] is False
     executor = spec['containers'][1]
     assert executor['securityContext']['runAsUser'] == 20002
-    assert executor['resources']['limits'] == {'cpu': '500m', 'memory': '128Mi'}
+    assert executor['resources'] == {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '1', 'memory': '512Mi'}}
     assert executor['volumeMounts'] == [
         {'name': 'native', 'mountPath': '/state/workspace', 'subPath': 'workspace'},
         {'name': 'native', 'mountPath': '/run/shell-executor', 'subPath': 'shell-ipc'},
@@ -274,3 +278,26 @@ def test_executor_plan_is_opt_in_and_confined(plan):
         server.pod['spec']['containers'][1]['volumeMounts'].append({'name': 'control', 'mountPath': '/control'})
         with pytest.raises(Refused): port.lookup(enabled.identity)
     finally: port.close()
+
+
+def test_pod_resources_transport_reference_and_grace(plan):
+    # #59: runner limits lowered, executor raised, transport token only as a runner env reference.
+    from app.runner_kube import ExecutorPlan, GRACE_SECONDS
+    enabled = replace(plan, executor=ExecutorPlan('registry.invalid/executor@sha256:'+'b'*64))
+    for candidate in (plan, enabled):
+        spec = candidate.manifest('isolated')['spec']
+        runner = spec['containers'][0]
+        assert spec['terminationGracePeriodSeconds'] == GRACE_SECONDS == 20
+        assert runner['resources'] == {'requests': {'cpu': '100m', 'memory': '192Mi'},
+                                       'limits': {'cpu': '500m', 'memory': '768Mi'}}
+        assert [entry for entry in runner['env'] if entry['name'].startswith('RUNNER_TOKEN')] == [
+            {'name': 'RUNNER_TOKEN', 'valueFrom': {'secretKeyRef': {'name': candidate.transport.name, 'key': 'token'}}}]
+        assert not [volume for volume in spec['volumes'] if 'secret' in volume or volume['name'] == 'transport']
+        assert not [mount for mount in runner['volumeMounts'] if mount['name'] == 'transport']
+        for other in spec['containers'][1:] + spec.get('initContainers', []):
+            assert not [entry for entry in other.get('env', []) if 'valueFrom' in entry]
+    spec = enabled.manifest('isolated')['spec']
+    assert {'name': 'shell-tmp', 'emptyDir': {'sizeLimit': '256Mi'}} in spec['volumes']
+    assert {'name': 'tmp', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '64Mi'}} in spec['volumes']
+    assert spec['initContainers'][0]['resources'] == {'requests': {'cpu': '10m', 'memory': '32Mi'},
+                                                      'limits': {'cpu': '100m', 'memory': '64Mi'}}

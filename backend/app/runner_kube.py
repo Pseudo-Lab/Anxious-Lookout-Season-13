@@ -23,6 +23,9 @@ from . import runner_http_budget as budget
 from runner.lifecycle import require, Refused
 
 LABEL = 'anxious.io/'
+# Both containers exit on SIGTERM within a second when idle (#59). The bound is the
+# runner's worst native shutdown: app-server EOF 5s, terminate 5s, kill 5s.
+GRACE_SECONDS = 20
 
 
 def name(value):
@@ -89,14 +92,14 @@ class Plan:
                   LABEL+'generation': str(identity.generation), LABEL+'managed': 'user-runner'}
         env = {'APP_ENV': 'operator-service', 'RUNNER_ACCOUNT_ID': str(identity.owner),
                'RUNNER_STATE_ID': str(identity.state_id), 'RUNNER_STATE_DIR': '/state',
-               'RUNNER_TOKEN_FILE': '/transport/token', 'CODEX_MODEL': 'gpt-6.1-sol',
+               'CODEX_MODEL': 'gpt-6.1-sol',
                'CODEX_AUTH_MODE': 'access-service', 'CODEX_EXECUTION_SCOPE': 'operator-access-service',
                'CODEX_ACCESS_CONTROL_DIR': '/control', 'CODEX_OPERATOR_ACCOUNT_FILE': '/control/operator-account',
                'RESEARCH_TOOL_CALLBACK_URL': self.callback}
         manifest = {'apiVersion': 'v1', 'kind': 'Pod',
                 'metadata': {'name': identity.name, 'namespace': namespace, 'labels': labels},
                 'spec': {'serviceAccountName': self.service_account, 'automountServiceAccountToken': False,
-                         'restartPolicy': 'Never', 'terminationGracePeriodSeconds': 55,
+                         'restartPolicy': 'Never', 'terminationGracePeriodSeconds': GRACE_SECONDS,
                          'hostNetwork': False, 'hostPID': False, 'hostIPC': False,
                          'enableServiceLinks': False, 'dnsPolicy': 'ClusterFirst',
                          'securityContext': {'runAsUser': 10001, 'runAsGroup': 10001, 'runAsNonRoot': True,
@@ -104,18 +107,20 @@ class Plan:
                          'containers': [{'name': 'runner', 'image': self.image, 'imagePullPolicy': 'IfNotPresent',
                             'command': ['uvicorn', 'runner.app:create_app', '--factory', '--host', '0.0.0.0', '--port', '8080',
                                         '--workers', '1', '--no-access-log', '--no-proxy-headers'],
+                            # Transport token as an env reference, runner container only: a 0400
+                            # Secret file cannot be owned by UID 10001 without a Pod fsGroup, and
+                            # fsGroup would relabel the private PVCs group-writable (#59).
                             'env': [{'name': key, 'value': value} for key, value in env.items()] +
-                                [{'name': 'RUNNER_POD_UID', 'valueFrom': {'fieldRef': {'apiVersion': 'v1', 'fieldPath': 'metadata.uid'}}}],
+                                [{'name': 'RUNNER_TOKEN', 'valueFrom': {'secretKeyRef': {'name': self.transport.name, 'key': 'token'}}},
+                                 {'name': 'RUNNER_POD_UID', 'valueFrom': {'fieldRef': {'apiVersion': 'v1', 'fieldPath': 'metadata.uid'}}}],
                             'ports': [{'name': 'runner', 'containerPort': 8080, 'protocol': 'TCP'}],
+                            'resources': {'requests': {'cpu': '100m', 'memory': '192Mi'}, 'limits': {'cpu': '500m', 'memory': '768Mi'}},
                             'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
                                                 'capabilities': {'drop': ['ALL']}},
                             'volumeMounts': [{'name': 'native', 'mountPath': '/state'}, {'name': 'control', 'mountPath': '/control'},
-                                             {'name': 'transport', 'mountPath': '/transport', 'readOnly': True},
                                              {'name': 'tmp', 'mountPath': '/tmp'}]}],
                          'volumes': [{'name': 'native', 'persistentVolumeClaim': {'claimName': self.native.name}},
                                      {'name': 'control', 'persistentVolumeClaim': {'claimName': self.control.name}},
-                                     {'name': 'transport', 'secret': {'secretName': self.transport.name, 'defaultMode': 292,
-                                                                    'items': [{'key': 'token', 'path': 'token'}]}},
                                      {'name': 'tmp', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '64Mi'}}]}}
         if self.executor is not None:
             self._executor_manifest(manifest)
@@ -134,7 +139,6 @@ class Plan:
             'resources': {'requests': {'cpu': '10m', 'memory': '32Mi'}, 'limits': {'cpu': '100m', 'memory': '64Mi'}},
             'volumeMounts': [{'name': 'native', 'mountPath': '/state'}]}]
         runner = spec['containers'][0]
-        runner['resources'] = {'requests': {'cpu': '100m', 'memory': '256Mi'}, 'limits': {'cpu': '1', 'memory': '1Gi'}}
         runner['env'] += [{'name': 'SHELL_EXECUTOR_ENABLED', 'value': 'true'},
                           {'name': 'SHELL_WALL_SECONDS', 'value': str(executor.wall_seconds)},
                           {'name': 'SHELL_OUTPUT_BYTES', 'value': str(executor.output_bytes)}]
@@ -142,13 +146,14 @@ class Plan:
         spec['containers'].append({'name': 'shell-executor', 'image': executor.image, 'imagePullPolicy': 'IfNotPresent',
             'command': ['python', '-I', '/opt/executor/server.py'],
             'securityContext': {**security, 'runAsUser': 20002, 'runAsGroup': 10001, 'runAsNonRoot': True},
-            'resources': {'requests': {'cpu': '50m', 'memory': '64Mi'}, 'limits': {'cpu': '500m', 'memory': '128Mi'}},
+            'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '1', 'memory': '512Mi'}},
             'env': [{'name': 'SHELL_WALL_SECONDS', 'value': str(executor.wall_seconds)},
                     {'name': 'SHELL_OUTPUT_BYTES', 'value': str(executor.output_bytes)}],
             'volumeMounts': [{'name': 'native', 'mountPath': '/state/workspace', 'subPath': 'workspace'},
                              {'name': 'native', 'mountPath': '/run/shell-executor', 'subPath': 'shell-ipc'},
                              {'name': 'shell-tmp', 'mountPath': '/tmp'}]})
-        spec['volumes'].append({'name': 'shell-tmp', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '16Mi'}})
+        # Disk-backed: a Memory medium would count the scratch pages against the 512Mi limit.
+        spec['volumes'].append({'name': 'shell-tmp', 'emptyDir': {'sizeLimit': '256Mi'}})
 
 
 class KubePods:
