@@ -15,9 +15,7 @@ CONFIG = '/etc/anxious-lookout/issue16'
 BIN = '/usr/local/lib/anxious-lookout/issue16'
 NS = 'codex-runner'
 KEYS = {'version', 'runtimeImage', 'runnerImage', 'provisionerImageId', 'postImagesStorageClass', 'api', 'hostApi',
-        'namespaceUid', 'podCIDR', 'node', 'nodeUid', 'bootId', 'hostPidNamespace',
-        'hostCgroupNamespace', 'providerAccountId', 'allowlist',
-        'crictl', 'criSocket', 'maxPods', 'idleSeconds', 'nativeSizeGiB', 'controlSizeGiB'}
+        'namespaceUid', 'podCIDR', 'node', 'providerAccountId', 'allowlist', 'maxPods', 'idleSeconds', 'nativeSizeGiB', 'controlSizeGiB'}
 IMAGE = r'[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}'
 
 
@@ -61,18 +59,10 @@ def checked(v):
         u = urlsplit(v[key])
         require(u.scheme == 'https' and u.hostname and not u.username and not u.password
                 and not u.query and not u.fragment and u.path in ('', '/') and u.port)
-    for key in ('namespaceUid', 'nodeUid', 'bootId'):
-        canonical_uuid(v[key])
+    canonical_uuid(v['namespaceUid'])
     require(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', v['node']))
     network = ipaddress.ip_network(v['podCIDR'])
     require(network.version == 4 and not network.is_loopback and not network.is_link_local)
-    for key, prefix in [('hostPidNamespace', 'pid'), ('hostCgroupNamespace', 'cgroup')]:
-        require(re.fullmatch(prefix+r':\[[1-9][0-9]*\]', v[key]))
-    for key in ('crictl', 'criSocket'):
-        value = v[key]
-        require(type(value) is str and re.fullmatch(r'/[A-Za-z0-9_./-]+', value)
-                and '..' not in value.split('/') and '//' not in value and not value.endswith('/'))
-    require(v['criSocket'].startswith('/run/'))
     require(isinstance(v['providerAccountId'], str) and re.fullmatch(r'[A-Za-z0-9_-]{1,200}', v['providerAccountId']))
     for key, maximum in [('maxPods', 100), ('idleSeconds', 86400),
                          ('nativeSizeGiB', 999999), ('controlSizeGiB', 999999)]:
@@ -199,9 +189,54 @@ def rule(resources, verbs, group='', names=None):
             **({'resourceNames': names} if names else {})}
 
 
+CONTROL_NS = 'runner-control'
+
+
+def controller(v):
+    """In-cluster runner controller (#61): its own namespace (the codex-runner CNP denies the API
+    server to every Pod there), a dedicated SA and a single resident Deployment."""
+    subject = [{'kind': 'ServiceAccount', 'name': 'runner-controller', 'namespace': CONTROL_NS}]
+    role = [rule(['pods'], ['get', 'list', 'watch', 'create', 'delete']),
+            rule(['persistentvolumeclaims', 'secrets'], ['get'])]
+    cluster = [rule(['namespaces'], ['get'], names=[NS]), rule(['nodes'], ['get'], names=[v['node']])]
+    items = [{'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': CONTROL_NS, 'labels': {
+                 'pod-security.kubernetes.io/enforce': 'restricted', 'pod-security.kubernetes.io/enforce-version': 'latest'}}},
+             resource('ServiceAccount', 'runner-controller', CONTROL_NS)]
+    for kind, ns, permissions in [('Role', NS, role), ('ClusterRole', None, cluster)]:
+        items.append(resource(kind, 'runner-controller', ns, rules=permissions))
+        items.append(resource(kind+'Binding', 'runner-controller', ns, subjects=subject,
+                              roleRef={'apiGroup': 'rbac.authorization.k8s.io', 'kind': kind, 'name': 'runner-controller'}))
+    env = {**environment(v), 'RUNNER_NAMESPACE': NS, 'RUNNER_NAMESPACE_UID': v['namespaceUid'],
+           'RUNNER_POD_CIDR': v['podCIDR'], 'RUNNER_NODE_NAME': v['node'],
+           'CONTROLLER_DATABASE_URL_FILE': '/run/runner-db/controller-url',
+           'OBSERVER_DATABASE_URL_FILE': '/run/runner-db/observer-url'}
+    labels = {'app': 'runner-controller'}
+    items.append({'apiVersion': 'apps/v1', 'kind': 'Deployment',
+        'metadata': {'name': 'runner-controller', 'namespace': CONTROL_NS, 'labels': labels},
+        'spec': {'replicas': 1, 'strategy': {'type': 'Recreate'},  # One controller at a time.
+                 'selector': {'matchLabels': labels},
+                 'template': {'metadata': {'labels': labels}, 'spec': {
+                     'serviceAccountName': 'runner-controller', 'enableServiceLinks': False,
+                     'securityContext': {'runAsUser': 10001, 'runAsGroup': 10001, 'runAsNonRoot': True,
+                                         'seccompProfile': {'type': 'RuntimeDefault'}},
+                     'containers': [{'name': 'controller', 'image': v['runtimeImage'], 'imagePullPolicy': 'Never',
+                         'command': ['python', '-B', '-m', 'ops.runner_controller_service'],
+                         'env': [{'name': k, 'value': val} for k, val in env.items()],
+                         'resources': {'requests': {'cpu': '50m', 'memory': '128Mi'}},
+                         'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
+                                             'capabilities': {'drop': ['ALL']}},
+                         'volumeMounts': [{'name': 'db', 'mountPath': '/run/runner-db', 'readOnly': True},
+                                          {'name': 'tmp', 'mountPath': '/tmp'}]}],
+                     # Secret runner-controller-db (keys controller-url, observer-url) is created by the
+                     # operator from the existing #16 logins; it is never rendered.
+                     'volumes': [{'name': 'db', 'secret': {'secretName': 'runner-controller-db', 'defaultMode': 288}},
+                                 {'name': 'tmp', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '16Mi'}}]}}}})
+    return items
+
+
 def resources(v):
     items = []
-    for role in ('api', 'controller', 'observer'):
+    for role in ('api', 'controller'):
         sa = 'hosting' if role == 'api' else 'runner-pool-'+role
         sa_ns = 'm2-hosting' if role == 'api' else NS
         if role != 'api':
@@ -209,13 +244,11 @@ def resources(v):
         rules = [rule(['pods', 'persistentvolumeclaims', 'secrets'], ['get'])]
         cluster = [rule(['namespaces'], ['get'], names=[NS])]
         if role == 'controller':
-            rules += [rule(['pods', 'persistentvolumeclaims', 'secrets'], ['create']),
+            # Host storage preparation only since #61: PVC, PV and Secret, never Pods.
+            rules += [rule(['persistentvolumeclaims', 'secrets'], ['create']),
                       rule(['serviceaccounts'], ['get'], names=['runner-workload']),
                       rule(['networkpolicies'], ['get'], 'networking.k8s.io', ['runner-default-deny'])]
             cluster += [rule(['persistentvolumes'], ['get', 'create'])]
-        if role == 'observer':
-            rules += [rule(['pods'], ['delete'])]
-            cluster += [rule(['persistentvolumes'], ['get']), rule(['nodes'], ['get'], names=[v['node']])]
         subject = [{'kind': 'ServiceAccount', 'name': sa, 'namespace': sa_ns}]
         for kind, name, ns, permissions in [('Role', 'runner-pool-'+role, NS, rules),
                                           ('ClusterRole', 'runner-pool-'+role, None, cluster)]:
@@ -223,10 +256,12 @@ def resources(v):
             items.append(resource(kind+'Binding', name, ns, subjects=subject,
                                   roleRef={'apiGroup': 'rbac.authorization.k8s.io', 'kind': kind, 'name': name}))
     # Replace old subjects as well as old rules: RBAC is additive.
-    # Host supply and its pods/exec right are retired by codex-broker (#60).
+    items += controller(v)
+    # Host supply (#60) and the host observer (#61, absorbed by runner-controller) are retired.
     for kind, name, ns in [('Role', 'runner-web', NS), ('Role', 'runner-preparer', NS), ('Role', 'runner-pool-supply', NS),
+                          ('Role', 'runner-pool-observer', NS),
                           ('ClusterRole', 'runner-web-namespace', None), ('ClusterRole', 'codex-runner-preparer', None),
-                          ('ClusterRole', 'runner-pool-supply', None)]:
+                          ('ClusterRole', 'runner-pool-supply', None), ('ClusterRole', 'runner-pool-observer', None)]:
         items.append(resource(kind, name, ns, rules=[]))
         items.append(resource(kind+'Binding', name, ns, subjects=[],
                               roleRef={'apiGroup': 'rbac.authorization.k8s.io', 'kind': kind, 'name': name}))
@@ -241,11 +276,7 @@ def inputs(v):
     return {'controller': {k: p[k] for k in ('api', 'namespace', 'namespaceUid', 'podCIDR', 'caFile', 'kubeTokenFile')} |
             {'hostRoot': STORAGE, 'node': v['node'], 'providerAccountId': v['providerAccountId'],
              'image': v['runnerImage'], 'callback': 'http://api.m2-hosting.svc.cluster.local:8080/api/internal/research/tools',
-             **({'executor': deepcopy(v['executor'])} if 'executor' in v else {})},
-            'observer': {'pool': p, 'storageRoot': STORAGE, 'host': {'node_name': v['node'], 'node_uid': v['nodeUid'],
-                'boot_id': v['bootId'], 'host_pid_namespace': v['hostPidNamespace'],
-                'host_cgroup_namespace': v['hostCgroupNamespace'], 'endpoint': 'unix://'+v['criSocket'],
-                'proc': '/host/proc', 'crictl': '/usr/local/bin/crictl'}}}
+             **({'executor': deepcopy(v['executor'])} if 'executor' in v else {})}}
 
 
 def shell_quote(value):
@@ -274,28 +305,13 @@ def docker(v, role):
             args += ['-e', key+'='+val]
     if role == 'controller':
         args += ['-e', 'DATABASE_URL_FILE=/private/database-url', '-e', 'CONTROLLER_DATABASE_URL_FILE=/private/database-url']
-    if role == 'observer':
-        args += ['-e', 'OBSERVER_DATABASE_URL_FILE=/private/database-url', '--cap-add=DAC_READ_SEARCH']
-        mount(ROOT+'/'+role, options='')
-    if role == 'observer':
-        args += ['--pid=host', '--cgroupns=host', '--cap-add=SYS_PTRACE']
-        mount('/proc', '/host/proc')
-        mount(v['criSocket'])
-        mount(v['crictl'], '/usr/local/bin/crictl')
-        # Slave propagation receives newly allocated mounts, never propagates writes back.
-        mount(STORAGE, options='readonly,bind-propagation=rslave')
     if role == 'restore':
         for key in ('CODEX_RUNNER_NATIVE_SIZE_GIB', 'CODEX_RUNNER_CONTROL_SIZE_GIB'):
             args += ['-e', key+'='+environment(v)[key]]
     args += ['--entrypoint=python', v['provisionerImageId'], '-B', '/rollout/worker.py', role]
     if role != 'restore':
         args += ['--inputs', '/private/inputs.json', '--limit', '10']
-        if role == 'controller':
-            args += ['--outputs', ROOT+'/provision-output']
-        else:
-            args += ['--cursor-file', ROOT+'/'+role+'/cursor.json']
-        if role == 'observer':
-            args += ['--idle']
+        args += ['--outputs', ROOT+'/provision-output']
     return args
 
 
@@ -340,7 +356,7 @@ def render(v, baseline, templates, configmaps=()):
         result[role+'-inputs.json'] = json.dumps(value, indent=2)+'\n'
     for name in ('worker.py', 'storage-root.sh'):
         result[name] = (templates/name).read_text()
-    for role in ('controller', 'observer', 'restore'):
+    for role in ('controller', 'restore'):
         result[role+'.sh'] = '#!/bin/sh\nset -eu\nexec '+ ' '.join(shell_quote(arg) for arg in docker(v, role))+'\n'
         result['stop-'+role+'.sh'] = (
             '#!/bin/sh\nset -eu\nfile=/run/issue16-'+role+'/container-id\n'

@@ -91,7 +91,7 @@ def test_unknown_baseline_refuses(values, baseline, maps, change):
 @pytest.mark.parametrize('key,value', [('maxPods', True), ('nativeSizeGiB', 0), ('allowlist', []),
     ('runtimeImage', 'runtime:latest'), ('provisionerImageId', 'worker:latest'),
     ('hostPidNamespace', 'pid:[0]'), ('hostApi', 'http://127.0.0.1:6443'),
-    ('crictl', '/bin/tool;echo leak'), ('criSocket', '/bin/../root/tool'), ('namespaceUid', 'not-a-uuid')])
+    ('node', 'Node_Upper'), ('namespaceUid', 'not-a-uuid')])
 def test_values_fail_closed(values, key, value):
     values[key] = value
     with pytest.raises((ValueError, TypeError)): rollout.checked(values)
@@ -109,15 +109,17 @@ def test_role_matrix_and_retired_bindings(values):
     assert lookup['Role', 'runner-web']['rules'] == []
     assert lookup['RoleBinding', 'runner-web']['subjects'] == []
     assert lookup['ClusterRoleBinding', 'codex-runner-preparer']['subjects'] == []
-    for role in ('controller', 'observer'):
-        assert lookup['ServiceAccount', 'runner-pool-'+role]['automountServiceAccountToken'] is False
+    assert lookup['ServiceAccount', 'runner-pool-controller']['automountServiceAccountToken'] is False
+    # #61: the host controller only prepares storage; it never creates or deletes Pods.
+    assert not any('pods' in r['resources'] for r in lookup['Role', 'runner-pool-controller']['rules'] if 'create' in r['verbs'])
     # #60: host supply and its pods/exec right are retired; RBAC is additive, so emptied in place.
     assert ('ServiceAccount', 'runner-pool-supply') not in lookup
     for kind in ('Role', 'ClusterRole'):
         assert lookup[kind, 'runner-pool-supply']['rules'] == [] and lookup[kind+'Binding', 'runner-pool-supply']['subjects'] == []
     assert not any(rule['resources'] == ['pods/exec'] for o in objects for rule in o.get('rules', []))
-    assert rollout.rule(['pods'], ['delete']) in lookup['Role', 'runner-pool-observer']['rules']
-    assert rollout.rule(['nodes'], ['get'], names=[values['node']]) in lookup['ClusterRole', 'runner-pool-observer']['rules']
+    assert ('ServiceAccount', 'runner-pool-observer') not in lookup
+    for kind in ('Role', 'ClusterRole'):
+        assert lookup[kind, 'runner-pool-observer']['rules'] == [] and lookup[kind+'Binding', 'runner-pool-observer']['subjects'] == []
     assert lookup['ResourceQuota', 'runner-bootstrap-no-pods']['spec']['hard'] == {'count/pods': '3'}
     secret = lookup['Secret', 'hosting-runner-pool-v2']
     assert set(json.loads(secret['stringData']['pool.json'])) == {'version', 'api', 'namespace', 'namespaceUid', 'podCIDR', 'caFile', 'kubeTokenFile'}
@@ -126,7 +128,8 @@ def test_role_matrix_and_retired_bindings(values):
 def test_workers_mounts_credentials_and_restore_order(values, baseline, maps):
     files = rollout.render(values, baseline, TEMPLATES, maps)
     assert not [name for name in files if 'supply' in name]
-    for role in ('controller', 'observer', 'restore'):
+    assert not [name for name in files if 'observer' in name]
+    for role in ('controller', 'restore'):
         args = rollout.docker(values, role)
         assert values['provisionerImageId'] in args and '--pull=never' in args
         assert not any('docker.sock' in a for a in args)
@@ -136,9 +139,6 @@ def test_workers_mounts_credentials_and_restore_order(values, baseline, maps):
     assert 'bind-propagation=rshared' in controller and '--cap-add=SYS_ADMIN' in controller
     assert 'CONTROLLER_DATABASE_URL_FILE=/private/database-url' in controller
     assert not any('/home/opc/.codex' in value for value in files.values())
-    observer = files['observer.sh']
-    assert '--idle' in observer and '--pid=host' in observer and '--cgroupns=host' in observer
-    assert 'readonly,bind-propagation=rslave' in observer
     restore = files['issue16-restore.service']
     assert 'Before=k3s.service' in restore and 'After=docker.service' in restore
     assert 'k3s.service' not in restore.split('After=')[1].split('\n')[0]
@@ -201,8 +201,6 @@ def test_schema_keys_and_regex_match_values(values):
     assert set(schema['required']) == rollout.KEYS
     assert set(schema['properties']) == set(values) == rollout.KEYS | {'executor'}
     assert 'executor' not in schema['required']
-    for key in ('hostPidNamespace', 'hostCgroupNamespace'):
-        assert re.fullmatch(schema['properties'][key]['pattern'], values[key])
 
 
 def test_cli_check_no_output_and_exclusive_render(values, baseline, maps, tmp_path):
@@ -353,10 +351,11 @@ def test_wrapper_refuses_retired_supply_role_and_reason_fields(monkeypatch, caps
     worker = load_worker()
     monkeypatch.setattr(sys, 'argv', [])
     with pytest.raises(ValueError): worker.run_batch('supply', [])
+    with pytest.raises(ValueError): worker.run_batch('observer', [])  # #61: absorbed by runner-controller.
     monkeypatch.setattr(worker.runpy, 'run_module', lambda *a, **kw: print(json.dumps({
         'owner': '00000000-0000-4000-8000-000000000001', 'stage': 'host-supply', 'result': 'supply_refused',
         'reason': 'running_conversation'})))
-    with pytest.raises(ValueError): worker.run_batch('observer', [])
+    with pytest.raises(ValueError): worker.run_batch('controller', [])
     assert capsys.readouterr().out == ''
 
 
@@ -365,5 +364,30 @@ def test_suppressed_failure_remains_wrapper_failure(monkeypatch,capsys):
     monkeypatch.setattr(sys,'argv',[])
     def failed(*args,**kwargs): raise SystemExit(1)
     monkeypatch.setattr(worker.runpy,'run_module',failed)
-    assert worker.run_batch('observer',[]) == 1
+    assert worker.run_batch('controller',[]) == 1
     assert capsys.readouterr().out == ''
+
+
+def test_in_cluster_controller_namespace_rbac_and_deployment(values):
+    # #61: own namespace (the codex-runner CNP denies the API server), dedicated SA, no PV or exec rights.
+    objects = rollout.resources(values)['items']
+    lookup = {(o['kind'], o['metadata'].get('namespace'), o['metadata']['name']): o for o in objects}
+    assert lookup['Namespace', None, 'runner-control']['metadata']['labels']['pod-security.kubernetes.io/enforce'] == 'restricted'
+    role = lookup['Role', 'codex-runner', 'runner-controller']['rules']
+    assert role == [rollout.rule(['pods'], ['get', 'list', 'watch', 'create', 'delete']),
+                    rollout.rule(['persistentvolumeclaims', 'secrets'], ['get'])]
+    assert lookup['ClusterRole', None, 'runner-controller']['rules'] == [
+        rollout.rule(['namespaces'], ['get'], names=['codex-runner']), rollout.rule(['nodes'], ['get'], names=[values['node']])]
+    for kind, ns in (('RoleBinding', 'codex-runner'), ('ClusterRoleBinding', None)):
+        assert lookup[kind, ns, 'runner-controller']['subjects'] == [
+            {'kind': 'ServiceAccount', 'name': 'runner-controller', 'namespace': 'runner-control'}]
+    deployment = lookup['Deployment', 'runner-control', 'runner-controller']['spec']
+    pod = deployment['template']['spec']
+    container, = pod['containers']
+    assert deployment['replicas'] == 1 and deployment['strategy'] == {'type': 'Recreate'}
+    assert container['command'] == ['python', '-B', '-m', 'ops.runner_controller_service']
+    env = {e['name']: e['value'] for e in container['env']}
+    assert (env['RUNNER_NAMESPACE'], env['RUNNER_NODE_NAME'], env['RUNNER_NAMESPACE_UID']) == ('codex-runner', values['node'], values['namespaceUid'])
+    assert env['CODEX_USER_RUNNER_MAX_PODS'] == '3'
+    assert {'name': 'db', 'secret': {'secretName': 'runner-controller-db', 'defaultMode': 288}} in pod['volumes']
+    assert container['securityContext']['readOnlyRootFilesystem'] is True and pod['securityContext']['runAsNonRoot'] is True

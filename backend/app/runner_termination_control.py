@@ -1,4 +1,4 @@
-"""Durable stop/deferred-entry bookkeeping; external proof belongs to observer.
+"""Durable stop/deferred-entry bookkeeping; external proof belongs to the runner controller.
 
 API can insert only intent columns. All callers serialize on the registry owner
 lock; observer completion consumes authenticated, session-bound entry intents.
@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import json
 from uuid import UUID, uuid4
 from sqlalchemy import text
-from .runner_registry import Registry
+from .runner_registry import Registry, notify
 from .runner_termination_schema import installed, validate
 from runner.lifecycle import Phase, Fence, change, require
 
@@ -46,6 +46,7 @@ def request_stop(db, owner):
         VALUES(:owner,:state,:generation,:pod,:stop,:revision)'''),
         {'owner':owner,'state':state.state_id,'generation':state.generation,'pod':state.pod_uid,
          'stop':uuid4(),'revision':state.revision})
+    notify(db, owner)
     return stop_for(db, state)
 
 
@@ -93,6 +94,19 @@ def drain_body(stop):
             'stateId':str(stop['state_id']),'podUid':str(stop['pod_uid']),'generation':stop['generation']}
 
 
+def terminal_receipt(stop, evidence):
+    """The runner process is already gone (node reboot, container exit): no drain is possible (#61)."""
+    require(type(evidence) is dict and set(evidence) <= {'podPhase', 'containers', 'podAbsent'})
+    return {**drain_body(stop), 'version': 2, 'terminal': evidence}
+
+
+def receipt_valid(stop):
+    receipt = stop['receipt']
+    return receipt == {**drain_body(stop), 'version': 1, 'clean': True} or (
+        type(receipt) is dict and receipt.get('version') == 2 and type(receipt.get('terminal')) is dict
+        and receipt == terminal_receipt(stop, receipt['terminal']))
+
+
 def no_pending_work(db, state):
     require(Registry(db)._pending(state.owner) == 0)
     # Preserve uncertain conversations; never synthesize a completion or error.
@@ -124,6 +138,27 @@ def accept_drain(db, owner, stop_id, receipt):
 
 
 @atomic
+def accept_terminal(db, owner, stop_id, evidence):
+    """Record a dead runner Pod as the stop receipt before the controller deletes it."""
+    validate(db)
+    registry = Registry(db)
+    state = registry._current(owner)
+    stop = stop_for(db, state)
+    require(stop is not None and stop['stop_id'] == stop_id and stop['pod_uid'] == state.pod_uid)
+    receipt = terminal_receipt(stop, evidence)
+    no_pending_work(db, state)  # The controller has already closed the dead Pod's work.
+    require(state.phase in {Phase.READY, Phase.UNREACHABLE, Phase.STOPPING})
+    if stop['receipt'] is not None:
+        require(receipt_valid(stop) and state.phase == Phase.STOPPING)
+        return state
+    result = change(state, phase=Phase.STOPPING, active_requests=0, ambiguous=False)
+    registry._save(state, result)
+    db.execute(text('UPDATE runner_termination.stops SET receipt=CAST(:receipt AS jsonb) WHERE stop_id=:stop'),
+               {'stop': stop_id, 'receipt': json.dumps(receipt)})
+    return result
+
+
+@atomic
 def release(db, owner, stop_id, proof, *, allow_entry):
     validate(db)
     require(type(allow_entry) is bool)
@@ -138,7 +173,7 @@ def release(db, owner, stop_id, proof, *, allow_entry):
         return state  # Evidence already consumed; never release a later UID.
     require(state.phase == Phase.STOPPING and state.state_id == stop['state_id']
             and state.generation == stop['generation'] and state.pod_uid == stop['pod_uid'])
-    require(stop['receipt'] == {**drain_body(stop),'version':1,'clean':True})
+    require(receipt_valid(stop))  # Clean drain receipt, or the terminal-Pod receipt (#61).
     require(proof['podUid'] == str(state.pod_uid) and proof['nodeName'] == stop['node_name']
             and proof['nodeUid'] == str(stop['node_uid']) and proof['bootId'] == str(stop['boot_id']))
     when = datetime.fromisoformat(proof['verifiedAt'])
