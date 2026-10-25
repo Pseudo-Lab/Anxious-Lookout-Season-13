@@ -38,6 +38,28 @@ sudo virsh net-destroy default 2>/dev/null || true
 sudo virsh net-autostart default --disable
 ```
 
+**Ubuntu 24.04, libvirt 10.0.0, passt backend: AppArmor override.**
+
+- **Why it is needed:** Ubuntu's `libvirt-daemon-system` 10.0.0 (checked with `10.0.0-2ubuntu8.19`) ships an `abstractions/libvirt-qemu` that grants only `/usr/bin/passt Cx -> passt,`. The per-VM profile `libvirt-<UUID>` is missing two permissions:
+  - `rm` on `/usr/bin/passt`, which an exec of the PIE binary needs
+  - access to the passt socket that QEMU connects to
+- **Symptom:** `virsh start` fails with `Child process (passt …) unexpected fatal signal 11`. The real failure is `execve("/usr/bin/passt") = -1 EACCES`, an AppArmor `file_mmap` denial. The signal 11 is libvirt's error-reporting child dying afterwards. Confirm the denial with `journalctl -k | grep DENIED`.
+- **Fix:** add the two rules to the local override, which the abstraction already includes with `include if exists`. Do not edit the packaged file. The override survives package updates.
+
+```sh
+sudo install -d -m 0755 /etc/apparmor.d/local/abstractions
+sudo tee /etc/apparmor.d/local/abstractions/libvirt-qemu >/dev/null <<'EOF'
+# issue #48: libvirt 10.0.0 abstraction grants only Cx; exec of PIE passt also needs rm
+/usr/bin/passt rm,
+owner @{run}/libvirt/qemu/passt/* rw,
+EOF
+```
+
+- **When it applies:** libvirt builds the per-VM profile when the guest starts, so the rules take effect at the next `virsh start`.
+- **Expected after start:** `anxious-dev` is running, passt runs under its child profile in enforce mode, `127.0.0.1:22107` is listening, and `journalctl -k` shows no new AppArmor `DENIED` lines.
+- **Rollback:** delete `/etc/apparmor.d/local/abstractions/libvirt-qemu`, then stop and start the guest.
+- **Not needed** on hosts whose libvirt abstraction already grants these rules, or with a non-passt network backend.
+
 Take the host baseline (see Isolation checks) **after** these packages are installed and **before** the guest is created.
 
 ## Network
