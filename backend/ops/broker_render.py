@@ -1,7 +1,8 @@
 """Offline codex-broker manifest renderer (#60). No cluster, credential or Docker calls.
 
 values: {"image": "<runner image>@sha256:...", "accountId": "<operator account id>",
-         "storageClass": "<class>", "accessMode": "ReadWriteOncePod" | "ReadWriteOnce"}
+         "storageClass": "<class>", "accessMode": "ReadWriteOncePod" | "ReadWriteOnce",
+         "egress": "fqdn" (default) | "world"}
 The account id is the ChatGPT workspace id the runners already expect, not a secret.
 """
 import argparse
@@ -21,12 +22,16 @@ def require(ok):
 
 
 def checked(v):
-    require(type(v) is dict and set(v) == {'image', 'accountId', 'storageClass', 'accessMode'})
+    require(type(v) is dict and {'image', 'accountId', 'storageClass', 'accessMode'} <= set(v)
+            <= {'image', 'accountId', 'storageClass', 'accessMode', 'egress'})
     require(isinstance(v['image'], str) and re.fullmatch(IMAGE, v['image']))
     require(isinstance(v['accountId'], str) and re.fullmatch(r'[A-Za-z0-9_-]{1,200}', v['accountId']))
     require(isinstance(v['storageClass'], str) and re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?', v['storageClass']))
     # ReadWriteOncePod needs a CSI class (#63); ReadWriteOnce with replicas 1 until then.
     require(v['accessMode'] in {'ReadWriteOncePod', 'ReadWriteOnce'})
+    # fqdn (#60 acceptance): auth.openai.com and chatgpt.com only, which needs Cilium's DNS proxy
+    # (l7Proxy: true). world is an explicit, weaker opt-in for clusters without it: any internet host on 443.
+    require(v.get('egress', 'fqdn') in {'fqdn', 'world'})
     return v
 
 
@@ -38,8 +43,16 @@ def rbac(kind, name, namespace, rules):
              'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': kind, 'name': name}}]
 
 
-def policy():
+def policy(egress='fqdn'):
     port = lambda number, protocol='TCP': {'port': str(number), 'protocol': protocol}
+    kube_dns = [{'matchLabels': {'k8s:io.kubernetes.pod.namespace': 'kube-system', 'k8s:k8s-app': 'kube-dns'}}]
+    if egress == 'fqdn':
+        # DNS through the Cilium proxy so toFQDNs can learn the provider addresses.
+        dns = {'toEndpoints': kube_dns, 'toPorts': [{'ports': [port(53, 'UDP'), port(53)], 'rules': {'dns': [{'matchPattern': '*'}]}}]}
+        internet = {'toFQDNs': [{'matchName': 'auth.openai.com'}, {'matchName': 'chatgpt.com'}], 'toPorts': [{'ports': [port(443)]}]}
+    else:
+        dns = {'toEndpoints': kube_dns, 'toPorts': [{'ports': [port(53, 'UDP'), port(53)]}]}
+        internet = {'toEntities': ['world'], 'toPorts': [{'ports': [port(443)]}]}
     return {'apiVersion': 'cilium.io/v2', 'kind': 'CiliumNetworkPolicy',
             'metadata': {'name': 'codex-broker', 'namespace': NS},
             'spec': {'endpointSelector': {'matchLabels': LABELS},
@@ -48,14 +61,7 @@ def policy():
                                   'toPorts': [{'ports': [port(8080)]}]},
                                  # allow-localhost=policy: kubelet probes come from the host entity.
                                  {'fromEntities': ['host'], 'toPorts': [{'ports': [port(8080)]}]}],
-                     # l7Proxy is off (infra/k3s/cilium-values.yaml), so toFQDNs and DNS rules cannot be
-                     # enforced; narrowing world:443 to auth.openai.com and chatgpt.com belongs to #62.
-                     'egress': [
-                         {'toEndpoints': [{'matchLabels': {'k8s:io.kubernetes.pod.namespace': 'kube-system',
-                                                           'k8s:k8s-app': 'kube-dns'}}],
-                          'toPorts': [{'ports': [port(53, 'UDP'), port(53)]}]},
-                         {'toEntities': ['kube-apiserver'], 'toPorts': [{'ports': [port(6443)]}]},
-                         {'toEntities': ['world'], 'toPorts': [{'ports': [port(443)]}]}]}}
+                     'egress': [dns, {'toEntities': ['kube-apiserver'], 'toPorts': [{'ports': [port(6443)]}]}, internet]}}
 
 
 def resources(v):
@@ -95,7 +101,7 @@ def resources(v):
                   'volumeClaimTemplates': [{'metadata': {'name': 'data'}, 'spec': {
                       'accessModes': [v['accessMode']], 'storageClassName': v['storageClass'],
                       'resources': {'requests': {'storage': '1Gi'}}}}]}},
-        policy()]
+        policy(v.get('egress', 'fqdn'))]
     return {'apiVersion': 'v1', 'kind': 'List', 'items': items}
 
 

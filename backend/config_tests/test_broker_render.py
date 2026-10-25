@@ -6,8 +6,8 @@ VALUES = {'image': 'registry.invalid/runner@sha256:'+'a'*64, 'accountId': 'synth
           'storageClass': 'openebs-lvm-ext4', 'accessMode': 'ReadWriteOncePod'}
 
 
-def lookup():
-    return {(item['kind'], item['metadata']['name']): item for item in resources(dict(VALUES))['items']}
+def lookup(**changes):
+    return {(item['kind'], item['metadata']['name']): item for item in resources({**VALUES, **changes})['items']}
 
 
 def test_rbac_is_tokenreview_and_runner_pod_get_only():
@@ -39,22 +39,35 @@ def test_single_writer_statefulset_restricted_and_private_home():
     assert container['command'][:2] == ['uvicorn', 'broker.app:create_app']
 
 
-def test_policy_admits_runners_and_probes_and_egress_needs_no_l7_proxy():
+PORT_8080 = [{'ports': [{'port': '8080', 'protocol': 'TCP'}]}]
+API = {'toEntities': ['kube-apiserver'], 'toPorts': [{'ports': [{'port': '6443', 'protocol': 'TCP'}]}]}
+
+
+def test_policy_admits_runners_and_kubelet_probes_only():
     spec = lookup()['CiliumNetworkPolicy', 'codex-broker']['spec']
     assert spec['ingress'] == [
         {'fromEndpoints': [{'matchLabels': {'k8s:io.kubernetes.pod.namespace': 'codex-runner',
-                                            'k8s:anxious.io/managed': 'user-runner'}}],
-         'toPorts': [{'ports': [{'port': '8080', 'protocol': 'TCP'}]}]},
-        {'fromEntities': ['host'], 'toPorts': [{'ports': [{'port': '8080', 'protocol': 'TCP'}]}]}]
-    # l7Proxy is off: no DNS rules or toFQDNs (they would not be enforced); FQDN narrowing is #62.
-    assert not any('toFQDNs' in rule or 'rules' in port for rule in spec['egress'] for port in rule.get('toPorts', []))
-    assert {'toEntities': ['world'], 'toPorts': [{'ports': [{'port': '443', 'protocol': 'TCP'}]}]} in spec['egress']
-    assert {'toEntities': ['kube-apiserver'], 'toPorts': [{'ports': [{'port': '6443', 'protocol': 'TCP'}]}]} in spec['egress']
-    assert len(spec['egress']) == 3
+                                            'k8s:anxious.io/managed': 'user-runner'}}], 'toPorts': PORT_8080},
+        # allow-localhost=policy: without the host entity the kubelet probes would be dropped.
+        {'fromEntities': ['host'], 'toPorts': PORT_8080}]
+
+
+def test_default_egress_is_the_two_provider_fqdns_through_the_dns_proxy():
+    egress = lookup()['CiliumNetworkPolicy', 'codex-broker']['spec']['egress']
+    assert egress[0]['toPorts'][0]['rules'] == {'dns': [{'matchPattern': '*'}]}
+    assert egress[1:] == [API, {'toFQDNs': [{'matchName': 'auth.openai.com'}, {'matchName': 'chatgpt.com'}],
+                                'toPorts': [{'ports': [{'port': '443', 'protocol': 'TCP'}]}]}]
+    assert lookup(egress='fqdn') == lookup()
+
+
+def test_world_egress_is_only_an_explicit_switch():
+    egress = lookup(egress='world')['CiliumNetworkPolicy', 'codex-broker']['spec']['egress']
+    assert 'rules' not in egress[0]['toPorts'][0]
+    assert egress[1:] == [API, {'toEntities': ['world'], 'toPorts': [{'ports': [{'port': '443', 'protocol': 'TCP'}]}]}]
 
 
 @pytest.mark.parametrize('key,value', [('image', 'runner:latest'), ('accountId', 'has space'),
-                                       ('storageClass', 'UPPER'), ('accessMode', 'ReadWriteMany'), ('extra', 1)])
+                                       ('storageClass', 'UPPER'), ('accessMode', 'ReadWriteMany'), ('egress', 'all'), ('extra', 1)])
 def test_values_fail_closed(key, value):
     with pytest.raises(ValueError):
         resources({**VALUES, key: value})

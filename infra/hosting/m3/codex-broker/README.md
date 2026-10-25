@@ -28,10 +28,15 @@ and measurements are in #58 C.
 | Role `codex-broker-runner-pods` (codex-runner) | `pods` get only; the API gets no new right |
 | Service `codex-broker:8080` | |
 | StatefulSet `codex-broker` | replicas 1, runner image with `uvicorn broker.app:create_app`, UID/GID 10001, read-only root, all capabilities dropped, no requests/limits, PVC `data` 1Gi with `CODEX_HOME=/data/codex` (0700) |
-| CiliumNetworkPolicy `codex-broker` | ingress: `codex-runner` user-runner Pods and the host (kubelet probes; `allow-localhost: policy`) → 8080. egress: kube-dns 53, kube-apiserver 6443, `world` 443. Cilium runs with `l7Proxy: false`, so `toFQDNs` (DNS proxy) is not enforceable; narrowing to `auth.openai.com` and `chatgpt.com` is a #62 decision |
+| CiliumNetworkPolicy `codex-broker` | ingress: `codex-runner` user-runner Pods and the host (kubelet probes; the cluster sets `allow-localhost: policy`) → 8080. egress: kube-dns 53 through the DNS proxy, kube-apiserver 6443, `toFQDNs` `auth.openai.com` and `chatgpt.com` on 443 |
 
 The runner side adds an explicit egress rule to `codex-broker:8080` in
 `user-runner-e2e/40-runner-network.json`. The runner's broader egress narrowing is #62.
+
+**DNS proxy prerequisite.** `toFQDNs` is enforced only when Cilium runs its DNS proxy (`l7Proxy: true`).
+`infra/k3s/cilium-values.yaml` currently sets `l7Proxy: false`, so the default policy cannot work on this
+cluster until that is decided (#60 comparison comment). `"egress": "world"` renders `toEntities: world` on
+443 instead: **weaker isolation** (any internet host on 443) and used only if the user chooses it.
 
 `values.json` (see `values.example.json`):
 
@@ -41,6 +46,7 @@ The runner side adds an explicit egress rule to `codex-broker:8080` in
 | `accountId` | the ChatGPT workspace id the runners already expect (`providerAccountId`); an identifier, not a credential |
 | `storageClass` | the CSI class from #63 |
 | `accessMode` | `ReadWriteOncePod` on CSI. `ReadWriteOnce` is allowed only on a non-CSI class until #63 |
+| `egress` | `fqdn` (default, #60 acceptance) or `world` (explicit opt-in, weaker; see above) |
 
 ## Operating requirements
 
@@ -64,9 +70,10 @@ The runner side adds an explicit egress rule to `codex-broker:8080` in
 - **Mock OAuth (development only):** the broker passes `CODEX_REFRESH_TOKEN_URL_OVERRIDE` to its app-server
   only when it is `http://` on a loopback address (a mock sidecar in the broker Pod); any other value is
   ignored. The production manifest never sets it.
-- **Network check (development VM):** from another namespace's Pod, a connection to the broker's 8080 is dropped; from
-  a runner Pod it is accepted; from the broker, port 80 or a non-DNS cluster address is dropped while 443 to the
-  internet is allowed. Hubble is off in this cluster; use `cilium-dbg monitor --type drop` on the agent.
+- **Network check (development VM):** under the same policy, show the allowed destinations succeeding and
+  others dropped by policy: a runner Pod reaches the broker's 8080 and another namespace's Pod is dropped; the
+  broker reaches `auth.openai.com:443` and `chatgpt.com:443` and another internet host on 443 is dropped. Use
+  Hubble or `cilium-dbg monitor --type drop` on the agent; a failed connection alone is not proof of a policy drop.
 
 ## Applying to production
 
