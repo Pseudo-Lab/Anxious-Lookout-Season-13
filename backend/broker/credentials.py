@@ -43,9 +43,13 @@ class AppServer:
         self.process = popen([binary, *COMMAND], env=environment, cwd=str(home), stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
         self.replies, self.next_id, self.lock = queue.Queue(), 0, threading.Lock()
-        threading.Thread(target=self.read, daemon=True).start()
-        self.rpc('initialize', {'clientInfo': {'name': 'codex_broker', 'version': '1'}, 'capabilities': {'experimentalApi': True}})
-        self.send({'method': 'initialized'})
+        try:
+            threading.Thread(target=self.read, daemon=True).start()
+            self.rpc('initialize', {'clientInfo': {'name': 'codex_broker', 'version': '1'}, 'capabilities': {'experimentalApi': True}})
+            self.send({'method': 'initialized'})
+        except BaseException:
+            self.close()  # Never leave a second managed writer behind a failed start.
+            raise
 
     def read(self):
         for line in self.process.stdout:
@@ -122,7 +126,8 @@ class Credentials:
         # A new login or logout replaces auth.json; restart so the app-server reloads it.
         if self.server is None or not self.server.alive() or self.server_source != identity:
             if self.server is not None:
-                self.server.close()
+                self.server, previous = None, self.server
+                previous.close()
             self.server = self.server_factory(self.binary, self.home)
             self.server_source = identity
         return self.server

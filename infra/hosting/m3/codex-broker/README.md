@@ -28,7 +28,7 @@ and measurements are in #58 C.
 | Role `codex-broker-runner-pods` (codex-runner) | `pods` get only; the API gets no new right |
 | Service `codex-broker:8080` | |
 | StatefulSet `codex-broker` | replicas 1, runner image with `uvicorn broker.app:create_app`, UID/GID 10001, read-only root, all capabilities dropped, no requests/limits, PVC `data` 1Gi with `CODEX_HOME=/data/codex` (0700) |
-| CiliumNetworkPolicy `codex-broker` | ingress: `codex-runner` user-runner Pods → 8080 only. egress: kube-dns 53 (DNS proxy), kube-apiserver 6443, `toFQDNs` `auth.openai.com` and `chatgpt.com` on 443 |
+| CiliumNetworkPolicy `codex-broker` | ingress: `codex-runner` user-runner Pods and the host (kubelet probes; `allow-localhost: policy`) → 8080. egress: kube-dns 53, kube-apiserver 6443, `world` 443. Cilium runs with `l7Proxy: false`, so `toFQDNs` (DNS proxy) is not enforceable; narrowing to `auth.openai.com` and `chatgpt.com` is a #62 decision |
 
 The runner side adds an explicit egress rule to `codex-broker:8080` in
 `user-runner-e2e/40-runner-network.json`. The runner's broader egress narrowing is #62.
@@ -64,10 +64,9 @@ The runner side adds an explicit egress rule to `codex-broker:8080` in
 - **Mock OAuth (development only):** the broker passes `CODEX_REFRESH_TOKEN_URL_OVERRIDE` to its app-server
   only when it is `http://` on a loopback address (a mock sidecar in the broker Pod); any other value is
   ignored. The production manifest never sets it.
-- **Network check (development VM):**
-  - With the policy applied, Hubble must show only DNS, the API server, `auth.openai.com:443` and `chatgpt.com:443` as forwarded from the broker.
-  - A connection to any other address must show as dropped.
-  - Refusals from other Pods must show as policy drops at the broker's 8080.
+- **Network check (development VM):** from another namespace's Pod, a connection to the broker's 8080 is dropped; from
+  a runner Pod it is accepted; from the broker, port 80 or a non-DNS cluster address is dropped while 443 to the
+  internet is allowed. Hubble is off in this cluster; use `cilium-dbg monitor --type drop` on the agent.
 
 ## Applying to production
 

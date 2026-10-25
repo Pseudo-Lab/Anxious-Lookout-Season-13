@@ -243,3 +243,37 @@ def test_only_a_loopback_refresh_override_reaches_the_app_server(monkeypatch, tm
     credentials.AppServer('/usr/local/bin/codex', tmp_path, popen=popen)
     assert seen.get('CODEX_REFRESH_TOKEN_URL_OVERRIDE') == (value if passed else None)
     assert set(seen) <= {'PATH', 'LANG', 'HOME', 'CODEX_HOME', 'CODEX_REFRESH_TOKEN_URL_OVERRIDE'}
+
+
+def test_failed_app_server_start_is_closed_and_the_next_access_retries(monkeypatch, home):
+    # A failed initialize must not leave a managed writer behind; the next call starts a fresh one.
+    from broker import credentials
+    write_auth(home, jwt(int(time.time()) + 600))
+    processes = []
+    class Process:
+        def __init__(self):
+            self.stdin = SimpleNamespace(write=lambda line: None, flush=lambda: None, close=lambda: self.events.append('stdin'))
+            self.stdout, self.events = iter(()), []
+        def wait(self, timeout=None): self.events.append('wait')
+        def kill(self): self.events.append('kill')
+        def poll(self): return 0 if 'wait' in self.events else None
+    def popen(command, env, **kwargs):
+        processes.append(Process())
+        return processes[-1]
+    def failing_rpc(self, method, params, timeout=30):
+        raise CodexFailure('unavailable')
+    monkeypatch.setattr(credentials.AppServer, 'rpc', failing_rpc)
+    factory = lambda binary, home: credentials.AppServer(binary, home, popen=popen)
+    instance = Credentials(home, ACCOUNT, server=factory)
+    for _ in range(2):
+        with pytest.raises(CodexFailure):
+            instance.access()
+        assert instance.server is None
+    assert len(processes) == 2 and all(p.events[:2] == ['stdin', 'wait'] for p in processes)
+
+
+def test_non_object_json_is_a_fixed_400_without_reflection():
+    with TestClient(create_app(StubVerifier(IDENTITY), StubCredentials())) as client:
+        response = client.post('/v1/access', json=['SECRET-SENTINEL'], headers={'Authorization': 'Bearer '+PRESENTED})
+    assert (response.status_code, response.json()) == (400, {'error': 'invalid_request'})
+    assert response.headers['cache-control'] == 'no-store' and 'SECRET' not in response.text

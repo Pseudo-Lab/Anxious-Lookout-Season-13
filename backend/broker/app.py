@@ -9,6 +9,7 @@ import os
 from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.codex_policy import CodexFailure
@@ -51,6 +52,10 @@ def create_app(verifier=None, credentials=None):
 
     def refused(status, code):
         return JSONResponse({'error': code}, status_code=status, headers={'Cache-Control': 'no-store'})
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid(request, exc):
+        return refused(400, 'invalid_request')  # Never reflect the submitted body (FastAPI 422 would).
 
     @app.get('/healthz')
     def health():

@@ -45,15 +45,17 @@ def policy():
             'spec': {'endpointSelector': {'matchLabels': LABELS},
                      'ingress': [{'fromEndpoints': [{'matchLabels': {'k8s:io.kubernetes.pod.namespace': RUNNER_NS,
                                                                      'k8s:anxious.io/managed': 'user-runner'}}],
-                                  'toPorts': [{'ports': [port(8080)]}]}],
+                                  'toPorts': [{'ports': [port(8080)]}]},
+                                 # allow-localhost=policy: kubelet probes come from the host entity.
+                                 {'fromEntities': ['host'], 'toPorts': [{'ports': [port(8080)]}]}],
+                     # l7Proxy is off (infra/k3s/cilium-values.yaml), so toFQDNs and DNS rules cannot be
+                     # enforced; narrowing world:443 to auth.openai.com and chatgpt.com belongs to #62.
                      'egress': [
-                         # DNS through the Cilium proxy so toFQDNs can learn the provider addresses.
                          {'toEndpoints': [{'matchLabels': {'k8s:io.kubernetes.pod.namespace': 'kube-system',
                                                            'k8s:k8s-app': 'kube-dns'}}],
-                          'toPorts': [{'ports': [port(53, 'UDP'), port(53)], 'rules': {'dns': [{'matchPattern': '*'}]}}]},
+                          'toPorts': [{'ports': [port(53, 'UDP'), port(53)]}]},
                          {'toEntities': ['kube-apiserver'], 'toPorts': [{'ports': [port(6443)]}]},
-                         {'toFQDNs': [{'matchName': 'auth.openai.com'}, {'matchName': 'chatgpt.com'}],
-                          'toPorts': [{'ports': [port(443)]}]}]}}
+                         {'toEntities': ['world'], 'toPorts': [{'ports': [port(443)]}]}]}}
 
 
 def resources(v):

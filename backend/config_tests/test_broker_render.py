@@ -39,16 +39,18 @@ def test_single_writer_statefulset_restricted_and_private_home():
     assert container['command'][:2] == ['uvicorn', 'broker.app:create_app']
 
 
-def test_policy_admits_runners_only_and_egress_is_dns_api_and_two_fqdns():
+def test_policy_admits_runners_and_probes_and_egress_needs_no_l7_proxy():
     spec = lookup()['CiliumNetworkPolicy', 'codex-broker']['spec']
-    assert spec['ingress'] == [{'fromEndpoints': [{'matchLabels': {'k8s:io.kubernetes.pod.namespace': 'codex-runner',
-                                                                   'k8s:anxious.io/managed': 'user-runner'}}],
-                                'toPorts': [{'ports': [{'port': '8080', 'protocol': 'TCP'}]}]}]
-    fqdns = [rule for rule in spec['egress'] if 'toFQDNs' in rule]
-    assert fqdns == [{'toFQDNs': [{'matchName': 'auth.openai.com'}, {'matchName': 'chatgpt.com'}],
-                      'toPorts': [{'ports': [{'port': '443', 'protocol': 'TCP'}]}]}]
+    assert spec['ingress'] == [
+        {'fromEndpoints': [{'matchLabels': {'k8s:io.kubernetes.pod.namespace': 'codex-runner',
+                                            'k8s:anxious.io/managed': 'user-runner'}}],
+         'toPorts': [{'ports': [{'port': '8080', 'protocol': 'TCP'}]}]},
+        {'fromEntities': ['host'], 'toPorts': [{'ports': [{'port': '8080', 'protocol': 'TCP'}]}]}]
+    # l7Proxy is off: no DNS rules or toFQDNs (they would not be enforced); FQDN narrowing is #62.
+    assert not any('toFQDNs' in rule or 'rules' in port for rule in spec['egress'] for port in rule.get('toPorts', []))
+    assert {'toEntities': ['world'], 'toPorts': [{'ports': [{'port': '443', 'protocol': 'TCP'}]}]} in spec['egress']
     assert {'toEntities': ['kube-apiserver'], 'toPorts': [{'ports': [{'port': '6443', 'protocol': 'TCP'}]}]} in spec['egress']
-    assert len(spec['egress']) == 3 and not any('toEntities' in r and r['toEntities'] != ['kube-apiserver'] for r in spec['egress'])
+    assert len(spec['egress']) == 3
 
 
 @pytest.mark.parametrize('key,value', [('image', 'runner:latest'), ('accountId', 'has space'),
