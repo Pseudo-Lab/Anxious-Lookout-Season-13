@@ -30,6 +30,12 @@ bash infra/hosting/m3/user-runner-isolated/initialize-rehearsal.sh initialize "$
 bash infra/hosting/m3/user-runner-isolated/initialize-rehearsal.sh verify "$rehearsal_image_id"
 ```
 
+An optional third argument selects the image platform: `arm64` (default, production) or `amd64`, used only on the x86_64 development VM (`infra/k3s/DEV-VM.md`). Any other value exits 2 before any host check. On the VM, pass the same `$rehearsal_arch` that was used for the build below:
+
+```sh
+bash infra/hosting/m3/user-runner-isolated/initialize-rehearsal.sh initialize "$rehearsal_image_id" amd64
+```
+
 Before any Docker operation, the script requires OS hostname `simple`, the local
 IPv4 address `10.0.0.107`, and a read-only Node lookup using the explicit local
 `/etc/rancher/k3s/k3s.yaml` kubeconfig through `sudo -n /usr/local/bin/k3s`.
@@ -75,14 +81,15 @@ git diff --quiet
 git diff --cached --quiet
 rehearsal_repo=docker.io/library/anxious-s13-runner-rehearsal
 rehearsal_tag="$rehearsal_repo:$rehearsal_sha"
-docker build --platform linux/arm64 -f backend/Dockerfile --target runtime \
+rehearsal_arch=arm64  # amd64 only on the x86_64 development VM (infra/k3s/DEV-VM.md)
+docker build --platform "linux/$rehearsal_arch" -f backend/Dockerfile --target runtime \
   --build-arg APP_GIT_SHA="$rehearsal_sha" \
   --build-arg APP_BUILT_AT="$(date -u +%FT%TZ)" -t "$rehearsal_tag" .
 rehearsal_image_id=$(docker image inspect --format '{{.Id}}' "$rehearsal_tag")
 docker image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}} {{.Config.User}}' "$rehearsal_tag"
 ```
 
-Require linux/arm64 and10001:10001. runtime includes runner.app and uvicorn; the
+Require linux/$rehearsal_arch and10001:10001. runtime includes runner.app and uvicorn; the
 Plan command replaces its default API CMD. No Codex binary is installed, and no
 provider/supply/turn path is used. The exact image's code, not a source overlay,
 is exercised by this HTTP check. Only the test driver is mounted read-only:
@@ -113,7 +120,7 @@ Never overwrite an existing archive or alias; stop on collisions.
 
 ```sh
 test ! -e "$rehearsal_evidence/runner-image.tar"
-docker save --platform linux/arm64 --output "$rehearsal_evidence/runner-image.tar" "$rehearsal_tag"
+docker save --platform "linux/$rehearsal_arch" --output "$rehearsal_evidence/runner-image.tar" "$rehearsal_tag"
 sha256sum "$rehearsal_evidence/runner-image.tar"
 tar -xOf "$rehearsal_evidence/runner-image.tar" manifest.json > "$rehearsal_evidence/docker-manifest.json"
 rehearsal_familiar=${rehearsal_tag#docker.io/library/}
@@ -124,7 +131,7 @@ rehearsal_config_path=$(jq -er '.[0].Config' "$rehearsal_evidence/docker-manifes
 [[ $rehearsal_config_path =~ ^blobs/sha256/[a-f0-9]{64}$ || $rehearsal_config_path =~ ^[a-f0-9]{64}\.json$ ]]
 tar -xOf "$rehearsal_evidence/runner-image.tar" "$rehearsal_config_path" > "$rehearsal_evidence/docker-config.json"
 rehearsal_config="sha256:$(sha256sum "$rehearsal_evidence/docker-config.json" | cut -d' ' -f1)"
-sudo /usr/local/bin/k3s ctr --namespace k8s.io images import --platform linux/arm64 \
+sudo /usr/local/bin/k3s ctr --namespace k8s.io images import --platform "linux/$rehearsal_arch" \
   "$rehearsal_evidence/runner-image.tar"
 sudo /usr/local/bin/k3s ctr --namespace k8s.io images ls > "$rehearsal_evidence/images-after.txt"
 rehearsal_manifest=$(awk -v ref="$rehearsal_tag" '$1 == ref {print $3}' "$rehearsal_evidence/images-after.txt")
@@ -133,12 +140,12 @@ sudo /usr/local/bin/k3s ctr --namespace k8s.io content get "$rehearsal_manifest"
 ```
 
 Docker image Id can be an index digest in the containerd image store, rather than
-a config digest. Do not infer its type. Resolve the imported target's arm64 child
+a config digest. Do not infer its type. Resolve the imported target's `$rehearsal_arch` child
 if it is an index, preserving the original target digest for the Plan reference:
 
 ```sh
 if jq -e '.manifests != null' "$rehearsal_evidence/target.json" >/dev/null; then
-  rehearsal_child=$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | if length == 1 then .[0].digest else error("ambiguous arm64 manifest") end' "$rehearsal_evidence/target.json")
+  rehearsal_child=$(jq -er --arg arch "$rehearsal_arch" '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)] | if length == 1 then .[0].digest else error("ambiguous " + $arch + " manifest") end' "$rehearsal_evidence/target.json")
   [[ $rehearsal_child =~ ^sha256:[a-f0-9]{64}$ ]]
   sudo /usr/local/bin/k3s ctr --namespace k8s.io content get "$rehearsal_child" > "$rehearsal_evidence/manifest.json"
 else
@@ -149,7 +156,7 @@ jq -e --arg id "$rehearsal_config" \
   "$rehearsal_evidence/manifest.json"
 sudo /usr/local/bin/k3s ctr --namespace k8s.io content get "$rehearsal_config" > "$rehearsal_evidence/config.json"
 cmp "$rehearsal_evidence/docker-config.json" "$rehearsal_evidence/config.json"
-jq -e '.architecture == "arm64" and .os == "linux" and .config.User == "10001:10001"' \
+jq -e --arg arch "$rehearsal_arch" '.architecture == $arch and .os == "linux" and .config.User == "10001:10001"' \
   "$rehearsal_evidence/config.json"
 rehearsal_plan_image="$rehearsal_repo@$rehearsal_manifest"
 sudo /usr/local/bin/k3s ctr --namespace k8s.io images tag "$rehearsal_tag" "$rehearsal_plan_image"

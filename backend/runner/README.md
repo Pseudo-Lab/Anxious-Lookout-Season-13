@@ -14,7 +14,9 @@ process startup; missing/modified/unexecutable bundles refuse. The pinned model 
 code_mode_only, so real native enables its required host while retaining the existing
 shell/unified-exec/apps/plugins/browser/image/web and approval restrictions. Test CLI
 fixtures keep their previous host-disabled path. Installer pins the official companion
-archive and ELF64 AArch64 binary; no model/version fallback is introduced.
+archive and ELF64 AArch64 binary; no model/version fallback is introduced. The x86_64
+development VM image (issue #48) selects a separate amd64 pin set of the same release by
+BuildKit `TARGETARCH`; production arm64 values are unchanged and other platforms refuse.
 
 `infra/hosting/m3/check_runner_companion.sh <runner-test image ID> <pinned models.json>`
 exercises actual Native construction and runner HTTP admission with a synthetic private

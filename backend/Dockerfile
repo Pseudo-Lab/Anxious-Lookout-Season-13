@@ -32,6 +32,8 @@ CMD ["pytest", "-q", "-p", "no:cacheprovider", "/app/tests"]
 
 FROM runtime AS runner
 USER root
+# BuildKit platform arg selects the arm64 or amd64 pin set; unset or other refuses.
+ARG TARGETARCH
 RUN python /app/runner/install_codex.py \
     && mkdir -p /state \
     && chown 10001:10001 /state

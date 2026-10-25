@@ -22,7 +22,7 @@ Docker and k3s containerd stores differ. Record each web/API image digest, platf
 sudo /usr/local/bin/k3s ctr -n k8s.io images import /PRIVATE/RELEASE/images.tar
 ```
 
-Use actual digest-qualified image names returned by containerd when rendering. Do not assume a Docker build alone made images available to kubelet. No embedded/private registry or host firewall change is introduced.
+Building these linux/arm64 images on the x86_64 development server instead of the node: [CROSS-BUILD.md](CROSS-BUILD.md). Use actual digest-qualified image names returned by containerd when rendering. Do not assume a Docker build alone made images available to kubelet. No embedded/private registry or host firewall change is introduced.
 
 ## Private configuration inputs
 

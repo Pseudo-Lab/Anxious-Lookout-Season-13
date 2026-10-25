@@ -264,8 +264,9 @@ docker run --rm --pull=never --network none --read-only --cap-drop ALL \
   --entrypoint cat <local-image-id> /app/release.json
 ```
 
-Require release.sha to equal task_source_sha. Require Linux/arm64 for the current
-node. For the runner, verify the native bundle checksums against
+Require release.sha to equal task_source_sha. Require the current node's platform:
+Linux/arm64 in production, Linux/amd64 only on the x86_64 development VM
+(`infra/k3s/DEV-VM.md`). For the runner, verify the native bundle checksums against
 backend/runner/install_codex.py; test the offline protocol suite in Docker. For the
 worker, run network-none `python -B -m <module> --help` for runner_provision_worker,
 runner_stop_observer, runner_host_supply, runner_legacy_reconcile and

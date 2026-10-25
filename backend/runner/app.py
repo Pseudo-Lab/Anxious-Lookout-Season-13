@@ -116,11 +116,15 @@ class Native:
             if (os.getenv("APP_ENV"), os.getenv("CODEX_EXECUTION_SCOPE")) != expected:
                 raise CodexFailure("policy_refused")
         if not self.fixture:
-            from .install_codex import EXPECTED_SHA256, HOST_SHA256
+            from .install_codex import pinned
             if binary != "/usr/local/bin/codex":
                 raise CodexFailure("policy_refused")
             try:
-                for path, digest in ((binary, EXPECTED_SHA256), ("/usr/local/bin/codex-code-mode-host", HOST_SHA256)):
+                pin = pinned()
+            except RuntimeError:
+                raise CodexFailure("policy_refused") from None
+            try:
+                for path, digest in ((binary, pin["codex_sha256"]), ("/usr/local/bin/codex-code-mode-host", pin["host_sha256"])):
                     with open(path, "rb") as executable:
                         if hashlib.file_digest(executable, "sha256").hexdigest() != digest or not os.access(path, os.X_OK):
                             raise CodexFailure("policy_refused")
