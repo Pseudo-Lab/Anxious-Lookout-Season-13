@@ -1,0 +1,126 @@
+# #64 shell-surface pilot on the development VM only. Never apply to production.
+# Images are the development VM's local images (imagePullPolicy Never); the B agent image is the
+# runner image plus bubblewrap (agent-b.Dockerfile). The seccomp profile is installed on the node at
+# /var/lib/kubelet/seccomp/profiles/shell-pilot-userns.json (seccomp-userns.json in this directory).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shell-pilot
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pilot-login
+  namespace: shell-pilot
+spec:
+  accessModes: [ReadWriteOnce]  # pilot-login only.
+  storageClassName: openebs-lvm-ext4
+  resources: {requests: {storage: 1Gi}}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pilot-login
+  namespace: shell-pilot
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext: {runAsUser: 10001, runAsGroup: 10001, runAsNonRoot: true, fsGroup: 10001,
+                    fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}
+  containers:
+  - name: login
+    image: docker.io/library/anxious-dev-runner@sha256:31bd3c6ecf2b866ac576b458c6a3c9fe611cacae2b6996830121cd7357984a45
+    imagePullPolicy: Never
+    command: [sh, -c, 'mkdir -p -m 0700 /login/codex && exec sleep infinity']
+    env: [{name: CODEX_HOME, value: /login/codex}, {name: HOME, value: /login/codex}]
+    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+    volumeMounts: [{name: login, mountPath: /login}, {name: src, mountPath: /pilot/src, readOnly: true}, {name: tmp, mountPath: /tmp}]
+  volumes:
+  - {name: login, persistentVolumeClaim: {claimName: pilot-login}}
+  - {name: src, configMap: {name: pilot-src}}
+  - {name: tmp, emptyDir: {medium: Memory, sizeLimit: 64Mi}}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pilot-a
+  namespace: shell-pilot
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  shareProcessNamespace: false
+  securityContext: {runAsUser: 10001, runAsGroup: 10001, runAsNonRoot: true, fsGroup: 10001,
+                    fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}
+  containers:
+  - name: harness
+    image: docker.io/library/anxious-dev-runner@sha256:31bd3c6ecf2b866ac576b458c6a3c9fe611cacae2b6996830121cd7357984a45
+    imagePullPolicy: Never
+    command: [sleep, infinity]
+    env: [{name: PYTHONPATH, value: /app}]
+    resources: {requests: {cpu: 100m, memory: 192Mi}, limits: {cpu: 500m, memory: 768Mi}}  # #59 runner values
+    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+    volumeMounts:
+    - {name: access, mountPath: /access, readOnly: true}
+    - {name: pilot, mountPath: /pilot}
+    - {name: src, mountPath: /pilot/src, readOnly: true}
+    - {name: workspace, mountPath: /pilot/ws}
+    - {name: shell-ipc, mountPath: /run/shell-executor}
+    - {name: tmp, mountPath: /tmp}
+  - name: shell-executor
+    image: docker.io/library/anxious-dev-shell-executor@sha256:575c18d2cc7be7ada8f8859e853b6f0d6d78d9a8f5167127392db6c98369ce79
+    imagePullPolicy: Never
+    command: [python, -I, /opt/executor/server.py]
+    env: [{name: SHELL_WALL_SECONDS, value: '30'}, {name: SHELL_OUTPUT_BYTES, value: '65536'}]
+    resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: '1', memory: 512Mi}}  # #59 executor values
+    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]},
+                      runAsUser: 20002, runAsGroup: 10001, runAsNonRoot: true}
+    volumeMounts:
+    - {name: workspace, mountPath: /state/workspace}
+    - {name: shell-ipc, mountPath: /run/shell-executor}
+    - {name: shell-tmp, mountPath: /tmp}
+  volumes:
+  # Access token only (harness.py export); the refresh token never leaves pilot-login. OpenEBS LVM also
+  # refuses a second mount of the login volume.
+  - {name: access, secret: {secretName: pilot-access, optional: true, defaultMode: 288}}  # 0440
+  - {name: src, configMap: {name: pilot-src}}
+  - {name: pilot, emptyDir: {sizeLimit: 2Gi}}
+  - {name: workspace, emptyDir: {sizeLimit: 1Gi}}
+  - {name: shell-ipc, emptyDir: {medium: Memory, sizeLimit: 1Mi}}
+  - {name: tmp, emptyDir: {medium: Memory, sizeLimit: 64Mi}}
+  - {name: shell-tmp, emptyDir: {sizeLimit: 256Mi}}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pilot-b
+  namespace: shell-pilot
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext: {runAsUser: 10001, runAsGroup: 10001, runAsNonRoot: true, fsGroup: 10001,
+                    fsGroupChangePolicy: OnRootMismatch,
+                    # container_t denies bubblewrap's devpts mount (measured); spc_t drops SELinux confinement
+                    # for this pilot Pod only. Production would need a dedicated SELinux policy (#58 F middle option).
+                    seLinuxOptions: {type: spc_t}}
+  containers:
+  - name: agent
+    image: docker.io/library/back58-agent-b@sha256:2018f80021114fba45cdf68aadb98ad6bb02ea5f59f17d18a758c4dd20b1a205  # agent-b.Dockerfile, built and imported in the guest
+    imagePullPolicy: Never
+    command: [sleep, infinity]
+    env: [{name: PYTHONPATH, value: /app}]
+    # Runner and executor limits added together: one container does both jobs in B.
+    resources: {requests: {cpu: 200m, memory: 320Mi}, limits: {cpu: 1500m, memory: 1280Mi}}
+    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]},
+                      seccompProfile: {type: Localhost, localhostProfile: profiles/shell-pilot-userns.json}}
+    volumeMounts:
+    - {name: access, mountPath: /access, readOnly: true}
+    - {name: pilot, mountPath: /pilot}
+    - {name: src, mountPath: /pilot/src, readOnly: true}
+    - {name: tmp, mountPath: /tmp}
+  volumes:
+  # Access token only (harness.py export); the refresh token never leaves pilot-login. OpenEBS LVM also
+  # refuses a second mount of the login volume.
+  - {name: access, secret: {secretName: pilot-access, optional: true, defaultMode: 288}}  # 0440
+  - {name: src, configMap: {name: pilot-src}}
+  - {name: pilot, emptyDir: {sizeLimit: 2Gi}}
+  - {name: tmp, emptyDir: {sizeLimit: 256Mi}}

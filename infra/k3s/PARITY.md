@@ -46,6 +46,8 @@ Issue [#54](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/54). 
 | Release archive build host | the OCI node (Docker containerd image store) | guest Docker for development images. The development server's own Docker (classic store) cannot produce auditable archives | May differ: release archives stay on the OCI node | #48 R3, #52, `infra/hosting/CROSS-BUILD.md` |
 | Host-side changes | none | development server: libvirt/QEMU packages; `qemu-user-static` (arm64 emulation for R3); AppArmor local override `/etc/apparmor.d/local/abstractions/libvirt-qemu` (passt only, harmless with SLIRP, kept) | May differ: development server only | #48 |
 | Isolation-check expected differences | n/a | `127.0.0.1:22107` QEMU listener, the AppArmor override file, and QEMU-owned ephemeral UDP egress sockets that SLIRP opens (seen in `ss -lntu`; not a forward) | May differ | #48 R4, DEV-VM.md "Isolation checks" |
+| `kernel.yama.ptrace_scope` | not recorded (#58 F asks for it) | **1** since 2026-10-25T19:13Z (`/etc/sysctl.d/90-shell-pilot-yama.conf`); was the OL9 default 0 | Record: measure production, then decide Must match (#58 F recommends 1 on both) | #58 F, #64 |
+| Shell-surface pilot objects | none | namespace `shell-pilot` (login Pod, pilot Pods A and B with B on SELinux `spc_t` and the Localhost seccomp profile), `/var/lib/kubelet/seccomp/profiles/shell-pilot-userns.json`, image `back58-agent-b` | May differ. Guard: development VM only; namespace deleted after the pilot | #64 `infra/hosting/m3/shell-pilot/` |
 
 ## Render output and the live node
 
