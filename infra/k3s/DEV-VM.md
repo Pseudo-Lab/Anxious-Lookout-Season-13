@@ -63,7 +63,10 @@ sudo cat "$f"   # check: earlier content unchanged, one marked block at the end
 ```
 
 - **When it applies:** libvirt builds the per-VM profile when the guest starts, so the rules take effect at the next `virsh start`.
-- **Expected after start:** `anxious-dev` is running, passt runs under its child profile in enforce mode, `127.0.0.1:22107` is listening, and `journalctl -k` shows no new AppArmor `DENIED` lines.
+- **Expected after start:**
+  - `journalctl -k | grep DENIED` shows no new denial that names `/usr/bin/passt` or `/run/libvirt/qemu/passt/`.
+  - Other denials seen on the development server are unrelated and harmless: libvirtd `ptrace` reads, and `signal` denials when the guest stops.
+  - `anxious-dev` running, passt under its child profile in enforce mode, and `127.0.0.1:22107` listening are necessary but not sufficient. The network works only when the guest gets `10.0.0.107` by DHCP (`ip -4 address` on the console) and `ssh -p 22107 opc@127.0.0.1` reaches sshd.
 - **Rollback:** remove only the marked block and keep every other line, then stop and start the guest:
 
   ```sh
