@@ -145,38 +145,19 @@ release too; it does not block this rollout, and its owner stays stuck until #61
 `plan.executor.image` in `runner_bindings.bindings.plan`. Rollout values change only new
 owners' bindings, and `Bindings.publish` refuses a different plan for an existing owner.
 The #59 manifest no longer provides `RUNNER_TOKEN_FILE`, so a runner image older than
-#59 cannot start under it: update every existing binding to the reviewed images in the
+#59 cannot start under it: move every existing binding to the reviewed images in the
 same window, after the API and worker images run the new code and before the next
-entry. Run per owner as the database owner, with the worker timers stopped:
+entry. Use `ops.runner_binding_image` (CUTOVER.md section 6) per owner in `idle_stopped`
+with a completed termination proof, with entry, controller, observer and supply stopped:
 
-```sql
-\set ON_ERROR_STOP on
--- psql -v owner=<uuid> -v runner_old=<ref@sha256> -v runner_new=<ref@sha256>
---      -v executor_old=<ref@sha256> -v executor_new=<ref@sha256>
-BEGIN;
-SELECT phase, pod_uid FROM runner_runtime.registry WHERE owner_id = :'owner' FOR UPDATE;
-UPDATE runner_bindings.bindings b
-   SET plan = jsonb_set(jsonb_set(b.plan, '{image}', to_jsonb(:'runner_new'::text)),
-                        '{executor,image}', to_jsonb(:'executor_new'::text))
-  FROM runner_runtime.registry r
- WHERE b.owner_id = :'owner' AND r.owner_id = b.owner_id AND r.state_id = b.state_id
-   AND r.phase = 'idle_stopped' AND r.pod_uid IS NULL
-   AND b.plan->>'version' = '2'
-   AND b.plan->>'image' = :'runner_old' AND b.plan->'executor'->>'image' = :'executor_old'
-   AND NOT EXISTS (SELECT 1 FROM runner_termination.stops s WHERE s.owner_id = b.owner_id AND s.completed_at IS NULL)
-   AND NOT EXISTS (SELECT 1 FROM runner_runtime.admissions a WHERE a.owner_id = b.owner_id AND a.completed_at IS NULL)
-   AND NOT EXISTS (SELECT 1 FROM research.conversations c WHERE c.owner_id = b.owner_id AND c.state = 'running');
--- Continue only on "UPDATE 1"; anything else: ROLLBACK and reconcile.
-COMMIT;
-```
-
-- The registry row lock serializes with entry, which changes that row before any Pod
-  is created. Registry, generation, storage, Secrets, receipts and settled outbox rows
-  are unchanged; the next entry renders the Pod from the updated plan.
-- For a v1 binding (no executor), drop the outer `jsonb_set`, the `version` condition
-  and the executor comparison. Image references must match `name@sha256:<64 hex>`.
-- Keep the `SELECT plan` output from before the change as evidence; restoring it with
-  the same statement and swapped values is the rollback.
+- inputs: `owner`, `state`, `generation`, `revision` (the current registry fence),
+  `oldPlanSha256` (`plan_digest` of the current plan, computed in the new worker image),
+  `newImage` (runner) and, for a v2 plan, `executorImage`. One report/apply changes both
+  digests; the executor's `wallSeconds`/`outputBytes` stay. A v1 plan takes `newImage`
+  alone, or the explicit `executor` opt-in instead.
+- `report` first, review it, then `apply` with the same inputs and the report mounted
+  read-only. Registry, generation, resources, receipts and outbox rows are unchanged; the
+  next entry renders the Pod from the updated plan.
 - The retained `provision-output/<owner>/runtime.json` is not read after publication
   (restore uses only its owner and state), so it stays as the original preparation record.
 
