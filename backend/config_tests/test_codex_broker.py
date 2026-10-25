@@ -222,3 +222,24 @@ def test_http_credential_failures_map_to_fixed_codes(failure, code):
     response = call(StubVerifier(IDENTITY), StubCredentials(failure))
     assert (response.status_code, response.json()) == (503, {'error': code})
     assert 'SECRET' not in response.text
+
+
+@pytest.mark.parametrize('value,passed', [('http://127.0.0.1:18080/oauth/token', True), ('http://[::1]:9/t', True),
+                                          ('https://127.0.0.1:18080/oauth/token', False), ('http://auth.example.com/token', False),
+                                          ('http://127.0.0.1/oauth/token', False), (None, False)])
+def test_only_a_loopback_refresh_override_reaches_the_app_server(monkeypatch, tmp_path, value, passed):
+    # Development checks point the refresh at a mock in the broker Pod; nothing else may redirect it.
+    from broker import credentials
+    if value is None: monkeypatch.delenv('CODEX_REFRESH_TOKEN_URL_OVERRIDE', raising=False)
+    else: monkeypatch.setenv('CODEX_REFRESH_TOKEN_URL_OVERRIDE', value)
+    seen = {}
+    class Process:
+        stdin = SimpleNamespace(write=lambda line: None, flush=lambda: None)
+        stdout = iter(())
+    def popen(command, env, **kwargs):
+        seen.update(env)
+        return Process()
+    monkeypatch.setattr(credentials.AppServer, 'rpc', lambda self, method, params, timeout=30: {})
+    credentials.AppServer('/usr/local/bin/codex', tmp_path, popen=popen)
+    assert seen.get('CODEX_REFRESH_TOKEN_URL_OVERRIDE') == (value if passed else None)
+    assert set(seen) <= {'PATH', 'LANG', 'HOME', 'CODEX_HOME', 'CODEX_REFRESH_TOKEN_URL_OVERRIDE'}

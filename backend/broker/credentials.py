@@ -12,6 +12,7 @@ import queue
 import subprocess
 import threading
 import time
+from urllib.parse import urlsplit
 
 from app.codex_policy import CodexFailure
 from ops.access_snapshot import selected_file
@@ -23,10 +24,22 @@ COMMAND = ['app-server', '--listen', 'stdio://',
            '-c', 'features.plugins=false', '-c', 'features.apps=false', '-c', 'web_search="disabled"']
 
 
+def loopback_override(value):
+    """A mock OAuth endpoint for development checks only: http on a loopback address."""
+    parsed = urlsplit(value or '')
+    if parsed.scheme == 'http' and parsed.hostname in {'127.0.0.1', '::1'} and parsed.port and not parsed.username:
+        return value
+    return None
+
+
 class AppServer:
     """One stdio JSON-RPC session. Server-initiated requests are refused."""
     def __init__(self, binary, home, popen=subprocess.Popen):
         environment = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8', 'HOME': str(home), 'CODEX_HOME': str(home)}
+        # Only a loopback mock may replace the refresh endpoint; any other value is ignored.
+        override = loopback_override(os.environ.get('CODEX_REFRESH_TOKEN_URL_OVERRIDE'))
+        if override:
+            environment['CODEX_REFRESH_TOKEN_URL_OVERRIDE'] = override
         self.process = popen([binary, *COMMAND], env=environment, cwd=str(home), stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
         self.replies, self.next_id, self.lock = queue.Queue(), 0, threading.Lock()

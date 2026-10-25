@@ -61,6 +61,9 @@ The runner side adds an explicit egress rule to `codex-broker:8080` in
   2. Delete the PVC (`kubectl -n codex-broker delete pvc data-codex-broker-0` after scaling the StatefulSet to 0). With a Retain class, also delete the PV and its backing volume.
   3. If the broker is gone or damaged, sign that session out in the ChatGPT security settings (or sign out all sessions).
   4. Runners keep their current access token until it expires. Stop them (`DELETE /api/research/codex/runner`) when access must end immediately.
+- **Mock OAuth (development only):** the broker passes `CODEX_REFRESH_TOKEN_URL_OVERRIDE` to its app-server
+  only when it is `http://` on a loopback address (a mock sidecar in the broker Pod); any other value is
+  ignored. The production manifest never sets it.
 - **Network check (development VM):**
   - With the policy applied, Hubble must show only DNS, the API server, `auth.openai.com:443` and `chatgpt.com:443` as forwarded from the broker.
   - A connection to any other address must show as dropped.
