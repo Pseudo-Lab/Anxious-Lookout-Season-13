@@ -1,5 +1,19 @@
 # Termination source checkpoints — no live deployment approval
 
+> **Superseded by #61.** The in-cluster `runner-controller` proves termination from Kubernetes:
+> a graceful DELETE with a UID precondition (or a Pod that is already gone, recorded as a
+> `podAbsent` terminal receipt), then a 404 for that Pod UID, read while the named
+> Node is Ready (heartbeat ≤ 600 s) and its UID/bootID are re-read from the API. kubelet
+> deletes the Pod object only after its containers are killed and volumes torn down. Only the
+> controller holds Pod DELETE among the rendered identities and it never force-deletes; a
+> manual force delete would void this. A dead runner (Pod Failed or `runner` container exited)
+> gets a version 2 `terminal` receipt instead of a drain, and its running conversation
+> becomes `failed`/`codex_runner_lost`. `ops.runner_termination` (HostTermination),
+> `ops.runner_stop_observer`, `ops.runner_observer_diagnostics` and
+> `ops.runner_legacy_reconcile` are removed. The drain contract and the DB schema below
+> still apply. The host CRI/proc, observer and legacy sections are the historical record.
+> Operations: [rollout/README.md](rollout/README.md) "In-cluster runner-controller (#61)".
+
 Use [CUTOVER.md](CUTOVER.md) for the ordered PM procedure and new rollout artifact
 record. Its same-source API/runner/worker build supersedes the historical legacy-only
 image below; retain the old pin as provenance, not the final idle/supply artifact.

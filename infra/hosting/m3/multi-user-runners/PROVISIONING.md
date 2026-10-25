@@ -28,7 +28,8 @@ metadata GET. No create/exec/PV/root permission belongs in that API role. Contro
 needs namespace PVC/Secret/Pod create/get, named prerequisite SA/KNP reads and
 cluster PV create/get plus named namespace metadata GET. PV CREATE is inherently
 cluster-scoped trusted privilege; exact path/spec generation and review remain gates.
-Pod DELETE belongs only to the stop observer in the final pool design. The earlier
+Pod CREATE and DELETE belong only to the in-cluster runner-controller since #61; the
+host controller keeps storage preparation and binding publication until #63. The earlier
 singleton deployment granted it to the API; [rollout/README.md](rollout/README.md)
 replaces those legacy grants and provides the concrete #18 installation bundle.
 No workload service-account token or new runner-to-runner/API-server allow rule.
@@ -60,8 +61,9 @@ The live operator registry is reported as `runner_failed` after #13. Its old
 runner has no new termination receipt. Binding import above does not make it
 eligible for entry. `Registry.enter` rejects this phase, and `Registry.stopped`
 only accepts `stopping`; neither is a recovery command for this legacy case.
-`ops.runner_legacy_reconcile` now supplies the narrow zero-admission recovery tool;
-see `TERMINATION.md` for its report/apply contract and pinned execution procedure.
+`ops.runner_legacy_reconcile` supplied the narrow zero-admission recovery tool (removed by
+#61; `TERMINATION.md` keeps its historical report/apply contract). Since #61 such a
+Pod-less FAILED owner is reconciled by the runner-controller dead-runner path instead.
 Do not substitute a direct SQL phase/UID reset, call an adapter with a fabricated
 `verified=True`, replay the old one-shot create permit, or manufacture a receipt.
 The tool and its exact pinned-image invocation require review before PM executes

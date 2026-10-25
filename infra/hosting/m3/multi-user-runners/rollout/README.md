@@ -14,9 +14,9 @@ keys, duplicates, empty allowlists and plaintext credential fields are refused.
 `allowlist: ["<owner UUID>"]` selects canary owners; **null** explicitly expands to
 all approved editors/admins. API and all workers receive the same selection.
 Defaults in `values.example.json`: cap3, idle1800, native5GiB/control1GiB.
-Observer cleanup/idle scanning still covers existing registry records; its allowlist
-gates new entry after release, not cleanup. Stop its timer AND service to suspend
-observation; disabling the API or narrowing the allowlist does not stop cleanup.
+runner-controller (#61) stop/idle handling still covers existing registry records; the
+allowlist gates new entry after release, not cleanup. Scale its Deployment to 0 to
+suspend it; disabling the API or narrowing the allowlist does not stop cleanup.
 
 The example includes PM's 2026-10-16 imported image references. PM independently
 verified Docker's containerd image store uses OCI **index digests** as local IDs,
@@ -50,9 +50,9 @@ records successful Pod creation and supply with these endpoint values, with user
 response verification still pending at that checkpoint. Do not disable TLS verification.
 The current offline renderer checks HTTPS syntax but does not enforce the runtime
 IP-literal requirement; `--check` success alone does not establish endpoint usability.
-Inventory PID/cgroup references independently on the host; do not discover them from the
-observer container. After reboot, refresh the observer boot/namespace input before
-resuming its timer; stale proof deliberately refuses. The example is not live input.
+runner-controller reads the named Node's UID and boot ID from the API at every proof
+(#61), so a reboot needs no input refresh; host PID/cgroup/boot inputs are gone. The
+example is not live input.
 
 Export Deployment and its envFrom ConfigMaps privately (no Secret export). Inputs
 can contain existing literal environment values, so do not publish the snapshots.
@@ -136,10 +136,11 @@ kubectl -n codex-runner get pods -l anxious.io/managed=user-runner \
   --field-selector=status.phase!=Failed,status.phase!=Succeeded -o name   # must print nothing
 ```
 
-If a runner is running, stop it through `DELETE /api/research/codex/runner` and let the
-observer finish first. Do not delete the Pod by hand. A Failed or Succeeded runner Pod
-(a node reboot or a container exit, #58 A) is already unreleasable by the previous
-release too; it does not block this rollout, and its owner stays stuck until #61.
+If a runner is running, stop it through `DELETE /api/research/codex/runner` and let
+runner-controller (before #61, the observer) finish first. Do not delete the Pod by hand.
+A Failed or Succeeded runner Pod (a node reboot or a container exit, #58 A) does not
+block a rollout. Since #61 runner-controller records it as a terminal receipt, fails its
+running conversation with `codex_runner_lost`, deletes it and releases the owner.
 
 **Existing binding images (#59).** A published binding pins `plan.image` and, for v2,
 `plan.executor.image` in `runner_bindings.bindings.plan`. Rollout values change only new
@@ -148,7 +149,8 @@ The #59 manifest no longer provides `RUNNER_TOKEN_FILE`, so a runner image older
 #59 cannot start under it: move every existing binding to the reviewed images in the
 same window, after the API and worker images run the new code and before the next
 entry. Use `ops.runner_binding_image` (CUTOVER.md section 6) per owner in `idle_stopped`
-with a completed termination proof, with entry, controller and observer stopped:
+with a completed termination proof, with entry stopped and runner-controller scaled to 0
+(before #61: the host controller and observer stopped):
 
 - inputs: `owner`, `state`, `generation`, `revision` (the current registry fence),
   `oldPlanSha256` (`plan_digest` of the current plan, computed in the new worker image),
@@ -192,8 +194,9 @@ No token value is rendered. Automatic general SA mounting remains disabled.
 | Identity | Namespace rights | Cluster rights |
 | --- | --- | --- |
 | m2-hosting/hosting | Pod/PVC/Secret GET | named codex-runner Namespace GET |
-| runner-pool-controller | Pod/PVC/Secret GET/CREATE; named runner-workload SA and runner-default-deny KNP GET | PV GET/CREATE; named Namespace GET |
-| runner-pool-observer | Pod/PVC/Secret GET; Pod DELETE | PV GET; named Node and Namespace GET |
+| runner-control/runner-controller (#61, in-cluster) | Pod GET/LIST/WATCH/CREATE/DELETE; PVC/Secret GET | named codex-runner Namespace and named Node GET |
+| runner-pool-controller (host storage preparation until #63) | Pod GET; PVC/Secret GET/CREATE; named runner-workload SA and runner-default-deny KNP GET | PV GET/CREATE; named Namespace GET |
+| runner-pool-observer | retired (#61): rendered empty | retired |
 | runner-pool-supply | retired (#60): Role, ClusterRole and bindings rendered empty | retired |
 
 API never receives create/delete/exec/PV privileges. New worker SAs have no
@@ -215,8 +218,9 @@ with current Cilium/host rules. This bundle does not establish those live result
 
 ## Private host inputs
 
-Install generated controller/observer input JSON as respectively
-`/etc/anxious-lookout/issue16/{controller,observer}/inputs.json`.
+Install the generated controller input JSON as
+`/etc/anxious-lookout/issue16/controller/inputs.json` (host storage preparation and
+binding publication only since #61; the observer input is no longer rendered).
 Each directory is root0700 and files root0600, with no symlink/hardlink, as required
 by the existing `read_private` implementation. Supply these additional files
 privately, never through values, command-line credential arguments or Git:
@@ -224,7 +228,9 @@ privately, never through values, command-line credential arguments or Git:
 | Directory | Additional files |
 | --- | --- |
 | controller | database-url (controller DB login), kube-token (runner-pool-controller SA), ca.crt |
-| observer | database-url (observer DB login), kube-token (runner-pool-observer SA), ca.crt |
+
+The in-cluster runner-controller needs no host file: its token is projected by kubelet
+and its two DSNs come from the Secret `runner-controller-db` (section below).
 
 The controller uses the same file for DATABASE_URL_FILE and
 CONTROLLER_DATABASE_URL_FILE. Apply the existing #16 SQL grants before starting.
@@ -251,7 +257,7 @@ terminal, argv, environment, Git or the operation report:
 ```sh
 set -eu
 umask 077
-for role in controller observer; do
+for role in controller; do
   dir=/etc/anxious-lookout/issue16/$role
   request=$(mktemp "$dir/.token-request.XXXXXX")
   candidate=$(mktemp "$dir/.kube-token.XXXXXX")
@@ -271,27 +277,9 @@ atomic replacement. Each new finite worker invocation reads the new token.
 Resume timers only with valid tokens and monitoring.
 
 No role gets Docker socket or `/home/opc/.codex` (operator access comes from codex-broker, #60).
-Use canonical root-owned executable files compatible with the image. This host's
-`/usr/local/bin/crictl` symlink resolves to the **compressed launcher**
-`/usr/local/bin/k3s` (currently nobody-owned). Binding that launcher alone fails in
-the read-only image while extracting `/var/lib/rancher/k3s/data`; it also fails the
-worker's root-owned executable check. Do not change the live launcher to bypass it.
-
-The example instead pins the **already extracted** root-owned CLI at
-`/var/lib/rancher/k3s/data/d83b1e679e41e04bbf4c6ff76f5684f0f98b2b4bf29bb632db4a497cd8093a71/bin/k3s`.
-Set values.crictl to that resolved path. The renderer binds it at
-`/usr/local/bin/crictl` inside the observer; basename dispatch works without extra
-extraction or host data/config mounts. PM can alternatively install identical bytes root:root0755 at
-a dedicated canonical path, recording the source/hash, and use that path. No external download is required. Preserve the pinned binary across k3s
-upgrades/cleanup; a replacement requires repeat provenance/compatibility checks.
-
-Offline probes in the pinned provisioner (network none, read-only, all caps dropped)
-passed kubectl client v1.36.4+k3s1 and crictl v1.36.0-k3s1. crictl with explicit
-`--runtime-endpoint unix:///nonexistent-test.sock --timeout 1s info` reached that
-dummy endpoint and then failed as expected. Missing crictl.yaml emitted a warning,
-not a configuration failure. The observer already passes its explicit endpoint,
-so `/var/lib/rancher/k3s/agent/etc/crictl.yaml` is not needed. This probe did not
-connect to the live CRI socket; PM still verifies the real host invocation.
+Since #61 no role needs CRI, crictl, host proc or host PID/cgroup namespaces: the
+observer and its pinned crictl binding are retired (git history before #61 has the
+previous crictl provenance notes).
 
 ## Installation and shared mount (PM after review)
 
@@ -301,19 +289,17 @@ PM checks expected ownership and any existing contents before installation:
 
 ```sh
 install -d -o root -g root -m 0700 /usr/local/lib/anxious-lookout/issue16
-install -d -o root -g root -m 0700 /etc/anxious-lookout/issue16/controller \
-  /etc/anxious-lookout/issue16/observer
+install -d -o root -g root -m 0700 /etc/anxious-lookout/issue16/controller
 install -d -o root -g root -m 0700 /var/lib/anxious-lookout/user-runners \
   /var/lib/anxious-lookout/issue16-d4 \
-  /var/lib/anxious-lookout/issue16-d4/provision-output \
-  /var/lib/anxious-lookout/issue16-d4/observer
+  /var/lib/anxious-lookout/issue16-d4/provision-output
 out=/private-rollout/candidate
 lib=/usr/local/lib/anxious-lookout/issue16
-for role in controller observer restore; do
+for role in controller restore; do
   install -o root -g root -m 0700 "$out/$role.sh" "$out/stop-$role.sh" "$lib/"
   install -o root -g root -m 0644 "$out/issue16-$role.service" /etc/systemd/system/
 done
-for role in controller observer; do
+for role in controller; do
   install -o root -g root -m 0644 "$out/issue16-$role.timer" /etc/systemd/system/
   install -o root -g root -m 0600 "$out/$role-inputs.json" \
     "/etc/anxious-lookout/issue16/$role/inputs.json"
@@ -349,8 +335,6 @@ FOWNER, MKNOD; loop-control device and block-major7 access; host /dev bind; rsha
 storage bind. They require a rootful Docker daemon and reviewed loop availability,
 free space, seccomp/AppArmor and host propagation. AppArmor confinement is disabled
 for these two helpers only. No host source/DB/network is mounted into restore.
-Observer has host PID/cgroup namespaces, read-only host proc/CRI socket/crictl and
-rslave storage, DAC_READ_SEARCH/SYS_PTRACE; socket read-only does not limit CRI RPCs.
 
 Restore runs after local-fs/Docker and **before k3s**; the k3s drop-in Requires/After
 makes restore failure prevent k3s startup. Do not add After=k3s/network-online to
@@ -363,8 +347,9 @@ an empty inventory, which succeeds. A partial controller run needs operator
 reconciliation before reboot; do not bypass failed restore to make k3s start.
 
 Start restore once before any new owner can enter, then manually run finite worker
-services for the canary. Controller and observer(--idle) timers are separate
-oneshot batches every15seconds after the previous batch finishes, not inbox watchers.
+services for the canary. The controller timer runs a separate oneshot batch
+(storage preparation and binding publication only) every15seconds after the previous
+batch finishes; runner-controller creates the Pod on the NOTIFY that publication sends.
 `worker.py` converts per-owner reconciliation_required into exit1 so systemd can
 alert even though the original CLI catches per-owner errors. Each unit has a
 commented OnFailure hook location; PM supplies the existing alert unit. Timeout/stop
@@ -374,11 +359,149 @@ canary checks; no restore validation/rollback rehearsal or two-owner full E2E is
 added as a PR gate. A real mount/host/native/provider check remains an execution
 result to report, not implied by the offline tests.
 
-Use `systemctl stop issue16-controller.timer issue16-observer.timer`
-and stop the corresponding services before changing inputs/allowlist or D4 actions.
+Use `systemctl stop issue16-controller.timer`, stop the service and scale
+`runner-control/runner-controller` to 0 before changing inputs/allowlist or D4 actions.
 Changing API env alone does not stop workers. On expansion, re-render API and all
 worker scripts from one values file and review/diff again; retain source/size settings
 for existing storage. systemd service env does not carry credential bytes.
+
+## In-cluster runner-controller (#61)
+
+`runner-control/runner-controller` is one resident Deployment (replicas 1, Recreate).
+It replaces the host observer and the host worker's Pod creation:
+
+- **Creation:** owners with a published binding and no Pod go through the existing
+  `Controller.ensure`, so capacity, single CREATE and lost-response adoption are unchanged.
+- **Stop:** stop intent → drain (v1 receipt) → graceful DELETE with a UID precondition →
+  GET 404 → Node `anxious-lookout` Ready with a heartbeat ≤ 600 s, its UID and bootID read
+  from the API → `release` (proof `evidence: pod-deleted`). A 404 means kubelet finished
+  killing the containers and tearing down the volumes, so no host CRI/proc inspection is needed.
+  A Pod already gone before any receipt is recorded as a `podAbsent` terminal receipt and
+  proved the same way. This relies on runner-controller being the only rendered identity with
+  Pod DELETE and never force-deleting: never force-delete a runner Pod by hand.
+- **Dead runner** (Pod phase Failed, or the `runner` container terminated): no drain.
+  Running conversations become `failed`/`codex_runner_lost` (the existing frontend text),
+  open admissions are completed, a v2 `terminal` receipt is recorded, then DELETE → 404 → release.
+- **Idle:** the same native idle evidence as before, then an ordinary stop intent.
+- **Wake-ups:** Postgres `NOTIFY runner_runtime` (sent by API code on entry/stop and by the
+  host worker on publication), the Pod watch (errors back off 1 s → 60 s) and a 30 s rescan.
+- **Logs:** one JSON line per owner per pass: `{"owner", "stage": "controller", "result"}`.
+
+New owners' storage is still prepared by the host `issue16-controller` oneshot until #63.
+It no longer creates Pods: it publishes the binding and sends NOTIFY.
+
+Rendered objects (`resources.json`):
+- Namespace `runner-control` (PSA restricted).
+- SA `runner-controller`, Role (codex-runner) and ClusterRole (named Namespace and Node) with bindings.
+- The Deployment: runtime image, `imagePullPolicy: Never`, UID/GID 10001, `fsGroup` 10001
+  (only a Secret and a memory emptyDir are mounted), read-only root filesystem.
+- `runner-pool-observer` Role/ClusterRole and bindings rendered empty.
+
+The host controller role loses all Pod verbs except GET.
+
+### Production window: #61 and #63 together
+
+Apply #61 and #63 in **one maintenance window**. #61 alone works for existing bindings, but
+#63 removes the host preparation that #61 still uses for new owners. #63 also moves existing
+bindings to CSI storage. One window means one freeze, one runner-Pod drain and one rollback point.
+
+Preconditions (all must hold before the first mutation):
+
+1. No **Pending or Running runner Pod**:
+   ```sh
+   kubectl -n codex-runner get pods -l anxious.io/managed=user-runner \
+     --field-selector=status.phase!=Failed,status.phase!=Succeeded -o name   # must print nothing
+   ```
+   Stop live runners through `DELETE /api/research/codex/runner` and let the **old** observer
+   finish before stopping it. Never delete a runner Pod by hand. Failed/Succeeded Pods may
+   remain: runner-controller handles them after the switch (dead-runner path above).
+2. Entry frozen (API maintenance/feature off) and the old mutators stopped:
+   - `issue16-controller.timer`/`.service`
+   - `issue16-observer.timer`/`.service`
+   - any external creator
+3. No open stop for a Pod that still exists: every `runner_termination.stops` row with
+   `completed_at IS NULL` must belong to a Pod that is already gone or Failed.
+4. A DB backup and the rollback image digests recorded with the operation.
+
+Order:
+
+1. **Grants:**
+   - Install `backend/db/061_runner_controller_grants.sql` through the reviewed administrator
+     channel (after `016_runner_observer_grants.sql`).
+   - It adds only `anxious_runner_observer` column UPDATEs (conversation state/error,
+     admission `completed_at`); the API role gains nothing.
+   - The script is idempotent `GRANT` statements; re-running it is harmless.
+2. **DB Secret.** Write two DSN files in a fresh root0700 directory, each mode 0600:
+   - `controller-url`: the existing controller login.
+   - `observer-url`: the existing observer login.
+
+   Address the database as `postgres.m2-hosting.svc.cluster.local:5432` (cluster DNS works
+   in-cluster; host files use the Pod IP only because the host cannot resolve it).
+   Create the Namespace, then the Secret from files. Never put DSNs on argv or in Git:
+   ```sh
+   jq '.items[] | select(.kind == "Namespace" and .metadata.name == "runner-control")' \
+     /private-rollout/candidate/resources.json | kubectl apply -f -
+   kubectl -n runner-control create secret generic runner-controller-db \
+     --from-file=controller-url=/root/runner-db/controller-url \
+     --from-file=observer-url=/root/runner-db/observer-url
+   ```
+3. **Runtime image.** The Deployment uses the API runtime image with `Never`. Verify that
+   exact digest resolves in k3s containerd on the node (`k3s ctr -n k8s.io images ls`).
+4. **Runner network policy:**
+   - Apply the reviewed `user-runner-e2e/40-runner-network.json` (`runner-callback-draft`).
+   - Runner 8080 ingress now comes from `runner-control`/`app=runner-controller` instead of
+     `host`; no runner Pod probes use the host path.
+   - Run `kubectl diff` first: the only intended change is that ingress rule (plus the #60
+     broker egress if #60 is not yet applied).
+5. **Apply `resources.json`** (Deployment, RBAC, emptied observer grants), then:
+   ```sh
+   kubectl -n runner-control rollout status deployment/runner-controller --timeout=120s
+   kubectl -n runner-control logs deployment/runner-controller --tail=20   # JSON lines only, no DSN
+   kubectl auth can-i create pods -n codex-runner --as=system:serviceaccount:runner-control:runner-controller  # yes
+   kubectl auth can-i create pods -n codex-runner --as=system:serviceaccount:codex-runner:runner-pool-controller  # no
+   ```
+6. **Retire the host observer:**
+   - `systemctl disable --now issue16-observer.timer issue16-observer.service`
+   - Remove its units and `observer.sh`/`stop-observer.sh`.
+   - Keep `/var/lib/anxious-lookout/issue16-d4/observer` (cursor) and
+     `/etc/anxious-lookout/issue16/observer` as evidence until the window closes, then remove
+     the latter (it holds the observer kube token and DSN).
+   - Revoke the `runner-pool-observer` SA token and delete that SA.
+7. **#63 steps in the same window** (storage; documented with #63):
+   - CSI StorageClass.
+   - Existing binding transition: per owner, in `idle_stopped` with a completed termination
+     proof, one **compare-and-swap** of `runner_bindings.bindings.plan`. Inputs are the
+     registry fence (owner/state/generation/revision) plus the current `plan_digest`. Run
+     `report` first, then `apply` with the identical report.
+   - It works like `ops.runner_binding_image` (CUTOVER.md section 6). A mismatched fence or
+     digest refuses, and the registry, generation, receipts and outbox stay unchanged.
+   - #61 itself does not change the runner Pod manifest (`KubePods._pod`), so a #61-only
+     deployment leaves every binding as it is.
+8. **Canary:**
+   - Unfreeze entry for the allowlisted canary owner.
+   - Check it in this order:
+     - cold start: NOTIFY → Pod
+     - turn
+     - stop: drain → DELETE → 404 → release
+     - re-entry
+   - Check the stop's `proof` (`evidence: pod-deleted` with the current Node UID/bootID) in
+     `runner_termination.stops`. Then widen the allowlist through re-render as before.
+
+### Rollback
+
+- **Before any new stop or entry under runner-controller:**
+  - Scale `runner-control/runner-controller` to 0.
+  - Re-apply the previous bundle's `resources.json` and the previous `40-runner-network.json`
+    (host ingress).
+  - Reinstall the previous observer units from the previous bundle and restart the old timers.
+  - The 061 grants may stay: they are column UPDATEs used only by the observer login.
+- **After runner-controller wrote a v2 `terminal` receipt:** the previous release accepts only
+  v1 receipts, so that owner stays in STOPPING under it, exactly as such an owner did before
+  #61. Nothing is corrupted. Finish those owners with runner-controller before rolling back,
+  or leave them for the next roll-forward.
+- **#63 has its own rollback for the storage part.** If either half fails inside the window,
+  roll back both and lift the freeze on the old release.
+- Rollback needs the same precondition: no Pending/Running runner Pod.
 
 ## Host supply retirement (#60)
 

@@ -67,6 +67,11 @@ at30min and Runtime currently limits max_pods to0/1.
    The #16 request for UID absence is necessary, but absence alone does not satisfy
    the existing kernel invariant. A bounded single-node termination observer is a
    required part of this slice, not the whole #11 drain protocol.
+   Since #61 the evidence is Kubernetes-level: absence of that Pod UID, read twice around a
+   Node check (Ready, heartbeat ≤ 600 s, UID/bootID re-read at proof time). It holds because
+   only runner-controller has Pod DELETE and it issues only graceful, UID-preconditioned
+   deletes, so the object disappears only after kubelet has stopped the containers. An
+   operator force delete would break that premise; runbooks forbid deleting runner Pods by hand.
 8. **Idle:** update last_activity on trusted admission/completion; UI polling is not
    activity. Stop only when no admitted work, no ambiguous execution and fresh
    quiescence evidence exists. Logout fences immediately; bounded asynchronous stop
