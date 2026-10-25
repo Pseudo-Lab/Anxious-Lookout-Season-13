@@ -2,11 +2,13 @@
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+import json
+
 import httpx
 import pytest
 
 from config_tests.test_runner_kube import response
-from ops.runner_controller_service import NodeEvidence, terminal_evidence
+from ops.runner_controller_service import NodeEvidence, Wake, terminal_evidence
 from runner.lifecycle import Refused
 
 NOW = datetime(2026, 10, 26, tzinfo=timezone.utc)
@@ -73,3 +75,28 @@ def test_node_identity_comes_from_the_api():
 def test_unready_stale_foreign_or_deleting_node_is_no_evidence(value):
     with pytest.raises(Refused):
         NodeEvidence('anxious-lookout').identity(client(value), NOW)
+
+
+def watcher(replies):
+    def handler(request):
+        status, lines = replies.pop(0)
+        return httpx.Response(status, content=''.join(json.dumps(line)+'\n' for line in lines).encode())
+    return httpx.Client(base_url='https://kube.invalid', transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.parametrize('status', [401, 403, 500])
+def test_watch_http_errors_back_off_without_waking(status):
+    wake, sleeps = Wake(), []
+    error = {'kind': 'Status', 'code': status}
+    wake.watch(watcher([(status, [error])]*3), 'codex-runner', sleep=sleeps.append, rounds=3)
+    assert sleeps == [1, 2, 4] and not wake.event.is_set()
+
+
+def test_watch_error_event_and_empty_stream_back_off_and_pod_events_reset():
+    wake, sleeps = Wake(), []
+    gone = {'type': 'ERROR', 'object': {'kind': 'Status', 'code': 410}}
+    replies = [(200, [gone]), (200, []), (200, [{'type': 'MODIFIED', 'object': {}}]), (200, [gone])]
+    wake.watch(watcher(replies[:2]), 'codex-runner', sleep=sleeps.append, rounds=2)
+    assert sleeps == [1, 2] and not wake.event.is_set()
+    wake.watch(watcher(replies[2:]), 'codex-runner', sleep=sleeps.append, rounds=2)
+    assert wake.event.is_set() and sleeps == [1, 2, 1]  # The Pod event reset the backoff.

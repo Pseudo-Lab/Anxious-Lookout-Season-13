@@ -259,17 +259,35 @@ class Wake:
             except Exception:
                 time.sleep(5)
 
-    def watch(self, client, namespace):
-        while True:
+    def watch(self, client, namespace, *, sleep=time.sleep, rounds=None):
+        """Only Pod change events wake reconcile. HTTP errors, Kubernetes ERROR events and
+        streams that end without an event back off (1 s doubling to 60 s), so a revoked
+        token or an API outage cannot turn into a busy loop against the API and DB."""
+        path = ('/api/v1/namespaces/'+namespace+'/pods?watch=1&allowWatchBookmarks=false'
+                '&labelSelector=anxious.io%2Fmanaged%3Duser-runner&timeoutSeconds=300')
+        delay = 1
+        while rounds is None or rounds > 0:
+            if rounds is not None:
+                rounds -= 1
+            delivered = False
             try:
-                path = ('/api/v1/namespaces/'+namespace+'/pods?watch=1&allowWatchBookmarks=false'
-                        '&labelSelector=anxious.io%2Fmanaged%3Duser-runner&timeoutSeconds=300')
                 with client.stream('GET', path, timeout=None) as response:
-                    for line in response.iter_lines():
-                        if line:
+                    if response.status_code == 200:
+                        for line in response.iter_lines():
+                            if not line:
+                                continue
+                            kind = json.loads(line).get('type')
+                            if kind not in {'ADDED', 'MODIFIED', 'DELETED'}:
+                                break  # ERROR (e.g. 410 Gone) or unknown: reconnect after backoff.
+                            delivered = True
                             self.event.set()
             except Exception:
-                time.sleep(5)
+                pass
+            if delivered:
+                delay = 1
+            else:
+                sleep(delay)
+                delay = min(delay*2, 60)
 
 
 def main():
