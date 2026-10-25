@@ -236,7 +236,7 @@ Production record (2026-10-25, read on the OCI node, issue #48 comment "운영 �
 | Item | Production (aarch64) |
 | --- | --- |
 | Repository | Docker's official RHEL repository `docker-ce-stable` (`https://download.docker.com/linux/rhel/$releasever/$basearch/stable`). The Oracle repositories' docker/podman packages are not used. |
-| RPMs | `docker-ce` 29.6.1-1.el9, `docker-ce-cli` 29.6.1-1.el9, `containerd.io` 2.2.5-1.el9, `docker-buildx-plugin` 0.35.0-1.el9, `docker-compose-plugin` 5.3.1-1.el9 |
+| RPMs | `docker-ce` 29.6.1-1.el9, `docker-ce-cli` 29.6.1-1.el9, `containerd.io` 2.2.5-1.el9, `docker-buildx-plugin` 0.35.0-1.el9, `docker-compose-plugin` 5.3.1-1.el9, `docker-ce-rootless-extras` 29.6.1-1.el9 (installed as a dependency; rootless mode unused: no `slirp4netns`/`fuse-overlayfs`, daemon runs as root) |
 | Engine | 29.6.1 (API 1.55), containerd v2.2.5 |
 | `/etc/docker/daemon.json` | absent: every daemon setting is the default |
 | Storage | `overlayfs`, `driver-type io.containerd.snapshotter.v1` (containerd image store, on by default in 29.x) |
@@ -256,7 +256,7 @@ docker info --format '{{.Driver}} | {{json .DriverStatus}}'
 ```
 
 - **Exact versions:** if a package name with an exact version is not found, list the published builds with `dnf list --showduplicates docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin` and pick the `x86_64` build with the same version and release. Record the `rpm -q` output with R4. Do not run a later `dnf update` of these packages in the guest unless production moves too.
-- **`docker-ce-rootless-extras`:** `docker-ce` pulls it in as a weak dependency. Without a version, the repository picks its latest build (29.9.2 in R4), so the command above pins it to the engine version. Rootless mode is not used. The production record does not list this package, so confirm on the OCI node with `rpm -q docker-ce-rootless-extras`.
+- **`docker-ce-rootless-extras`:** `docker-ce` pulls it in as a weak dependency. Without a version, the repository picks its latest build (29.9.2 in R4), so the command above pins it to the engine version. Rootless mode is not used. Production has the same `29.6.1-1.el9` (confirmed 2026-10-25).
 - **Image store check:** the `docker info` line must show `overlayfs` with `driver-type io.containerd.snapshotter.v1`, the same as production. Do not continue if it does not. Images built in the guest then have OCI index digests as local IDs, as on production, and the archive audits accept them (#52).
 - After Docker, follow this README's Docker preservation steps as written.
 - **Docker installed after k3s breaks Pod networking.** In R4 Docker was installed on a guest where k3s and Cilium were already running. Afterwards `iptables-save` had no `CILIUM_FORWARD`/`CILIUM_INPUT`/`CILIUM_OUTPUT` chains, and Pods lost gateway and DNS access, while `cilium status` still reported Ready. Whether the Docker installation triggered a firewalld reload was not determined, and the order in which Docker and k3s were installed on the production node is not recorded. Install Docker first. If k3s is already there, check the dataplane after installing Docker, not just agent health:
