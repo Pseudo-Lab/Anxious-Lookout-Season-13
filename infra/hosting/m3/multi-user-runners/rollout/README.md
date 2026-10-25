@@ -422,6 +422,12 @@ Preconditions (all must hold before the first mutation):
 3. No open stop for a Pod that still exists: every `runner_termination.stops` row with
    `completed_at IS NULL` must belong to a Pod that is already gone or Failed.
 4. A DB backup and the rollback image digests recorded with the operation.
+5. No owner in `runner_failed` (`SELECT owner_id FROM runner_runtime.registry WHERE
+   phase='runner_failed'` returns nothing). runner-controller never selects this phase (see
+   PROVISIONING.md "Existing operator import"). Such an owner needs a separately reviewed and
+   approved recovery before the window; never reset it by SQL.
+6. No owner waiting for a Pod (`phase IN ('provisioning','capacity_wait')` returns nothing),
+   or runner-controller would create its Pod as soon as it starts in step 5.
 
 Order:
 
@@ -460,14 +466,27 @@ Order:
    kubectl auth can-i create pods -n codex-runner --as=system:serviceaccount:runner-control:runner-controller  # yes
    kubectl auth can-i create pods -n codex-runner --as=system:serviceaccount:codex-runner:runner-pool-controller  # no
    ```
-6. **Retire the host observer:**
-   - `systemctl disable --now issue16-observer.timer issue16-observer.service`
-   - Remove its units and `observer.sh`/`stop-observer.sh`.
-   - Keep `/var/lib/anxious-lookout/issue16-d4/observer` (cursor) and
-     `/etc/anxious-lookout/issue16/observer` as evidence until the window closes, then remove
-     the latter (it holds the observer kube token and DSN).
-   - Revoke the `runner-pool-observer` SA token and delete that SA.
-7. **#63 steps in the same window** (storage; documented with #63):
+6. **Let runner-controller finish the dead runners, then stop it.**
+   - Wait until no open stop and no runner Pod remain:
+     ```sh
+     kubectl -n codex-runner get pods -l anxious.io/managed=user-runner -o name   # nothing, Failed included
+     # and: SELECT count(*) FROM runner_termination.stops WHERE completed_at IS NULL;  -- 0
+     ```
+     A Failed Pod that does not clear shows `reconciliation_required` in the controller log;
+     investigate it, never delete it by hand.
+   - Stop the controller and wait for its Pod to be gone. The API entry freeze does not stop
+     the controller's own work:
+     ```sh
+     kubectl -n runner-control scale deployment/runner-controller --replicas=0
+     kubectl -n runner-control wait --for=delete pod -l app=runner-controller --timeout=120s
+     ```
+   - Recheck preconditions 1, 5 and 6. From here until step 8 every mutator is stopped: the
+     host controller and observer timers, runner-controller at 0, entry frozen.
+   - Disable the host observer for good, but keep it restorable until the window closes:
+     `systemctl disable --now issue16-observer.timer issue16-observer.service`. Keep its units,
+     scripts, `/etc/anxious-lookout/issue16/observer` (token, DSN, inputs), the cursor directory
+     and the `runner-pool-observer` SA. They are removed in step 9.
+7. **#63 steps in the same window** (storage; documented with #63), with all mutators stopped:
    - CSI StorageClass.
    - Existing binding transition: per owner, in `idle_stopped` with a completed termination
      proof, one **compare-and-swap** of `runner_bindings.bindings.plan`. Inputs are the
@@ -478,6 +497,9 @@ Order:
    - #61 itself does not change the runner Pod manifest (`KubePods._pod`), so a #61-only
      deployment leaves every binding as it is.
 8. **Canary:**
+   - Start the controller again:
+     `kubectl -n runner-control scale deployment/runner-controller --replicas=1`, then wait for
+     `rollout status`.
    - Unfreeze entry for the allowlisted canary owner.
    - Check it in this order:
      - cold start: NOTIFY → Pod
@@ -486,19 +508,47 @@ Order:
      - re-entry
    - Check the stop's `proof` (`evidence: pod-deleted` with the current Node UID/bootID) in
      `runner_termination.stops`. Then widen the allowlist through re-render as before.
+9. **Close the window** (only after the canary passed): remove the host observer units and
+   `observer.sh`/`stop-observer.sh`, then `/etc/anxious-lookout/issue16/observer`. That
+   directory holds the observer kube token and DSN. Delete the `runner-pool-observer` SA,
+   which invalidates its tokens. Keep `/var/lib/anxious-lookout/issue16-d4/observer` (cursor)
+   as evidence. After this step a rollback must first re-create the observer identity (below).
 
 ### Rollback
 
-- **Before any new stop or entry under runner-controller:**
-  - Scale `runner-control/runner-controller` to 0.
-  - Re-apply the previous bundle's `resources.json` and the previous `40-runner-network.json`
-    (host ingress).
-  - Reinstall the previous observer units from the previous bundle and restart the old timers.
+- **Stop the new path first:**
+  - Scale `runner-control/runner-controller` to 0 and wait for its Pod to be gone.
+  - Keep entry frozen.
+  - Require no Pending/Running runner Pod.
+- **Receipts decide what the old release can finish.** It reads only open stops
+  (`completed_at IS NULL`) and accepts only v1 drain receipts:
+  - Completed stops are history, whatever their receipt version, and are never read again.
+  - An open stop with a v2 `terminal` receipt would stay STOPPING under the old release, as
+    such an owner did before #61. Nothing is corrupted.
+  - Before rolling back, finish those owners with runner-controller. Otherwise record them as
+    left for the next roll-forward. The check:
+    ```sql
+    SELECT owner_id FROM runner_termination.stops
+     WHERE completed_at IS NULL AND receipt->>'version' = '2';   -- finish or record these
+    ```
+- **Restore the old objects:**
+  - Re-apply the previous bundle's `resources.json` (it renders the `runner-pool-observer` SA,
+    Role and ClusterRole with grants again).
+  - Re-apply the previous `40-runner-network.json` (host ingress).
   - The 061 grants may stay: they are column UPDATEs used only by the observer login.
-- **After runner-controller wrote a v2 `terminal` receipt:** the previous release accepts only
-  v1 receipts, so that owner stays in STOPPING under it, exactly as such an owner did before
-  #61. Nothing is corrupted. Finish those owners with runner-controller before rolling back,
-  or leave them for the next roll-forward.
+- **Observer identity:**
+  - Before step 9, the retained units, inputs and token still work. Check that the token has
+    not expired.
+  - After step 9, or if the token expired, the SA is new. Issue a new token with the procedure
+    in "Private host inputs" (`for role in observer`; the SA name is `runner-pool-observer`).
+    Replace `/etc/anxious-lookout/issue16/observer/kube-token` atomically as root0600 and
+    restore the observer DSN file and inputs from the operation's private backup.
+  - Check `kubectl auth can-i delete pods -n codex-runner
+    --as=system:serviceaccount:codex-runner:runner-pool-observer` returns yes.
+  - Reinstall the previous observer units and scripts from the previous bundle. The retained
+    DSN and inputs alone do not make a deleted SA's token valid again.
+- **Resume:** start the old controller and observer timers, then lift the freeze on the old
+  release.
 - **#63 has its own rollback for the storage part.** If either half fails inside the window,
   roll back both and lift the freeze on the old release.
 - Rollback needs the same precondition: no Pending/Running runner Pod.
