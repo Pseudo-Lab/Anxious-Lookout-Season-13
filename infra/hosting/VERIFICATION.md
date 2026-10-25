@@ -26,7 +26,7 @@ Issue [#4](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/4) is 
 
 ## Prepared, not applied
 
-`render.sh` emits dedicated namespace/SA/ConfigMap, new Retain StorageClass/PVC, non-root PostgreSQL and web/API resources, exact Host/API boundary and scoped Cilium policies. `render-migration.sh`/`render-approval.sh` emit explicit operator Jobs only. No production Secret values or administrator ID are committed. No script automatically applies these resources.
+`render.sh` emits dedicated namespace/SA/ConfigMap, new Retain StorageClass/PVC, non-root PostgreSQL and web/API resources, exact Host/API boundary and scoped Cilium policies (historical: the live node removed the CNP in the issue #13 transition, and since #54 the renderer no longer emits it). `render-migration.sh`/`render-approval.sh` emit explicit operator Jobs only. No production Secret values or administrator ID are committed. No script automatically applies these resources.
 
 Existing k3s resources/data/roles, GitHub OAuth apps and Supabase data have not been changed. Real GitHub code/token/user/session/logout flow, production web/API image release/digests, k3s rollout/Traefik routing, resource/surge measurements, and M1/Docker/android service regressions require separate evidence before acceptance. Control-plane backups do not establish application DB recovery.
 

@@ -1,5 +1,7 @@
 # Issue #13: default-allow transition (decision C)
 
+> Since #54, `infra/hosting/render.sh` no longer renders `hosting-boundary`, so a node installed from current source never has it. This procedure remains the record of the live node's transition. On a new node, only step 3 (the Pod CIDR → TCP 6443 rule) and the step 4 checks still apply. If an older render applied the CNP, step 2 removes it. See [PARITY.md](PARITY.md).
+
 PM executes only after source/plan review. Target: single node `anxious-lookout`, private API `10.0.0.107:6443`, Pod CIDR `10.42.0.0/16`, public firewalld zone. No backend/RBAC changes. Do not change codex-runner or codex-trial policy objects. The old A-plan is superseded.
 
 Run the following in a root Bash shell with `set -euo pipefail`, `umask 077`, `jq`, `firewall-cmd` and `/usr/local/bin/k3s` available. Keep the same shell and private snapshot path for rollback. Do not use firewalld reload. Stop on errors, retain evidence and use rollback for completed steps; do not blindly continue. A failed read is not evidence of absence.

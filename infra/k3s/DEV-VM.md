@@ -4,22 +4,7 @@ Issue [#48](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/48). 
 
 ## Difference from the production node
 
-Architecture is the only intended difference. Record the actual values in the issue after creation.
-
-| Item | Production (OCI) | Development VM |
-| --- | --- | --- |
-| Architecture | aarch64 | **x86_64** |
-| Distribution | Oracle Linux Server 9.7 | Oracle Linux Server 9.7 |
-| Kernel | UEK `6.12.0-204.92.4.2.el9uek` | Same UEK 6.12 NVR when published for x86_64; otherwise record the exact NVR used |
-| SELinux / firewalld / NetworkManager | enforcing / active / active | enforcing / active / active |
-| k3s / Cilium / Cilium CLI | `versions.env` | `versions.env` (same file, unchanged) |
-| `/etc/rancher/k3s/config.yaml` | `config.yaml` | `config.yaml` (same file, node name `anxious-lookout`) |
-| Pod / Service CIDR | `10.42.0.0/16` / `10.43.0.0/16` | same |
-| Node address / hostname | `10.0.0.107` / `simple` | `10.0.0.107` / `simple` (guest-private, see Network) |
-| CPU / memory / disk | 2 / ~10.6 GiB / existing | 4 vCPU / 8 GiB / 60 GiB qcow2 initial value |
-| Runner / API / web images | linux/arm64 | linux/amd64 built from the same source (`backend/runner/install_codex.py` amd64 pin set) |
-
-Kernel patch level can drift between the two even within the UEK 6.12 line. Compare kernel NVRs first when a Cilium or dataplane symptom appears in only one of them.
+Every difference from production, with its class (must match / may differ / record) and basis, is in [PARITY.md](PARITY.md). Add a row there for any new difference. The sections below say how to build the guest.
 
 The guest deliberately reuses the production node identity (`anxious-lookout`, `simple`, `10.0.0.107`) so that operational documents and their host guards run unchanged. To keep the two apart for humans, set `/etc/motd` and the shell prompt to `DEV-VM x86_64` and name the libvirt domain `anxious-dev`. Never copy production kubeconfig, k3s token, backups or Secrets into the guest; create fresh ones.
 
@@ -272,9 +257,9 @@ Then apply the hosting procedure as written: `infra/hosting/render.sh` output se
 
 The one runner Pod comes from the current production path, the #16/#18 pool rollout. A fresh guest first needs the network state production reached through later operations. Steps 1–3 below were verified in R4 (2026-10-25):
 
-1. **Network contract: issue #13 default allow.** `infra/hosting/render.sh` still renders the `hosting-boundary` CNP (issue #54), but production deleted it in the [default-allow transition](DEFAULT-ALLOW.md). With that policy, PostgreSQL admits only the hosting-api and ops Pods, so the host-network runner workers cannot reach it. Bring the guest to production's end state:
-   - Steps 0/1 of DEFAULT-ALLOW.md do not apply on a new guest: the old ipsets, sync units and CCNPs never existed, because `render-policy.sh` emits an empty List. Record their absence with `kubectl get ccnp --ignore-not-found`.
-   - Step 2: save the object, then `kubectl -n m2-hosting delete cnp hosting-boundary`. Delete `hosting-access-web-link-v1` only if it exists (absent in R4). Touch nothing in codex-runner or codex-trial.
+1. **Network contract: issue #13 default allow** (PARITY.md rows for the m2-hosting CNPs and the 6443 rule). Since #54 `infra/hosting/render.sh` emits no CNP, so a guest rendered from current source already matches production's policy state. With the old `hosting-boundary` policy, PostgreSQL admitted only the hosting-api and ops Pods, and the host-network runner workers could not reach it.
+   - Steps 0/1 of [DEFAULT-ALLOW.md](DEFAULT-ALLOW.md) do not apply on a new guest: the old ipsets, sync units and CCNPs never existed, because `render-policy.sh` emits an empty List. Record their absence with `kubectl get ccnp --ignore-not-found`.
+   - Check `kubectl -n m2-hosting get cnp` is empty. Only a guest rendered before #54 (such as `anxious-dev` in #48 R4) still has `hosting-boundary`. Save it, then delete it once (`kubectl -n m2-hosting delete cnp hosting-boundary`). Touch nothing in codex-runner or codex-trial.
    - Step 3: add the Pod CIDR → TCP 6443 rich rule (`rule family="ipv4" source address="10.42.0.0/16" port port="6443" protocol="tcp" accept`) to the runtime and `--permanent` configurations separately. **No reload.**
 2. **Runner namespace and policies:** apply only `infra/hosting/m3/user-runner-e2e/00-foundation.json` (Namespace `codex-runner`, KNP `runner-default-deny`, SA `runner-workload`) and `40-runner-network.json` (CNP `runner-callback-draft`, production's post-EGRESS-REPAIR policy). The worker checks that these exist and does not create them. Never apply that directory's full deployment `resources.json`, which would recreate `hosting-access-web-link-v1`.
 3. **Worker database URLs:** the postgres Service is headless (`clusterIP: None`), and host DNS cannot resolve cluster names. So the controller, observer and supply `database-url` files under `/etc/anxious-lookout/issue16/*/` address the **postgres-0 Pod IP** directly (`10.42.0.250` in R4), as on production.
@@ -300,7 +285,7 @@ R4 also passed:
 - the shared storage root
 - restore with an empty inventory
 
-Differences from production in that procedure:
+Differences from production in that procedure (classified in PARITY.md):
 
 - **Guest-observed values:** `values.json` takes the guest's own namespace/node/source UIDs, pod CIDR, extracted k3s CLI path (the hash directory differs on x86_64) and guest image references.
 - **Synthetic identities:**
@@ -391,7 +376,7 @@ ss -lntu
 ip -br address; ip route
 ```
 
-Expected difference: none, apart from the AppArmor local override file (`/etc/apparmor.d/local/abstractions/libvirt-qemu`, see Host prerequisites) and the `127.0.0.1:22107` loopback listener. Container uptimes changing order is not a difference; a restarted container is.
+Expected difference: none, apart from the AppArmor local override file (`/etc/apparmor.d/local/abstractions/libvirt-qemu`, see Host prerequisites), the `127.0.0.1:22107` loopback listener, and QEMU-owned ephemeral UDP egress sockets that SLIRP opens for guest traffic (they appear in `ss -lntu` but are not forwards). The PARITY.md row "Isolation-check expected differences" is the reference. Container uptimes changing order is not a difference; a restarted container is.
 
 ## Resources
 

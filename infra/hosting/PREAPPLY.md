@@ -37,7 +37,7 @@ Record each exact SHA/time/platform and OCI digest, archive/checksum and verifie
 
 ## Owned target and safe stages
 
-Only new `m2-hosting` Namespace, `m2-postgres-retain` StorageClass, hosting ServiceAccount/ConfigMap, scoped CNP, owned PostgreSQL StatefulSet/headless Service/PVC, API/web Deployments/Services, owned IngressRoute and explicit operator Jobs. No existing volume/default SC/M1 policy/Cilium setting/firewall/Docker hermes/android-agent resource changes. API uses only its restricted credential; operator and PostgreSQL credentials stay separate. No automatic schema migration, seed approval or administrator selection.
+Only new `m2-hosting` Namespace, `m2-postgres-retain` StorageClass, hosting ServiceAccount/ConfigMap, scoped CNP (historical; removed by issue #13 decision C and no longer rendered since #54), owned PostgreSQL StatefulSet/headless Service/PVC, API/web Deployments/Services, owned IngressRoute and explicit operator Jobs. No existing volume/default SC/M1 policy/Cilium setting/firewall/Docker hermes/android-agent resource changes. API uses only its restricted credential; operator and PostgreSQL credentials stay separate. No automatic schema migration, seed approval or administrator selection.
 
 ```sh
 M2_PUBLIC_ORIGIN='ACTUAL_REVIEWED_HTTP_ORIGIN' \
