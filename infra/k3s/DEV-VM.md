@@ -47,17 +47,31 @@ sudo virsh net-autostart default --disable
 - **Fix:** add the two rules to the local override, which the abstraction already includes with `include if exists`. Do not edit the packaged file. The override survives package updates.
 
 ```sh
-sudo install -d -m 0755 /etc/apparmor.d/local/abstractions
-sudo tee /etc/apparmor.d/local/abstractions/libvirt-qemu >/dev/null <<'EOF'
-# issue #48: libvirt 10.0.0 abstraction grants only Cx; exec of PIE passt also needs rm
+f=/etc/apparmor.d/local/abstractions/libvirt-qemu
+sudo install -d -m 0755 /etc/apparmor.d/local/abstractions /var/backups/issue48-apparmor
+# Keep whatever the file already holds (rules for other guests); back it up outside apparmor.d.
+if sudo test -e "$f"; then sudo cp -a "$f" "/var/backups/issue48-apparmor/libvirt-qemu.$(date -u +%Y%m%dT%H%M%SZ)"; fi
+# Append the marked block once; never rewrite existing lines.
+sudo grep -qx '# BEGIN issue #48 passt' "$f" 2>/dev/null || sudo tee -a "$f" >/dev/null <<'EOF'
+# BEGIN issue #48 passt
+# libvirt 10.0.0 abstraction grants only Cx; exec of PIE passt also needs rm
 /usr/bin/passt rm,
 owner @{run}/libvirt/qemu/passt/* rw,
+# END issue #48 passt
 EOF
+sudo cat "$f"   # check: earlier content unchanged, one marked block at the end
 ```
 
 - **When it applies:** libvirt builds the per-VM profile when the guest starts, so the rules take effect at the next `virsh start`.
 - **Expected after start:** `anxious-dev` is running, passt runs under its child profile in enforce mode, `127.0.0.1:22107` is listening, and `journalctl -k` shows no new AppArmor `DENIED` lines.
-- **Rollback:** delete `/etc/apparmor.d/local/abstractions/libvirt-qemu`, then stop and start the guest.
+- **Rollback:** remove only the marked block and keep every other line, then stop and start the guest:
+
+  ```sh
+  sudo sed -i '/^# BEGIN issue #48 passt$/,/^# END issue #48 passt$/d' /etc/apparmor.d/local/abstractions/libvirt-qemu
+  ```
+
+  If the file did not exist before (no backup under `/var/backups/issue48-apparmor/`) and is now empty, delete it.
+- **First application on the development server (2026-10-25):** it was made before the markers existed. It consists of three lines: `# issue #48: libvirt 10.0.0 abstraction grants only Cx; exec of PIE passt also needs rm`, `/usr/bin/passt rm,` and `owner @{run}/libvirt/qemu/passt/* rw,`. Roll it back by removing exactly those three lines, or replace them with the marked block above so the standard rollback applies.
 - **Not needed** on hosts whose libvirt abstraction already grants these rules, or with a non-passt network backend.
 
 Take the host baseline (see Isolation checks) **after** these packages are installed and **before** the guest is created.
