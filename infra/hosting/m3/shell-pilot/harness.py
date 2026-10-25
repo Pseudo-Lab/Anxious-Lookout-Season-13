@@ -31,9 +31,13 @@ import pilot_tasks  # noqa: E402
 
 MODEL = 'gpt-6.1-sol'
 ACCESS = Path('/access/access.json')  # Secret pilot-access: access token only, exported from pilot-login.
-RESULTS = Path('/pilot/results')
+PILOT = Path('/pilot')
+RESULTS = PILOT/'results'
 BUDGET = RESULTS/'budget.json'
 LIMITS = {'input': 2_400_000, 'output': 100_000}  # Issue #64 cap for the whole pilot.
+# A and B run in separate Pods with separate budget files, so each configuration gets half:
+# the two can never add up past the pilot cap.
+SHARE = {key: value // 2 for key, value in LIMITS.items()}
 PROVIDER = ['model_provider="access_only_openai"', 'model_providers.access_only_openai.name="OpenAI"',
             'model_providers.access_only_openai.base_url="https://chatgpt.com/backend-api/codex"',
             'model_providers.access_only_openai.wire_api="responses"',
@@ -77,7 +81,7 @@ def spent():
     try:
         return json.loads(BUDGET.read_text())
     except FileNotFoundError:
-        return {'input': 0, 'cachedInput': 0, 'output': 0, 'runs': []}
+        return {'input': 0, 'cachedInput': 0, 'output': 0, 'runs': [], 'unknown': []}
 
 
 class Session:
@@ -135,12 +139,12 @@ class Session:
 def prepare_workspace(config, task, run):
     if config == 'A':
         # The executor sees only its fixed /state/workspace mount; reuse it, emptied per run.
-        workspace, cwd = Path('/pilot/ws'), Path('/pilot/native-work')/run
+        workspace, cwd = PILOT/'ws', PILOT/'native-work'/run
         for child in workspace.iterdir():
             shutil.rmtree(child) if child.is_dir() else child.unlink()
         cwd.mkdir(parents=True, mode=0o700)
     else:
-        workspace = Path('/pilot/runs')/run/'work'
+        workspace = PILOT/'runs'/run/'work'
         workspace.mkdir(parents=True, mode=0o700)
         cwd = workspace
     pilot_tasks.materialize(task, workspace)
@@ -179,22 +183,25 @@ def summarize(item, counters, commands):
 def run(task, config, wall_limit):
     RESULTS.mkdir(parents=True, exist_ok=True)
     budget = spent()
-    if budget['input'] >= LIMITS['input'] or budget['output'] >= LIMITS['output']:
-        raise SystemExit('pilot budget exhausted; not starting')
+    if budget.get('unknown'):
+        raise SystemExit('a previous run has unknown token usage; reconcile it before another paid run')
+    if budget['input'] >= SHARE['input'] or budget['output'] >= SHARE['output']:
+        raise SystemExit('pilot budget share exhausted; not starting')
     run_id = f'{task}-{config}-{uuid.uuid4().hex[:8]}'
     workspace, cwd = prepare_workspace(config, task, run_id)
-    home = Path('/pilot/homes')/run_id
+    home = PILOT/'homes'/run_id
     home.mkdir(parents=True, mode=0o700)
     broker = None
     if config == 'A':
         from runner.shell_broker import ShellBroker
-        Path('/pilot/ipc').mkdir(mode=0o700, exist_ok=True)
-        broker = ShellBroker(Path('/pilot/ipc')/(run_id+'.sock'), lambda turn, arguments: True, lambda value: value,
+        (PILOT/'ipc').mkdir(mode=0o700, exist_ok=True)
+        broker = ShellBroker(PILOT/'ipc'/(run_id+'.sock'), lambda turn, arguments: True, lambda value: value,
                              executor='/run/shell-executor/command.sock', wall=30)
     session = Session(config, home, cwd)
     counters = dict.fromkeys(['toolCalls', 'toolFailures', 'timeouts', 'truncated', 'fileChanges', 'patchFailures',
                               'agentMessages', 'modelRequests'], 0)
     commands, usage, status, started = [], None, 'unknown', time.monotonic()
+    turn_started = False
     try:
         session.rpc('initialize', {'clientInfo': {'name': 'shell_pilot', 'version': '1'}, 'capabilities': {'experimentalApi': True}})
         session.send({'method': 'initialized'})
@@ -208,16 +215,23 @@ def run(task, config, wall_limit):
         else:
             params.update(sandbox='workspace-write')
         thread = session.rpc('thread/start', params)['thread']['id']
+        turn_started = True  # Set before the call: a lost reply may still have started a paid turn.
         session.rpc('turn/start', {'threadId': thread, 'input': [{'type': 'text', 'text': pilot_tasks.TASKS[task]['prompt']}]})
-        remaining = {'input': LIMITS['input'] - budget['input'], 'output': LIMITS['output'] - budget['output']}
+        remaining = {'input': SHARE['input'] - budget['input'], 'output': SHARE['output'] - budget['output']}
+        stop_reason, drain_until = None, None
         while True:
-            left = wall_limit - (time.monotonic() - started)
-            if left <= 0:
-                status = 'wall_limit'
+            now = time.monotonic()
+            if stop_reason is None and now - started >= wall_limit:
+                stop_reason = 'wall_limit'
+            if stop_reason is not None and drain_until is None:
+                # Interrupt, then keep reading so the final usage of the interrupted turn is counted.
                 session.send({'id': 999999, 'method': 'turn/interrupt', 'params': {'threadId': thread}})
+                drain_until = now + 60
+            if drain_until is not None and now >= drain_until:
+                status = stop_reason
                 break
             try:
-                event = session.events.get(timeout=min(left, 5))
+                event = session.events.get(timeout=5)
             except queue.Empty:
                 continue
             method = event.get('method')
@@ -228,16 +242,16 @@ def run(task, config, wall_limit):
             elif method == 'thread/tokenUsage/updated':
                 counters['modelRequests'] += 1
                 usage = event['params']['tokenUsage']['total']
-                if usage['inputTokens'] > remaining['input'] or usage['outputTokens'] > remaining['output']:
-                    status = 'budget_stop'
-                    session.send({'id': 999998, 'method': 'turn/interrupt', 'params': {'threadId': thread}})
-                    break
+                if stop_reason is None and (usage['inputTokens'] > remaining['input'] or usage['outputTokens'] > remaining['output']):
+                    stop_reason = 'budget_stop'
             elif method == 'turn/completed':
-                status = event['params'].get('turn', {}).get('status', 'completed')
+                status = stop_reason or event['params'].get('turn', {}).get('status', 'completed')
                 break
             elif method == 'harness/exited':
                 status = 'app_server_exited'
                 break
+    except Exception as failure:
+        status = 'harness_error: ' + type(failure).__name__  # Recorded like any run; usage rules below apply.
     finally:
         wall = time.monotonic() - started
         session.close()
@@ -254,6 +268,9 @@ def run(task, config, wall_limit):
     budget['cachedInput'] += result['tokens']['cachedInputTokens']
     budget['output'] += result['tokens']['outputTokens']
     budget['runs'].append(run_id)
+    if usage is None and turn_started:
+        # A turn reached the model but no usage arrived (crash, exit, timeout): never count it as zero.
+        budget.setdefault('unknown', []).append(run_id)
     BUDGET.write_text(json.dumps(budget, indent=2))
     print(json.dumps({k: v for k, v in result.items() if k != 'commands'}))
 
@@ -262,7 +279,7 @@ def selfcheck(config):
     """No model call: app-server starts with the configuration, thread/start works, sandbox mode is accepted."""
     run_id = f'selfcheck-{config}-{uuid.uuid4().hex[:6]}'
     workspace, cwd = prepare_workspace(config, 'fix-failing-test', run_id)
-    home = Path('/pilot/homes')/run_id
+    home = PILOT/'homes'/run_id
     home.mkdir(parents=True, mode=0o700)
     session = Session(config, home, cwd)
     try:

@@ -68,7 +68,10 @@ kubectl -n shell-pilot exec pilot-b -c agent   -- python -B /pilot/src/harness.p
   - tool calls and failures, timeouts, truncations, patch failures, repeated commands
   - token totals
 - The run file in `/pilot/results/` also keeps the commands, truncated to 200 characters.
-- The two Pods keep separate budget files. Add both after the first pair, and stop if the sum is near the cap.
+- Each Pod keeps its own budget file and may use **half** of the pilot cap (1.2M input, 50k output), so A and B
+  together can never pass it. A turn that crosses the remaining share is interrupted and its final usage is still
+  counted. A run whose turn may have reached the model but reported no usage is marked unknown and blocks every
+  later run in that Pod until it is reconciled by hand; it is never counted as zero.
 
 ## Revocation and cleanup (immediately after the fourth run)
 
