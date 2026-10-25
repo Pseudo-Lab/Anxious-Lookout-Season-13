@@ -62,8 +62,14 @@ runner has no new termination receipt. Binding import above does not make it
 eligible for entry. `Registry.enter` rejects this phase, and `Registry.stopped`
 only accepts `stopping`; neither is a recovery command for this legacy case.
 `ops.runner_legacy_reconcile` supplied the narrow zero-admission recovery tool (removed by
-#61; `TERMINATION.md` keeps its historical report/apply contract). Since #61 such a
-Pod-less FAILED owner is reconciled by the runner-controller dead-runner path instead.
+#61; `TERMINATION.md` keeps its historical report/apply contract). **runner-controller does
+not recover this case.** Its candidates are open stops and owners in ready,
+runner_unreachable or stopping with a registry Pod UID; a `runner_failed` owner is never
+selected, and an owner without a registry Pod UID ends as `no_pod`. The dead-runner path
+covers only a selected owner whose registry Pod UID belongs to a Failed Pod, an exited
+runner container, or a Pod object that is already gone. A remaining legacy
+`runner_failed` owner therefore blocks the #61 window until a separately reviewed and
+approved recovery path has completed (rollout README, window precondition 5).
 Do not substitute a direct SQL phase/UID reset, call an adapter with a fabricated
 `verified=True`, replay the old one-shot create permit, or manufacture a receipt.
 The tool and its exact pinned-image invocation require review before PM executes
