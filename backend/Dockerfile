@@ -22,6 +22,7 @@ USER root
 COPY backend/requirements-test.lock /tmp/requirements-test.lock
 RUN pip install --no-cache-dir --disable-pip-version-check -r /tmp/requirements-test.lock
 COPY backend/tests /app/tests
+COPY backend/contracts /app/contracts
 COPY infra/hosting/db-backup.sh /app/ops/db-backup.sh
 COPY --chmod=755 backend/tests/fixtures/docker /usr/local/bin/docker
 COPY --chmod=755 backend/tests/fixtures/codex.mock.py /usr/local/bin/codex-fixture

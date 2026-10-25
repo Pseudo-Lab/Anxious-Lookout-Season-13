@@ -14,7 +14,7 @@ from tests.test_policy_publication import connect, publish
 
 @pytest.fixture(scope="module", autouse=True)
 def page_schema(schema):
-    migrate("0006_posts")
+    migrate("0007_post_blocks")
 
 
 class HeldRunner:
