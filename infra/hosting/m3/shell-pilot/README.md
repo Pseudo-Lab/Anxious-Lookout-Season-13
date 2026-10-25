@@ -21,7 +21,8 @@ The same model, Codex 0.160.1, prompts and fixtures are used in both. Fixtures u
 
 - `pilot_tasks.py`: fixtures, prompts and graders (`test_pilot_tasks.py` checks that the fixtures fail as given, pass with the intended fix, and reject edited tests).
 - `harness.py`: `selfcheck --config A|B` (no model call), `run --task … --config …`, `budget`.
-- `pilot.yaml`: namespace `shell-pilot`, PVC `pilot-login`, Pods `pilot-login`, `pilot-a` and `pilot-b`.
+- `pilot.yaml`: namespace `shell-pilot`, PVC `pilot-login`, Pods `pilot-login`, `pilot-a` and `pilot-b` (B on SELinux
+  `spc_t`: `container_t` denies bubblewrap's devpts mount, measured; production would need a dedicated policy).
 - `seccomp-userns.json`: the Docker v27.5.1 default profile plus `clone`, `unshare`, `mount`, `umount2`, `pivot_root` allowed without CAP_SYS_ADMIN (bubblewrap's user, mount and PID namespaces).
 - `agent-b.Dockerfile`: the B image.
 
@@ -42,7 +43,14 @@ ssh -t -i ~/.ssh/anxious-back-devvm -o IdentitiesOnly=yes -p 22107 opc@127.0.0.1
 - It prints a URL and a one-time code. Open the URL on any device, sign in to the operator account, and enter the code.
 - No token is printed. `auth.json` stays on the `pilot-login` volume (0600, UID 10001).
 - For a ChatGPT workspace account, the workspace admin enables device code login and Codex local use first.
-- The pilot Pods read only the access token from it (read-only mount) and never write it back.
+- Then back exports only the access token into the Secret the pilot Pods mount at `/access` (OpenEBS LVM refuses a
+  second mount of the login volume, and the refresh token never leaves `pilot-login`). The token passes through
+  the pipe only, never a terminal or file:
+
+  ```sh
+  kubectl -n shell-pilot exec pilot-login -- python -B /pilot/src/harness.py export |
+    kubectl -n shell-pilot create secret generic pilot-access --from-file=access.json=/dev/stdin
+  ```
 
 ## Runs (back, review present)
 
@@ -69,6 +77,6 @@ ssh -t -i ~/.ssh/anxious-back-devvm -o IdentitiesOnly=yes -p 22107 opc@127.0.0.1
 ```
 
 1. `codex logout` revokes the refresh token at OpenAI and deletes `auth.json` (measured in #58 C).
-2. Then `kubectl delete namespace shell-pilot`. The PVC uses the Delete reclaim policy, so its LV is removed; check with `lvs openebs-vg`.
+2. Then `kubectl -n shell-pilot delete secret pilot-access` and `kubectl delete namespace shell-pilot`. The PVC uses the Delete reclaim policy, so its LV is removed; check with `lvs openebs-vg`.
 3. If the logout fails, sign that session out in the ChatGPT security settings.
 4. The report states both steps and their output, never the token.
