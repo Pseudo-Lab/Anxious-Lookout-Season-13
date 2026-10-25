@@ -105,6 +105,7 @@ libvirt 10.0's `<portForward>` element is passt-only. So the guest NIC is declar
 - The device sits on the q35 root bus `pcie.0`, slot `0x3`, which was free on `anxious-dev`. Check `virsh dumpxml anxious-dev` for a free root slot on another guest. A libvirt-managed bridge such as `pci.6` cannot be used: libvirt removes empty bridges, and the guest then fails before boot.
 - `-set netdev.hostnet0.hostfwd=…` on a libvirt `<interface type='user'>` does not work either: it fails before boot with `there is no netdev hostnet0 defined`.
 - The MAC address is the guest's existing one. Keep it stable so NetworkManager keeps its connection profile.
+- With `<qemu:commandline>`, libvirt marks the domain as tainted (`custom-argv`) in its log and in `virsh dominfo`. That is accepted for the development VM only.
 
 Measured guest network (NIC `enp0s3`):
 
@@ -114,7 +115,7 @@ Measured guest network (NIC `enp0s3`):
 | Default route | `default via 10.0.0.2 dev enp0s3 proto dhcp` |
 | DNS | `nameserver 10.0.0.3` (SLIRP resolver, which forwards to the host's resolver) |
 | Outbound | HTTPS works, for example `https://get.k3s.io` returns HTTP 200, and dnf reaches the Oracle Linux repositories |
-| Host side | only QEMU listening on `127.0.0.1:22107` |
+| Host side | only QEMU listening on `127.0.0.1:22107` (backlog 1; no other new listener) |
 
 - Guest address `10.0.0.107/24` mirrors the production VCN address and node identity, so host guards (`initialize-rehearsal.sh`) and the API certificate SANs run unchanged. `10.0.0.0/24` exists only inside QEMU's SLIRP and is not used anywhere on the host. SLIRP keeps the gateway `.2` and DNS `.3` inside the subnet, unlike passt's off-link `192.168.0.1`.
 - **Inbound:** SLIRP gives no inbound path except `hostfwd`.
