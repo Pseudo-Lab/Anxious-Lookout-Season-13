@@ -28,8 +28,10 @@ The guest deliberately reuses the production node identity (`anxious-lookout`, `
 The development server is Ubuntu 24.04 with `/dev/kvm` present and libvirt not installed. Installing it is a host change and needs approval:
 
 ```sh
-sudo apt install --no-install-recommends qemu-system-x86 qemu-utils libvirt-daemon-system virtinst passt
+sudo apt install --no-install-recommends qemu-system-x86 qemu-utils libvirt-daemon-system virtinst
 ```
+
+`passt` is optional. Install it only to try the passt backend, which does not work on this host (see Network).
 
 `libvirt-daemon-system` defines a `default` NAT network on `192.168.122.0/24`. That range lies inside an existing Docker network (`192.168.112.0/20`), and host Docker already occupies `172.17.0.0/16`–`172.31.0.0/16` and most `192.168.0.0/16` /20 blocks. Do not use, start or autostart the libvirt default network:
 
@@ -39,6 +41,8 @@ sudo virsh net-autostart default --disable
 ```
 
 **Ubuntu 24.04, libvirt 10.0.0, passt backend: AppArmor override.**
+
+This override is needed only when the passt backend is chosen. The default SLIRP backend (see Network) does not need it. The development server still has the 2026-10-25 application; it is harmless with SLIRP and stays in place.
 
 - **Why it is needed:** Ubuntu's `libvirt-daemon-system` 10.0.0 (checked with `10.0.0-2ubuntu8.19`) ships an `abstractions/libvirt-qemu` that grants only `/usr/bin/passt Cx -> passt,`. The per-VM profile `libvirt-<UUID>` is missing two permissions:
   - `rm` on `/usr/bin/passt`, which an exec of the PIE binary needs
@@ -81,24 +85,53 @@ Take the host baseline (see Isolation checks) **after** these packages are insta
 
 ## Network
 
-Recommended: libvirt user-mode networking with the `passt` backend. It creates no host bridge, no host iptables/nft rule and no listening port except an explicit loopback forward, so the host Docker networks, `central-traefik` (`:12345`) and other projects are unaffected. Host bridging is not available: the host uplink is Wi-Fi (`wlp4s0`).
+Recommended: QEMU's built-in user-mode networking (SLIRP), declared through libvirt's QEMU command-line passthrough. It runs inside the QEMU process and creates no host bridge, no host iptables/nft rule, no extra process and no listening port except one loopback forward. So the host Docker networks, `central-traefik` (`:12345`) and other projects are unaffected. Host bridging is not available: the host uplink is Wi-Fi (`wlp4s0`). The passt backend does not work on this host (below).
+
+libvirt 10.0's `<portForward>` element is passt-only. So the guest NIC is declared as a single QEMU `-netdev user` with `hostfwd`, and the domain has **no** `<interface>` element. Remove any existing one; otherwise libvirt adds a second NIC. Verified on 2026-10-25 (issue #48 R4):
 
 ```xml
-<interface type='user'>
-  <backend type='passt'/>
-  <model type='virtio'/>
-  <ip family='ipv4' address='10.0.0.107' prefix='24'/>
-  <portForward proto='tcp' address='127.0.0.1'>
-    <range start='22107' to='22'/>
-  </portForward>
-</interface>
+<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
+  <!-- … no <interface> element … -->
+  <qemu:commandline>
+    <qemu:arg value='-netdev'/>
+    <qemu:arg value='user,id=devnet,net=10.0.0.0/24,dhcpstart=10.0.0.107,hostfwd=tcp:127.0.0.1:22107-10.0.0.107:22'/>
+    <qemu:arg value='-device'/>
+    <qemu:arg value='virtio-net-pci,netdev=devnet,mac=52:54:00:e3:56:b1,bus=pcie.0,addr=0x3'/>
+  </qemu:commandline>
+</domain>
 ```
 
-- Guest address `10.0.0.107/24` mirrors the production VCN address; `10.0.0.0/24` is not used anywhere on the host. Confirm the guest default route with `ip route` after first boot and record it.
+- The `xmlns:qemu` declaration must be on the `<domain>` element, or libvirt drops the passthrough.
+- The device sits on the q35 root bus `pcie.0`, slot `0x3`, which was free on `anxious-dev`. Check `virsh dumpxml anxious-dev` for a free root slot on another guest. A libvirt-managed bridge such as `pci.6` cannot be used: libvirt removes empty bridges, and the guest then fails before boot.
+- `-set netdev.hostnet0.hostfwd=…` on a libvirt `<interface type='user'>` does not work either: it fails before boot with `there is no netdev hostnet0 defined`.
+- The MAC address is the guest's existing one. Keep it stable so NetworkManager keeps its connection profile.
+
+Measured guest network (NIC `enp0s3`):
+
+| Item | Value |
+| --- | --- |
+| Address | `10.0.0.107/24` by SLIRP DHCP (`dhcpstart`), NetworkManager `dynamic` |
+| Default route | `default via 10.0.0.2 dev enp0s3 proto dhcp` |
+| DNS | `nameserver 10.0.0.3` (SLIRP resolver, which forwards to the host's resolver) |
+| Outbound | HTTPS works, for example `https://get.k3s.io` returns HTTP 200, and dnf reaches the Oracle Linux repositories |
+| Host side | only QEMU listening on `127.0.0.1:22107` |
+
+- Guest address `10.0.0.107/24` mirrors the production VCN address and node identity, so host guards (`initialize-rehearsal.sh`) and the API certificate SANs run unchanged. `10.0.0.0/24` exists only inside QEMU's SLIRP and is not used anywhere on the host. SLIRP keeps the gateway `.2` and DNS `.3` inside the subnet, unlike passt's off-link `192.168.0.1`.
+- **Inbound:** SLIRP gives no inbound path except `hostfwd`.
+- **Outbound to the host:** QEMU maps connections to the gateway address `10.0.0.2` onto the host's `127.0.0.1`. Left as is, the guest could reach every loopback-bound service on the development server: other projects' containers published on `127.0.0.1`, the anxious hosting ports and so on. Close that path inside the guest. Routing via `10.0.0.2` still works, because only traffic addressed to `10.0.0.2` itself is dropped, and DNS uses `10.0.0.3`:
+
+  ```sh
+  sudo firewall-cmd --permanent --direct --add-rule ipv4 filter OUTPUT 0 -d 10.0.0.2/32 -j REJECT
+  sudo firewall-cmd --reload
+  ```
+
+  Check it from the guest: `curl -m 5 http://10.0.0.2:12345/` must fail, and `curl -sSI https://get.k3s.io` must still return 200. This rule is development-VM only and was not part of the 2026-10-25 verification. Record its result with R4. Never add `restrict=on` to the netdev: it also cuts the guest off from the internet.
 - SSH reaches the guest only from the host loopback: `ssh -p 22107 opc@127.0.0.1`.
 - Ingress tests (Traefik 80/443 inside the guest) run from inside the guest with `curl --resolve`, or through an additional loopback-only forward on a free high port. Do not forward 80/443 or bind `0.0.0.0`.
 - Public origin for `infra/hosting/render.sh`: `M2_PUBLIC_ORIGIN=http://192.88.99.1`. `192.88.99.0/24` is the deprecated 6to4 relay anycast block (RFC 7526). It is not announced on the internet, and render.sh accepts it because it is outside the private and documentation ranges render.sh rejects. Use it only from inside the guest as a name-pinned target, for example `curl --resolve "192.88.99.1:80:127.0.0.1" http://192.88.99.1/`, so that no packet for it leaves the guest. Never query it from the host or from outside the guest. Optionally add a guest blackhole route (`ip route add blackhole 192.88.99.1/32`, or the NetworkManager equivalent) so that an unpinned request fails locally.
-- Fallback when passt cannot carry a needed case: a dedicated libvirt NAT network on `10.0.0.0/24` with `<forward mode='nat'/>` and no DHCP range outside it. This one-time step adds libvirt-owned `LIBVIRT_*` rules and a `virbr` device to the host; record that diff separately as the network setup, then re-take the baseline before guest work.
+- Fallback when SLIRP cannot carry a needed case: a dedicated libvirt NAT network on `10.0.0.0/24` with `<forward mode='nat'/>` and no DHCP range outside it. This one-time step adds libvirt-owned `LIBVIRT_*` rules and a `virbr` device to the host; record that diff separately as the network setup, then re-take the baseline before guest work.
+
+**Why not passt on this host.** On the development server (Ubuntu 24.04, kernel 7.0, AppArmor fine-grained `af_unix` mediation `features/network_v9/af_unix`), noble's passt `0.0~git20240220` cannot accept QEMU's connection. Inside libvirt's `//passt` child profile, `accept4` on its listening socket returns `EACCES`. The kernel audit log records nothing, and noble's `abstractions/passt` has only `network unix stream,`. passt does not handle that failure and continues with fd -1. Its listening socket is edge-triggered, so it never retries, and the connection stays in the socket's queue forever. The visible symptom is `Recv-Q 1` on `/run/libvirt/qemu/passt/*.socket`, and the guest has TX but RX 0 and no IPv4 address. The evidence is the issue #48 comment "R4 네트워크 차단 원인 확정". Making passt work would need a patched packaged AppArmor policy or a newer passt, so the development VM uses SLIRP instead.
 
 ## Guest creation
 
@@ -112,7 +145,7 @@ Recommended: libvirt user-mode networking with the `passt` backend. It creates n
      --network none --graphics none --console pty,target_type=serial --extra-args 'console=ttyS0'
    ```
 
-   Then add the `passt` interface above with `sudo virsh edit anxious-dev` (or install with it directly if the installed `virt-install` accepts `--network passt,...`). Set `OS_VARIANT` to the closest Oracle Linux 9 name `osinfo-query os` lists.
+   Then add the `xmlns:qemu` declaration and the `<qemu:commandline>` block above with `sudo virsh edit anxious-dev`, without adding an `<interface>` element. Set `OS_VARIANT` to the closest Oracle Linux 9 name `osinfo-query os` lists.
 3. In the guest: minimal install, hostname `simple`, SELinux enforcing, firewalld and NetworkManager enabled. Enable `ol9_UEKR8`, install the production kernel NVR if available for x86_64, reboot into it and record `uname -r`.
 4. Record `getenforce`, `firewall-cmd --get-active-zones`, `nmcli device` and `uname -m` (`x86_64`).
 5. Take snapshot `base-os` (below).
@@ -140,7 +173,7 @@ Differences from production in that procedure:
 - **Synthetic identities:**
   - `providerAccountId` is a synthetic identifier. It is never a credential, and supply is not run.
   - The single owner is a synthetic approved editor. The allowlist holds only that owner.
-- **Login:** the API is configured as in production (`OAUTH_MODE=github`) but has no reachable GitHub OAuth app for the guest-only origin. So the owner's session is seeded in the guest database: one `auth.accounts` row (role `editor`, approved) and one `auth.sessions` row, whose `token_hash` is `app.main.session_digest(token, "http://192.88.99.1")`. The owner then calls `POST /api/.../runner` with that session cookie, the session's CSRF token and an `Idempotency-Key`, through `curl --resolve`.
+- **Login:** the API is configured as in production (`OAUTH_MODE=github`) but has no reachable GitHub OAuth app for the guest-only origin. So the owner's session is seeded in the guest database. `APP_ENV=test` with `OAUTH_MODE=mock` is not used, because it moves the API configuration further from production. See "Synthetic owner seed" below.
 - **Everything after login is the production code path:** registry entry, controller, PV/PVC/Secret, binding and Pod. The Pod is expected to reach Running with health `not_configured`. No provider credential exists.
 
 The older #10 one-shot rehearsal (`user-runner-isolated/`) is not the current path. Its `initialize-rehearsal.sh` and `IMAGE-INITIALIZER-PACKAGE.md` take the image platform (`amd64` on this VM), but its fixed rehearsal PV/namespace values are historical.
@@ -150,6 +183,54 @@ Image audits take the architecture explicitly: `access_image_audit.py --architec
 The audits need a Docker daemon that uses the containerd image store. On such a daemon the build metadata's `containerimage.digest` is the OCI index that `docker save` writes. The development server's daemon has the containerd image store turned off (`/etc/docker/daemon.json`: `"containerd-snapshotter": false`). There, `containerimage.digest` is the image config digest, and `docker save` builds a new manifest at save time. So the audits refuse every archive built there, for either architecture (measured in [CROSS-BUILD.md](../hosting/CROSS-BUILD.md)). Images built inside the guest, whose Docker has the containerd image store on, are audited normally with `--architecture=amd64`. For archives built on the development server, take the image reference from the guest after import (`k3s ctr --namespace k8s.io images ls`, column `DIGEST`, the manifest in the archive's `index.json`). Do not change the host daemon setting: changing it hides every image the host's other projects have in the classic store.
 
 Take snapshot `k3s-ready` after Cilium is Ready.
+
+## Synthetic owner seed (development VM only)
+
+This applies only to the development VM's guest database. Never run it against the production database or any database holding real accounts.
+
+Every identifier marks itself as synthetic:
+
+| Field | Value |
+| --- | --- |
+| `auth.accounts.id` | `00000000-0000-4000-8000-000000000048` |
+| `github_id` | `synthetic-devvm-48` |
+| `login` | `SYNTHETIC-DEVVM-NOT-A-USER` |
+| `role` / `is_approved` | `editor` / `true` |
+
+1. Take snapshot `pre-synthetic-owner` (see Snapshots) before seeding.
+2. In the guest, generate the session token and CSRF token with `python -c 'import secrets; print(secrets.token_urlsafe(32))'`. Write them to a root-only `0600` file in the guest, never to argv, shell history or logs.
+3. Compute `token_hash` inside the API image, reading the token from that file: `app.main.session_digest(token, "http://192.88.99.1")`.
+4. Insert one account and one session with a one-hour expiry, and put the owner UUID in the rollout `allowlist`:
+
+   ```sql
+   INSERT INTO auth.accounts (id, github_id, login, role, is_approved)
+   VALUES ('00000000-0000-4000-8000-000000000048', 'synthetic-devvm-48', 'SYNTHETIC-DEVVM-NOT-A-USER', 'editor', true);
+   INSERT INTO auth.sessions (token_hash, account_id, csrf_token, expires_at)
+   VALUES ('<token_hash>', '00000000-0000-4000-8000-000000000048', '<csrf>', now() + interval '1 hour');
+   ```
+
+5. Call `POST /api/research/codex/runner` once through `curl --resolve 192.88.99.1:80:127.0.0.1`, with:
+   - header `Cookie: anxious_session=<token>`
+   - header `x-csrf-token: <csrf>`
+   - header `Idempotency-Key: <uuid>`
+   - body `{}`
+
+   Expect `202`.
+
+**Removal:**
+
+- **Full removal (preferred):** shut the guest down and `virsh snapshot-revert anxious-dev pre-synthetic-owner`. Rows are not deleted one by one, because the account is referenced by `runner_runtime.registry` and other durable runner records.
+- **To keep the runner evidence instead:**
+  1. Request termination with `DELETE /api/research/codex/runner` using the same session, and let the observer finish.
+  2. Revoke the account:
+
+     ```sql
+     DELETE FROM auth.sessions WHERE account_id = '00000000-0000-4000-8000-000000000048';
+     UPDATE auth.accounts SET is_approved = false, role = 'commenter'
+       WHERE id = '00000000-0000-4000-8000-000000000048' AND github_id = 'synthetic-devvm-48';
+     ```
+
+  3. Delete the guest token file.
 
 ## Snapshots
 
@@ -177,7 +258,7 @@ ss -lntu
 ip -br address; ip route
 ```
 
-Expected difference: none, apart from the `passt` process and its loopback forward port(s). Container uptimes changing order is not a difference; a restarted container is.
+Expected difference: none, apart from the AppArmor local override file (`/etc/apparmor.d/local/abstractions/libvirt-qemu`, see Host prerequisites) and the `127.0.0.1:22107` loopback listener. Container uptimes changing order is not a difference; a restarted container is.
 
 ## Resources
 
