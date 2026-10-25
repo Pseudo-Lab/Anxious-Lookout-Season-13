@@ -209,7 +209,34 @@ Measured guest network (NIC `enp0s3`):
 
 Follow [README.md](README.md) "Layout and installation" in the same order as production: record routes/firewall/SELinux/NetworkManager state, install `config.yaml` as `/etc/rancher/k3s/config.yaml` mode 0600 with the k3s SELinux policy package, exclude CNI interfaces from NetworkManager, start k3s pinned to `K3S_VERSION`, then install Cilium `CILIUM_VERSION` with `cilium-values.yaml` and CLI `CILIUM_CLI_VERSION`. The installers select the x86_64 artifacts of the same pinned versions; nothing in `versions.env`, `config.yaml` or `cilium-values.yaml` changes.
 
-The guest runs Docker Engine next to k3s, as the production node does. The production runner path needs it: the #16/#18 controller, observer, supply and restore units are rootful `docker run --pull=never <provisioner local ID>` invocations ([rollout README](../hosting/m3/multi-user-runners/rollout/README.md)). Install the Docker Engine major version recorded on the OCI node (`docker version` there), from Docker's RHEL repository for x86_64, before k3s. Turn on the containerd image store (`/etc/docker/daemon.json`: `{"features": {"containerd-snapshotter": true}}`), as on production, so that local image IDs are OCI index digests. Then follow this README's Docker preservation steps as written.
+The guest runs Docker Engine next to k3s, as the production node does. The production runner path needs it: the #16/#18 controller, observer, supply and restore units are rootful `docker run --pull=never <provisioner local ID>` invocations ([rollout README](../hosting/m3/multi-user-runners/rollout/README.md)).
+
+Production record (2026-10-25, read on the OCI node, issue #48 comment "운영 노드 Docker 기록"):
+
+| Item | Production (aarch64) |
+| --- | --- |
+| Repository | Docker's official RHEL repository `docker-ce-stable` (`https://download.docker.com/linux/rhel/$releasever/$basearch/stable`). The Oracle repositories' docker/podman packages are not used. |
+| RPMs | `docker-ce` 29.6.1-1.el9, `docker-ce-cli` 29.6.1-1.el9, `containerd.io` 2.2.5-1.el9, `docker-buildx-plugin` 0.35.0-1.el9, `docker-compose-plugin` 5.3.1-1.el9 |
+| Engine | 29.6.1 (API 1.55), containerd v2.2.5 |
+| `/etc/docker/daemon.json` | absent: every daemon setting is the default |
+| Storage | `overlayfs`, `driver-type io.containerd.snapshotter.v1` (containerd image store, on by default in 29.x) |
+| `docker.service` | enabled, active |
+
+Install the same versions for x86_64 from the same repository, before k3s. Do not create `/etc/docker/daemon.json`:
+
+```sh
+sudo dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+sudo dnf install docker-ce-29.6.1-1.el9 docker-ce-cli-29.6.1-1.el9 containerd.io-2.2.5-1.el9 \
+  docker-buildx-plugin-0.35.0-1.el9 docker-compose-plugin-5.3.1-1.el9
+sudo systemctl enable --now docker.service
+rpm -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+test ! -e /etc/docker/daemon.json
+docker info --format '{{.Driver}} | {{json .DriverStatus}}'
+```
+
+- **Exact versions:** if a package name with an exact version is not found, list the published builds with `dnf list --showduplicates docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin` and pick the `x86_64` build with the same version and release. Record the `rpm -q` output with R4. Do not run a later `dnf update` of these packages in the guest unless production moves too.
+- **Image store check:** the `docker info` line must show `overlayfs` with `driver-type io.containerd.snapshotter.v1`, the same as production. Do not continue if it does not. Images built in the guest then have OCI index digests as local IDs, as on production, and the archive audits accept them (#52).
+- After Docker, follow this README's Docker preservation steps as written.
 
 Then apply the hosting procedure as written: `infra/hosting/render.sh` output server dry-run, web/API rollout and one runner Pod, using linux/amd64 images built from the same source and imported with `k3s ctr images import` exactly as `infra/hosting/README.md` describes. Build them inside the guest with its Docker, using the production arguments (for example `docker build -f backend/Dockerfile --target runner --build-arg APP_GIT_SHA=FULL_SHA --build-arg APP_BUILT_AT=UTC -t IMAGE .`, and `--target provisioner` for the runner workers). `docker save` the result and import it into k3s. Building on the development server with `--platform linux/amd64` also works, but see the image-store note below. `build_common_chatbot.sh` stays arm64-only because it produces production artifacts.
 
