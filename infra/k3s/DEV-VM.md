@@ -270,14 +270,35 @@ docker info --format '{{.Driver}} | {{json .DriverStatus}}'
 
 Then apply the hosting procedure as written: `infra/hosting/render.sh` output server dry-run, web/API rollout and one runner Pod, using linux/amd64 images built from the same source and imported with `k3s ctr images import` exactly as `infra/hosting/README.md` describes. Build them inside the guest with its Docker, using the production arguments (for example `docker build -f backend/Dockerfile --target runner --build-arg APP_GIT_SHA=FULL_SHA --build-arg APP_BUILT_AT=UTC -t IMAGE .`, and `--target provisioner` for the runner workers). `docker save` the result and import it into k3s. Building on the development server with `--platform linux/amd64` also works, but see the image-store note below. `build_common_chatbot.sh` stays arm64-only because it produces production artifacts.
 
-The one runner Pod comes from the current production path, the #16/#18 pool rollout. Follow [rollout/README.md](../hosting/m3/multi-user-runners/rollout/README.md):
+The one runner Pod comes from the current production path, the #16/#18 pool rollout. A fresh guest first needs the network state production reached through later operations. Steps 1–3 below were verified in R4 (2026-10-25):
 
-1. Render `values.json` with guest values.
+1. **Network contract: issue #13 default allow.** `infra/hosting/render.sh` still renders the `hosting-boundary` CNP (issue #54), but production deleted it in the [default-allow transition](DEFAULT-ALLOW.md). With that policy, PostgreSQL admits only the hosting-api and ops Pods, so the host-network runner workers cannot reach it. Bring the guest to production's end state:
+   - Steps 0/1 of DEFAULT-ALLOW.md do not apply on a new guest: the old ipsets, sync units and CCNPs never existed, because `render-policy.sh` emits an empty List. Record their absence with `kubectl get ccnp --ignore-not-found`.
+   - Step 2: save the object, then `kubectl -n m2-hosting delete cnp hosting-boundary`. Delete `hosting-access-web-link-v1` only if it exists (absent in R4). Touch nothing in codex-runner or codex-trial.
+   - Step 3: add the Pod CIDR → TCP 6443 rich rule (`rule family="ipv4" source address="10.42.0.0/16" port port="6443" protocol="tcp" accept`) to the runtime and `--permanent` configurations separately. **No reload.**
+2. **Runner namespace and policies:** apply only `infra/hosting/m3/user-runner-e2e/00-foundation.json` (Namespace `codex-runner`, KNP `runner-default-deny`, SA `runner-workload`) and `40-runner-network.json` (CNP `runner-callback-draft`, production's post-EGRESS-REPAIR policy). The worker checks that these exist and does not create them. Never apply that directory's full deployment `resources.json`, which would recreate `hosting-access-web-link-v1`.
+3. **Worker database URLs:** the postgres Service is headless (`clusterIP: None`), and host DNS cannot resolve cluster names. So the controller, observer and supply `database-url` files under `/etc/anxious-lookout/issue16/*/` address the **postgres-0 Pod IP** directly (`10.42.0.250` in R4), as on production.
+   - Use the dedicated controller and observer logins, root 0600, with credentials only in private files.
+   - Check from a host-network container with the controller login: `SELECT 1`.
+   - When the postgres Pod is recreated and its IP changes, update all three files before the next worker batch. The production node carries the same operational duty.
+   - The `DB-ROUTE.md` loopback port-forward is a pre-#13 workaround, not this path.
+
+Then follow [rollout/README.md](../hosting/m3/multi-user-runners/rollout/README.md):
+
+1. Render `values.json` with guest values. Mount only a dedicated private staging parent as the renderer's `/output`, for example `/var/lib/anxious-lookout/r4-render` with `:Z` under SELinux, never all of `/root`. In R4, binding `/root` failed with `mkdir` PermissionError, and the dedicated directory worked without relaxing SELinux.
 2. Apply `resources.json`.
 3. Issue the worker SA tokens.
 4. Install the units.
 5. Start restore once.
 6. Run one finite `issue16-controller.service` for one entered owner.
+
+R4 also passed:
+- renderer `--check` and candidate output
+- the PVC Retain gate
+- the API UID/resourceVersion JSON patch
+- SA rights (API cannot create Pods; the controller can)
+- the shared storage root
+- restore with an empty inventory
 
 Differences from production in that procedure:
 
