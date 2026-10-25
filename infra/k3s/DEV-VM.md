@@ -140,7 +140,7 @@ Measured guest network (NIC `enp0s3`):
 
   The rule was added after snapshot `base-os`. After reverting to `base-os`, add it again.
 
-  **Pods and containers (FORWARD): draft, not yet verified by review.** Pod (Cilium) and Docker container traffic leaves through FORWARD, not OUTPUT. A firewalld direct rule in iptables `FORWARD` does not reliably catch it, because Cilium (`CILIUM_FORWARD`) and Docker (`DOCKER-USER`, `DOCKER-FORWARD`) insert ACCEPT jumps at the top of that chain, and the result depends on start order. The draft uses a separate nftables base chain instead. It runs at hook priority `-10`, before the iptables-nft filter chains at priority 0, and its reject is final whatever later chains accept. firewalld does not manage or flush foreign nftables tables. It needs no reload, and it can be loaded before or after k3s:
+  **Pods and containers (FORWARD), verified in R4 2026-10-25.** Pod (Cilium) and Docker container traffic leaves through FORWARD, not OUTPUT. A firewalld direct rule in iptables `FORWARD` does not reliably catch it, because Cilium (`CILIUM_FORWARD`) and Docker (`DOCKER-USER`, `DOCKER-FORWARD`) insert ACCEPT jumps at the top of that chain, and the result depends on start order. This uses a separate nftables base chain instead. It runs at hook priority `-10`, before the iptables-nft filter chains at priority 0, and its reject is final whatever later chains accept. firewalld does not manage or flush foreign nftables tables. It needs no reload, and it can be loaded before or after k3s:
 
   ```sh
   sudo tee /etc/nftables/devvm-hostguard.nft >/dev/null <<'EOF'
@@ -172,7 +172,13 @@ Measured guest network (NIC `enp0s3`):
   sudo systemctl daemon-reload && sudo systemctl enable --now devvm-hostguard.service
   ```
 
-  The file's first two lines make reloading idempotent. To verify, run the 5001 positive control from a Pod (for example a one-off `curlimages/curl` Pod) and from a Docker container (`docker run --rm`, default bridge), before and after enabling the unit. Also check:
+  The file's first two lines make reloading idempotent. Measured in R4 with this file and unit, unchanged:
+  - With the unit stopped, a Pod (`curlimages/curl:8.12.1@sha256:94e9e444bcba979c2ea12e27ae39bee4cd10bc7041a472c4727a558e213744e6`) and a default-bridge Docker container got HTTP 200 from `10.0.0.2:5001/v2/`, even with the OUTPUT rule in place.
+  - With it enabled, both failed (curl exit 7). The counter rose to 2 packets / 120 bytes, both got HTTP 200 from `https://get.k3s.io` (DNS included) and new SSH still worked.
+  - After restarting `k3s` and `docker`, the table, rule, counter and `CILIUM_FORWARD` remained. New Pods and containers were blocked again, and Cilium status stayed OK.
+  - The check covers new IPv4 connections to `10.0.0.2` only. It does not cover connections already established, or other host addresses.
+
+  To repeat the check, run the 5001 positive control from a Pod (for example a one-off `curlimages/curl` Pod) and from a Docker container (`docker run --rm`, default bridge), before and after enabling the unit. Also check:
   - `nft list table inet devvm_hostguard` counters increase
   - Pod DNS, Pod HTTPS to `https://get.k3s.io` and Cilium health stay unchanged
   - the chain is still present after `systemctl restart k3s` and `systemctl restart docker`
@@ -209,6 +215,20 @@ Measured guest network (NIC `enp0s3`):
 
 Follow [README.md](README.md) "Layout and installation" in the same order as production: record routes/firewall/SELinux/NetworkManager state, install `config.yaml` as `/etc/rancher/k3s/config.yaml` mode 0600 with the k3s SELinux policy package, exclude CNI interfaces from NetworkManager, start k3s pinned to `K3S_VERSION`, then install Cilium `CILIUM_VERSION` with `cilium-values.yaml` and CLI `CILIUM_CLI_VERSION`. The installers select the x86_64 artifacts of the same pinned versions; nothing in `versions.env`, `config.yaml` or `cilium-values.yaml` changes.
 
+Minimal-OS details measured in R4 (2026-10-25). Whether the production node needed the same steps is not recorded:
+
+- **`tar` is missing** from the minimal install. The k3s installer and the Cilium CLI archive need it: `sudo dnf install -y tar`.
+- **k3s binary:** download it from the official release, verify the release checksum and install it as `/usr/local/bin/k3s` mode 0755. Copy `config.yaml` to `/etc/rancher/k3s/config.yaml` mode 0600.
+- **Installer:** run it with `INSTALL_K3S_SKIP_DOWNLOAD=binary`, not `=true`. `true` also skips the SELinux RPMs. `binary` skips only the binary, and the installer installs `k3s-selinux` (1.6-1.el9 in R4) and `container-selinux` from the official Rancher repository:
+
+  ```sh
+  sudo env INSTALL_K3S_SKIP_DOWNLOAD=binary INSTALL_K3S_VERSION='v1.36.4+k3s1' sh ./install-k3s.sh server
+  sudo tar -xzf cilium-linux-amd64.tar.gz -C /usr/local/bin cilium
+  sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml /usr/local/bin/cilium install --version 1.20.2 --values cilium-values.yaml
+  ```
+
+- **Checks:** SELinux stays enforcing, the Cilium ConfigMap shows `kube-proxy-replacement: "false"`, and Cilium and the node are Ready.
+
 The guest runs Docker Engine next to k3s, as the production node does. The production runner path needs it: the #16/#18 controller, observer, supply and restore units are rootful `docker run --pull=never <provisioner local ID>` invocations ([rollout README](../hosting/m3/multi-user-runners/rollout/README.md)).
 
 Production record (2026-10-25, read on the OCI node, issue #48 comment "운영 노드 Docker 기록"):
@@ -222,12 +242,13 @@ Production record (2026-10-25, read on the OCI node, issue #48 comment "운영 �
 | Storage | `overlayfs`, `driver-type io.containerd.snapshotter.v1` (containerd image store, on by default in 29.x) |
 | `docker.service` | enabled, active |
 
-Install the same versions for x86_64 from the same repository, before k3s. Do not create `/etc/docker/daemon.json`:
+Install the same versions for x86_64 from the same repository, **before k3s**. Do not create `/etc/docker/daemon.json`:
 
 ```sh
+sudo dnf install -y dnf-plugins-core   # minimal OS has no config-manager
 sudo dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
 sudo dnf install docker-ce-29.6.1-1.el9 docker-ce-cli-29.6.1-1.el9 containerd.io-2.2.5-1.el9 \
-  docker-buildx-plugin-0.35.0-1.el9 docker-compose-plugin-5.3.1-1.el9
+  docker-buildx-plugin-0.35.0-1.el9 docker-compose-plugin-5.3.1-1.el9 docker-ce-rootless-extras-29.6.1-1.el9
 sudo systemctl enable --now docker.service
 rpm -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 test ! -e /etc/docker/daemon.json
@@ -235,8 +256,17 @@ docker info --format '{{.Driver}} | {{json .DriverStatus}}'
 ```
 
 - **Exact versions:** if a package name with an exact version is not found, list the published builds with `dnf list --showduplicates docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin` and pick the `x86_64` build with the same version and release. Record the `rpm -q` output with R4. Do not run a later `dnf update` of these packages in the guest unless production moves too.
+- **`docker-ce-rootless-extras`:** `docker-ce` pulls it in as a weak dependency. Without a version, the repository picks its latest build (29.9.2 in R4), so the command above pins it to the engine version. Rootless mode is not used. The production record does not list this package, so confirm on the OCI node with `rpm -q docker-ce-rootless-extras`.
 - **Image store check:** the `docker info` line must show `overlayfs` with `driver-type io.containerd.snapshotter.v1`, the same as production. Do not continue if it does not. Images built in the guest then have OCI index digests as local IDs, as on production, and the archive audits accept them (#52).
 - After Docker, follow this README's Docker preservation steps as written.
+- **Docker installed after k3s breaks Pod networking.** In R4 Docker was installed on a guest where k3s and Cilium were already running. Afterwards `iptables-save` had no `CILIUM_FORWARD`/`CILIUM_INPUT`/`CILIUM_OUTPUT` chains, and Pods lost gateway and DNS access, while `cilium status` still reported Ready. Whether the Docker installation triggered a firewalld reload was not determined. Install Docker first. If k3s is already there, check the dataplane after installing Docker, not just agent health:
+
+  ```sh
+  sudo iptables-save | grep -c '^:CILIUM_FORWARD'    # must be 1
+  # plus a one-off Pod: DNS lookup and HTTPS to https://get.k3s.io
+  ```
+
+  If the chains are missing, restore them with the Cilium rollout restart in [README.md](README.md) (the firewalld reload recovery): `rollout restart daemonset/cilium`, `rollout status`, `cilium status --wait`. Then repeat the Pod check. In R4 this restored the chains and the same Pod request returned 200.
 
 Then apply the hosting procedure as written: `infra/hosting/render.sh` output server dry-run, web/API rollout and one runner Pod, using linux/amd64 images built from the same source and imported with `k3s ctr images import` exactly as `infra/hosting/README.md` describes. Build them inside the guest with its Docker, using the production arguments (for example `docker build -f backend/Dockerfile --target runner --build-arg APP_GIT_SHA=FULL_SHA --build-arg APP_BUILT_AT=UTC -t IMAGE .`, and `--target provisioner` for the runner workers). `docker save` the result and import it into k3s. Building on the development server with `--platform linux/amd64` also works, but see the image-store note below. `build_common_chatbot.sh` stays arm64-only because it produces production artifacts.
 
