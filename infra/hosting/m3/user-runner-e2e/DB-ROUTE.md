@@ -1,5 +1,7 @@
 # Operational correction: host preparation reaches PostgreSQL through loopback
 
+> **Historical, pre-#13 workaround.** This applied while the `hosting-boundary` CNP existed. The issue #13 default-allow transition removed that policy, and since #54 `render.sh` no longer emits it. The current route is direct: host workers use the postgres Pod IP in their database URLs (#16 cutover; [DEV-VM.md](../../../k3s/DEV-VM.md) runner preparation). Do not use the port-forward below for new work. It is kept as a record.
+
 The live hosting-boundary CNP allows PostgreSQL ingress only from hosting-api and
 hosting-ops Pods in m2-hosting. Host-network Docker is neither. Host DNS also cannot
 resolve the cluster-local DB name. Adding CoreDNS alone does not fix connectivity.

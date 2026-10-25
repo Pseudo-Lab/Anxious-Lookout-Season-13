@@ -22,7 +22,7 @@ Docker and k3s containerd stores differ. Record each web/API image digest, platf
 sudo /usr/local/bin/k3s ctr -n k8s.io images import /PRIVATE/RELEASE/images.tar
 ```
 
-Building these linux/arm64 images on the x86_64 development server instead of the node: [CROSS-BUILD.md](CROSS-BUILD.md). Use actual digest-qualified image names returned by containerd when rendering. Do not assume a Docker build alone made images available to kubelet. No embedded/private registry or host firewall change is introduced.
+Building these linux/arm64 images on the x86_64 development server instead of the node: [CROSS-BUILD.md](CROSS-BUILD.md). Production ↔ development differences (images, policy state, worker DB route, login/origin): [PARITY.md](../k3s/PARITY.md). Use actual digest-qualified image names returned by containerd when rendering. Do not assume a Docker build alone made images available to kubelet. No embedded/private registry or host firewall change is introduced.
 
 ## Private configuration inputs
 
@@ -53,12 +53,17 @@ Create these only after target/diff/baseline/rollback review. Secret file modes/
      bash infra/hosting/render-migration.sh > /tmp/m2-auth-migration.yaml
    ```
 
-3. Review resource list/diff and server dry-run in the approved namespace sequence before real apply. New namespace m2-hosting, new m2-postgres-retain StorageClass, SA, ConfigMap, PostgreSQL StatefulSet/PVC/headless Service, web/API Deployments/Services, owned IngressRoute and owned CNP only. Default StorageClass and existing PVs/namespaces/apps remain untouched. Establish policies before workload exposure and observe policy realization. Do not interpret absent namespace/Secret/PVC prerequisites as a completed server dry-run.
+3. Review resource list/diff and server dry-run in the approved namespace sequence before real apply. New namespace m2-hosting, new m2-postgres-retain StorageClass, SA, ConfigMap, PostgreSQL StatefulSet/PVC/headless Service, web/API Deployments/Services and owned IngressRoute only. No CiliumNetworkPolicy is rendered (#54); see the network note below. Default StorageClass and existing PVs/namespaces/apps remain untouched. Establish policies before workload exposure and observe policy realization. Do not interpret absent namespace/Secret/PVC prerequisites as a completed server dry-run.
 4. On explicit application authorization, create dedicated namespace/retaining storage/policy/config/secrets, start PG, wait for ready/volume ownership, run explicit **auth-alembic-0001** Job, then web/API rollout. Cluster-scoped Namespace/StorageClass bootstrap is separate from the namespaced SA; wait for authorized namespace creation before namespaced server dry-runs. Check actual role login/schema as well as pg_isready. No automatic API-startup migrations or DB resets. Request budgets/surge are initial values; measure them on this node.
 5. IngressRoute selects only the actual numeric public IPv4 Host from mandatory M2_PUBLIC_ORIGIN. Existing hostless `/android-agent` resource is not edited: the web rule excludes both `/android-agent` and `/android-agent/`. API matcher is exact `/api` or `/api/` prefix; `/apis` goes to web. Dashboard/TLS/hostless root fallback are not added. Browser uses the actual public origin. Host matching ignores port, so verify existing entrypoint/ServiceLB external port matches the exact AUTH_ORIGIN; actual auth separately enforces Host/protocol/port. Verify unspecified Host/IP cannot expose M2 root/API and compare original existing routes.
 6. Validate status/versions/web assets/content-type/cache/real 404, role/DB behavior, resource/restart readings and M1 authorized-source controls + policy drop evidence for denials. Ready alone or timeout without evidence is insufficient.
 
-API egress permits approved DB and CoreDNS plus public IPv4 HTTPS excluding private/reserved CIDRs. Real provider URLs are hardcoded; DNS FQDN enforcement is not claimed because existing Cilium L7 proxy remains off. Existing all-non-system node/API/metadata/own-public-IP guard remains authoritative. Web/PG have no runtime egress; operator migration has only DNS/DB. Tenant labels/materials-api/agent-manager labels are not reused.
+**Network policy:** `render.sh` emits no CiliumNetworkPolicy (#54).
+- The original scoped `hosting-boundary` CNP restricted API egress, kept web/PG without egress and admitted PG ingress only from hosting-api/ops.
+- The live node deleted it in the issue #13 default-allow transition (decision C, [DEFAULT-ALLOW.md](../k3s/DEFAULT-ALLOW.md)). m2-hosting endpoints now have no selecting policy and use Cilium default allow, and the host-network runner workers reach PostgreSQL at its Pod IP.
+- The renderer matches that state. Applying the current output to the live node changes no policy object: none is created, and `kubectl apply` does not delete objects absent from its input. `infra/k3s/host/postboot-check.sh` already requires both CNPs to be absent.
+- Reintroducing a hosting policy is a new issue, and must keep the worker database route. [PARITY.md](../k3s/PARITY.md) classifies the policy state as "must match".
+- Real provider URLs are hardcoded. DNS FQDN enforcement is not claimed because the Cilium L7 proxy is off. Tenant labels/materials-api/agent-manager labels are not reused.
 
 ## Data persistence and rollback
 
@@ -103,7 +108,7 @@ ssh -N -L 28000:127.0.0.1:28000 VERIFIED_SSH_USER@VERIFIED_SERVER
 
 Use AUTH_ORIGIN=http://127.0.0.1:28000 and explicit ALLOW_INSECURE_LOOPBACK=true only for that optional local origin; keep its gateway loopback bound. This is independent of the selected public-IP k3s acceptance and does not substitute for actual browser/provider evidence.
 
-Real-auth endpoints validate incoming Host/protocol/port against configured AUTH_ORIGIN. Forwarded protocol is trusted only from explicit AUTH_TRUSTED_PROXY_CIDRS combined with the ingress-only-from-Traefik Cilium policy. HTTP is allowed only for the explicit selected origin; do not weaken source/Host/Origin/CSRF validation or add a broad hostless route. Review origin, callback and routing together on later TLS transition.
+Real-auth endpoints validate incoming Host/protocol/port against configured AUTH_ORIGIN. Forwarded protocol is trusted only from explicit AUTH_TRUSTED_PROXY_CIDRS. The rendered value is the whole Pod CIDR `10.42.0.0/16`. Since the issue #13 default-allow transition, no policy limits API ingress to Traefik, so any Pod that reaches the API counts as a trusted proxy. With the current `http://` origin, a peer can only claim a protocol, which must still equal the configured origin's scheme. Revisit this before a TLS origin. HTTP is allowed only for the explicit selected origin; do not weaken source/Host/Origin/CSRF validation or add a broad hostless route. Review origin, callback and routing together on later TLS transition.
 
 For k3s operator account changes, `render-approval.sh` emits an ops-labelled non-root Job with the private operator credential. Supply verified GITHUB_ID, APPROVED, ROLE, ACTOR and REASON plus API_IMAGE, inspect it, then use `kubectl create -f` only under the approved operation. No ID/default administrator is selected by the script. It uses generateName for an auditable one-shot execution; retain status/log outcome and remove only the completed owned Job if desired. The direct CLI remains available for audit text outside the renderer's safe ASCII literal set.
 

@@ -9,6 +9,7 @@ The active network baseline is [issue #13 decision C](https://github.com/Pseudo-
 - Cilium replaces Flannel and kube-router policy; kube-proxy remains enabled. IPv4 only.
 - One node has no high availability; local-path PVCs depend on its disk.
 - Development and rehearsal use an x86_64 KVM guest with the same pins and configuration: [DEV-VM.md](DEV-VM.md).
+- Production ↔ development differences and whether each is allowed: [PARITY.md](PARITY.md). A change that creates a new difference adds a row there.
 
 Record routes, Docker health, firewall rules, SELinux/NetworkManager configuration and recovery access before installation. `versions.env` pins versions; install `config.yaml` as `/etc/rancher/k3s/config.yaml` mode 0600, preserve Docker configuration and keep SELinux enforcing with the k3s policy package. Exclude CNI interfaces from NetworkManager management without restarting the remote host connection.
 

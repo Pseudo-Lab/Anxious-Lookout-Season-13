@@ -1,5 +1,19 @@
 # Issue #13: default-allow transition (decision C)
 
+> **Existing node only.** This procedure is the record of the live node's transition. Do not run it on a new node:
+> - Its variables (`k`, `snapshot`, `cidr_rule`) are defined only in step 0, so step 3 alone fails under `set -u` with `cidr_rule: unbound variable`.
+> - Step 0 itself queries CNPs, ipsets and sync units that a new node never had.
+> - Since #54 `infra/hosting/render.sh` no longer renders `hosting-boundary`, so a node installed from current source already has the target policy state.
+>
+> A new node reaches the same end state with the standalone commands in [DEV-VM.md](DEV-VM.md), runner preparation step 1 (the Pod CIDR → TCP 6443 rule and absence checks). Of step 4 below, only these checks apply to a new or synthetic node:
+> - deleted objects absent (`--ignore-not-found`)
+> - codex-runner policies present
+> - Cilium forwarding/NAT chains and status
+> - the API Pod's verified-TLS request to `10.0.0.107:6443`
+> - DNS/HTTPS
+>
+> These do not apply: the old ipset/rule and sync-unit checks, the metrics outcome, and the real login → Codex response → logout run, which needs a real provider. See [PARITY.md](PARITY.md).
+
 PM executes only after source/plan review. Target: single node `anxious-lookout`, private API `10.0.0.107:6443`, Pod CIDR `10.42.0.0/16`, public firewalld zone. No backend/RBAC changes. Do not change codex-runner or codex-trial policy objects. The old A-plan is superseded.
 
 Run the following in a root Bash shell with `set -euo pipefail`, `umask 077`, `jq`, `firewall-cmd` and `/usr/local/bin/k3s` available. Keep the same shell and private snapshot path for rollback. Do not use firewalld reload. Stop on errors, retain evidence and use rollback for completed steps; do not blindly continue. A failed read is not evidence of absence.

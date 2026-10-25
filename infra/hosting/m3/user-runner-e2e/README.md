@@ -9,7 +9,8 @@ earlier instruction to preserve the runner policies; KNP and trial policies rema
 Issue #13 decision C supersedes the hosting-link network instructions below after
 the initial deployment. Follow `../../../k3s/DEFAULT-ALLOW.md`. Do not rerun/apply
 the complete deployment renderer's `resources.json` after C: it would recreate
-`hosting-access-web-link-v1`. Preserve the already installed codex-runner policies
+`hosting-access-web-link-v1` (`backend/ops/user_runner_deployment.py` still
+emits it; production must not have it, see `../../../k3s/PARITY.md`). Preserve the already installed codex-runner policies
 and runtime/RBAC resources. The historical preparation sequence below records the
 initial bootstrap; no new bootstrap or backend change is required for C.
 
