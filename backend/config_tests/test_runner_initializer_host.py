@@ -93,13 +93,14 @@ sudo() {
   esac
 }
 docker() {
-  if [[ $1 == image ]]; then echo 'linux/arm64 10001:10001'; return 0; fi
+  if [[ $1 == image ]]; then echo "linux/$IMAGE_ARCH 10001:10001"; return 0; fi
   [[ $1 == run ]] || return 90
   printf 'DOCKER %s\\n' "$*" >> "$TRACE"
 }
 ''')
     result = subprocess.run(['bash', str(SCRIPT), mode, 'sha256:' + 'a' * 64],
-                            env=dict(os.environ, BASH_ENV=str(prelude), TRACE=str(trace), FAILURE=failure),
+                            env=dict(os.environ, BASH_ENV=str(prelude), TRACE=str(trace), FAILURE=failure,
+                                     IMAGE_ARCH='arm64'),
                             capture_output=True, timeout=5)
     calls = trace.read_text()
     assert (result.returncode == 0) == (not failure), result.stderr.decode()
@@ -108,3 +109,59 @@ docker() {
         assert calls.count('matchpathcon -V ') == 2
         assert '--user 10001:10001' in calls
         assert '--' + mode in calls
+
+
+@pytest.mark.parametrize('arguments, image, ok', [
+    ([], 'arm64', True),             # production default
+    (['arm64'], 'arm64', True),
+    (['amd64'], 'amd64', True),      # x86_64 development VM only
+    ([], 'amd64', False),            # default never accepts the development platform
+    (['arm64'], 'amd64', False),
+    (['amd64'], 'arm64', False),
+])
+def test_image_platform_argument(tmp_path, arguments, image, ok):
+    trace = tmp_path / 'trace'
+    prelude = tmp_path / 'platform.sh'
+    prelude.write_text('''
+hostname() { echo simple; }
+ip() { echo '[]'; }
+jq() { cat >/dev/null; }
+getenforce() { echo Enforcing; }
+sudo() {
+  [[ $1 == -n ]] || return 90
+  shift
+  case "$1" in
+    /usr/local/bin/k3s) return 0;;
+    readlink) echo "${!#}";;
+    stat) [[ $2 == -c && $3 == %C ]] && echo 'system_u:object_r:container_file_t:s0' || echo '10001:10001:700';;
+    matchpathcon) return 0;;
+    *) return 90;;
+  esac
+}
+docker() {
+  if [[ $1 == image ]]; then echo "linux/$IMAGE_ARCH 10001:10001"; return 0; fi
+  [[ $1 == run ]] || return 90
+  printf 'DOCKER %s\\n' "$*" >> "$TRACE"
+}
+''')
+    result = subprocess.run(['bash', str(SCRIPT), 'verify', 'sha256:' + 'a' * 64, *arguments],
+                            env=dict(os.environ, BASH_ENV=str(prelude), TRACE=str(trace), IMAGE_ARCH=image),
+                            capture_output=True, timeout=5)
+    assert (result.returncode == 0) == ok, result.stderr.decode()
+    assert trace.exists() == ok
+
+
+@pytest.mark.parametrize('arguments', [['x86_64'], ['aarch64'], ['ARM64'], [''], ['amd64', 'extra']])
+def test_unsupported_platform_refuses_before_host_checks(tmp_path, arguments):
+    trace = tmp_path / 'trace'
+    prelude = tmp_path / 'refuse.sh'
+    prelude.write_text('''
+hostname() { echo called >> "$TRACE"; echo simple; }
+sudo() { echo called >> "$TRACE"; return 90; }
+docker() { echo called >> "$TRACE"; return 90; }
+''')
+    result = subprocess.run(['bash', str(SCRIPT), 'verify', 'sha256:' + 'a' * 64, *arguments],
+                            env=dict(os.environ, BASH_ENV=str(prelude), TRACE=str(trace)),
+                            capture_output=True, timeout=5)
+    assert result.returncode == 2
+    assert not trace.exists()

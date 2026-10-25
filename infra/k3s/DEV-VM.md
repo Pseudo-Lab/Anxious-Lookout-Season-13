@@ -80,13 +80,35 @@ Recommended: libvirt user-mode networking with the `passt` backend. It creates n
 
 ## k3s and Cilium
 
-Follow [README.md](README.md) "Layout and installation" in the same order as production: record routes/firewall/SELinux/NetworkManager state, install `config.yaml` as `/etc/rancher/k3s/config.yaml` mode 0600 with the k3s SELinux policy package, exclude CNI interfaces from NetworkManager, start k3s pinned to `K3S_VERSION`, then install Cilium `CILIUM_VERSION` with `cilium-values.yaml` and CLI `CILIUM_CLI_VERSION`. The installers select the x86_64 artifacts of the same pinned versions; nothing in `versions.env`, `config.yaml` or `cilium-values.yaml` changes. The guest has no Docker; this README's Docker preservation steps are no-ops there.
+Follow [README.md](README.md) "Layout and installation" in the same order as production: record routes/firewall/SELinux/NetworkManager state, install `config.yaml` as `/etc/rancher/k3s/config.yaml` mode 0600 with the k3s SELinux policy package, exclude CNI interfaces from NetworkManager, start k3s pinned to `K3S_VERSION`, then install Cilium `CILIUM_VERSION` with `cilium-values.yaml` and CLI `CILIUM_CLI_VERSION`. The installers select the x86_64 artifacts of the same pinned versions; nothing in `versions.env`, `config.yaml` or `cilium-values.yaml` changes.
 
-Then apply the hosting procedure as written: `infra/hosting/render.sh` output server dry-run, web/API rollout and one runner Pod, using linux/amd64 images built from the same source and imported with `k3s ctr images import` exactly as `infra/hosting/README.md` describes. Build them on the development server with the production arguments and `--platform linux/amd64` (for example `docker buildx build --load --platform linux/amd64 -f backend/Dockerfile --target runner --build-arg APP_GIT_SHA=FULL_SHA --build-arg APP_BUILT_AT=UTC -t IMAGE .`), then `docker save` and copy the archive into the guest. `build_common_chatbot.sh` stays arm64-only because it produces production artifacts.
+The guest runs Docker Engine next to k3s, as the production node does. The production runner path needs it: the #16/#18 controller, observer, supply and restore units are rootful `docker run --pull=never <provisioner local ID>` invocations ([rollout README](../hosting/m3/multi-user-runners/rollout/README.md)). Install the Docker Engine major version recorded on the OCI node (`docker version` there), from Docker's RHEL repository for x86_64, before k3s. Turn on the containerd image store (`/etc/docker/daemon.json`: `{"features": {"containerd-snapshotter": true}}`), as on production, so that local image IDs are OCI index digests. Then follow this README's Docker preservation steps as written.
+
+Then apply the hosting procedure as written: `infra/hosting/render.sh` output server dry-run, web/API rollout and one runner Pod, using linux/amd64 images built from the same source and imported with `k3s ctr images import` exactly as `infra/hosting/README.md` describes. Build them inside the guest with its Docker, using the production arguments (for example `docker build -f backend/Dockerfile --target runner --build-arg APP_GIT_SHA=FULL_SHA --build-arg APP_BUILT_AT=UTC -t IMAGE .`, and `--target provisioner` for the runner workers). `docker save` the result and import it into k3s. Building on the development server with `--platform linux/amd64` also works, but see the image-store note below. `build_common_chatbot.sh` stays arm64-only because it produces production artifacts.
+
+The one runner Pod comes from the current production path, the #16/#18 pool rollout. Follow [rollout/README.md](../hosting/m3/multi-user-runners/rollout/README.md):
+
+1. Render `values.json` with guest values.
+2. Apply `resources.json`.
+3. Issue the worker SA tokens.
+4. Install the units.
+5. Start restore once.
+6. Run one finite `issue16-controller.service` for one entered owner.
+
+Differences from production in that procedure:
+
+- **Guest-observed values:** `values.json` takes the guest's own namespace/node/source UIDs, pod CIDR, extracted k3s CLI path (the hash directory differs on x86_64) and guest image references.
+- **Synthetic identities:**
+  - `providerAccountId` is a synthetic identifier. It is never a credential, and supply is not run.
+  - The single owner is a synthetic approved editor. The allowlist holds only that owner.
+- **Login:** the API is configured as in production (`OAUTH_MODE=github`) but has no reachable GitHub OAuth app for the guest-only origin. So the owner's session is seeded in the guest database: one `auth.accounts` row (role `editor`, approved) and one `auth.sessions` row, whose `token_hash` is `app.main.session_digest(token, "http://192.88.99.1")`. The owner then calls `POST /api/.../runner` with that session cookie, the session's CSRF token and an `Idempotency-Key`, through `curl --resolve`.
+- **Everything after login is the production code path:** registry entry, controller, PV/PVC/Secret, binding and Pod. The Pod is expected to reach Running with health `not_configured`. No provider credential exists.
+
+The older #10 one-shot rehearsal (`user-runner-isolated/`) is not the current path. Its `initialize-rehearsal.sh` and `IMAGE-INITIALIZER-PACKAGE.md` take the image platform (`amd64` on this VM), but its fixed rehearsal PV/namespace values are historical.
 
 Image audits take the architecture explicitly: `access_image_audit.py --architecture=amd64 ARCHIVE METADATA INSPECT REPOSITORY SHA` and `common_chatbot_image_audit.py ROLE --architecture amd64 …`. The default stays `arm64`, and production output keys are unchanged (`arm64Manifest`; amd64 runs report `amd64Manifest`). `image_audit.py` accepts `--architecture=` too, but its `POLICY` holds only approved production arm64 image IDs, so it has no development-VM role.
 
-The audits need a Docker daemon that uses the containerd image store. On such a daemon the build metadata's `containerimage.digest` is the OCI index that `docker save` writes. The development server's daemon has the containerd image store turned off (`/etc/docker/daemon.json`: `"containerd-snapshotter": false`). There, `containerimage.digest` is the image config digest, and `docker save` builds a new manifest at save time. So the audits refuse every archive built there, for either architecture (measured in [CROSS-BUILD.md](../hosting/CROSS-BUILD.md)). For development VM images, take the image reference from the guest after import (`k3s ctr --namespace k8s.io images ls`, column `DIGEST`, the manifest in the archive's `index.json`). Do not change the host daemon setting: changing it hides every image the host's other projects have in the classic store.
+The audits need a Docker daemon that uses the containerd image store. On such a daemon the build metadata's `containerimage.digest` is the OCI index that `docker save` writes. The development server's daemon has the containerd image store turned off (`/etc/docker/daemon.json`: `"containerd-snapshotter": false`). There, `containerimage.digest` is the image config digest, and `docker save` builds a new manifest at save time. So the audits refuse every archive built there, for either architecture (measured in [CROSS-BUILD.md](../hosting/CROSS-BUILD.md)). Images built inside the guest, whose Docker has the containerd image store on, are audited normally with `--architecture=amd64`. For archives built on the development server, take the image reference from the guest after import (`k3s ctr --namespace k8s.io images ls`, column `DIGEST`, the manifest in the archive's `index.json`). Do not change the host daemon setting: changing it hides every image the host's other projects have in the classic store.
 
 Take snapshot `k3s-ready` after Cilium is Ready.
 
