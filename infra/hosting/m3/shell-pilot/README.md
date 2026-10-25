@@ -68,10 +68,14 @@ kubectl -n shell-pilot exec pilot-b -c agent   -- python -B /pilot/src/harness.p
   - tool calls and failures, timeouts, truncations, patch failures, repeated commands
   - token totals
 - The run file in `/pilot/results/` also keeps the commands, truncated to 200 characters.
-- Each Pod keeps its own budget file and may use **half** of the pilot cap (1.2M input, 50k output), so A and B
-  together can never pass it. A turn that crosses the remaining share is interrupted and its final usage is still
-  counted. A run whose turn may have reached the model but reported no usage is marked unknown and blocks every
-  later run in that Pod until it is reconciled by hand; it is never counted as zero.
+- Each Pod keeps its own budget file and may start a run only while it is under **half** of the pilot cap (1.2M
+  input, 50k output). Usage events arrive after the fact, so this cannot guarantee a turn never overshoots: when a
+  turn crosses the remaining share the harness interrupts it, counts its final usage, and halts that Pod.
+- Before `turn/start` the run is written as in-flight (fsync, atomic replace). It is settled right after the turn,
+  before closing, grading or writing results. Observed usage is always added as a lower bound; without the
+  turn's completion event the run is unconfirmed. An unsettled, unconfirmed or halted run blocks every later run.
+- **Operator rule:** any `budget_stop`, unconfirmed or unsettled run stops the whole pilot (both Pods) and is
+  reported to PM before anything else runs.
 
 ## Revocation and cleanup (immediately after the fourth run)
 

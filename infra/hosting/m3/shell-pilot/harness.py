@@ -81,7 +81,29 @@ def spent():
     try:
         return json.loads(BUDGET.read_text())
     except FileNotFoundError:
-        return {'input': 0, 'cachedInput': 0, 'output': 0, 'runs': [], 'unknown': []}
+        return {'input': 0, 'cachedInput': 0, 'output': 0, 'runs': [], 'unknown': [], 'inflight': None}
+
+
+def save(budget):
+    # Atomic replace with fsync: a crash leaves either the previous or the new state, never none.
+    partial = BUDGET.with_suffix('.partial')
+    with open(partial, 'w') as stream:
+        json.dump(budget, stream, indent=2)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(partial, BUDGET)
+
+
+def blocked(budget):
+    if budget.get('inflight'):
+        return 'run '+budget['inflight']+' never settled; reconcile it before another paid run'
+    if budget.get('unknown'):
+        return 'a previous run has unconfirmed token usage; reconcile it before another paid run'
+    if budget.get('halted'):
+        return 'run '+budget['halted']+' crossed the budget share; the pilot stops here'
+    if budget['input'] >= SHARE['input'] or budget['output'] >= SHARE['output']:
+        return 'pilot budget share exhausted; not starting'
+    return None
 
 
 class Session:
@@ -183,10 +205,9 @@ def summarize(item, counters, commands):
 def run(task, config, wall_limit):
     RESULTS.mkdir(parents=True, exist_ok=True)
     budget = spent()
-    if budget.get('unknown'):
-        raise SystemExit('a previous run has unknown token usage; reconcile it before another paid run')
-    if budget['input'] >= SHARE['input'] or budget['output'] >= SHARE['output']:
-        raise SystemExit('pilot budget share exhausted; not starting')
+    reason = blocked(budget)
+    if reason:
+        raise SystemExit(reason)
     run_id = f'{task}-{config}-{uuid.uuid4().hex[:8]}'
     workspace, cwd = prepare_workspace(config, task, run_id)
     home = PILOT/'homes'/run_id
@@ -201,7 +222,7 @@ def run(task, config, wall_limit):
     counters = dict.fromkeys(['toolCalls', 'toolFailures', 'timeouts', 'truncated', 'fileChanges', 'patchFailures',
                               'agentMessages', 'modelRequests'], 0)
     commands, usage, status, started = [], None, 'unknown', time.monotonic()
-    turn_started = False
+    turn_started = settled = False
     try:
         session.rpc('initialize', {'clientInfo': {'name': 'shell_pilot', 'version': '1'}, 'capabilities': {'experimentalApi': True}})
         session.send({'method': 'initialized'})
@@ -215,7 +236,10 @@ def run(task, config, wall_limit):
         else:
             params.update(sandbox='workspace-write')
         thread = session.rpc('thread/start', params)['thread']['id']
-        turn_started = True  # Set before the call: a lost reply may still have started a paid turn.
+        # Durable before the paid call: if anything below dies, the next run sees an unsettled run.
+        budget['inflight'] = run_id
+        save(budget)
+        turn_started = True
         session.rpc('turn/start', {'threadId': thread, 'input': [{'type': 'text', 'text': pilot_tasks.TASKS[task]['prompt']}]})
         remaining = {'input': SHARE['input'] - budget['input'], 'output': SHARE['output'] - budget['output']}
         stop_reason, drain_until = None, None
@@ -246,6 +270,7 @@ def run(task, config, wall_limit):
                     stop_reason = 'budget_stop'
             elif method == 'turn/completed':
                 status = stop_reason or event['params'].get('turn', {}).get('status', 'completed')
+                settled = True  # The final usage of a turn precedes its completion event.
                 break
             elif method == 'harness/exited':
                 status = 'app_server_exited'
@@ -254,24 +279,31 @@ def run(task, config, wall_limit):
         status = 'harness_error: ' + type(failure).__name__  # Recorded like any run; usage rules below apply.
     finally:
         wall = time.monotonic() - started
-        session.close()
-        if broker is not None:
-            broker.close()
+        tokens = {k: (usage or {}).get(k, 0) for k in ('inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningOutputTokens')}
+        if turn_started:
+            # Settle before anything else can fail (close, grading, result files). Observed usage is a lower
+            # bound; without the turn's completion event it is unconfirmed and blocks later runs.
+            budget['input'] += tokens['inputTokens']
+            budget['cachedInput'] += tokens['cachedInputTokens']
+            budget['output'] += tokens['outputTokens']
+            budget['runs'].append(run_id)
+            if not settled:
+                budget.setdefault('unknown', []).append(run_id)
+            if status == 'budget_stop':
+                budget['halted'] = run_id  # The share was crossed: no further run in this Pod.
+            budget['inflight'] = None
+            save(budget)
+        for closing in (session.close, broker.close if broker is not None else None):
+            try:
+                if closing: closing()
+            except Exception:
+                pass
     grade = pilot_tasks.grade(task, workspace)
     repeated = len(commands) - len(set(commands))
-    result = {'run': run_id, 'task': task, 'config': config, 'turnStatus': status, 'wallSeconds': round(wall, 1),
-              **grade, **counters, 'repeatedCommands': repeated,
-              'tokens': {k: (usage or {}).get(k, 0) for k in ('inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningOutputTokens')},
+    result = {'run': run_id, 'task': task, 'config': config, 'turnStatus': status, 'settled': settled,
+              'wallSeconds': round(wall, 1), **grade, **counters, 'repeatedCommands': repeated, 'tokens': tokens,
               'commands': commands}
     (RESULTS/(run_id+'.json')).write_text(json.dumps(result, indent=2))
-    budget['input'] += result['tokens']['inputTokens']
-    budget['cachedInput'] += result['tokens']['cachedInputTokens']
-    budget['output'] += result['tokens']['outputTokens']
-    budget['runs'].append(run_id)
-    if usage is None and turn_started:
-        # A turn reached the model but no usage arrived (crash, exit, timeout): never count it as zero.
-        budget.setdefault('unknown', []).append(run_id)
-    BUDGET.write_text(json.dumps(budget, indent=2))
     print(json.dumps({k: v for k, v in result.items() if k != 'commands'}))
 
 

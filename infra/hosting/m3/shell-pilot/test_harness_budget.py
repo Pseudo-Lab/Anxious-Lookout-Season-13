@@ -77,7 +77,7 @@ def test_missing_usage_after_a_started_turn_blocks_later_runs(env, capsys):
     FakeSession.script = [{'method': 'harness/exited'}]
     harness.run('fix-failing-test', 'A', 900)
     assert budget(env)['unknown'] and budget(env)['input'] == 0
-    with pytest.raises(SystemExit, match='unknown token usage'):
+    with pytest.raises(SystemExit, match='unconfirmed'):
         harness.run('slow-suite', 'A', 900)
 
 
@@ -92,3 +92,37 @@ def test_a_lost_turn_start_reply_is_still_unknown(env, capsys, monkeypatch):
 def test_each_configuration_gets_half_of_the_pilot_cap():
     assert harness.SHARE == {'input': 1_200_000, 'output': 50_000}
     assert sum(harness.SHARE.values()) * 2 == sum(harness.LIMITS.values())
+
+
+def test_usage_then_exit_without_completion_is_a_counted_lower_bound_and_blocks(env, capsys):
+    FakeSession.script = [usage(10, 2), {'method': 'harness/exited'}]
+    harness.run('fix-failing-test', 'A', 900)
+    state = budget(env)
+    assert state['input'] == 10 and state['unknown'] and state['inflight'] is None
+    with pytest.raises(SystemExit, match='unconfirmed'):
+        harness.run('slow-suite', 'A', 900)
+
+
+def test_settlement_survives_a_grading_failure(env, monkeypatch):
+    FakeSession.script = [usage(10, 2), {'method': 'turn/completed', 'params': {'turn': {'status': 'completed'}}}]
+    def broken(task, root): raise OSError('disk')
+    monkeypatch.setattr(harness.pilot_tasks, 'grade', broken)
+    with pytest.raises(OSError):
+        harness.run('fix-failing-test', 'B', 900)
+    state = budget(env)
+    assert (state['input'], state['output'], state['unknown'], state['inflight']) == (10, 2, [], None)
+
+
+def test_a_crash_after_the_paid_call_leaves_an_unsettled_marker(env, monkeypatch):
+    # Simulate the process dying inside the turn: the durable marker written before turn/start remains.
+    FakeSession.script = []
+    def die(self, method, params, timeout=60):
+        if method == 'turn/start': raise SystemExit('killed')
+        return {'thread': {'id': 't'}} if method == 'thread/start' else {}
+    monkeypatch.setattr(FakeSession, 'rpc', die)
+    monkeypatch.setattr(harness, 'save', lambda state: harness.BUDGET.write_text(json.dumps(state)) if state.get('inflight') else None)
+    with pytest.raises(SystemExit):
+        harness.run('fix-failing-test', 'B', 900)
+    assert budget(env)['inflight']
+    with pytest.raises(SystemExit, match='never settled'):
+        harness.run('slow-suite', 'B', 900)
