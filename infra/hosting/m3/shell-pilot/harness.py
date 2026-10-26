@@ -1,4 +1,7 @@
-"""#64 shell-surface pilot: one task under configuration A (current) or B (native shell).
+"""#64 shell-surface pilot: one task slot under configuration A (current) or B (native shell).
+
+Full run: 2 tasks x A/B x 15 slots (ORDER). `gate` reads both Pods' ledgers and names the next slot or
+the reason to stop both; `campaign.sh` drives it. Each slot runs at most once.
 
 Runs inside the pilot Pod as UID 10001 with the runner image (PYTHONPATH=/app).
 
@@ -34,10 +37,14 @@ ACCESS = Path('/access/access.json')  # Secret pilot-access: access token only, 
 PILOT = Path('/pilot')
 RESULTS = PILOT/'results'
 BUDGET = RESULTS/'budget.json'
-LIMITS = {'input': 2_400_000, 'output': 100_000}  # Issue #64 cap for the whole pilot.
+LIMITS = {'input': 8_000_000, 'output': 60_000}  # Issue #64 full run (60 turns); its own ledger, the pilot excluded.
 # A and B run in separate Pods with separate budget files, so each configuration gets half:
-# the two can never add up past the pilot cap.
+# the two can never add up past the cap.
 SHARE = {key: value // 2 for key, value in LIMITS.items()}
+REPEATS = 15        # Slots per task and configuration.
+ERROR_LIMIT = 3     # harness_error slots across A and B that stop the whole run.
+ORDER = [(task, config, slot) for slot in range(1, REPEATS + 1)
+         for task in ('fix-failing-test', 'slow-suite') for config in ('A', 'B')]  # A/B alternate within each task.
 PROVIDER = ['model_provider="access_only_openai"', 'model_providers.access_only_openai.name="OpenAI"',
             'model_providers.access_only_openai.base_url="https://chatgpt.com/backend-api/codex"',
             'model_providers.access_only_openai.wire_api="responses"',
@@ -103,7 +110,45 @@ def blocked(budget):
         return 'run '+budget['halted']+' crossed the budget share; the pilot stops here'
     if budget['input'] >= SHARE['input'] or budget['output'] >= SHARE['output']:
         return 'pilot budget share exhausted; not starting'
+    if len(budget.get('errors', [])) >= ERROR_LIMIT:
+        return 'harness error limit reached; the run stops here'
     return None
+
+
+def gate(budgets):
+    """Operator check before each slot, over both Pods' ledgers: any stop condition stops A and B.
+
+    Returns ('stop', reason), ('next', (task, config, slot)) or ('done', None)."""
+    for config in ('A', 'B'):
+        reason = blocked(budgets[config])
+        if reason:
+            return 'stop', config + ': ' + reason
+    if any(sum(state[key] for state in budgets.values()) >= LIMITS[key] for key in LIMITS):
+        return 'stop', 'total budget exhausted'
+    errors = sum(len(state.get('errors', [])) for state in budgets.values())
+    if errors >= ERROR_LIMIT:
+        return 'stop', f'{errors} harness errors across A and B'
+    done = set(budgets['A'].get('slots', {})) | set(budgets['B'].get('slots', {}))
+    for task, config, slot in ORDER:
+        if slot_key(task, config, slot) not in done:
+            return 'next', (task, config, slot)
+    return 'done', None
+
+
+def slot_key(task, config, slot):
+    return f'{task}-{config}-{slot:02d}'
+
+
+def clear_executor_files(broker):
+    """A: files the model creates through the executor belong to UID 20002 (for example `__pycache__`, 2755), which
+    the harness (10001) cannot remove. Empty the shared workspace through the executor before the harness's pass."""
+    lease = broker.activate({'cleanup': True})
+    try:
+        result = broker.execute({'lease': lease, 'arguments': {'command': 'find . -mindepth 1 -delete', 'cwd': '.'}})
+    finally:
+        broker.revoke()
+    if result.get('exitCode') != 0:
+        raise RuntimeError('executor cleanup failed')
 
 
 class Session:
@@ -202,28 +247,34 @@ def summarize(item, counters, commands):
         counters['agentMessages'] += 1
 
 
-def run(task, config, wall_limit):
+def run(task, config, wall_limit, slot):
     RESULTS.mkdir(parents=True, exist_ok=True)
     budget = spent()
+    key = slot_key(task, config, slot)
     reason = blocked(budget)
+    if not reason and key in budget.get('slots', {}):
+        reason = f'slot {key} already ran as {budget["slots"][key]["run"]}; no automatic rerun'
     if reason:
         raise SystemExit(reason)
-    run_id = f'{task}-{config}-{uuid.uuid4().hex[:8]}'
-    workspace, cwd = prepare_workspace(config, task, run_id)
-    home = PILOT/'homes'/run_id
-    home.mkdir(parents=True, mode=0o700)
-    broker = None
-    if config == 'A':
-        from runner.shell_broker import ShellBroker
-        (PILOT/'ipc').mkdir(mode=0o700, exist_ok=True)
-        broker = ShellBroker(PILOT/'ipc'/(run_id+'.sock'), lambda turn, arguments: True, lambda value: value,
-                             executor='/run/shell-executor/command.sock', wall=30)
-    session = Session(config, home, cwd)
+    run_id = f'{key}-{uuid.uuid4().hex[:8]}'
+    budget.setdefault('slots', {})[key] = {'run': run_id, 'status': 'started'}  # Claimed before anything can fail.
+    save(budget)
     counters = dict.fromkeys(['toolCalls', 'toolFailures', 'timeouts', 'truncated', 'fileChanges', 'patchFailures',
                               'agentMessages', 'modelRequests'], 0)
     commands, usage, status, started = [], None, 'unknown', time.monotonic()
     turn_started = settled = False
+    broker = session = workspace = None
     try:
+        if config == 'A':
+            from runner.shell_broker import ShellBroker
+            (PILOT/'ipc').mkdir(mode=0o700, exist_ok=True)
+            broker = ShellBroker(PILOT/'ipc'/(run_id+'.sock'), lambda turn, arguments: True, lambda value: value,
+                                 executor='/run/shell-executor/command.sock', wall=30)
+            clear_executor_files(broker)
+        workspace, cwd = prepare_workspace(config, task, run_id)
+        home = PILOT/'homes'/run_id
+        home.mkdir(parents=True, mode=0o700)
+        session = Session(config, home, cwd)
         session.rpc('initialize', {'clientInfo': {'name': 'shell_pilot', 'version': '1'}, 'capabilities': {'experimentalApi': True}})
         session.send({'method': 'initialized'})
         session.rpc('account/login/start', access())
@@ -293,13 +344,17 @@ def run(task, config, wall_limit):
             if status == 'budget_stop':
                 budget['halted'] = run_id  # The share was crossed: no further run in this Pod.
             budget['inflight'] = None
-            save(budget)
-        for closing in (session.close, broker.close if broker is not None else None):
+        budget['slots'][key]['status'] = status
+        if status.startswith('harness_error'):
+            budget.setdefault('errors', []).append(key)  # An error slot is a result, never rerun automatically.
+        save(budget)
+        for closing in (session.close if session is not None else None, broker.close if broker is not None else None):
             try:
                 if closing: closing()
             except Exception:
                 pass
-    grade = pilot_tasks.grade(task, workspace)
+    grade = pilot_tasks.grade(task, workspace) if workspace is not None else {
+        'passed': False, 'testsChanged': False, 'summary': 'not graded: no workspace'}
     repeated = len(commands) - len(set(commands))
     result = {'run': run_id, 'task': task, 'config': config, 'turnStatus': status, 'settled': settled and usage is not None,
               'wallSeconds': round(wall, 1), **grade, **counters, 'repeatedCommands': repeated, 'tokens': tokens,
@@ -333,17 +388,27 @@ def main():
     one.add_argument('--task', choices=sorted(pilot_tasks.TASKS), required=True)
     one.add_argument('--config', choices=('A', 'B'), required=True)
     one.add_argument('--wall-limit', type=int, default=900)
+    one.add_argument('--slot', type=int, choices=range(1, REPEATS + 1), required=True)
     check = sub.add_parser('selfcheck')
     check.add_argument('--config', choices=('A', 'B'), required=True)
     sub.add_parser('budget')
+    sub.add_parser('gate', help='stdin {"A": budget, "B": budget}; prints STOP <reason>, NEXT <task> <config> <slot> or DONE')
     sub.add_parser('export')
     args = parser.parse_args()
     if args.action == 'run':
-        run(args.task, args.config, args.wall_limit)
+        run(args.task, args.config, args.wall_limit, args.slot)
     elif args.action == 'selfcheck':
         selfcheck(args.config)
     elif args.action == 'export':
         export()
+    elif args.action == 'gate':
+        verdict, value = gate(json.load(sys.stdin))
+        if verdict == 'stop':
+            print('STOP ' + value)
+        elif verdict == 'next':
+            print('NEXT %s %s %d' % value)
+        else:
+            print('DONE')
     else:
         print(json.dumps(spent()))
 

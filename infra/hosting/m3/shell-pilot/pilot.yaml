@@ -2,16 +2,18 @@
 # Images are the development VM's local images (imagePullPolicy Never); the B agent image is the
 # runner image plus bubblewrap (agent-b.Dockerfile). The seccomp profile is installed on the node at
 # /var/lib/kubelet/seccomp/profiles/shell-pilot-userns.json (seccomp-userns.json in this directory).
+# Namespace shell-full for the full run: the pilot's shell-pilot namespace object stays Terminating on the
+# development VM (metrics.k8s.io discovery failure) and is not force-finalized.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: shell-pilot
+  name: shell-full
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: pilot-login
-  namespace: shell-pilot
+  namespace: shell-full
 spec:
   accessModes: [ReadWriteOnce]  # pilot-login only.
   storageClassName: openebs-lvm-ext4
@@ -21,7 +23,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: pilot-login
-  namespace: shell-pilot
+  namespace: shell-full
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
@@ -32,7 +34,7 @@ spec:
     image: docker.io/library/anxious-dev-runner@sha256:31bd3c6ecf2b866ac576b458c6a3c9fe611cacae2b6996830121cd7357984a45
     imagePullPolicy: Never
     command: [sh, -c, 'mkdir -p -m 0700 /login/codex && exec sleep infinity']
-    env: [{name: CODEX_HOME, value: /login/codex}, {name: HOME, value: /login/codex}]
+    env: [{name: CODEX_HOME, value: /login/codex}, {name: HOME, value: /login/codex}, {name: PYTHONPATH, value: /app}]
     securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
     volumeMounts: [{name: login, mountPath: /login}, {name: src, mountPath: /pilot/src, readOnly: true}, {name: tmp, mountPath: /tmp}]
   volumes:
@@ -44,7 +46,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: pilot-a
-  namespace: shell-pilot
+  namespace: shell-full
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
@@ -93,7 +95,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: pilot-b
-  namespace: shell-pilot
+  namespace: shell-full
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
