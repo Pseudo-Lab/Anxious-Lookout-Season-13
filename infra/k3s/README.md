@@ -35,12 +35,14 @@ The development VM was installed from the old file and is switched with the proc
 
 ```sh
 sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml /usr/local/bin/cilium upgrade --version 1.20.2 --values cilium-values.yaml
+sudo /usr/local/bin/k3s kubectl -n kube-system rollout restart ds/cilium    # the chart does not roll the agent on a ConfigMap change
 sudo /usr/local/bin/k3s kubectl -n kube-system rollout status ds/cilium --timeout=300s
+sudo /usr/local/bin/k3s kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg status | grep -E '^(Cilium|KubeProxyReplacement|Proxy Status|Hubble):'   # Proxy Status OK, Envoy: embedded
 sudo /usr/local/bin/k3s kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.enable-l7-proxy} {.data.external-envoy-proxy} {.data.kube-proxy-replacement}{"\n"}'   # true false false
 sudo /usr/local/bin/k3s kubectl -n kube-system get ds cilium-envoy    # NotFound
 ```
 
-- The cilium-agent DaemonSet restarts once (single node). Established connections keep working in the BPF datapath, but new endpoints and policy changes wait until the agent is Ready.
+- `cilium upgrade` only updates the ConfigMap. The agent reads `enable-l7-proxy` at start, so the explicit `rollout restart` replaces the agent Pod once (single node; 13 s on the development VM, 2026-10-26). Established connections keep working in the BPF datapath, but new endpoints and policy changes wait until the agent is Ready.
 - Then check the dataplane, not only agent health: `cilium status` OK, `iptables-save | grep -c '^:CILIUM_FORWARD'` is 1, Pod DNS works, and Traefik and the API still answer.
 - **Acceptance (one endpoint, one policy set, both outcomes):**
   - Record every policy that selects the endpoint.
