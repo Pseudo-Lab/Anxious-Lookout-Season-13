@@ -14,6 +14,15 @@ This is an operator checklist, not reboot authorization or evidence of success. 
 
 Compare boot IDs, verify units/node/Cilium readiness and Cilium iptables forwarding/NAT chains. Follow README recovery if necessary and record manual intervention. Run `DEFAULT-ALLOW.md` acceptance again: removed guards remain absent, runner/trial policy specs match snapshots, Pod CIDR TCP6443 exists in both firewall views, retired ipsets are empty and unreferenced, API-Pod API access and actual runner flow work. Record metrics scraping separately (no 10250 replacement grant). Verify Docker health, internal DNS/HTTPS and external response against baseline. Verify backup checksum and report PVC persistence limitations. A failed probe cannot be erased by later success without recording recovery.
 
+**Runner stop observer (until #61 retires it).** The observer's proof is pinned to the boot ID in `/etc/anxious-lookout/issue16/observer/inputs.json` (`host.boot_id`). After a reboot that value is stale. The observer then refuses every stop with `reconciliation_required`, and a stopping runner stays `runner_unreachable` (#66). Before the issue16 timers resume, compare the two values:
+
+```sh
+cat /proc/sys/kernel/random/boot_id
+python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["host"]["boot_id"])' /etc/anxious-lookout/issue16/observer/inputs.json
+```
+
+If they differ, stop the three issue16 timers and services. Then replace only `host.boot_id` (and `bootId` in `/private-rollout/values.json`), keeping a `.pre66`-style backup. Restart the timers afterwards. The exact commands are steps 1, 2 and 5 of the [#66 runbook](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/66#issuecomment-6408328794). Also check that `readlink /proc/1/ns/pid /proc/1/ns/cgroup` still equals `host_pid_namespace`/`host_cgroup_namespace`; if not, stop and report rather than editing them. Never delete a runner Pod or edit the registry to clear a stuck stop.
+
 ## Optional one-reboot collector
 
 Install `host/postboot-check.sh` root-owned mode0700 at `/usr/local/sbin/anxious-k3s-postboot-check.sh` and its service under `/etc/systemd/system/`. Replace any installed previous collector; no old `validation/run.sh` installation is needed. Create root-owned mode0600 `/etc/anxious-lookout/postboot.env` from the example with actual Docker container/network values. Save the before-boot-ID file.
