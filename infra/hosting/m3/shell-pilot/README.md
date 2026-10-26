@@ -51,12 +51,13 @@ ssh -t -i ~/.ssh/anxious-back-devvm -o IdentitiesOnly=yes -p 22107 opc@127.0.0.1
   set -o pipefail
   kubectl -n shell-pilot exec pilot-login -- env PYTHONPATH=/app python -B /pilot/src/harness.py export |
     kubectl -n shell-pilot create secret generic pilot-access --from-file=access.json=/dev/stdin >/dev/null ||
-    kubectl -n shell-pilot delete secret pilot-access --ignore-not-found
+    { kubectl -n shell-pilot delete secret pilot-access --ignore-not-found; echo 'export failed: stop' >&2; exit 1; }
   kubectl -n shell-pilot describe secret pilot-access    # byte count only
   ```
 
   - `pilot-login` has no `PYTHONPATH`. Without `env PYTHONPATH=/app`, the export fails on `import ops`, but
-    `create` still makes an empty Secret, so a failed pipe deletes it.
+    `create` still makes an empty Secret. A failed pipe deletes it and exits non-zero, and nothing after it runs:
+    fix the cause and report before another export.
   - Check the Secret only with `describe`. Never use `-o yaml|json|jsonpath|go-template`: a template error makes
     kubectl print the raw object, token included (this happened in the pilot, see #64).
 
