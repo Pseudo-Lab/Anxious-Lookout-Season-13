@@ -244,3 +244,15 @@ def test_gate_stops_on_the_total_even_below_each_share(monkeypatch):
     monkeypatch.setattr(harness, 'LIMITS', {'input': 100, 'output': 100})
     monkeypatch.setattr(harness, 'SHARE', {'input': 60, 'output': 60})
     assert harness.gate({'A': ledger(input=50), 'B': ledger(input=50)}) == ('stop', 'total budget exhausted')
+
+
+def test_settled_usage_is_on_disk_before_grading_even_if_grading_never_returns(env, monkeypatch):
+    FakeSession.script = [usage(10, 2), {'method': 'turn/completed', 'params': {'turn': {'status': 'completed'}}}]
+    def interrupted(task, root): raise KeyboardInterrupt()
+    monkeypatch.setattr(harness.pilot_tasks, 'grade', interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        harness.run('fix-failing-test', 'B', 900, 1)
+    state = budget(env)
+    assert (state['input'], state['output'], state['runs'], state['inflight']) == (10, 2, [state['runs'][0]], None)
+    assert state['slots']['fix-failing-test-B-01']['status'] == 'started'  # The gate stops on it until reconciled.
+    assert harness.gate({'A': ledger(), 'B': state})[0] == 'stop'

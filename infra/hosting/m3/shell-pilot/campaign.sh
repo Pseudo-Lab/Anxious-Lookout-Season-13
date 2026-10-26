@@ -37,7 +37,9 @@ for ((n = 0; ; n++)); do
   [ "$transport" -eq 0 ] && [[ $rc == rc=* ]] || stop "transport failure ($transport) during $name; check the ledger before anything else"
   if [ "$config" = A ]; then dirs='/pilot/results /pilot/ws /pilot/native-work'; else dirs='/pilot/results /pilot/runs'; fi
   check=$(inpod "$config" sh -c "'for d in $dirs; do test -d \$d || echo missing=\$d; done; grep -rlE \"eyJ[A-Za-z0-9_-]{20,}\\.eyJ\" $dirs; echo exit=\$?'" </dev/null)
+  transport=$?
   check=$(echo $check)
+  [ "$transport" -eq 0 ] || stop "transport failure ($transport) during the JWT check after $name; outputs stay in the Pod"
   echo "$start $end $name $rc jwt($dirs): $check" >> "$out/progress.md"
   [ "$check" = 'exit=1' ] || stop "JWT check not clean after $name: $check; outputs stay in the Pod"  # exit=2 or missing= fails.
   line=$(inpod "$config" cat "$console.out" </dev/null) && errors=$(inpod "$config" sh -c "'wc -l < $console.err'" </dev/null) ||

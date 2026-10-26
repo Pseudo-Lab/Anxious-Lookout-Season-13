@@ -348,6 +348,7 @@ def run(task, config, wall_limit, slot):
             if status == 'budget_stop':
                 budget['halted'] = run_id  # The share was crossed: no further run in this Pod.
             budget['inflight'] = None
+            save(budget)  # Durable now; the slot stays 'started' until grading and the result file are done.
         if status.startswith('harness_error'):
             settle_slot(budget, key, status)
         for closing in (session.close if session is not None else None, broker.close if broker is not None else None):

@@ -35,6 +35,8 @@ elif 'harness.py run' in command:
     print('rc=%d' % scenario.get('rc', 0))
 elif 'grep -rlE' in command:
     print(scenario.get('check', 'exit=1'))
+    if scenario.get('check_transport'):
+        sys.exit(255)
 elif ' cat ' in command:
     print(open(f'{state}/console').read())
 elif 'wc -l' in command:
@@ -100,3 +102,8 @@ def test_slots_alternate_and_pause_after_max(campaign):
 def test_an_abandoned_claim_stops_the_run(campaign):
     code, progress, runs = campaign({}, a=ledger(slots={'fix-failing-test-A-01': {'run': 'r', 'status': 'started'}}))
     assert code == 2 and runs == [] and 'claimed but never finished' in progress
+
+
+def test_a_transport_failure_of_the_jwt_check_stops_before_any_output_leaves(campaign):
+    code, progress, runs = campaign({'stdout': '{"summary": "%s"}' % JWT, 'check_transport': True})
+    assert code == 2 and len(runs) == 1 and 'during the JWT check' in progress and 'eyJ' not in progress
