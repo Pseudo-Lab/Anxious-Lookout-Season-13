@@ -16,8 +16,6 @@ assert os.geteuid() == os.getegid() == 10001
 assert not Path('/usr/local/bin/codex').exists()  # runtime target, provider excluded
 initialize(Path('/state'), Path('/control'))
 token = secrets.token_urlsafe(48)
-fd = os.open('/transport/token', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, 'w') as output: output.write(token)
 plan = plan_for({'image': 'synthetic@sha256:'+'a'*64,
     'callback': 'https://rehearsal-callback.invalid:443/research/tools',
     'callbackNamespace': 'codex-runner-callback-disabled', 'callbackServiceAccount': 'callback-disabled',
@@ -26,6 +24,8 @@ container = plan['spec']['containers'][0]
 pod_uid = '23c64cfe-f7bf-4cdb-9d46-eb250fc3f230'
 env = {'PATH': os.environ['PATH'], 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONUNBUFFERED': '1'}
 env.update({item['name']: item['value'] for item in container['env'] if 'value' in item})
+assert [item['valueFrom']['secretKeyRef']['key'] for item in container['env'] if item['name'] == 'RUNNER_TOKEN'] == ['token']
+env['RUNNER_TOKEN'] = token  # Kubernetes resolves the Secret reference; the runner drops it after reading.
 env['RUNNER_POD_UID'] = pod_uid
 process = subprocess.Popen(container['command'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 

@@ -117,3 +117,46 @@ def test_executor_transition_refuses_unsafe_inputs(admin, stopped_binding, damag
                     executor=executor, apply=True)
     with admin.begin() as db:
         assert db.execute(text('SELECT plan FROM runner_bindings.bindings')).scalar_one() == value
+
+
+NEW_EXECUTOR_IMAGE = 'registry.invalid/executor@sha256:'+'d'*64
+
+
+@pytest.fixture
+def stopped_v2_binding(admin, owner, t0):
+    state, stop, proof = drained(admin, owner, t0)
+    value = {**plan_value(state), 'version': 2, 'executor': EXECUTOR}
+    with admin.begin() as db:
+        Bindings(db).publish(value, 'isolated', uuid4(), {'native': uuid4(), 'control': uuid4()})
+        release(db, owner, stop['stop_id'], proof, allow_entry=False)
+        db.execute(text('UPDATE runner_runtime.outbox SET settled=true WHERE owner_id=:owner'), {'owner': owner})
+    return Fence.of(read(admin, owner)), value
+
+
+def test_v2_executor_image_swaps_both_digests_and_keeps_limits(admin, stopped_v2_binding):
+    # #59: an existing v2 binding needs the runner and executor images of one release.
+    fence, value = stopped_v2_binding
+    before = preservation_snapshot(admin)
+    with admin.begin() as db:
+        resources = db.execute(text('SELECT * FROM runner_bindings.resources')).all()
+        report = upgrade(db, fence, plan_digest(value), NEW_IMAGE, executor_image=NEW_EXECUTOR_IMAGE)
+        assert (report['oldExecutorImage'], report['newExecutorImage']) == (EXECUTOR['image'], NEW_EXECUTOR_IMAGE)
+        assert db.execute(text('SELECT plan FROM runner_bindings.bindings')).scalar_one() == value
+        assert upgrade(db, fence, plan_digest(value), NEW_IMAGE, executor_image=NEW_EXECUTOR_IMAGE, apply=True) == report
+        updated = db.execute(text('SELECT plan FROM runner_bindings.bindings')).scalar_one()
+        assert updated == {**value, 'image': NEW_IMAGE, 'executor': {**EXECUTOR, 'image': NEW_EXECUTOR_IMAGE}}
+        assert db.execute(text('SELECT * FROM runner_bindings.resources')).all() == resources
+    assert preservation_snapshot(admin) == before
+    with pytest.raises(Refused):
+        with admin.begin() as db:
+            upgrade(db, fence, plan_digest(value), NEW_IMAGE, executor_image=NEW_EXECUTOR_IMAGE, apply=True)
+
+
+@pytest.mark.parametrize('case', ['v1', 'mutable', 'with-opt-in'])
+def test_executor_image_swap_refuses_v1_mutable_or_mixed(admin, request, case):
+    fence, value = request.getfixturevalue('stopped_binding' if case == 'v1' else 'stopped_v2_binding')
+    image = 'mutable:latest' if case == 'mutable' else NEW_EXECUTOR_IMAGE
+    executor = EXECUTOR if case == 'with-opt-in' else None
+    with pytest.raises(Refused):
+        with admin.begin() as db:
+            upgrade(db, fence, plan_digest(value), NEW_IMAGE, executor=executor, executor_image=image, apply=True)

@@ -125,6 +125,42 @@ app/auth config remain as captured. Re-export after scaling to zero/mutator stop
 do not remove a stale test to force application. `api-candidate.json` is for diff,
 not apply: applying that snapshot could restore stale replicas/metadata.
 
+**Runner Pod manifest gate.** API and workers accept a runner Pod only if it equals
+the manifest their own code renders (`KubePods._pod`). A release that changes that
+manifest (#59: resources, executor `/tmp`, transport token as an env reference)
+refuses live Pods created by the previous release, so roll it out only while
+`codex-runner` has no Pending or Running runner Pod:
+
+```sh
+kubectl -n codex-runner get pods -l anxious.io/managed=user-runner \
+  --field-selector=status.phase!=Failed,status.phase!=Succeeded -o name   # must print nothing
+```
+
+If a runner is running, stop it through `DELETE /api/research/codex/runner` and let the
+observer finish first. Do not delete the Pod by hand. A Failed or Succeeded runner Pod
+(a node reboot or a container exit, #58 A) is already unreleasable by the previous
+release too; it does not block this rollout, and its owner stays stuck until #61.
+
+**Existing binding images (#59).** A published binding pins `plan.image` and, for v2,
+`plan.executor.image` in `runner_bindings.bindings.plan`. Rollout values change only new
+owners' bindings, and `Bindings.publish` refuses a different plan for an existing owner.
+The #59 manifest no longer provides `RUNNER_TOKEN_FILE`, so a runner image older than
+#59 cannot start under it: move every existing binding to the reviewed images in the
+same window, after the API and worker images run the new code and before the next
+entry. Use `ops.runner_binding_image` (CUTOVER.md section 6) per owner in `idle_stopped`
+with a completed termination proof, with entry, controller, observer and supply stopped:
+
+- inputs: `owner`, `state`, `generation`, `revision` (the current registry fence),
+  `oldPlanSha256` (`plan_digest` of the current plan, computed in the new worker image),
+  `newImage` (runner) and, for a v2 plan, `executorImage`. One report/apply changes both
+  digests; the executor's `wallSeconds`/`outputBytes` stay. A v1 plan takes `newImage`
+  alone, or the explicit `executor` opt-in instead.
+- `report` first, review it, then `apply` with the same inputs and the report mounted
+  read-only. Registry, generation, resources, receipts and outbox rows are unchanged; the
+  next entry renders the Pod from the updated plan.
+- The retained `provision-output/<owner>/runtime.json` is not read after publication
+  (restore uses only its owner and state), so it stays as the original preparation record.
+
 ```sh
 kubectl diff -f /private-rollout/candidate/resources.json
 kubectl diff -f /private-rollout/candidate/api-candidate.json

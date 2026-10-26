@@ -361,7 +361,7 @@ conditions, escalate the concrete mismatch; do not broaden the recovery algorith
 The normal publish/import/worker/API paths remain immutable. Do not patch an old
 running Pod to the new image or edit resources to make a spec check pass. A separate
 admin-only `ops.runner_binding_image` maintenance operation changes **only**
-plan.image after proved termination. All entry/creators/supply/observer remain
+plan.image (and, with `executorImage`, a v2 plan's executor image; #59) after proved termination. All entry/creators/supply/observer remain
 stopped. Freshly verify Pod absence and the existing retained resource identities;
 archive those read-only checks with the private before-plan/resources export.
 

@@ -808,7 +808,10 @@ def create_app():
     pod_uid = os.getenv("RUNNER_POD_UID")
     if pod_uid is not None:
         canonical_uuid(pod_uid)  # Auxiliary instance metadata, never an auth identity.
-    token = Path(os.environ["RUNNER_TOKEN_FILE"]).read_text().strip()
+    # Kubernetes passes the transport token as an env reference (#59); drop it from the
+    # environment so no later child process can inherit it. Local runs use a file.
+    token = os.environ.pop("RUNNER_TOKEN", None)
+    token = token.strip() if token is not None else Path(os.environ["RUNNER_TOKEN_FILE"]).read_text().strip()
     model = os.getenv("CODEX_MODEL", MODEL)
     if len(token) < 32 or model != MODEL or os.getenv("CODEX_API_KEY_FILE"):
         raise ValueError("Explicit private runner configuration is required")
