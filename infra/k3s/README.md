@@ -40,9 +40,21 @@ sudo /usr/local/bin/k3s kubectl -n kube-system get ds cilium-envoy    # NotFound
 
 - The cilium-agent DaemonSet restarts once (single node). Established connections keep working in the BPF datapath, but new endpoints and policy changes wait until the agent is Ready.
 - Then check the dataplane, not only agent health: `cilium status` OK, `iptables-save | grep -c '^:CILIUM_FORWARD'` is 1, Pod DNS works, and Traefik and the API still answer.
-- **Acceptance (same policy, both outcomes):** an allowed FQDN connects, and a non-allowed destination is recorded as a policy drop (`cilium-dbg monitor --type drop` in the agent). A timeout alone is inconclusive.
-- **Cost:** record cilium-agent memory and CPU before and after, measured the same way, plus the agent's restart count.
-- **Hubble** stays disabled. If a verification window uses it, enable it for that window only (`cilium hubble enable`, no relay or UI), disable it afterwards, and record the temporary difference.
+- **Acceptance (one endpoint, one policy set, both outcomes):**
+  - Record every policy that selects the endpoint.
+  - Both allowed names (`auth.openai.com`, `chatgpt.com`) connect.
+  - A non-allowed name and a direct IP are each recorded together with the DNS answer, the destination IP and the policy drop (`cilium-dbg monitor --type drop` in the agent).
+  - `toFQDNs` allows the IPs learned from the allowed names' DNS answers, so the direct-IP sample must not be one of those IPs.
+  - A timeout alone is inconclusive.
+- **Cost:** record cilium-agent memory and CPU before and after, measured the same way. A rollout can replace the agent Pod instead of restarting its container, so record:
+  - the Pod UID, creation time and container restart counts before and after;
+  - the number of rollouts.
+
+  This separates the expected replacement from an unexpected restart.
+- **Hubble** stays disabled. If a verification window uses it, enable only the agent part for that window: `cilium hubble enable --relay=false --ui=false`. The plain command enables relay by default. Afterwards:
+  - `cilium hubble disable`;
+  - check that `cilium-config` `enable-hubble` is `false` or absent and that no `hubble-relay` or `hubble-ui` Deployment exists;
+  - record the temporary difference.
 - **Rollback:** set `l7Proxy: false` and run the same `cilium upgrade`. FQDN egress then stops working. The broker cannot reach OpenAI unless its policy is rendered with the explicit `"egress": "world"` switch, which weakens isolation and needs a user decision.
 
 ## Validation and reboot
