@@ -34,9 +34,10 @@ The runner side adds an explicit egress rule to `codex-broker:8080` in
 `user-runner-e2e/40-runner-network.json`. The runner's broader egress narrowing is #62.
 
 **DNS proxy prerequisite.** `toFQDNs` is enforced only when Cilium runs its DNS proxy (`l7Proxy: true`).
-`infra/k3s/cilium-values.yaml` currently sets `l7Proxy: false`, so the default policy cannot work on this
-cluster until that is decided (#60 comparison comment). `"egress": "world"` renders `toEntities: world` on
-443 instead: **weaker isolation** (any internet host on 443) and used only if the user chooses it.
+`infra/k3s/cilium-values.yaml` sets it (user decision (a) on #60). Apply it to the cluster first, following
+`infra/k3s/README.md` "Cilium DNS proxy (#60)", and check `enable-l7-proxy: "true"` before applying this
+policy. `"egress": "world"` renders `toEntities: world` on 443 instead: **weaker isolation** (any internet
+host on 443), kept only as an explicit switch that the user did not choose.
 
 `values.json` (see `values.example.json`):
 

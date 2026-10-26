@@ -25,6 +25,26 @@ The existing `codex-runner` KNP/CNP and `codex-trial` policies remain unchanged.
 
 Firewalld public zone permits Pod CIDR `10.42.0.0/16` to TCP6443 in runtime and permanent configuration. This is the explicit issue-13 user decision superseding the earlier rejection of a Pod CIDR API exception. It grants no other host port and no public internet API access. Both old API and metrics ipset rules and entries and the installed sync script/service/timer are retired. No replacement 10250 grant is added: metrics scraping may fail and must be recorded separately.
 
+## Cilium DNS proxy (#60)
+
+`cilium-values.yaml` sets `l7Proxy: true` (user decision (a) on #60). `toFQDNs` rules, such as the codex-broker egress to `auth.openai.com` and `chatgpt.com`, need the DNS proxy: it reads the DNS answers of endpoints with `rules.dns` and allows the learned IPs. With `l7Proxy: false` those rules are not enforced. The proxy runs inside cilium-agent. `envoy.enabled: false` keeps the cilium-envoy DaemonSet absent; no HTTP/Kafka L7 rules are used. L3/L4 policy meaning, kube-proxy and `allow-localhost: policy` do not change. Only DNS traffic of endpoints whose policy has `rules.dns` goes through the proxy.
+
+Apply it to an existing cluster in a maintenance window with no runner turns in progress:
+
+```sh
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml /usr/local/bin/cilium upgrade --version 1.20.2 --values cilium-values.yaml
+sudo /usr/local/bin/k3s kubectl -n kube-system rollout status ds/cilium --timeout=300s
+sudo /usr/local/bin/k3s kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.enable-l7-proxy} {.data.external-envoy-proxy} {.data.kube-proxy-replacement}{"\n"}'   # true false false
+sudo /usr/local/bin/k3s kubectl -n kube-system get ds cilium-envoy    # NotFound
+```
+
+- The cilium-agent DaemonSet restarts once (single node). Established connections keep working in the BPF datapath, but new endpoints and policy changes wait until the agent is Ready.
+- Then check the dataplane, not only agent health: `cilium status` OK, `iptables-save | grep -c '^:CILIUM_FORWARD'` is 1, Pod DNS works, and Traefik and the API still answer.
+- **Acceptance (same policy, both outcomes):** an allowed FQDN connects, and a non-allowed destination is recorded as a policy drop (`cilium-dbg monitor --type drop` in the agent). A timeout alone is inconclusive.
+- **Cost:** record cilium-agent memory and CPU before and after, measured the same way, plus the agent's restart count.
+- **Hubble** stays disabled. If a verification window uses it, enable it for that window only (`cilium hubble enable`, no relay or UI), disable it afterwards, and record the temporary difference.
+- **Rollback:** set `l7Proxy: false` and run the same `cilium upgrade`. FQDN egress then stops working. The broker cannot reach OpenAI unless its policy is rendered with the explicit `"egress": "world"` switch, which weakens isolation and needs a user decision.
+
 ## Validation and reboot
 
 Follow `DEFAULT-ALLOW.md`: verify removed objects, unchanged runner/trial policies, both firewall views, API-Pod authenticated API access, actual runner TCP8080/login/Codex response/logout deletion, and Docker regressions. An API response alone is not the end-to-end gate. Retained runner-deny checks need an authorized-source control plus Cilium policy-drop evidence; a timeout alone is inconclusive. The historical issue-1 tenant matrix is no longer an acceptance requirement for default-allow namespaces.

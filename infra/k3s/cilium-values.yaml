@@ -1,6 +1,8 @@
 # Cilium 1.20.2; kube-proxy is retained.
 kubeProxyReplacement: false
-l7Proxy: false
+# DNS proxy for toFQDNs policies (#60). envoy.enabled stays false: no cilium-envoy DaemonSet,
+# and no HTTP/Kafka L7 rules are used.
+l7Proxy: true
 ipam:
   mode: cluster-pool
   operator:
