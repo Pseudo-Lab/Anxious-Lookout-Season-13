@@ -76,6 +76,9 @@ infra/hosting/m3/shell-pilot/campaign.sh "$EVIDENCE" [MAX_SLOTS]   # 0 done, 2 s
   - an unknown, unsettled or halted run in either Pod;
   - a per-configuration share or the total cap reached;
   - **3 harness errors** across A and B.
+- A slot starts at least `SLOT_GAP` seconds (default 60) after the previous slot ended, across chunks too
+  (`last-slot-end` in the evidence directory). Back-to-back slots got a 429 at slot 4 of the first chunk while the
+  weekly window was at 10% (#64 STOP 1). A `STOP` file written during the gap still stops before the slot.
 - A slot's stdout and stderr stay in the Pod (`/pilot/results/console/`) until the JWT-shape check after
   the slot (A: results, ws, native-work; B: results, runs) is clean. Only then is the stdout line copied to
   the evidence directory, and stderr only as a line count. Anything other than grep exit 1 stops the run

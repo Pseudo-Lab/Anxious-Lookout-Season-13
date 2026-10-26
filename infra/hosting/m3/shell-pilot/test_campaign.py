@@ -3,6 +3,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -58,12 +60,12 @@ def campaign(tmp_path):
         path.mkdir()
     (bin_dir/'ssh').write_text(FAKE_SSH.replace('PYTHON', sys.executable))
     (bin_dir/'ssh').chmod(0o755)
-    def run(scenario, max_slots=60, a=None, b=None):
+    def run(scenario, max_slots=60, a=None, b=None, gap=0):
         (state/'scenario.json').write_text(json.dumps(scenario))
         (state/'ledger-A.json').write_text(json.dumps(a or ledger()))
         (state/'ledger-B.json').write_text(json.dumps(b or ledger()))
         env = {**os.environ, 'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'HOME': str(tmp_path),
-               'FAKE_STATE': str(state), 'HARNESS': str(HERE/'harness.py')}
+               'FAKE_STATE': str(state), 'HARNESS': str(HERE/'harness.py'), 'SLOT_GAP': str(gap)}
         done = subprocess.run(['bash', str(HERE/'campaign.sh'), str(out), str(max_slots)], env=env,
                               capture_output=True, text=True, timeout=60)
         calls = (state/'calls').read_text().splitlines() if (state/'calls').exists() else []
@@ -102,6 +104,25 @@ def test_slots_alternate_and_pause_after_max(campaign):
 def test_an_abandoned_claim_stops_the_run(campaign):
     code, progress, runs = campaign({}, a=ledger(slots={'fix-failing-test-A-01': {'run': 'r', 'status': 'started'}}))
     assert code == 2 and runs == [] and 'claimed but never finished' in progress
+
+
+def test_slots_are_spaced_by_the_gap_across_chunks(campaign, tmp_path):
+    started = time.monotonic()
+    assert campaign({}, max_slots=1)[0] == 3
+    first = time.monotonic()
+    end = int((tmp_path/'out'/'last-slot-end').read_text())
+    code, progress, runs = campaign({}, max_slots=1, gap=3)  # The next chunk waits for the previous slot's end.
+    assert code == 3 and len(runs) == 2 and time.monotonic() - first >= 2 and first - started < 2
+    assert int((tmp_path/'out'/'last-slot-end').read_text()) >= end + 3
+
+
+def test_a_stop_file_written_during_the_gap_stops_before_the_slot(campaign, tmp_path):
+    (tmp_path/'out'/'last-slot-end').write_text(str(int(time.time())))
+    stopper = threading.Timer(1, lambda: (tmp_path/'out'/'STOP').write_text('review'))
+    stopper.start()
+    code, progress, runs = campaign({}, gap=3)
+    stopper.join()
+    assert code == 2 and runs == [] and 'operator stop file: review' in progress
 
 
 def test_a_transport_failure_of_the_jwt_check_stops_before_any_output_leaves(campaign):

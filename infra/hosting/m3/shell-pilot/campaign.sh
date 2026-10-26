@@ -6,9 +6,11 @@
 # only then is the stdout line copied here (stderr only as a line count). A transport failure or a non-zero
 # exit stops the run without calling the slot again: check the ledger first.
 # A file named STOP in the evidence directory (for example on review's request) stops before the next slot.
+# Paid slots start at least SLOT_GAP seconds (default 60) after the previous one ended, across chunks too
+# (last-slot-end in the evidence directory): back-to-back turns hit a short-term 429 in the first chunk.
 # Usage: campaign.sh EVIDENCE_DIR [MAX_SLOTS]   exit 0 = all slots done, 2 = stopped, 3 = MAX_SLOTS reached
 set -u
-out=$1 max=${2:-60}
+out=$1 max=${2:-60} gap=${SLOT_GAP:-60}
 ssh=(ssh -i "$HOME/.ssh/anxious-back-devvm" -o IdentitiesOnly=yes -o ServerAliveInterval=30 -p 22107 opc@127.0.0.1)
 K="sudo -n /usr/local/bin/k3s kubectl -n shell-full"
 pod() { case $1 in A) echo 'pilot-a -c harness' ;; B) echo 'pilot-b -c agent' ;; esac; }
@@ -30,9 +32,15 @@ for ((n = 0; ; n++)); do
   fi
   name=$(printf '%s-%s-%02d' "$task" "$config" "$slot")
   console=/pilot/results/console/$name
+  wait=$(($(cat "$out/last-slot-end" 2>/dev/null || echo 0) + gap - $(date +%s)))
+  if ((wait > 0)); then
+    sleep "$wait"
+    [ -e "$out/STOP" ] && stop "operator stop file: $(head -c 200 "$out/STOP")"  # Honoured during the gap too.
+  fi
   start=$(date -u +%FT%TZ)
   rc=$(inpod "$config" sh -c "'mkdir -p /pilot/results/console && python -B /pilot/src/harness.py run --task $task --config $config --slot $slot > $console.out 2> $console.err; echo rc=\$?'" </dev/null)
   transport=$?
+  date +%s > "$out/last-slot-end"
   end=$(date -u +%FT%TZ)
   [ "$transport" -eq 0 ] && [[ $rc == rc=* ]] || stop "transport failure ($transport) during $name; check the ledger before anything else"
   if [ "$config" = A ]; then dirs='/pilot/results /pilot/ws /pilot/native-work'; else dirs='/pilot/results /pilot/runs'; fi
