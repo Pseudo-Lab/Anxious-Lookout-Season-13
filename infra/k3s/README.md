@@ -29,7 +29,9 @@ Firewalld public zone permits Pod CIDR `10.42.0.0/16` to TCP6443 in runtime and 
 
 `cilium-values.yaml` sets `l7Proxy: true` (user decision (a) on #60). `toFQDNs` rules, such as the codex-broker egress to `auth.openai.com` and `chatgpt.com`, need the DNS proxy: it reads the DNS answers of endpoints with `rules.dns` and allows the learned IPs. With `l7Proxy: false` those rules are not enforced. The proxy runs inside cilium-agent. `envoy.enabled: false` keeps the cilium-envoy DaemonSet absent; no HTTP/Kafka L7 rules are used. L3/L4 policy meaning, kube-proxy and `allow-localhost: policy` do not change. Only DNS traffic of endpoints whose policy has `rules.dns` goes through the proxy.
 
-Apply it to an existing cluster in a maintenance window with no runner turns in progress:
+**Production already runs this.** A read-only check on 2026-10-26 found `enable-l7-proxy: "true"`, `external-envoy-proxy: "false"`, `enable-hubble: "false"` and no cilium-envoy DaemonSet. The repository file said `false` from #1 until #60, which was a drift from the live value. Production needs no upgrade or agent restart: before applying FQDN policies there, check those values only, using the `get cm` line below.
+
+The development VM was installed from the old file and is switched with the procedure below. The procedure also applies to any cluster installed from a file older than #60. Run it in a maintenance window with no runner turns in progress:
 
 ```sh
 sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml /usr/local/bin/cilium upgrade --version 1.20.2 --values cilium-values.yaml
