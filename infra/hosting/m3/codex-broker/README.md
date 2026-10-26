@@ -28,7 +28,7 @@ and measurements are in #58 C.
 | Role `codex-broker-runner-pods` (codex-runner) | `pods` get only; the API gets no new right |
 | Service `codex-broker:8080` | |
 | StatefulSet `codex-broker` | replicas 1, runner image with `uvicorn broker.app:create_app`, UID/GID 10001, read-only root, all capabilities dropped, no requests/limits, PVC `data` 1Gi with `CODEX_HOME=/data/codex` (0700) |
-| CiliumNetworkPolicy `codex-broker` | ingress: `codex-runner` user-runner Pods and the host (kubelet probes; the cluster sets `allow-localhost: policy`) → 8080. egress: kube-dns 53 through the DNS proxy, kube-apiserver 6443, `toFQDNs` `auth.openai.com` and `chatgpt.com` on 443 |
+| CiliumNetworkPolicy `codex-broker` | ingress: `codex-runner` user-runner Pods and the host (kubelet probes; the cluster sets `allow-localhost: policy`) → 8080. egress: kube-dns 53 through the DNS proxy (all broker lookups, including `kubernetes.default.svc` for TokenReview and Pod GET), kube-apiserver 6443, `toFQDNs` `auth.openai.com` and `chatgpt.com` on 443 |
 
 The runner side adds an explicit egress rule to `codex-broker:8080` in
 `user-runner-e2e/40-runner-network.json`. The runner's broader egress narrowing is #62.
