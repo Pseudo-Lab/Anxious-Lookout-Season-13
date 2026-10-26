@@ -128,6 +128,10 @@ def gate(budgets):
     errors = sum(len(state.get('errors', [])) for state in budgets.values())
     if errors >= ERROR_LIMIT:
         return 'stop', f'{errors} harness errors across A and B'
+    for config in ('A', 'B'):
+        for key, slot in budgets[config].get('slots', {}).items():
+            if slot.get('status') == 'started':  # Claimed, never finished: the process died; reconcile first.
+                return 'stop', f'{config}: slot {key} claimed but never finished; reconcile it before another slot'
     done = set(budgets['A'].get('slots', {})) | set(budgets['B'].get('slots', {}))
     for task, config, slot in ORDER:
         if slot_key(task, config, slot) not in done:
@@ -344,23 +348,43 @@ def run(task, config, wall_limit, slot):
             if status == 'budget_stop':
                 budget['halted'] = run_id  # The share was crossed: no further run in this Pod.
             budget['inflight'] = None
-        budget['slots'][key]['status'] = status
         if status.startswith('harness_error'):
-            budget.setdefault('errors', []).append(key)  # An error slot is a result, never rerun automatically.
-        save(budget)
+            settle_slot(budget, key, status)
         for closing in (session.close if session is not None else None, broker.close if broker is not None else None):
             try:
                 if closing: closing()
             except Exception:
                 pass
-    grade = pilot_tasks.grade(task, workspace) if workspace is not None else {
-        'passed': False, 'testsChanged': False, 'summary': 'not graded: no workspace'}
+    error = status if status.startswith('harness_error') else None
+    try:
+        grade = pilot_tasks.grade(task, workspace) if workspace is not None else {
+            'passed': False, 'testsChanged': False, 'summary': 'not graded: no workspace'}
+    except Exception as failure:
+        error = 'harness_error: grade ' + type(failure).__name__  # Settled above; the slot still counts as an error.
+        grade = {'passed': False, 'testsChanged': False, 'summary': 'not graded: ' + type(failure).__name__}
     repeated = len(commands) - len(set(commands))
     result = {'run': run_id, 'task': task, 'config': config, 'turnStatus': status, 'settled': settled and usage is not None,
               'wallSeconds': round(wall, 1), **grade, **counters, 'repeatedCommands': repeated, 'tokens': tokens,
-              'commands': commands}
-    (RESULTS/(run_id+'.json')).write_text(json.dumps(result, indent=2))
+              'commands': commands, **({'harnessError': error} if error else {})}
+    try:
+        (RESULTS/(run_id+'.json')).write_text(json.dumps(result, indent=2))
+    except Exception as failure:
+        error = error or 'harness_error: result ' + type(failure).__name__
+        settle_slot(budget, key, error)
+        raise  # The ledger records the error; a non-zero exit stops the driver.
+    if not status.startswith('harness_error'):
+        settle_slot(budget, key, error or status)
     print(json.dumps({k: v for k, v in result.items() if k != 'commands'}))
+
+
+def settle_slot(budget, key, status):
+    """Durable final status of a claimed slot; an error slot is a result, never rerun automatically."""
+    if budget['slots'][key]['status'] != 'started':
+        return
+    budget['slots'][key]['status'] = status
+    if status.startswith('harness_error'):
+        budget.setdefault('errors', []).append(key)
+    save(budget)
 
 
 def selfcheck(config):

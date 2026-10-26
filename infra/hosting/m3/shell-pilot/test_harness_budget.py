@@ -113,10 +113,42 @@ def test_settlement_survives_a_grading_failure(env, monkeypatch):
     FakeSession.script = [usage(10, 2), {'method': 'turn/completed', 'params': {'turn': {'status': 'completed'}}}]
     def broken(task, root): raise OSError('disk')
     monkeypatch.setattr(harness.pilot_tasks, 'grade', broken)
-    with pytest.raises(OSError):
-        harness.run('fix-failing-test', 'B', 900, 1)
+    harness.run('fix-failing-test', 'B', 900, 1)
     state = budget(env)
     assert (state['input'], state['output'], state['unknown'], state['inflight']) == (10, 2, [], None)
+    assert state['errors'] == ['fix-failing-test-B-01']  # A grading failure is an error slot and counts.
+    assert state['slots']['fix-failing-test-B-01']['status'] == 'harness_error: grade OSError'
+
+
+def test_three_grading_failures_stop_the_gate(env, capsys, monkeypatch):
+    def broken(task, root): raise OSError('disk')
+    monkeypatch.setattr(harness.pilot_tasks, 'grade', broken)
+    for slot in (1, 2, 3):
+        FakeSession.script = [usage(10, 2), {'method': 'turn/completed', 'params': {'turn': {'status': 'completed'}}}]
+        harness.run('fix-failing-test', 'B', 900, slot)
+    verdict, reason = harness.gate({'A': ledger(), 'B': budget(env)})
+    assert verdict == 'stop' and 'harness error' in reason
+
+
+def test_a_result_write_failure_is_recorded_and_exits_non_zero(env, monkeypatch):
+    FakeSession.script = [usage(10, 2), {'method': 'turn/completed', 'params': {'turn': {'status': 'completed'}}}]
+    real = harness.Path.write_text
+    def full(self, *args, **kwargs):
+        if self.suffix == '.json' and self.parent.name == 'results' and self.name != 'budget.json':
+            raise OSError('no space')
+        return real(self, *args, **kwargs)
+    monkeypatch.setattr(harness.Path, 'write_text', full)
+    with pytest.raises(OSError):
+        harness.run('slow-suite', 'B', 900, 1)
+    state = budget(env)
+    assert state['input'] == 10 and state['slots']['slow-suite-B-01']['status'] == 'harness_error: result OSError'
+    assert state['errors'] == ['slow-suite-B-01']
+
+
+def test_a_claim_left_started_stops_the_gate():
+    abandoned = ledger(slots={'fix-failing-test-A-01': {'run': 'r', 'status': 'started'}})
+    verdict, reason = harness.gate({'A': abandoned, 'B': ledger()})
+    assert verdict == 'stop' and 'claimed but never finished' in reason
 
 
 def test_a_crash_after_the_paid_call_leaves_an_unsettled_marker(env, monkeypatch):

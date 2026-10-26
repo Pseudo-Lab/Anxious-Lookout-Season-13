@@ -22,7 +22,7 @@ The same model, Codex 0.160.1, prompts and fixtures are used in both. Fixtures u
 
 - `pilot_tasks.py`: fixtures, prompts and graders (`test_pilot_tasks.py` checks that the fixtures fail as given, pass with the intended fix, and reject edited tests).
 - `harness.py`: `selfcheck --config A|B` (no model call), `run --task … --config … --slot N`, `budget`, `gate`.
-- `campaign.sh`: the full-run driver (gate before each slot, JWT-shape check after it, `STOP` file).
+- `campaign.sh`: the full-run driver (gate before each slot, JWT-shape check after it, `STOP` file); `test_campaign.py` runs it against a fake ssh.
 - `pilot.yaml`: namespace `shell-full` (the pilot's `shell-pilot` object stays Terminating on the VM), PVC `pilot-login`, Pods `pilot-login`, `pilot-a` and `pilot-b` (B on SELinux
   `spc_t`: `container_t` denies bubblewrap's devpts mount, measured; production would need a dedicated policy).
 - `seccomp-userns.json`: the Docker v27.5.1 default profile plus `clone`, `unshare`, `mount`, `umount2`, `pivot_root` allowed without CAP_SYS_ADMIN (bubblewrap's user, mount and PID namespaces).
@@ -76,13 +76,24 @@ infra/hosting/m3/shell-pilot/campaign.sh "$EVIDENCE" [MAX_SLOTS]   # 0 done, 2 s
   - an unknown, unsettled or halted run in either Pod;
   - a per-configuration share or the total cap reached;
   - **3 harness errors** across A and B.
-- After each slot the driver runs the JWT-shape check (A: results, ws, native-work; B: results, runs) and
-  records file names only. Anything other than grep exit 1 stops the run.
+- A slot's stdout and stderr stay in the Pod (`/pilot/results/console/`) until the JWT-shape check after
+  the slot (A: results, ws, native-work; B: results, runs) is clean. Only then is the stdout line copied to
+  the evidence directory, and stderr only as a line count. Anything other than grep exit 1 stops the run
+  with the outputs left in the Pod.
+- **Stops without calling the slot again:**
+  - a transport failure (ssh or exec);
+  - a non-zero harness exit, for example a result file that cannot be written;
+  - a slot still `started` in a ledger, meaning the process died after claiming it.
+
+  Check the ledger before anything else.
+- The gate runs again after the last slot of a `MAX_SLOTS` batch, so a final unknown run or third error is
+  reported as a stop, not hidden behind a pause.
 - A file `STOP` in the evidence directory stops the run before the next slot. The operator creates it when
   review asks for a stop.
 - `run --slot N` claims its slot in the ledger before anything can fail, and a claimed slot never runs again.
-  A failure before or outside the turn is an `error` result (`harness_error: <type>`) with no usage. It counts
-  towards the 3, and the next slot follows. A failed grade is a result, never a stop reason.
+  A failure before or outside the turn is an `error` result (`harness_error: <type>`) with no usage. So is a
+  grading failure after a settled turn (`harness_error: grade <type>`; its usage stays counted). Either counts
+  towards the 3, and the next slot follows. A failed grade (tests failing) is a result, never a stop reason.
 - After a stop, nothing runs until PM sends a new notice. The driver then resumes at the first unclaimed slot,
   within the remaining budget.
 - **A workspace:** the model's commands run in the executor as UID 20002, and the files they create (for
