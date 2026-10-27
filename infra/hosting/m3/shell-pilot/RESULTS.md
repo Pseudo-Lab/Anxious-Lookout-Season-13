@@ -86,7 +86,12 @@ The full-run caps were 8M input and 60k output, with 4M / 30k per configuration.
    - PV `pvc-8a2a0537-3709-4453-a649-2e9f73d0d200`: NotFound.
    - LVMVolume: absent.
    - `lvs openebs-vg`: the LV is gone. The preserved LVs `617614d2…`, `pvc-2e293117…` and `pvc-57329fcd…` (broker) are unchanged.
-   - The namespace object stays Terminating with all content removed and no finalizers left (`NamespaceDeletionDiscoveryFailure`: stale `metrics.k8s.io/v1beta1` discovery), like `shell-pilot`. It was not force-finalized.
+   - The namespace object stays Terminating, like `shell-pilot`. Its conditions:
+     - `NamespaceContentRemaining=False`;
+     - `NamespaceFinalizersRemaining=False` (no content finalizers);
+     - `NamespaceDeletionDiscoveryFailure=True` (stale `metrics.k8s.io/v1beta1` discovery).
+
+     The namespace's own `spec.finalizers: [kubernetes]` remains. It was not force-finalized.
 5. **Server-side revocation:** not proven separately. The logout cleared the local login. The user chose not to sign out all devices, so there is no proof beyond the logout's rc 0.
 
 **Kept for #68 on the development VM:** `kernel.yama.ptrace_scope=1`, the seccomp profile `shell-pilot-userns.json`, and the `back58-agent-b` image.
