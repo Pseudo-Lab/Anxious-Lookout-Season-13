@@ -1,7 +1,9 @@
 # Shell-surface A/B pilot (#64, development VM only)
 
 Tasks `fix-failing-test` and `slow-suite` (#58 F tasks 1 and 6) under A (current runner shell surface) and
-B (native shell middle option). The 4-turn pilot is done (#64 results). The full run, approved by the user, is
+B (native shell middle option). **Ended:** the full run stopped at 5 of 60 slots after two 429s, and the user
+adopted B (#68). Results and cleanup are in `RESULTS.md`. The rest of this file is the procedure as it was run.
+The 4-turn pilot is done (#64 results). The full run, approved by the user, is
 2 tasks × A/B × 15 slots = 60 paid turns, A and B alternating within each task (`harness.ORDER`). Budget cap
 for the full run: 8M input and 60k output tokens, 4M / 30k per configuration, in a new ledger (the pilot's
 usage is not counted). The harness refuses to start past it and interrupts a turn that would cross it.
@@ -20,6 +22,7 @@ The same model, Codex 0.160.1, prompts and fixtures are used in both. Fixtures u
 
 ## Files
 
+- `RESULTS.md`: the 7 graded runs, the two 429 infrastructure failures, limits, the decision and cleanup.
 - `pilot_tasks.py`: fixtures, prompts and graders (`test_pilot_tasks.py` checks that the fixtures fail as given, pass with the intended fix, and reject edited tests).
 - `harness.py`: `selfcheck --config A|B` (no model call), `run --task … --config … --slot N`, `budget`, `gate`.
 - `campaign.sh`: the full-run driver (gate before each slot, JWT-shape check after it, `STOP` file); `test_campaign.py` runs it against a fake ssh.
