@@ -698,6 +698,9 @@ function handleMutation(owner, method, path, b, user) {
         // #23 api-contracts/issue23-shell-display.md: /fixture/shell-{ok,fail,timeout,busy,cancel,long}이면 shell 실행 결과를 투영한다.
         const shellCase = /\/fixture\/shell-([a-z]+)/.exec(b.text)?.[1];
         if (shellCase) s.items.push(shellItem(shellCase, scope));
+        // #68 api-contracts/issue68-native-shell-history.md: /fixture/native-{ok,empty,declined,patch,patchfail}이면 native 투영을 넣는다.
+        const nativeCase = /\/fixture\/native-([a-z]+)/.exec(b.text)?.[1];
+        if (nativeCase) s.items.push(nativeItem(nativeCase));
         // #22 /fixture/propose: 보고 있는 문서에 Codex 제안을 만든다(research_document_update는 제안만 만들고 문서를 바꾸지 않는다).
         if (b.text.includes("/fixture/propose") && scope.page.kind === "document" && scope.capability === "owner_research") {
           const doc = owned(scope.page.resourceId, owner, "document");
@@ -773,6 +776,29 @@ function shellItem(kind, scope) {
   }
   const item = { id: uuid(), type: "tool_call", name: "shell", input, output, status, raw: { kind: "function_call", arguments: input, result: output, fixture: true } };
   if (error) item.error = error;
+  return item;
+}
+
+// #68 API가 commandExecution·fileChange를 투영한 모양(backend/app/conversations.py display_native_item).
+function nativeItem(kind) {
+  let item;
+  if (kind === "patch" || kind === "patchfail") {
+    const status = kind === "patch" ? "completed" : "failed";
+    const changes = [
+      { path: "notes/native-a.md", kind: "update", movePath: null, diff: "@@ -1 +1 @@\n-old line\n+native patch line\n" },
+      { path: "notes/native-b.md", kind: "add", movePath: null, diff: "new file\n" },
+      { path: "notes/old-name.md", kind: "update", movePath: "notes/new-name.md", diff: "" },
+    ];
+    item = { id: uuid(), type: "tool_call", name: "apply_patch", input: { changes }, output: { status }, status };
+  } else {
+    const status = kind === "declined" ? "rejected" : "completed";
+    const stdout = kind === "ok" ? "native fixture output\nwarning: native stderr line\n" : null;
+    const input = { command: `native-${kind} --run`, cwd: "." };
+    const output = { status, stdout, stderr: null, combinedOutput: true, exitCode: status === "completed" ? 0 : null, durationMs: status === "completed" ? 1530 : null };
+    item = { id: uuid(), type: "tool_call", name: "shell", input, output, status };
+    if (kind === "declined") item.error = { code: "shell_declined" };
+  }
+  item.raw = { kind: "native_item", fixture: true };
   return item;
 }
 

@@ -890,7 +890,11 @@ async function confirmSingleTurn(label, text) {
   check("R22. general page hint shown", await appears(chat.getByText("보고 있는 화면: 일반")));
   check("R22. owner wording: no per-page tool limits", await appears(chat.getByText("연결 관계와 보관도 처리합니다", { exact: false })));
   check("R22. web search saving wording", await appears(chat.getByText("출처 주소와 수집 시각을 붙여 자료로 저장합니다", { exact: false })));
-  check("R22. shell wording without fixed limit number (#23)", await appears(chat.getByText("명령은 한 번에 하나씩 시간 상한 안에서 실행됩니다", { exact: false })) && !/30\s*초/.test(await chat.innerText()));
+  // #68 native shell: 실행기의 한 번에 하나·시간 상한 문구는 없어지고, 파일을 직접 고칠 수 있다고 적는다.
+  check(
+    "R22. shell wording: files edited directly, no executor limits (#68)",
+    (await appears(chat.getByText("파일을 만들거나 고쳐 계산·정리할 수 있습니다", { exact: false }))) && !/30\s*초|시간 상한 안에서/.test(await chat.innerText())
+  );
   check("R22. memory wording: earlier conversation continues", await appears(chat.getByText("이전 대화 내용은 이 대화에 계속 이어집니다.")));
   await chat.getByLabel("메시지").fill("일반 페이지 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
@@ -982,6 +986,44 @@ async function confirmSingleTurn(label, text) {
   check("R22s. busy: rejected, one at a time", (await appears(shellItem("busy").getByText("거부됨"))) && (await appears(shellItem("busy").getByText("한 번에 하나씩", { exact: false }))));
   await ask("/fixture/shell-cancel");
   check("R22s. cancel: no resource-limit guess", (await appears(shellItem("cancel").getByText("중간에 취소되었습니다", { exact: false }))) && !/메모리|CPU|자원/.test(await shellItem("cancel").innerText()));
+
+  // R22n. #68 native shell·apply_patch(api-contracts/issue68-native-shell-history.md)
+  const nativeItem = (text) => chat.locator("li", { hasText: text }).last();
+  await ask("/fixture/native-ok");
+  check("R22n. ok: completed, no warning", (await appears(nativeItem("native-ok --run").getByText("완료", { exact: true }))) && (await nativeItem("native-ok --run").locator("p.text-amber-800").count()) === 0);
+  await nativeItem("native-ok --run").getByRole("button", { name: /명령 실행/ }).click();
+  check(
+    "R22n. ok: combined output label, duration, no stderr box",
+    (await appears(nativeItem("native-ok --run").getByText("출력 (표준 출력·오류 합침)"))) &&
+      (await appears(nativeItem("native-ok --run").locator("pre", { hasText: "native stderr line" }))) &&
+      (await appears(nativeItem("native-ok --run").getByText("실행 시간 1.5초"))) &&
+      (await nativeItem("native-ok --run").getByText("오류 출력").count()) === 0
+  );
+  await ask("/fixture/native-empty");
+  await nativeItem("native-empty --run").getByRole("button", { name: /명령 실행/ }).click();
+  check("R22n. empty: no-output note instead of raw JSON", (await appears(nativeItem("native-empty --run").getByText("출력이 없습니다."))) && !/combinedOutput/.test(await nativeItem("native-empty --run").innerText()));
+  await ask("/fixture/native-declined");
+  check(
+    "R22n. declined: rejected with authorization wording",
+    (await appears(nativeItem("native-declined --run").getByText("거부됨"))) &&
+      (await appears(nativeItem("native-declined --run").getByText("권한 확인에서 거부되어 서버가 이 명령을 실행하지 않았습니다", { exact: false })))
+  );
+  await ask("/fixture/native-patch");
+  const patchItem = nativeItem("notes/native-a.md 외 2개");
+  check("R22n. patch: shown as file change with summary and Korean status", (await appears(patchItem.getByText("파일 변경"))) && (await appears(patchItem.getByText("완료", { exact: true }))));
+  await patchItem.getByRole("button", { name: /파일 변경/ }).click();
+  check(
+    "R22n. patch: per-change kind, rename and diff shown inert",
+    (await appears(patchItem.getByText("이름 바꿈", { exact: false }))) &&
+      (await appears(patchItem.getByText("notes/new-name.md", { exact: false }))) &&
+      (await appears(patchItem.locator("pre", { hasText: "+native patch line" })))
+  );
+  await ask("/fixture/native-patchfail");
+  check(
+    "R22n. patch failed: Korean label and warning",
+    (await appears(nativeItem("notes/native-a.md 외 2개").getByText("실패", { exact: true }))) &&
+      (await appears(nativeItem("notes/native-a.md 외 2개").getByText("파일 변경을 적용하지 못했습니다")))
+  );
   await page.unroute("**/api/research/sessions/*/messages");
 
   // 기존 대화 링크: 대화창에서 열고 입력창·polling은 하나

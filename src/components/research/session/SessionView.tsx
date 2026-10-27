@@ -20,7 +20,22 @@ import type { AcceptedScope, PageDescriptor, SessionDetail, SessionItem, ToolCal
 import { describePage, kindText, pageUnresolved, sameDescriptor, scopeLabel, useRegisteredPage } from "@/lib/research/pageContext";
 import { own } from "@/lib/research/own";
 import { BASE_PATH } from "@/lib/constants";
-import { SHELL_STATUS_LABELS, SHELL_TOOL, shellNote, shellView } from "@/lib/research/shell";
+import {
+  PATCH_STATUS_LABELS,
+  PATCH_TOOL,
+  SHELL_STATUS_LABELS,
+  SHELL_TOOL,
+  formatDuration,
+  patchChanges,
+  patchKindLabel,
+  patchNote,
+  patchSummary,
+  shellCwdLabel,
+  shellEmptyOutput,
+  shellNote,
+  shellOutputLabel,
+  shellView,
+} from "@/lib/research/shell";
 import { formatDateTime, toDisplayText } from "@/lib/research/format";
 import {
   CodexStatusView,
@@ -112,17 +127,27 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
   const [raw, setRaw] = useState(false);
   // #23: shell은 명령 실행으로 읽기 쉽게 보인다. 서버 기록은 그대로이며 모르는 값은 일반 도구처럼 표시한다.
   const shell = item.name === SHELL_TOOL ? shellView(item) : null;
+  // #68: apply_patch(native 파일 수정)는 "파일 변경"으로 보인다. changes가 배열이 아니면 일반 도구처럼 표시한다.
+  const patch = item.name === PATCH_TOOL ? patchChanges(item) : null;
   const proposal = proposalRef(item);
   const note = shell
     ? shellNote(item.status, shell)
-    : item.status === "rejected"
+    : patch
+      ? patchNote(item.status, item.error?.code)
+      : item.status === "rejected"
       ? item.error?.code === "tool_not_allowed"
         ? "이 질문을 보낸 범위(공개 글 읽기 등)에서 허용되지 않는 도구라 서버가 실행하지 않았습니다."
         : "서버가 이 도구 호출을 실행하지 않았습니다."
       : null;
   const code = shell ? shell.code : item.error?.code;
-  const warn = item.status === "rejected" || (shell !== null && (item.status === "failed" || item.status === "timed_out"));
-  const label = shell ? own(SHELL_STATUS_LABELS, item.status) : own(TOOL_STATUS_LABELS, item.status);
+  const warn =
+    item.status === "rejected" || ((shell !== null || patch !== null) && (item.status === "failed" || item.status === "timed_out"));
+  const label = shell
+    ? own(SHELL_STATUS_LABELS, item.status)
+    : patch
+      ? own(PATCH_STATUS_LABELS, item.status)
+      : own(TOOL_STATUS_LABELS, item.status);
+  const emptyOutput = shell ? shellEmptyOutput(item.status, shell) : null;
   return (
     <li className="rounded-md bg-stone-50 text-xs">
       <button
@@ -131,8 +156,10 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
         className="flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left hover:bg-stone-100"
       >
         <span className="min-w-0 break-words">
-          <span className="mr-2 text-xs text-stone-500">{shell ? "명령 실행" : "도구"}</span>
-          <span className="font-mono text-stone-900">{shell ? commandPreview(shell.command) || item.name : item.name}</span>
+          <span className="mr-2 text-xs text-stone-500">{shell ? "명령 실행" : patch ? "파일 변경" : "도구"}</span>
+          <span className="font-mono text-stone-900">
+            {shell ? commandPreview(shell.command) || item.name : patch ? patchSummary(patch) || item.name : item.name}
+          </span>
         </span>
         <span className={`shrink-0 text-xs ${warn ? "font-medium text-amber-700" : "text-stone-500"}`}>{label ?? item.status}</span>
       </button>
@@ -162,29 +189,44 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
           {shell ? (
             <>
               <div className="space-y-1">
-                <p className="text-xs font-medium text-stone-900">명령 (작업 공간 {shell.cwd ?? "."})</p>
+                <p className="text-xs font-medium text-stone-900">명령 ({shellCwdLabel(shell.cwd)})</p>
                 <Inert value={shell.command ?? item.input} />
               </div>
               {shell.exitCode !== null && <p className="text-xs text-stone-900">종료 코드 {shell.exitCode}</p>}
-              {shell.stdout !== null && (
+              {shell.durationMs !== null && <p className="text-xs text-stone-900">실행 시간 {formatDuration(shell.durationMs)}</p>}
+              {shell.stdout !== null && !(shell.combined && shell.stdout === "") && (
                 <div className="space-y-1">
-                  <p className="text-xs font-medium text-stone-900">표준 출력</p>
+                  <p className="text-xs font-medium text-stone-900">{shellOutputLabel(shell)}</p>
                   <Inert value={shell.stdout} />
                 </div>
               )}
+              {emptyOutput && <p className="text-xs text-stone-900">{emptyOutput}</p>}
               {shell.stderr !== null && shell.stderr !== "" && (
                 <div className="space-y-1">
                   <p className="text-xs font-medium text-stone-900">오류 출력</p>
                   <Inert value={shell.stderr} />
                 </div>
               )}
-              {shell.stdout === null && (
+              {shell.stdout === null && !shell.combined && (
                 <div className="space-y-1">
                   <p className="text-xs font-medium text-stone-900">출력</p>
                   <Inert value={item.output} />
                 </div>
               )}
             </>
+          ) : patch ? (
+            <ul className="space-y-3">
+              {patch.map((change, i) => (
+                <li key={i} className="space-y-1">
+                  <p className="text-xs font-medium text-stone-900">
+                    {patchKindLabel(change)} <span className="font-mono">{change.path ?? "(경로 없음)"}</span>
+                    {change.movePath && <span className="font-mono"> → {change.movePath}</span>}
+                  </p>
+                  {change.diff ? <Inert value={change.diff} /> : <p className="text-xs text-stone-500">변경 내용이 기록되지 않았습니다.</p>}
+                </li>
+              ))}
+              {patch.length === 0 && <li className="text-xs text-stone-500">기록된 변경이 없습니다.</li>}
+            </ul>
           ) : (
             <>
               <div className="space-y-1">
