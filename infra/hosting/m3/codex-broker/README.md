@@ -28,16 +28,32 @@ and measurements are in #58 C.
 | Role `codex-broker-runner-pods` (codex-runner) | `pods` get only; the API gets no new right |
 | Service `codex-broker:8080` | |
 | StatefulSet `codex-broker` | replicas 1, runner image with `uvicorn broker.app:create_app`, UID/GID 10001, read-only root, all capabilities dropped, no requests/limits, PVC `data` 1Gi with `CODEX_HOME=/data/codex` (0700) |
-| CiliumNetworkPolicy `codex-broker` | ingress: `codex-runner` user-runner Pods and the host (kubelet probes; the cluster sets `allow-localhost: policy`) → 8080. egress: kube-dns 53 through the DNS proxy (all broker lookups, including `kubernetes.default.svc` for TokenReview and Pod GET), kube-apiserver 6443, `toFQDNs` `auth.openai.com` and `chatgpt.com` on 443 |
+| CiliumNetworkPolicy `codex-broker` | ingress: `codex-runner` user-runner Pods and the host (kubelet probes; the cluster sets `allow-localhost: policy`) → 8080. egress: kube-dns 53 (plain L4, no DNS proxy), kube-apiserver 6443, `world` on 443 (default). The `fqdn` switch renders `toFQDNs` `auth.openai.com` and `chatgpt.com` on 443 instead, with all broker DNS through the proxy |
 
 The runner side adds an explicit egress rule to `codex-broker:8080` in
 `user-runner-e2e/40-runner-network.json`. The runner's broader egress narrowing is #62.
 
-**DNS proxy prerequisite.** `toFQDNs` is enforced only when Cilium runs its DNS proxy (`l7Proxy: true`).
-`infra/k3s/cilium-values.yaml` sets it (user decision (a) on #60). Apply it to the cluster first, following
-`infra/k3s/README.md` "Cilium DNS proxy (#60)", and check `enable-l7-proxy: "true"` before applying this
-policy. `"egress": "world"` renders `toEntities: world` on 443 instead: **weaker isolation** (any internet
-host on 443), kept only as an explicit switch that the user did not choose.
+**Egress: `world` by default (user decision on #60, 2026-10-29).**
+- **What it renders:** `toEntities: world` on TCP 443. The broker reaches **any internet host on 443**, not only
+  `auth.openai.com` and `chatgpt.com`.
+- **Weaker isolation, accepted by the user.** The policy no longer restricts the destination domain. The other
+  limits stay: TCP 443 only, kube-dns 53, kube-apiserver 6443, and ingress from runner Pods and the host only.
+  The broker runs no shell. The runner policies are not affected by this decision.
+- **DNS stays off the Cilium DNS proxy:** the kube-dns rule has no `rules.dns`, so no proxy redirect is installed
+  for the broker endpoint.
+
+**Why not `fqdn`:**
+- `"egress": "fqdn"` renders `toFQDNs` for the two names. It needs the DNS proxy (`l7Proxy: true`, set in
+  `infra/k3s/cilium-values.yaml`), and its kube-dns rule carries `rules.dns`, so **every** broker lookup goes
+  through the proxy, `kubernetes.default.svc` included.
+- On the development VM that proxy path fails: all lookups time out, and so do TokenReview and Pod GET. With the
+  policy deleted, the same lookups work.
+- Candidate 1 (`dnsProxy.enableTransparentMode=false`) changed nothing, applied or reverted (see
+  `infra/k3s/README.md` "Cilium DNS proxy (#60)").
+- The domain restriction and the remaining candidate (`bpf.tproxy`) are
+  [#70](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/70). Production has the same Cilium
+  values as the development VM (`infra/k3s/PARITY.md`), so **do not use `fqdn` in production before #70 shows it
+  working.**
 
 `values.json` (see `values.example.json`):
 
@@ -47,7 +63,7 @@ host on 443), kept only as an explicit switch that the user did not choose.
 | `accountId` | the ChatGPT workspace id the runners already expect (`providerAccountId`); an identifier, not a credential |
 | `storageClass` | the CSI class from #63 |
 | `accessMode` | `ReadWriteOncePod` on CSI. `ReadWriteOnce` is allowed only on a non-CSI class until #63 |
-| `egress` | `fqdn` (default, #60 acceptance) or `world` (explicit opt-in, weaker; see above) |
+| `egress` | `world` (default, #60 user decision; any host on 443) or `fqdn` (explicit switch, the two names only; not working until #70) |
 
 ## Operating requirements
 
@@ -71,10 +87,17 @@ host on 443), kept only as an explicit switch that the user did not choose.
 - **Mock OAuth (development only):** the broker passes `CODEX_REFRESH_TOKEN_URL_OVERRIDE` to its app-server
   only when it is `http://` on a loopback address (a mock sidecar in the broker Pod); any other value is
   ignored. The production manifest never sets it.
-- **Network check (development VM):** under the same policy, show the allowed destinations succeeding and
-  others dropped by policy: a runner Pod reaches the broker's 8080 and another namespace's Pod is dropped; the
-  broker reaches `auth.openai.com:443` and `chatgpt.com:443` and another internet host on 443 is dropped. Use
-  Hubble or `cilium-dbg monitor --type drop` on the agent; a failed connection alone is not proof of a policy drop.
+- **Network check (development VM, default `world`):** under the same policy, show the allowed destinations
+  succeeding and the others dropped by policy:
+  - A runner Pod reaches the broker's 8080; another namespace's Pod is dropped.
+  - The broker resolves `kubernetes.default.svc` and the provider names, and reaches the API (TokenReview,
+    Pod GET), `auth.openai.com:443` and `chatgpt.com:443`.
+  - An internet host on a port other than 443 is dropped.
+  - The broker endpoint has no `cilium-dns-egress` redirect (`cilium-dbg status --verbose` on the agent).
+
+  Use Hubble or `cilium-dbg monitor --type drop` on the agent: a failed connection alone is not proof of a
+  policy drop. An internet host on 443 that is not a provider is **allowed** under `world`. That is the accepted
+  difference, not a failure.
 
 ## Applying to production
 

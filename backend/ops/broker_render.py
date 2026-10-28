@@ -2,7 +2,7 @@
 
 values: {"image": "<runner image>@sha256:...", "accountId": "<operator account id>",
          "storageClass": "<class>", "accessMode": "ReadWriteOncePod" | "ReadWriteOnce",
-         "egress": "fqdn" (default) | "world"}
+         "egress": "world" (default) | "fqdn"}
 The account id is the ChatGPT workspace id the runners already expect, not a secret.
 """
 import argparse
@@ -29,9 +29,9 @@ def checked(v):
     require(isinstance(v['storageClass'], str) and re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?', v['storageClass']))
     # ReadWriteOncePod needs a CSI class (#63); ReadWriteOnce with replicas 1 until then.
     require(v['accessMode'] in {'ReadWriteOncePod', 'ReadWriteOnce'})
-    # fqdn (#60 acceptance): auth.openai.com and chatgpt.com only, which needs Cilium's DNS proxy
-    # (l7Proxy: true). world is an explicit, weaker opt-in for clusters without it: any internet host on 443.
-    require(v.get('egress', 'fqdn') in {'fqdn', 'world'})
+    # world (#60 user decision): any internet host on 443 and no DNS proxy path. fqdn (auth.openai.com and
+    # chatgpt.com only) needs Cilium's DNS proxy, which fails on the development VM; an explicit switch until #70.
+    require(v.get('egress', 'world') in {'world', 'fqdn'})
     return v
 
 
@@ -43,7 +43,7 @@ def rbac(kind, name, namespace, rules):
              'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': kind, 'name': name}}]
 
 
-def policy(egress='fqdn'):
+def policy(egress='world'):
     port = lambda number, protocol='TCP': {'port': str(number), 'protocol': protocol}
     kube_dns = [{'matchLabels': {'k8s:io.kubernetes.pod.namespace': 'kube-system', 'k8s:k8s-app': 'kube-dns'}}]
     if egress == 'fqdn':
@@ -101,7 +101,7 @@ def resources(v):
                   'volumeClaimTemplates': [{'metadata': {'name': 'data'}, 'spec': {
                       'accessModes': [v['accessMode']], 'storageClassName': v['storageClass'],
                       'resources': {'requests': {'storage': '1Gi'}}}}]}},
-        policy(v.get('egress', 'fqdn'))]
+        policy(v.get('egress', 'world'))]
     return {'apiVersion': 'v1', 'kind': 'List', 'items': items}
 
 

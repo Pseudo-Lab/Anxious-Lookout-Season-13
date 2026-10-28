@@ -1,7 +1,8 @@
 # Cilium 1.20.2; kube-proxy is retained.
 kubeProxyReplacement: false
-# DNS proxy for toFQDNs policies (#60). envoy.enabled stays false: no cilium-envoy DaemonSet,
-# and no HTTP/Kafka L7 rules are used.
+# DNS proxy for toFQDNs policies (#60), the same as production. envoy.enabled stays false: no
+# cilium-envoy DaemonSet, and no HTTP/Kafka L7 rules are used. The proxy path fails on the development
+# VM, so the codex-broker defaults to world egress without it; see README.md and #70.
 l7Proxy: true
 ipam:
   mode: cluster-pool

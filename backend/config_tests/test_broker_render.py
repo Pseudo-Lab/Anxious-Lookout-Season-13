@@ -52,18 +52,22 @@ def test_policy_admits_runners_and_kubelet_probes_only():
         {'fromEntities': ['host'], 'toPorts': PORT_8080}]
 
 
-def test_default_egress_is_the_two_provider_fqdns_through_the_dns_proxy():
+def test_default_egress_is_world_443_without_the_dns_proxy():
     egress = lookup()['CiliumNetworkPolicy', 'codex-broker']['spec']['egress']
+    # No rules.dns: the broker's lookups stay off the Cilium DNS proxy path (#60 decision, #70).
+    assert egress[0] == {'toEndpoints': [{'matchLabels': {'k8s:io.kubernetes.pod.namespace': 'kube-system',
+                                                          'k8s:k8s-app': 'kube-dns'}}],
+                         'toPorts': [{'ports': [{'port': '53', 'protocol': 'UDP'}, {'port': '53', 'protocol': 'TCP'}]}]}
+    assert egress[1:] == [API, {'toEntities': ['world'], 'toPorts': [{'ports': [{'port': '443', 'protocol': 'TCP'}]}]}]
+    assert not any('toFQDNs' in rule for rule in egress)
+    assert lookup(egress='world') == lookup()
+
+
+def test_fqdn_egress_is_only_an_explicit_switch():
+    egress = lookup(egress='fqdn')['CiliumNetworkPolicy', 'codex-broker']['spec']['egress']
     assert egress[0]['toPorts'][0]['rules'] == {'dns': [{'matchPattern': '*'}]}
     assert egress[1:] == [API, {'toFQDNs': [{'matchName': 'auth.openai.com'}, {'matchName': 'chatgpt.com'}],
                                 'toPorts': [{'ports': [{'port': '443', 'protocol': 'TCP'}]}]}]
-    assert lookup(egress='fqdn') == lookup()
-
-
-def test_world_egress_is_only_an_explicit_switch():
-    egress = lookup(egress='world')['CiliumNetworkPolicy', 'codex-broker']['spec']['egress']
-    assert 'rules' not in egress[0]['toPorts'][0]
-    assert egress[1:] == [API, {'toEntities': ['world'], 'toPorts': [{'ports': [{'port': '443', 'protocol': 'TCP'}]}]}]
 
 
 @pytest.mark.parametrize('key,value', [('image', 'runner:latest'), ('accountId', 'has space'),
