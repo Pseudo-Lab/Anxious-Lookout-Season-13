@@ -33,20 +33,33 @@ Firewalld public zone permits Pod CIDR `10.42.0.0/16` to TCP6443 in runtime and 
 
 The development VM was installed from the old file and was switched with the procedure below on 2026-10-26. Its FQDN result is in "Development VM result" below; the follow-up is #70. The procedure also applies to any cluster installed from a file older than #60. Run it in a maintenance window with no runner turns in progress:
 
+1. Save the config, upgrade, and diff. **This block ends at the diff on purpose:**
+
 ```sh
 k() { sudo /usr/local/bin/k3s kubectl "$@"; }
 cm() { k -n kube-system get cm cilium-config -o json | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["data"],sort_keys=True,indent=0))'; }
 cm > /tmp/cilium-config-before.json
 sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml /usr/local/bin/cilium upgrade --version 1.20.2 --values cilium-values.yaml
-cm > /tmp/cilium-config-after.json; diff /tmp/cilium-config-before.json /tmp/cilium-config-after.json   # only the intended keys
-k -n kube-system rollout restart ds/cilium deploy/cilium-operator    # the chart rolls neither on a ConfigMap change
-k -n kube-system rollout status ds/cilium --timeout=300s; k -n kube-system rollout status deploy/cilium-operator --timeout=300s
-sudo /usr/local/bin/k3s kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg status | grep -E '^(Cilium|KubeProxyReplacement|Proxy Status|Hubble):'   # Proxy Status OK, Envoy: embedded
-sudo /usr/local/bin/k3s kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.enable-l7-proxy} {.data.external-envoy-proxy} {.data.kube-proxy-replacement}{"\n"}'   # true false false
-sudo /usr/local/bin/k3s kubectl -n kube-system get ds cilium-envoy    # NotFound
+cm > /tmp/cilium-config-after.json
+diff /tmp/cilium-config-before.json /tmp/cilium-config-after.json
 ```
 
-- **Rendered-config diff before any restart.** Restart only if the diff shows nothing but the intended keys. Otherwise run the upgrade again with the previous values, check that the diff against `cilium-config-before.json` is empty, and stop.
+2. **Read the diff before going on.**
+   - `diff` exits 1 for the intended change too, so its exit code decides nothing.
+   - Continue only if the upgrade succeeded and every changed, added or removed line is an intended key.
+   - Otherwise do not restart. Run the upgrade again with the previous values file (the committed version before your change), check that the diff against `cilium-config-before.json` is empty, and stop. The running agent still has the old configuration until a restart.
+
+3. Only then restart the agent and the operator (the chart rolls neither on a ConfigMap change), and check:
+
+```sh
+k() { sudo /usr/local/bin/k3s kubectl "$@"; }
+k -n kube-system rollout restart ds/cilium deploy/cilium-operator
+k -n kube-system rollout status ds/cilium --timeout=300s; k -n kube-system rollout status deploy/cilium-operator --timeout=300s
+k -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg status | grep -E '^(Cilium|KubeProxyReplacement|Proxy Status|Hubble):'   # Proxy Status OK, Envoy: embedded
+k -n kube-system get cm cilium-config -o jsonpath='{.data.enable-l7-proxy} {.data.external-envoy-proxy} {.data.kube-proxy-replacement}{"\n"}'   # true false false
+k -n kube-system get ds cilium-envoy    # NotFound
+```
+
 - **Keep `kubeProxyReplacement: false` pinned.** `cilium-values.yaml` sets it, and the upgrade above uses that file, not `--reuse-values`.
   - The CLI still prints "Auto-detected kube-proxy has not been installed / Cilium will fully replace all functionalities of kube-proxy", because k3s embeds kube-proxy and has no DaemonSet to detect. The pinned file value wins.
   - On the development VM the Helm release values had held `kubeProxyReplacement: true` while the live ConfigMap said `false`. A `--reuse-values --set <one key>` upgrade re-rendered `true` and changed a second key (#60, 2026-10-27). That shows the drift between the stored values and the live config on that VM; it does not show that every `--reuse-values` upgrade flips KPR.
