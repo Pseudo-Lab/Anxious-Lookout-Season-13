@@ -36,13 +36,13 @@ from release evidence, not a mutable tag or the historical example worker ID.
 Record approved SHA, image digest, templates SHA and module hash together.
 `postImagesStorageClass` is required; this cluster selects `m2-postgres-retain`.
 
-PM must replace providerAccountId and verify sourceUid, node/boot/namespace IDs,
+PM must replace providerAccountId and verify node/boot/namespace IDs,
 CIDR, API TLS names and canonical root-owned executable paths in the example.
 The provider account is an identifier, never an access/refresh token.
 Both API endpoints must use **IP literals**: `app.runner_kube.KubePods` rejects
 DNS hostnames in real execution, including `localhost` and `kubernetes.default.svc`.
 Use `api=https://10.43.0.1:443` for the in-cluster API and
-`hostApi=https://127.0.0.1:6443` for host workers; supply kubeconfig uses the latter.
+`hostApi=https://127.0.0.1:6443` for host workers.
 PM corrected its earlier truncated certificate report: the serving certificate has
 IP SANs `127.0.0.1`, `10.43.0.1` and `10.0.0.107`. The
 [PM canary report](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/16#issuecomment-6214030575)
@@ -148,7 +148,7 @@ The #59 manifest no longer provides `RUNNER_TOKEN_FILE`, so a runner image older
 #59 cannot start under it: move every existing binding to the reviewed images in the
 same window, after the API and worker images run the new code and before the next
 entry. Use `ops.runner_binding_image` (CUTOVER.md section 6) per owner in `idle_stopped`
-with a completed termination proof, with entry, controller, observer and supply stopped:
+with a completed termination proof, with entry, controller and observer stopped:
 
 - inputs: `owner`, `state`, `generation`, `revision` (the current registry fence),
   `oldPlanSha256` (`plan_digest` of the current plan, computed in the new worker image),
@@ -194,12 +194,13 @@ No token value is rendered. Automatic general SA mounting remains disabled.
 | m2-hosting/hosting | Pod/PVC/Secret GET | named codex-runner Namespace GET |
 | runner-pool-controller | Pod/PVC/Secret GET/CREATE; named runner-workload SA and runner-default-deny KNP GET | PV GET/CREATE; named Namespace GET |
 | runner-pool-observer | Pod/PVC/Secret GET; Pod DELETE | PV GET; named Node and Namespace GET |
-| runner-pool-supply | Pod/PVC/Secret GET; pods/exec CREATE | named Namespace GET |
+| runner-pool-supply | retired (#60): Role, ClusterRole and bindings rendered empty | retired |
 
 API never receives create/delete/exec/PV privileges. New worker SAs have no
 automount. Existing runner-web / runner-preparer Roles and bindings, and their
 runner-web-namespace / codex-runner-preparer cluster counterparts, are replaced
-with empty rules/subjects. Do this only with old mutators stopped. Existing old
+with empty rules/subjects. So are runner-pool-supply's (host supply retired by
+codex-broker, #60); delete its ServiceAccount after the retirement steps below. Do this only with old mutators stopped. Existing old
 SAs and Secrets are retained as evidence, with no grant from those bindings.
 RBAC is additive: PM must audit any OTHER binding to these SAs, and check effective
 `kubectl auth can-i --as=system:serviceaccount:...` rights before enabling services.
@@ -214,8 +215,8 @@ with current Cilium/host rules. This bundle does not establish those live result
 
 ## Private host inputs
 
-Install generated controller/observer/supply input JSON as respectively
-`/etc/anxious-lookout/issue16/{controller,observer,supply}/inputs.json`.
+Install generated controller/observer input JSON as respectively
+`/etc/anxious-lookout/issue16/{controller,observer}/inputs.json`.
 Each directory is root0700 and files root0600, with no symlink/hardlink, as required
 by the existing `read_private` implementation. Supply these additional files
 privately, never through values, command-line credential arguments or Git:
@@ -224,7 +225,6 @@ privately, never through values, command-line credential arguments or Git:
 | --- | --- |
 | controller | database-url (controller DB login), kube-token (runner-pool-controller SA), ca.crt |
 | observer | database-url (observer DB login), kube-token (runner-pool-observer SA), ca.crt |
-| supply | database-url (observer DB login), kube-token (runner-pool-supply SA), ca.crt, kubeconfig |
 
 The controller uses the same file for DATABASE_URL_FILE and
 CONTROLLER_DATABASE_URL_FILE. Apply the existing #16 SQL grants before starting.
@@ -251,7 +251,7 @@ terminal, argv, environment, Git or the operation report:
 ```sh
 set -eu
 umask 077
-for role in controller observer supply; do
+for role in controller observer; do
   dir=/etc/anxious-lookout/issue16/$role
   request=$(mktemp "$dir/.token-request.XXXXXX")
   candidate=$(mktemp "$dir/.kube-token.XXXXXX")
@@ -267,28 +267,22 @@ done
 
 On failure stop here; protect/remove only these newly created temporary files
 after inspection, never print their contents. Existing token remains intact until
-atomic replacement. Each new finite worker invocation reads the new token; supply
-kubeconfig also uses tokenFile. Resume timers only with valid tokens and monitoring.
+atomic replacement. Each new finite worker invocation reads the new token.
+Resume timers only with valid tokens and monitoring.
 
-Supply kubeconfig must address the same hostApi/CA/SA as supply pool config, have
-exactly one reviewed context, verified TLS, `certificate-authority: /private/ca.crt`,
-and `tokenFile: /private/kube-token`; no exec/auth-provider plugins, impersonation,
-insecure-skip-tls-verify or embedded broad admin credentials. PM validates it.
-Only supply receives a read-only `/home/opc/.codex` bind. No role gets Docker socket.
+No role gets Docker socket or `/home/opc/.codex` (operator access comes from codex-broker, #60).
 Use canonical root-owned executable files compatible with the image. This host's
-`/usr/local/bin/{kubectl,crictl}` symlinks resolve to the **compressed launcher**
+`/usr/local/bin/crictl` symlink resolves to the **compressed launcher**
 `/usr/local/bin/k3s` (currently nobody-owned). Binding that launcher alone fails in
 the read-only image while extracting `/var/lib/rancher/k3s/data`; it also fails the
 worker's root-owned executable check. Do not change the live launcher to bypass it.
 
 The example instead pins the **already extracted** root-owned CLI at
 `/var/lib/rancher/k3s/data/d83b1e679e41e04bbf4c6ff76f5684f0f98b2b4bf29bb632db4a497cd8093a71/bin/k3s`.
-Set BOTH values.kubectl and values.crictl to that resolved path. The renderer binds
-it separately at `/usr/local/bin/kubectl` and `/usr/local/bin/crictl` inside the
-respective containers; basename dispatch works without extra extraction or host
-data/config mounts. PM can alternatively install identical bytes root:root0755 at
-a dedicated canonical path, recording the source/hash, and use that path for both
-values. No external download is required. Preserve the pinned binary across k3s
+Set values.crictl to that resolved path. The renderer binds it at
+`/usr/local/bin/crictl` inside the observer; basename dispatch works without extra
+extraction or host data/config mounts. PM can alternatively install identical bytes root:root0755 at
+a dedicated canonical path, recording the source/hash, and use that path. No external download is required. Preserve the pinned binary across k3s
 upgrades/cleanup; a replacement requires repeat provenance/compatibility checks.
 
 Offline probes in the pinned provisioner (network none, read-only, all caps dropped)
@@ -308,20 +302,18 @@ PM checks expected ownership and any existing contents before installation:
 ```sh
 install -d -o root -g root -m 0700 /usr/local/lib/anxious-lookout/issue16
 install -d -o root -g root -m 0700 /etc/anxious-lookout/issue16/controller \
-  /etc/anxious-lookout/issue16/observer /etc/anxious-lookout/issue16/supply
+  /etc/anxious-lookout/issue16/observer
 install -d -o root -g root -m 0700 /var/lib/anxious-lookout/user-runners \
   /var/lib/anxious-lookout/issue16-d4 \
   /var/lib/anxious-lookout/issue16-d4/provision-output \
-  /var/lib/anxious-lookout/issue16-d4/observer \
-  /var/lib/anxious-lookout/issue16-d4/supply \
-  /var/lib/anxious-lookout/issue16-d4/supply/attempts
+  /var/lib/anxious-lookout/issue16-d4/observer
 out=/private-rollout/candidate
 lib=/usr/local/lib/anxious-lookout/issue16
-for role in controller observer supply restore; do
+for role in controller observer restore; do
   install -o root -g root -m 0700 "$out/$role.sh" "$out/stop-$role.sh" "$lib/"
   install -o root -g root -m 0644 "$out/issue16-$role.service" /etc/systemd/system/
 done
-for role in controller observer supply; do
+for role in controller observer; do
   install -o root -g root -m 0644 "$out/issue16-$role.timer" /etc/systemd/system/
   install -o root -g root -m 0600 "$out/$role-inputs.json" \
     "/etc/anxious-lookout/issue16/$role/inputs.json"
@@ -359,8 +351,6 @@ free space, seccomp/AppArmor and host propagation. AppArmor confinement is disab
 for these two helpers only. No host source/DB/network is mounted into restore.
 Observer has host PID/cgroup namespaces, read-only host proc/CRI socket/crictl and
 rslave storage, DAC_READ_SEARCH/SYS_PTRACE; socket read-only does not limit CRI RPCs.
-Supply has only source/config/binary reads and its own writable cursor/attempt dir,
-DAC_READ_SEARCH, host network, no host PID/cgroup/CRI/dev/storage mounts.
 
 Restore runs after local-fs/Docker and **before k3s**; the k3s drop-in Requires/After
 makes restore failure prevent k3s startup. Do not add After=k3s/network-online to
@@ -373,7 +363,7 @@ an empty inventory, which succeeds. A partial controller run needs operator
 reconciliation before reboot; do not bypass failed restore to make k3s start.
 
 Start restore once before any new owner can enter, then manually run finite worker
-services for the canary. Controller, observer(--idle), supply timers are separate
+services for the canary. Controller and observer(--idle) timers are separate
 oneshot batches every15seconds after the previous batch finishes, not inbox watchers.
 `worker.py` converts per-owner reconciliation_required into exit1 so systemd can
 alert even though the original CLI catches per-owner errors. Each unit has a
@@ -384,8 +374,30 @@ canary checks; no restore validation/rollback rehearsal or two-owner full E2E is
 added as a PR gate. A real mount/host/native/provider check remains an execution
 result to report, not implied by the offline tests.
 
-Use `systemctl stop issue16-controller.timer issue16-observer.timer issue16-supply.timer`
+Use `systemctl stop issue16-controller.timer issue16-observer.timer`
 and stop the corresponding services before changing inputs/allowlist or D4 actions.
 Changing API env alone does not stop workers. On expansion, re-render API and all
 worker scripts from one values file and review/diff again; retain source/size settings
 for existing storage. systemd service env does not carry credential bytes.
+
+## Host supply retirement (#60)
+
+Runners now pull operator access from `codex-broker` (`infra/hosting/m3/codex-broker/README.md`).
+The rendered bundle has no supply unit, input or RBAC grant. On a node installed before
+#60, after the broker is logged in and a canary runner reports `available`:
+
+```sh
+systemctl disable --now issue16-supply.timer issue16-supply.service
+rm -f /etc/systemd/system/issue16-supply.timer /etc/systemd/system/issue16-supply.service \
+  /usr/local/lib/anxious-lookout/issue16/supply.sh /usr/local/lib/anxious-lookout/issue16/stop-supply.sh
+systemctl daemon-reload
+kubectl apply -f /private-rollout/candidate/resources.json      # empties runner-pool-supply Role/ClusterRole
+kubectl -n codex-runner delete serviceaccount runner-pool-supply
+```
+
+- Keep `/var/lib/anxious-lookout/issue16-d4/supply/attempts` as evidence of past deliveries.
+  Remove `/etc/anxious-lookout/issue16/supply` (database URL, kube token, kubeconfig) once
+  the canary succeeded; revoke that database login with the other #16 grants.
+- The host's `/home/opc/.codex/auth.json` is no longer read. Logging it out (`codex logout`
+  as `opc`) revokes that host session; whether to keep it for the operator's own use is the
+  operator's choice. It must never be copied into the broker volume (single writer).

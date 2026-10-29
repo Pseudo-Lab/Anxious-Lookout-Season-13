@@ -89,9 +89,9 @@ def test_unknown_baseline_refuses(values, baseline, maps, change):
 
 
 @pytest.mark.parametrize('key,value', [('maxPods', True), ('nativeSizeGiB', 0), ('allowlist', []),
-    ('runtimeImage', 'runtime:latest'), ('provisionerImageId', 'worker:latest'), ('sourceUid', -1),
+    ('runtimeImage', 'runtime:latest'), ('provisionerImageId', 'worker:latest'),
     ('hostPidNamespace', 'pid:[0]'), ('hostApi', 'http://127.0.0.1:6443'),
-    ('kubectl', '/bin/tool;echo leak'), ('crictl', '/bin/../root/tool'), ('namespaceUid', 'not-a-uuid')])
+    ('crictl', '/bin/tool;echo leak'), ('criSocket', '/bin/../root/tool'), ('namespaceUid', 'not-a-uuid')])
 def test_values_fail_closed(values, key, value):
     values[key] = value
     with pytest.raises((ValueError, TypeError)): rollout.checked(values)
@@ -109,9 +109,13 @@ def test_role_matrix_and_retired_bindings(values):
     assert lookup['Role', 'runner-web']['rules'] == []
     assert lookup['RoleBinding', 'runner-web']['subjects'] == []
     assert lookup['ClusterRoleBinding', 'codex-runner-preparer']['subjects'] == []
-    for role in ('controller', 'observer', 'supply'):
+    for role in ('controller', 'observer'):
         assert lookup['ServiceAccount', 'runner-pool-'+role]['automountServiceAccountToken'] is False
-    assert rollout.rule(['pods/exec'], ['create']) in lookup['Role', 'runner-pool-supply']['rules']
+    # #60: host supply and its pods/exec right are retired; RBAC is additive, so emptied in place.
+    assert ('ServiceAccount', 'runner-pool-supply') not in lookup
+    for kind in ('Role', 'ClusterRole'):
+        assert lookup[kind, 'runner-pool-supply']['rules'] == [] and lookup[kind+'Binding', 'runner-pool-supply']['subjects'] == []
+    assert not any(rule['resources'] == ['pods/exec'] for o in objects for rule in o.get('rules', []))
     assert rollout.rule(['pods'], ['delete']) in lookup['Role', 'runner-pool-observer']['rules']
     assert rollout.rule(['nodes'], ['get'], names=[values['node']]) in lookup['ClusterRole', 'runner-pool-observer']['rules']
     assert lookup['ResourceQuota', 'runner-bootstrap-no-pods']['spec']['hard'] == {'count/pods': '3'}
@@ -121,7 +125,8 @@ def test_role_matrix_and_retired_bindings(values):
 
 def test_workers_mounts_credentials_and_restore_order(values, baseline, maps):
     files = rollout.render(values, baseline, TEMPLATES, maps)
-    for role in ('controller', 'observer', 'supply', 'restore'):
+    assert not [name for name in files if 'supply' in name]
+    for role in ('controller', 'observer', 'restore'):
         args = rollout.docker(values, role)
         assert values['provisionerImageId'] in args and '--pull=never' in args
         assert not any('docker.sock' in a for a in args)
@@ -130,10 +135,7 @@ def test_workers_mounts_credentials_and_restore_order(values, baseline, maps):
     controller = files['controller.sh']
     assert 'bind-propagation=rshared' in controller and '--cap-add=SYS_ADMIN' in controller
     assert 'CONTROLLER_DATABASE_URL_FILE=/private/database-url' in controller
-    assert '/home/opc/.codex' not in controller
-    supply = files['supply.sh']
-    assert 'src=/home/opc/.codex,dst=/home/opc/.codex,readonly' in supply
-    assert '--pid=host' not in supply and 'containerd.sock' not in supply and '--cap-add=SYS_ADMIN' not in supply
+    assert not any('/home/opc/.codex' in value for value in files.values())
     observer = files['observer.sh']
     assert '--idle' in observer and '--pid=host' in observer and '--cgroupns=host' in observer
     assert 'readonly,bind-propagation=rslave' in observer
@@ -152,7 +154,7 @@ def load_worker():
     return module
 
 
-@pytest.mark.parametrize('result,exit_code', [('processed', 0), ('reconciliation_required', 1), ('auth_expired', 1)])
+@pytest.mark.parametrize('result,exit_code', [('processed', 0), ('reconciliation_required', 1)])
 def test_wrapper_makes_per_owner_failure_visible(monkeypatch, result, exit_code):
     worker = load_worker()
     monkeypatch.setattr(sys, 'argv', [])
@@ -347,19 +349,15 @@ def test_storage_class_schema_agrees(values):
             with pytest.raises(ValueError): rollout.checked(candidate)
 
 
-@pytest.mark.parametrize('reason', ['running_conversation', 'SECRET-EXCEPTION'])
-def test_supply_wrapper_only_accepts_fixed_reason(monkeypatch,capsys,reason):
+def test_wrapper_refuses_retired_supply_role_and_reason_fields(monkeypatch, capsys):
     worker = load_worker()
-    monkeypatch.setattr(sys,'argv',[])
-    monkeypatch.setattr(worker.runpy,'run_module',lambda *a,**kw:print(json.dumps({
-        'owner':'00000000-0000-4000-8000-000000000001','stage':'host-supply',
-        'result':'supply_refused','reason':reason})))
-    if reason == 'running_conversation':
-        assert worker.run_batch('supply',[]) == 1
-        assert json.loads(capsys.readouterr().out)['reason'] == reason
-    else:
-        with pytest.raises(ValueError): worker.run_batch('supply',[])
-        assert capsys.readouterr().out == ''
+    monkeypatch.setattr(sys, 'argv', [])
+    with pytest.raises(ValueError): worker.run_batch('supply', [])
+    monkeypatch.setattr(worker.runpy, 'run_module', lambda *a, **kw: print(json.dumps({
+        'owner': '00000000-0000-4000-8000-000000000001', 'stage': 'host-supply', 'result': 'supply_refused',
+        'reason': 'running_conversation'})))
+    with pytest.raises(ValueError): worker.run_batch('observer', [])
+    assert capsys.readouterr().out == ''
 
 
 def test_suppressed_failure_remains_wrapper_failure(monkeypatch,capsys):
@@ -367,5 +365,5 @@ def test_suppressed_failure_remains_wrapper_failure(monkeypatch,capsys):
     monkeypatch.setattr(sys,'argv',[])
     def failed(*args,**kwargs): raise SystemExit(1)
     monkeypatch.setattr(worker.runpy,'run_module',failed)
-    assert worker.run_batch('supply',[]) == 1
+    assert worker.run_batch('observer',[]) == 1
     assert capsys.readouterr().out == ''

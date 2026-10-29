@@ -1,5 +1,10 @@
 # Host access-token supply — source review, no live enablement
 
+> **Retired by #60.** Runners pull operator access from codex-broker
+> ([../codex-broker/README.md](../codex-broker/README.md)); `ops.runner_host_supply`, the
+> `issue16-supply` units and the `runner-pool-supply` grants are removed. This file is the
+> historical record of the host path; retirement steps are in the rollout README.
+
 Use [CUTOVER.md](CUTOVER.md) for build/pin records, stopped binding-image transition,
 service installation order, expansion gates and rollback. No live build is implied.
 

@@ -35,8 +35,9 @@ parser.add_argument('--permission-probe', action='store_true')
 parser.add_argument('--fail-after-tool', action='store_true')
 parser.add_argument('--runner-path', action='store_true')
 parser.add_argument('--access-only-path', action='store_true')
+parser.add_argument('--broker-path', choices=('refresh', 'forbidden', 'same', 'timeout', 'unwired'))
 options = parser.parse_args()
-options.runner_path = options.runner_path or options.access_only_path
+options.runner_path = options.runner_path or options.access_only_path or bool(options.broker_path)
 fixture_tool_names = ('research_list',) if options.runner_path else ('original_fixture_tool', 'web_fixture_tool')
 
 
@@ -52,6 +53,7 @@ audit = {'responsePosts': 0, 'toolOutputs': 0, 'wrongModel': False, 'nonResponse
          'postToolFailuresInjected': 0,
          'missingRegisteredTools': 0}
 requests, callbacks, captures, failures = [], [], [], []
+response_log = []  # Broker path only: Authorization digests per Responses POST, never printed.
 permission_results = {}
 mutex = threading.Lock()
 
@@ -122,7 +124,13 @@ class Mock(BaseHTTPRequestHandler):
                 assert users and isinstance(users[-1].get('id'), str)
                 call += '-'+users[-1]['id']
                 outputs = [v for v in outputs if v.get('call_id') == call]
-            if getattr(options, 'unauthorized_access', False):
+                if options.broker_path:
+                    response_log.append({'auth': hashlib.sha256(self.headers.get('Authorization', '').encode()).hexdigest(),
+                                         'user': users[-1]['id'], 'outputs': bool(outputs), 'unauthorized': False})
+            if getattr(options, 'unauthorized_access', False) or getattr(options, 'unauthorized_once', False):
+                if getattr(options, 'unauthorized_once', False):
+                    options.unauthorized_once = False  # Exactly one upstream 401 for the broker path.
+                    response_log[-1]['unauthorized'] = True
                 payload = b'{"error":{"message":"Synthetic unauthorized","type":"invalid_request_error"}}'
                 self.send_response(401); self.send_header('Content-Length', str(len(payload)))
                 self.end_headers(); self.wfile.write(payload)
@@ -217,6 +225,17 @@ for setting in settings:
     args += ['-c', setting]
 if options.enable_code_mode_host:
     args += ['-c', 'features.code_mode_host=true']
+if options.broker_path:
+    from runner_broker_path import run_broker
+    try:
+        broker_report = run_broker(root, origin, cert_path, settings, options, audit, response_log)
+    except Exception as error:
+        # Fixed type only: a message or traceback could carry synthetic credentials or headers.
+        broker_report = {'brokerPath': options.broker_path, 'error': type(error).__name__, 'acceptancePassed': False}
+    finally:
+        server.shutdown()
+    print(json.dumps(broker_report))
+    raise SystemExit(0 if broker_report['acceptancePassed'] else 1)
 if options.runner_path:
     from runner_mock_path import run_runner
     try:

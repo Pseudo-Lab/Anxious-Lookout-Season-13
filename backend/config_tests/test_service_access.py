@@ -204,7 +204,10 @@ def test_service_factory_is_explicit_and_no_native_starts_without_private_supply
                        "RUNNER_TOKEN_FILE":str(token), "RUNNER_STATE_DIR":str(home.parent), "CODEX_MODEL":"gpt-6.1-sol",
                        "CODEX_AUTH_MODE":"access-service", "CODEX_ACCESS_CONTROL_DIR":str(auth.control),
                        "CODEX_OPERATOR_ACCOUNT_FILE":str(account_file), "CODEX_EXECUTION_SCOPE":scope,
-                       "APP_ENV":environment, "RESEARCH_TOOL_CALLBACK_URL":"http://callback.invalid/tools"}.items():
+                       "APP_ENV":environment, "RESEARCH_TOOL_CALLBACK_URL":"http://callback.invalid/tools",
+                       # #60: no broker answers (token file absent), so supply never arrives.
+                       "BROKER_URL":"http://codex-broker.codex-broker.svc:8080",
+                       "BROKER_TOKEN_FILE":str(tmp_path / "missing-broker-token")}.items():
         monkeypatch.setenv(key, value)
     with TestClient(create_app()) as client:
         headers = {"Authorization":"Bearer " + "x" * 40, "X-Runner-State-Id":auth.state_id}

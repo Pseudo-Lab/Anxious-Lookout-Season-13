@@ -16,8 +16,8 @@ BIN = '/usr/local/lib/anxious-lookout/issue16'
 NS = 'codex-runner'
 KEYS = {'version', 'runtimeImage', 'runnerImage', 'provisionerImageId', 'postImagesStorageClass', 'api', 'hostApi',
         'namespaceUid', 'podCIDR', 'node', 'nodeUid', 'bootId', 'hostPidNamespace',
-        'hostCgroupNamespace', 'providerAccountId', 'sourceUid', 'allowlist',
-        'kubectl', 'crictl', 'criSocket', 'maxPods', 'idleSeconds', 'nativeSizeGiB', 'controlSizeGiB'}
+        'hostCgroupNamespace', 'providerAccountId', 'allowlist',
+        'crictl', 'criSocket', 'maxPods', 'idleSeconds', 'nativeSizeGiB', 'controlSizeGiB'}
 IMAGE = r'[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}'
 
 
@@ -68,15 +68,15 @@ def checked(v):
     require(network.version == 4 and not network.is_loopback and not network.is_link_local)
     for key, prefix in [('hostPidNamespace', 'pid'), ('hostCgroupNamespace', 'cgroup')]:
         require(re.fullmatch(prefix+r':\[[1-9][0-9]*\]', v[key]))
-    for key in ('kubectl', 'crictl', 'criSocket'):
+    for key in ('crictl', 'criSocket'):
         value = v[key]
         require(type(value) is str and re.fullmatch(r'/[A-Za-z0-9_./-]+', value)
                 and '..' not in value.split('/') and '//' not in value and not value.endswith('/'))
     require(v['criSocket'].startswith('/run/'))
     require(isinstance(v['providerAccountId'], str) and re.fullmatch(r'[A-Za-z0-9_-]{1,200}', v['providerAccountId']))
-    for key, maximum in [('sourceUid', 2147483647), ('maxPods', 100), ('idleSeconds', 86400),
+    for key, maximum in [('maxPods', 100), ('idleSeconds', 86400),
                          ('nativeSizeGiB', 999999), ('controlSizeGiB', 999999)]:
-        require(type(v[key]) is int and (0 if key == 'sourceUid' else 1) <= v[key] <= maximum)
+        require(type(v[key]) is int and 1 <= v[key] <= maximum)
     require(v['allowlist'] is None or (type(v['allowlist']) is list and 0 < len(v['allowlist']) <= 100
                                      and len(set(v['allowlist'])) == len(v['allowlist'])))
     for owner in v['allowlist'] or []:
@@ -201,7 +201,7 @@ def rule(resources, verbs, group='', names=None):
 
 def resources(v):
     items = []
-    for role in ('api', 'controller', 'observer', 'supply'):
+    for role in ('api', 'controller', 'observer'):
         sa = 'hosting' if role == 'api' else 'runner-pool-'+role
         sa_ns = 'm2-hosting' if role == 'api' else NS
         if role != 'api':
@@ -216,8 +216,6 @@ def resources(v):
         if role == 'observer':
             rules += [rule(['pods'], ['delete'])]
             cluster += [rule(['persistentvolumes'], ['get']), rule(['nodes'], ['get'], names=[v['node']])]
-        if role == 'supply':
-            rules += [rule(['pods/exec'], ['create'])]
         subject = [{'kind': 'ServiceAccount', 'name': sa, 'namespace': sa_ns}]
         for kind, name, ns, permissions in [('Role', 'runner-pool-'+role, NS, rules),
                                           ('ClusterRole', 'runner-pool-'+role, None, cluster)]:
@@ -225,8 +223,10 @@ def resources(v):
             items.append(resource(kind+'Binding', name, ns, subjects=subject,
                                   roleRef={'apiGroup': 'rbac.authorization.k8s.io', 'kind': kind, 'name': name}))
     # Replace old subjects as well as old rules: RBAC is additive.
-    for kind, name, ns in [('Role', 'runner-web', NS), ('Role', 'runner-preparer', NS),
-                          ('ClusterRole', 'runner-web-namespace', None), ('ClusterRole', 'codex-runner-preparer', None)]:
+    # Host supply and its pods/exec right are retired by codex-broker (#60).
+    for kind, name, ns in [('Role', 'runner-web', NS), ('Role', 'runner-preparer', NS), ('Role', 'runner-pool-supply', NS),
+                          ('ClusterRole', 'runner-web-namespace', None), ('ClusterRole', 'codex-runner-preparer', None),
+                          ('ClusterRole', 'runner-pool-supply', None)]:
         items.append(resource(kind, name, ns, rules=[]))
         items.append(resource(kind+'Binding', name, ns, subjects=[],
                               roleRef={'apiGroup': 'rbac.authorization.k8s.io', 'kind': kind, 'name': name}))
@@ -245,9 +245,7 @@ def inputs(v):
             'observer': {'pool': p, 'storageRoot': STORAGE, 'host': {'node_name': v['node'], 'node_uid': v['nodeUid'],
                 'boot_id': v['bootId'], 'host_pid_namespace': v['hostPidNamespace'],
                 'host_cgroup_namespace': v['hostCgroupNamespace'], 'endpoint': 'unix://'+v['criSocket'],
-                'proc': '/host/proc', 'crictl': '/usr/local/bin/crictl'}},
-            'supply': {'pool': p, 'account': v['providerAccountId'], 'sourceUid': v['sourceUid'],
-                'kubeconfig': '/private/kubeconfig', 'kubectl': '/usr/local/bin/kubectl', 'attemptRoot': ROOT+'/supply/attempts'}}
+                'proc': '/host/proc', 'crictl': '/usr/local/bin/crictl'}}}
 
 
 def shell_quote(value):
@@ -276,7 +274,7 @@ def docker(v, role):
             args += ['-e', key+'='+val]
     if role == 'controller':
         args += ['-e', 'DATABASE_URL_FILE=/private/database-url', '-e', 'CONTROLLER_DATABASE_URL_FILE=/private/database-url']
-    if role in {'observer', 'supply'}:
+    if role == 'observer':
         args += ['-e', 'OBSERVER_DATABASE_URL_FILE=/private/database-url', '--cap-add=DAC_READ_SEARCH']
         mount(ROOT+'/'+role, options='')
     if role == 'observer':
@@ -286,9 +284,6 @@ def docker(v, role):
         mount(v['crictl'], '/usr/local/bin/crictl')
         # Slave propagation receives newly allocated mounts, never propagates writes back.
         mount(STORAGE, options='readonly,bind-propagation=rslave')
-    if role == 'supply':
-        mount('/home/opc/.codex')
-        mount(v['kubectl'], '/usr/local/bin/kubectl')
     if role == 'restore':
         for key in ('CODEX_RUNNER_NATIVE_SIZE_GIB', 'CODEX_RUNNER_CONTROL_SIZE_GIB'):
             args += ['-e', key+'='+environment(v)[key]]
@@ -345,7 +340,7 @@ def render(v, baseline, templates, configmaps=()):
         result[role+'-inputs.json'] = json.dumps(value, indent=2)+'\n'
     for name in ('worker.py', 'storage-root.sh'):
         result[name] = (templates/name).read_text()
-    for role in ('controller', 'observer', 'supply', 'restore'):
+    for role in ('controller', 'observer', 'restore'):
         result[role+'.sh'] = '#!/bin/sh\nset -eu\nexec '+ ' '.join(shell_quote(arg) for arg in docker(v, role))+'\n'
         result['stop-'+role+'.sh'] = (
             '#!/bin/sh\nset -eu\nfile=/run/issue16-'+role+'/container-id\n'
