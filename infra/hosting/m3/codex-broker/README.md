@@ -98,6 +98,15 @@ The runner side adds an explicit egress rule to `codex-broker:8080` in
   Use Hubble or `cilium-dbg monitor --type drop` on the agent: a failed connection alone is not proof of a
   policy drop. An internet host on 443 that is not a provider is **allowed** under `world`. That is the accepted
   difference, not a failure.
+- **Runner 401 refresh harness:** `infra/hosting/m3/check_runner_companion.sh <runner-test image ID> <pinned
+  models.json> broker` runs the actual runner in `access-service` mode (ServiceAccessAuth, envelope v2) with the
+  pinned app-server, `--network none`, against a loopback broker. The production Service name resolves to
+  127.0.0.1 inside the probe only, so `BrokerClient` keeps its `.svc` check and its own HTTP client. One upstream
+  401 must make the app-server ask for a refresh. The runner then gets exactly one `refresh=true` from the
+  broker and retries the failed request once with the new token. The turn completes with nothing blocked. A broker
+  403, the same token, a timeout and a removed refresher (`unwired`, the sensitivity case) each end in
+  `codex_auth_revoked` with no replay. Output is booleans and counts only. The broker's own upstream refresh is
+  outside this harness and is checked against the live broker.
 
 ## Applying to production
 

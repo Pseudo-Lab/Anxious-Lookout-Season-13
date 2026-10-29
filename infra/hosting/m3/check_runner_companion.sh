@@ -6,10 +6,24 @@ RUNNER_CHECK_BACKEND=$(cd "$RUNNER_CHECK_DIR/../../../backend" && pwd)
 RUNNER_CHECK_IMAGE=${1:?Source-built runner-test immutable image ID}
 RUNNER_CHECK_MODELS=${2:?Pinned public model catalog}
 RUNNER_CHECK_PATH=${3:-managed}
-[[ $RUNNER_CHECK_PATH == managed || $RUNNER_CHECK_PATH == access || $RUNNER_CHECK_PATH == unit-only ]]
+[[ $RUNNER_CHECK_PATH == managed || $RUNNER_CHECK_PATH == access || $RUNNER_CHECK_PATH == broker || $RUNNER_CHECK_PATH == unit-only ]]
 [[ $RUNNER_CHECK_IMAGE =~ ^sha256:[a-f0-9]{64}$ ]]
 [[ -f $RUNNER_CHECK_MODELS && ! -L $RUNNER_CHECK_MODELS ]]
 [[ $(sha256sum "$RUNNER_CHECK_MODELS" | cut -d' ' -f1) == fd219bd9f061278275f528939f82f54d2eb97df4b25c23b022adbe48813d920b ]]
+if [[ $RUNNER_CHECK_PATH == broker ]]; then
+  # #60: pinned app-server 401 -> refresh callback -> real BrokerClient over loopback; one runner per case.
+  for RUNNER_CHECK_CASE in refresh forbidden same timeout unwired; do
+    docker run --rm --pull=never --network none --read-only --tmpfs /tmp \
+      --cap-drop ALL --security-opt no-new-privileges:true --user 10001:10001 \
+      --mount "type=bind,src=$RUNNER_CHECK_DIR,dst=/checks,readonly" \
+      --mount "type=bind,src=$RUNNER_CHECK_BACKEND,dst=/source,readonly" \
+      --mount "type=bind,src=$RUNNER_CHECK_MODELS,dst=/fixture-models.json,readonly" \
+      --env PYTHONPATH=/source --entrypoint python "$RUNNER_CHECK_IMAGE" \
+      -B /checks/stock_tools_probe.py --broker-path "$RUNNER_CHECK_CASE" --legacy-history --legacy-tools \
+      --code-mode-wire --enable-code-mode-host --permission-probe
+  done
+  exit 0
+fi
 RUNNER_CHECK_PG="issue7-runner-companion-unit-$(cat /proc/sys/kernel/random/uuid)"
 trap 'docker rm -f "$RUNNER_CHECK_PG" >/dev/null 2>&1 || true' EXIT
 docker run -d --rm --pull=never --name "$RUNNER_CHECK_PG" --network none --read-only --user 999:999 \
