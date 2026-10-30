@@ -59,6 +59,7 @@ docker run --rm --network bridge --user 0 -v "$PWD/infra/hosting/m3:/m3:ro" -v "
   --entrypoint sh alpine:3.20 /m3/codex-broker/prod/test_steps.sh
 ```
 
+- The production node runs Python 3.9 (F inventory, 2026-10-31). Run the harness on `alpine:3.15` (Python 3.9) as well as `alpine:3.20`: every `python3 -I` snippet and the node-side B3 render run under it.
 - `mock/k3s.py` and `mock/systemctl.py` stand in for the cluster and systemd.
 - The credential fixtures carry `SECRET` markers. Any marker in any output fails the case.
 - **Not covered yet:**

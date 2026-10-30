@@ -5,7 +5,7 @@
 #     5 systemctl failed (report, do not rerun); 8 changed but a postcheck failed.
 set -u
 RUNNER_IMAGE_ID=@@RUNNER_IMAGE_ID@@   # containerd digest of the e9337f7 runner image, sha256:<64 hex>
-EXEMPT_PODS='@@EXEMPT_PODS@@'         # #72 decision 3: Running pods allowed on an old image, or "none"
+EXEMPT_PODS='@@EXEMPT_PODS@@'         # #72 decision 3: runner-<owner hex> names allowed on an old image (Pod and binding), or "none"
 K='/usr/local/bin/k3s kubectl'
 UNITS='issue16-supply.timer issue16-supply.service'
 SUPPLY=/usr/local/lib/anxious-lookout/issue16/supply.sh
@@ -28,6 +28,19 @@ for l in $pods; do
   old="$old $name"
 done
 [ -z "$old" ] || refuse "Running runners on an old image:$old"
+# Stopped owners too: a binding still pinning an old runner image would start a Pod with the broker
+# spec but no broker client at its next entry, with no host supply left. Pod name = runner-<owner hex>.
+b=$(timeout 30 $K -n m2-hosting exec postgres-0 -- psql -U postgres -d hosting -At -v ON_ERROR_STOP=1 -c \
+  "select 'runner-'||replace(owner_id::text,'-','')||'|'||coalesce(plan::jsonb->>'image','-') from runner_bindings.bindings order by 1" 2>/dev/null) \
+  || refuse 'binding lookup failed'
+oldb=
+for l in $b; do
+  name=${l%%|*}; image=${l#*|}
+  case "$image" in *"@$RUNNER_IMAGE_ID") continue;; esac
+  case " $EXEMPT_PODS " in *" $name "*) continue;; esac
+  oldb="$oldb $name"
+done
+[ -z "$oldb" ] || refuse "bindings still on an old runner image:$oldb"
 
 # 2. Units loaded, no delivery in progress; record the unit-file state for the rollback.
 before=

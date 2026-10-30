@@ -136,6 +136,11 @@ build; MOCK_HOME_STAT='755 10001' t home-mode 3 check-login; unset MOCK_HOME_STA
 build; t normal 0 retire-e1-disable 'grep -q disabled /mock/unit.issue16-supply.timer && echo "$out" | grep -q "exempt (decision 3): runner-66"'
 build; sed -i "s|^EXEMPT_PODS=.*|EXEMPT_PODS='none'|" $B/retire-e1-disable.sh; t old-image-runner 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer'
 build; echo 'loaded active static' > /mock/unit.issue16-supply.service; t delivery-running 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer'
+# Production baseline (F before): the service's last batch failed, the timer is active.
+build; echo 'loaded active enabled' > /mock/unit.issue16-supply.timer; echo 'loaded failed disabled' > /mock/unit.issue16-supply.service
+t baseline-service-failed 0 retire-e1-disable 'grep -q "inactive disabled" /mock/unit.issue16-supply.timer'
+build; MOCK_BINDING_IMAGE=runner@sha256:old t stopped-owner-binding-old 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer && echo "$out" | grep -q "bindings still on an old runner image: runner-00000000000040008000000000000048"'; unset MOCK_BINDING_IMAGE
+build; MOCK_PSQL_FAIL=1 t binding-lookup-fails 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer'; unset MOCK_PSQL_FAIL
 build; MOCK_BROKER_READY=false t broker-not-ready 3 retire-e1-disable; unset MOCK_BROKER_READY
 build; MOCK_DISABLE_FAIL=1 t disable-fails 5 retire-e1-disable; unset MOCK_DISABLE_FAIL
 build; sh -c 'sleep 20; :' /usr/local/lib/anxious-lookout/issue16/supply.sh & sp=$!

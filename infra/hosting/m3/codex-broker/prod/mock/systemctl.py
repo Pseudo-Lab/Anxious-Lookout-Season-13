@@ -28,7 +28,11 @@ if args[0] == 'disable':
         sys.exit(1)
     for u in [a for a in args[1:] if not a.startswith('-')]:
         s = state(u)
-        (M / f'unit.{u}').write_text(f'{s[0]} inactive {"static" if u.endswith(".service") else "disabled"}')
+        if u.endswith('.service'):  # a failed oneshot stays failed; disable does not reset it
+            active = 'failed' if s[1] == 'failed' else 'inactive'
+            (M / f'unit.{u}').write_text(f'{s[0]} {active} {s[2] if s[2] in ("disabled", "static") else "disabled"}')
+        else:
+            (M / f'unit.{u}').write_text(f'{s[0]} inactive disabled')
     sys.exit(0)
 if args[0] == 'daemon-reload':
     for u in ('issue16-supply.timer', 'issue16-supply.service'):

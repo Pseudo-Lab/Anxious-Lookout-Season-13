@@ -45,6 +45,11 @@ def psql(sql):
         out('ALTER ROLE\n')
     if 'rolcanlogin::text from' in sql:
         out((M / 'role').read_text().split('|')[0] + '\n')
+    if 'runner_bindings' in sql and sql.startswith("select 'runner-'"):
+        new = 'docker.io/library/runner@sha256:' + 'b' * 64
+        rows = ['runner-00000000000040008000000000000048|' + (env('MOCK_BINDING_IMAGE') or new),
+                'runner-66|old@sha256:' + 'c' * 64]
+        out('\n'.join(rows) + '\n')
     if 'runner_bindings' in sql:
         out('00000000-0000-4000-8000-000000000048|runner@sha256:old|-\n')
     if '3cb453bf' in sql:
