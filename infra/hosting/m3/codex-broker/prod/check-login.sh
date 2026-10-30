@@ -15,7 +15,8 @@ echo "login status rc=$s"
 [ $s = 0 ] || bad="$bad login"
 h=$($X stat -c '%a %u' /data/codex 2>/dev/null); echo "CODEX_HOME: ${h:-lookup_failed}"
 [ "$h" = '700 10001' ] || bad="$bad home"
-a=$($X stat -c '%a %u %s' /data/codex/auth.json 2>/dev/null); echo "auth.json: ${a:-lookup_failed}"
+# The mtime (epoch) is the refresh signal E4 uses: a refresh rewrites auth.json.
+a=$($X stat -c '%a %u %s %Y' /data/codex/auth.json 2>/dev/null); echo "auth.json: ${a:-lookup_failed}"
 case "$a" in '600 10001 '[1-9]*) ;; *) bad="$bad auth.json";; esac
 [ -z "$bad" ] && rc=0 || { echo "not ready:$bad"; rc=3; }
 echo "result rc=$rc"

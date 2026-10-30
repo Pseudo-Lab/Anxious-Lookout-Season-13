@@ -12,8 +12,8 @@ set -u
 RENDERER_SHA=5a0bae425e0eb06c43fecd69cec51759d54e91b841a184293735bb4ceb24459f  # backend/ops/broker_render.py since d1428e1
 CNP_SHA=c969169d995b97b1cae5a36eb32e92fa7d53ce698b69292b3157cf210c5bb5ec       # 40-runner-network.json since d1428e1
 RUNNER_IMAGE=@@RUNNER_IMAGE_REF@@   # <name>@sha256:<64 hex>, the imported e9337f7 runner image
-STORAGE_CLASS=@@STORAGE_CLASS@@     # decision 1
-ACCESS_MODE=@@ACCESS_MODE@@         # decision 1: ReadWriteOnce on local-path, ReadWriteOncePod on CSI
+STORAGE_CLASS=local-path            # decision 1: stock class (Delete); production has no CSI class
+ACCESS_MODE=ReadWriteOnce           # decision 1: ReadWriteOncePod needs CSI; replicas 1 keeps the single writer
 K='/usr/local/bin/k3s kubectl'
 R=/root/issue72/render
 EV=/root/issue72/evidence/b3

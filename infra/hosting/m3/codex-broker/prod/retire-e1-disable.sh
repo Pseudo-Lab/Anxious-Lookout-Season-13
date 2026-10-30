@@ -5,13 +5,17 @@
 #     5 systemctl failed (report, do not rerun); 8 changed but a postcheck failed.
 set -u
 RUNNER_IMAGE_ID=@@RUNNER_IMAGE_ID@@   # containerd digest of the e9337f7 runner image, sha256:<64 hex>
-EXEMPT_PODS='@@EXEMPT_PODS@@'         # #72 decision 3: runner-<owner hex> names allowed on an old image (Pod and binding), or "none"
+# #72 decision 3 (option c): the #66 owner 3cb453bf-d870-40dc-b7e1-3a58aa0cbaf2 keeps its issue28 Pod and binding;
+# its binding moves in the #66 runbook before that owner's next entry. runner-<owner hex>, or "none".
+EXEMPT_PODS='runner-3cb453bfd87040dcb7e13a58aa0cbaf2'
 K='/usr/local/bin/k3s kubectl'
 UNITS='issue16-supply.timer issue16-supply.service'
 SUPPLY=/usr/local/lib/anxious-lookout/issue16/supply.sh
+EV=/root/issue72/evidence/e1
 case "$RUNNER_IMAGE_ID$EXEMPT_PODS" in *@@*) echo 'placeholders not filled'; exit 2;; esac
 refuse() { echo "precheck: $1; nothing changed"; exit 3; }
 echo "$RUNNER_IMAGE_ID" | grep -qE '^sha256:[0-9a-f]{64}$' || refuse 'RUNNER_IMAGE_ID is not a digest'
+[ ! -e "$EV" ] || refuse "$EV already exists"
 
 # 1. Broker serving, and no Running user runner left on an image without the broker client.
 p=$(timeout 30 $K -n codex-broker get pod codex-broker-0 -o jsonpath='{.status.phase}|{.status.containerStatuses[0].ready}' 2>/dev/null)
@@ -58,6 +62,10 @@ rc=0
 timeout 60 systemctl disable --now $UNITS > /dev/null 2>&1 || { echo 'systemctl disable --now failed'; rc=5; }
 if [ $rc = 0 ]; then
   bad=
+  # Decision 2: E4's 24 h stable period and its refresh check count from this moment.
+  at=$(date -u +%s)
+  { install -d -m 0700 "$EV" && ( umask 077; printf '%s\n' "$at" > "$EV/stopped-at" ) && [ "$(cat "$EV/stopped-at")" = "$at" ]; } \
+    && echo "stopped-at $(date -u -d "@$at" +%Y-%m-%dT%H:%M:%SZ)" || bad="$bad stopped-at"
   for u in $UNITS; do
     v=$(timeout 10 systemctl show -p ActiveState -p UnitFileState --value "$u" 2>/dev/null | tr '\n' ' ')
     echo "$u: $v"
@@ -67,6 +75,6 @@ if [ $rc = 0 ]; then
   [ $s = 1 ] || bad="$bad process"
   [ -z "$bad" ] && rc=0 || { echo "postcheck failed:$bad"; rc=8; }
 fi
-echo "rollback: for each unit recorded as enabled above: systemctl enable <unit>; then systemctl start issue16-supply.timer"
+echo "rollback: for each unit recorded as enabled above: systemctl enable <unit>; then systemctl start issue16-supply.timer (keep $EV as the record)"
 echo "result rc=$rc"
 exit $rc

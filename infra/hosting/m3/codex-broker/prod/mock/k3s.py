@@ -48,7 +48,7 @@ def psql(sql):
     if 'runner_bindings' in sql and sql.startswith("select 'runner-'"):
         new = 'docker.io/library/runner@sha256:' + 'b' * 64
         rows = ['runner-00000000000040008000000000000048|' + (env('MOCK_BINDING_IMAGE') or new),
-                'runner-66|old@sha256:' + 'c' * 64]
+                'runner-3cb453bfd87040dcb7e13a58aa0cbaf2|old@sha256:' + 'c' * 64]
         out('\n'.join(rows) + '\n')
     if 'runner_bindings' in sql:
         out('00000000-0000-4000-8000-000000000048|runner@sha256:old|-\n')
@@ -104,7 +104,10 @@ if 'exec' in args:
         sys.stdout.write('Logged in using ChatGPT\n')
         sys.exit(int(env('MOCK_LOGIN_RC', '0')))
     if cmd[0] == 'stat':
-        out(env('MOCK_AUTH_STAT', '600 10001 1890') if cmd[-1].endswith('auth.json') else env('MOCK_HOME_STAT', '700 10001'))
+        mtime = env('MOCK_AUTH_MTIME', '4102444800')
+        if cmd[-1].endswith('auth.json'):
+            out(mtime if cmd[2] == '%Y' else env('MOCK_AUTH_STAT', '600 10001 1890') + ' ' + mtime)
+        out(env('MOCK_HOME_STAT', '700 10001'))
     sys.exit(99)
 if args[:2] == ['get', 'ns'] and 'codex-broker' in args:
     if (M / 'ns-exists').exists():

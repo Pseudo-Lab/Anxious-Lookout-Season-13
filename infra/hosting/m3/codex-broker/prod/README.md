@@ -13,12 +13,12 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
 | Step | Script | Changes state | Inputs (`@@…@@` and files) |
 |---|---|---|---|
 | F | `inventory.sh` | no | none |
-| B3 | `apply-broker.sh` | yes | the runner image reference, storage class and access mode (decision 1); files: `broker_render.py` and `runner-cnp.json` (pinned in the script), `values.json` written on the node |
+| B3 | `apply-broker.sh` | yes | the runner image reference (after A); filled: `local-path` + `ReadWriteOnce` (decision 1); files: `broker_render.py` and `runner-cnp.json` (pinned in the script), `values.json` written on the node |
 | C | `check-login.sh` | no (run after the user's `codex login --device-auth`) | none |
-| E1 | `retire-e1-disable.sh` | yes, reversible | runner image containerd digest; Pods exempt per decision 3 |
+| E1 | `retire-e1-disable.sh` | yes, reversible | runner image containerd digest (after A); filled: the #66 owner `runner-3cb453bfd87040dcb7e13a58aa0cbaf2` exempt (decision 3, option c). Writes `evidence/e1/stopped-at` |
 | E2 | `retire-e2-rbac.sh` | yes, reversible | `supply-rbac.json` from this directory (pinned in the script; the harness checks it against `ops.runner_rollout`) |
 | E3 | `retire-e3-files.sh` | yes, reversible from evidence | none |
-| E4 | `retire-e4-final.sh` | **yes, no return** | stable-period end (decision 2), credential file names (from F), supply database role |
+| E4 | `retire-e4-final.sh` | **yes, no return** | supply database role; filled: 24 h after E1's `stopped-at` plus a refresh since then, shown by a newer broker `auth.json` mtime (decision 2); the five credential file names from F |
 
 **Node-local delivery.** The user runs every command in their own session on the OCI node; nobody here has production ssh. Scripts and inputs reach the node the same way:
 1. `git -C <node checkout> fetch`;

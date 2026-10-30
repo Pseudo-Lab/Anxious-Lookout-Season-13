@@ -2,25 +2,34 @@
 # #72 E4: POINT OF NO RETURN. Disable the supply database login, delete the supply ServiceAccount and
 # remove the supply credential directory without copying it. Going back means new supply credentials
 # as a new reviewed change. Keeps /var/lib/anxious-lookout/issue16-d4/supply/attempts.
-# Run as root, once, after the stable period (#72 decision 2) and review cleared this SHA-256 with the @@ values.
+# Run as root, once, after review cleared this SHA-256 with the @@ values.
+# Decision 2: at least 24 h since E1 stopped host supply, and at least one natural refresh since then.
+# A refresh rewrites the broker's auth.json, so its mtime (stat only, never the content) must be newer than
+# E1's record. A new device login would also rewrite it; any such login is in the operational record.
 # rc: 0 done and verified; 2 placeholders left; 3 precheck refused, nothing changed;
 #     5 a step failed midway (stop, report; earlier steps stay done); 8 done but a postcheck failed.
 set -u
-NOT_BEFORE=@@NOT_BEFORE_UTC@@            # e.g. 2026-11-02T00:00:00Z, from decision 2
-CRED_ENTRIES='@@SUPPLY_CRED_FILE_NAMES@@' # exact file names in the directory, from the F inventory
+STABLE_SECONDS=86400                                          # decision 2
+CRED_ENTRIES='ca.crt database-url inputs.json kube-token kubeconfig'  # F inventory 2026-10-30T15:26:55Z
 DB_ROLE=@@SUPPLY_DB_ROLE@@               # the supply login role (an identifier, not a credential)
 K='/usr/local/bin/k3s kubectl'
 D=/etc/anxious-lookout/issue16/supply
 A=/var/lib/anxious-lookout/issue16-d4/supply/attempts
-case "$NOT_BEFORE$CRED_ENTRIES$DB_ROLE" in *@@*) echo 'placeholders not filled'; exit 2;; esac
+E1=/root/issue72/evidence/e1/stopped-at
+case "$DB_ROLE" in *@@*) echo 'placeholders not filled'; exit 2;; esac
 refuse() { echo "precheck: $1; nothing changed"; exit 3; }
 q() { timeout 30 $K -n m2-hosting exec postgres-0 -- psql -U postgres -d hosting -At -v ON_ERROR_STOP=1 -c "$1" 2>/dev/null; }
 echo "$DB_ROLE" | grep -qE '^[a-z_][a-z0-9_]{0,62}$' || refuse 'DB_ROLE is not a plain identifier'
 for n in $CRED_ENTRIES; do echo "$n" | grep -qE '^[A-Za-z0-9._-]+$' || refuse 'bad credential file name'; done
 
-# 1. Time gate.
-nb=$(date -u -d "$NOT_BEFORE" +%s 2>/dev/null) || refuse 'NOT_BEFORE unreadable'
-[ "$(date -u +%s)" -ge "$nb" ] || refuse "stable period not over (not before $NOT_BEFORE)"
+# 1. Stable period and a refresh since E1.
+[ -f "$E1" ] && [ ! -L "$E1" ] || refuse 'E1 record missing'
+stopped=$(cat "$E1" 2>/dev/null) && echo "$stopped" | grep -qE '^[0-9]{10}$' || refuse 'E1 record unreadable'
+[ "$(date -u +%s)" -ge $((stopped + STABLE_SECONDS)) ] || refuse "stable period not over (E1 at $(date -u -d "@$stopped" +%Y-%m-%dT%H:%M:%SZ), 24 h)"
+m=$(timeout 30 $K -n codex-broker exec codex-broker-0 -- stat -c %Y /data/codex/auth.json 2>/dev/null) \
+  && echo "$m" | grep -qE '^[0-9]{10}$' || refuse 'auth.json mtime lookup failed'
+[ "$m" -gt "$stopped" ] || refuse 'no refresh observed since E1 (auth.json not rewritten)'
+echo "refresh observed: auth.json rewritten $(date -u -d "@$m" +%Y-%m-%dT%H:%M:%SZ), after E1"
 # 2. E3 done, broker serving.
 for u in issue16-supply.timer issue16-supply.service; do
   [ "$(timeout 10 systemctl show -p LoadState --value "$u" 2>/dev/null)" = not-found ] || refuse "E3 not complete: $u"

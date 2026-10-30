@@ -20,7 +20,7 @@ build() {
            /etc/anxious-lookout/issue16/supply /var/lib/anxious-lookout/issue16-d4/supply/attempts
   echo 'loaded inactive enabled' > /mock/unit.issue16-supply.timer
   echo 'loaded inactive static' > /mock/unit.issue16-supply.service
-  printf 'runner-a|Running|docker.io/library/%s\nrunner-66|Running|old@sha256:%s\nrunner-gone|Failed|old@sha256:c\n' \
+  printf 'runner-a|Running|docker.io/library/%s\nrunner-3cb453bfd87040dcb7e13a58aa0cbaf2|Running|old@sha256:%s\nrunner-gone|Failed|old@sha256:c\n' \
     "$IMG" "$(printf 'c%.0s' $(seq 64))" > /mock/runners
   echo 'true|0' > /mock/role
   printf '[Timer]\nOnCalendar=*:0/5\n' > /etc/systemd/system/issue16-supply.timer
@@ -29,7 +29,7 @@ build() {
   printf '#!/bin/sh\nread_private database-url\n' > /usr/local/lib/anxious-lookout/issue16/supply.sh
   printf '#!/bin/sh\nexit 0\n' > /usr/local/lib/anxious-lookout/issue16/stop-supply.sh
   chmod 0644 /etc/systemd/system/issue16-supply.*; chmod 0700 /usr/local/lib/anxious-lookout/issue16/*.sh
-  for n in database-url kube-token kubeconfig; do echo "SECRET-$n" > /etc/anxious-lookout/issue16/supply/$n; chmod 0600 /etc/anxious-lookout/issue16/supply/$n; done
+  for n in ca.crt database-url inputs.json kube-token kubeconfig; do echo "SECRET-$n" > /etc/anxious-lookout/issue16/supply/$n; chmod 0600 /etc/anxious-lookout/issue16/supply/$n; done
   echo '{"owner":"00000000-0000-4000-8000-000000000048","state":"s","generation":1,"podUid":"p","snapshotId":"a1","result":"accepted"}' \
     > /var/lib/anxious-lookout/issue16-d4/supply/attempts/a1
   # Node-local inputs exactly as `git show <sha>:<path>` would place them; values.json is written on the node.
@@ -46,15 +46,15 @@ json.dump(cnp, open('/mock/live-cnp.json', 'w'))
 PY
   for s in inventory apply-broker check-login retire-e1-disable retire-e2-rbac retire-e3-files retire-e4-final; do
     sed -e "s|@@STORAGE_CLASS@@|local-path|" -e "s|@@ACCESS_MODE@@|ReadWriteOnce|" \
-        -e "s|@@RUNNER_IMAGE_REF@@|$IMG|" -e "s|@@RUNNER_IMAGE_ID@@|$DIG|" -e "s|@@EXEMPT_PODS@@|runner-66|" \
-        -e "s|@@NOT_BEFORE_UTC@@|2020-01-01T00:00:00Z|" -e "s|@@SUPPLY_CRED_FILE_NAMES@@|database-url kube-token kubeconfig|" \
+        -e "s|@@RUNNER_IMAGE_REF@@|$IMG|" -e "s|@@RUNNER_IMAGE_ID@@|$DIG|" \
         -e "s|@@SUPPLY_DB_ROLE@@|runner_supply|" $P/$s.sh > $B/$s.sh
   done
 }
 after_e1() { echo 'loaded inactive disabled' > /mock/unit.issue16-supply.timer; echo 'loaded inactive static' > /mock/unit.issue16-supply.service; }
 after_e2() { after_e1; touch /mock/rbac-emptied; }
 after_e3() { after_e2; rm -f /etc/systemd/system/issue16-supply.* /usr/local/lib/anxious-lookout/issue16/supply.sh /usr/local/lib/anxious-lookout/issue16/stop-supply.sh
-             echo 'not-found inactive -' > /mock/unit.issue16-supply.timer; echo 'not-found inactive -' > /mock/unit.issue16-supply.service; }
+             echo 'not-found inactive -' > /mock/unit.issue16-supply.timer; echo 'not-found inactive -' > /mock/unit.issue16-supply.service
+             install -d -m 0700 /root/issue72/evidence/e1; echo $(( $(date -u +%s) - 90000 )) > /root/issue72/evidence/e1/stopped-at; }
 
 pass=0 fail=0
 # t name want script [check] -- environment assignments come before t.
@@ -133,8 +133,11 @@ build; MOCK_AUTH_STAT='644 10001 1890' t auth-mode 3 check-login; unset MOCK_AUT
 build; MOCK_HOME_STAT='755 10001' t home-mode 3 check-login; unset MOCK_HOME_STAT
 
 # E1.
-build; t normal 0 retire-e1-disable 'grep -q disabled /mock/unit.issue16-supply.timer && echo "$out" | grep -q "exempt (decision 3): runner-66"'
-build; sed -i "s|^EXEMPT_PODS=.*|EXEMPT_PODS='none'|" $B/retire-e1-disable.sh; t old-image-runner 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer'
+build; t normal 0 retire-e1-disable 'grep -q disabled /mock/unit.issue16-supply.timer && echo "$out" | grep -q "exempt (decision 3): runner-3cb453bfd87040dcb7e13a58aa0cbaf2" \
+  && grep -qE "^[0-9]{10}$" /root/issue72/evidence/e1/stopped-at && echo "$out" | grep -q "^stopped-at 20"'
+build; sed -i "s|^EXEMPT_PODS=.*|EXEMPT_PODS='none'|" $B/retire-e1-disable.sh; t old-image-runner 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer && echo "$out" | grep -q "runner-3cb453bfd87040dcb7e13a58aa0cbaf2"'
+build; sed -i "s|^EXEMPT_PODS=.*|EXEMPT_PODS='runner-3cb453bf'|" $B/retire-e1-disable.sh; t partial-exemption-name 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer'
+build; install -d -m 0700 /root/issue72/evidence/e1; t e1-record-exists 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer'
 build; echo 'loaded active static' > /mock/unit.issue16-supply.service; t delivery-running 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer'
 # Production baseline (F before): the service's last batch failed, the timer is active.
 build; echo 'loaded active enabled' > /mock/unit.issue16-supply.timer; echo 'loaded failed disabled' > /mock/unit.issue16-supply.service
@@ -158,7 +161,7 @@ sed -i "s|^RBAC_SHA=.*|RBAC_SHA=$(sha256sum < /root/issue72/render/supply-rbac.j
 build; after_e1; MOCK_APPLY_FAIL=runner-pool-supply t apply-fails 5 retire-e2-rbac; unset MOCK_APPLY_FAIL
 
 # E3.
-build; after_e2; t normal 0 retire-e3-files '[ "$(grep -c . /root/issue72/evidence/e3/MANIFEST.sha256)" = 5 ] && [ ! -e /usr/local/lib/anxious-lookout/issue16/supply.sh ] && grep -q not-found /mock/unit.issue16-supply.timer && creds 3'
+build; after_e2; t normal 0 retire-e3-files '[ "$(grep -c . /root/issue72/evidence/e3/MANIFEST.sha256)" = 5 ] && [ ! -e /usr/local/lib/anxious-lookout/issue16/supply.sh ] && grep -q not-found /mock/unit.issue16-supply.timer && creds 5'
 build; after_e1; t e2-not-done 3 retire-e3-files '[ -e /usr/local/lib/anxious-lookout/issue16/supply.sh ]'
 build; after_e2; echo 'DSN=postgresql://x' >> /usr/local/lib/anxious-lookout/issue16/stop-supply.sh; t credential-marker 3 retire-e3-files '[ ! -e /root/issue72/evidence/e3 ]'
 build; after_e2; printf 'ExecStart=/usr/local/lib/anxious-lookout/issue16/stop-supply.sh\n' > /etc/systemd/system/issue16-other.service; t other-unit-uses-script 3 retire-e3-files
@@ -175,12 +178,15 @@ PATH=/stubs:$PATH t unlink-fails-midway 7 retire-e3-files '[ -e /usr/local/lib/a
 
 # E4.
 build; after_e3; t normal 0 retire-e4-final 'creds 0 && [ ! -e /etc/anxious-lookout/issue16/supply ] && [ -f /var/lib/anxious-lookout/issue16-d4/supply/attempts/a1 ] && [ -e /mock/sa-deleted ] && grep -q false /mock/role'
-build; after_e3; sed -i 's|^NOT_BEFORE=.*|NOT_BEFORE=2099-01-01T00:00:00Z|' $B/retire-e4-final.sh; t too-early 3 retire-e4-final 'creds 3 && grep -q true /mock/role'
-build; after_e2; t e3-not-done 3 retire-e4-final 'creds 3'
-build; after_e3; echo SECRET-extra > /etc/anxious-lookout/issue16/supply/extra; t unexpected-credential-file 3 retire-e4-final 'creds 4'
-build; after_e3; echo 'true|1' > /mock/role; t role-in-use 3 retire-e4-final 'creds 3'
-build; after_e3; sed -i "s|^DB_ROLE=.*|DB_ROLE='x; drop'|" $B/retire-e4-final.sh; t role-not-identifier 3 retire-e4-final 'creds 3'
-build; after_e3; MOCK_SA_DELETE_FAIL=1 t sa-delete-fails 5 retire-e4-final 'creds 3 && grep -q false /mock/role'; unset MOCK_SA_DELETE_FAIL
+build; after_e3; date -u +%s > /root/issue72/evidence/e1/stopped-at; t too-early 3 retire-e4-final 'creds 5 && grep -q true /mock/role && echo "$out" | grep -q "stable period not over"'
+build; after_e3; MOCK_AUTH_MTIME=1000000000 t no-refresh-since-e1 3 retire-e4-final 'creds 5 && echo "$out" | grep -q "no refresh observed"'; unset MOCK_AUTH_MTIME
+build; after_e3; rm -rf /root/issue72/evidence/e1; t e1-record-missing 3 retire-e4-final 'creds 5'
+build; after_e3; MOCK_KFAIL='stat -c %Y' t mtime-lookup-refused 3 retire-e4-final 'creds 5 && echo "$out" | grep -q "mtime lookup failed"'; unset MOCK_KFAIL
+build; after_e2; t e3-not-done 3 retire-e4-final 'creds 5'
+build; after_e3; echo SECRET-extra > /etc/anxious-lookout/issue16/supply/extra; t unexpected-credential-file 3 retire-e4-final 'creds 6'
+build; after_e3; echo 'true|1' > /mock/role; t role-in-use 3 retire-e4-final 'creds 5'
+build; after_e3; sed -i "s|^DB_ROLE=.*|DB_ROLE='x; drop'|" $B/retire-e4-final.sh; t role-not-identifier 3 retire-e4-final 'creds 5'
+build; after_e3; MOCK_SA_DELETE_FAIL=1 t sa-delete-fails 5 retire-e4-final 'creds 5 && grep -q false /mock/role'; unset MOCK_SA_DELETE_FAIL
 build; after_e3; mkdir -p /stubs; printf '#!/bin/sh\ncase "$*" in *issue16/supply*) printf "f database-url\\nf kube-token\\nf kubeconfig\\n"; exit 1;; esac\nexec /usr/bin/find "$@"\n' > /stubs/find; chmod 0755 /stubs/find
 PATH=/stubs:$PATH t credential-scan-fails 3 retire-e4-final 'grep -q true /mock/role'; rm -rf /stubs
 build; after_e3; MOCK_KFAIL='--ignore-not-found -o name' t sa-absence-unconfirmed 8 retire-e4-final 'echo "$out" | grep -q "postcheck failed: serviceaccount"'; unset MOCK_KFAIL
