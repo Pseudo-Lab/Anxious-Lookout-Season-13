@@ -13,12 +13,23 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
 | Step | Script | Changes state | Inputs (`@@…@@` and files) |
 |---|---|---|---|
 | F | `inventory.sh` | no | none |
-| B3 | `apply-broker.sh` | yes | `/root/issue72/render/broker.json` (`ops.broker_render` output) and `runner-cnp.json` (`user-runner-e2e/40-runner-network.json`), their SHA-256s, the runner image reference |
+| B3 | `apply-broker.sh` | yes | the runner image reference, storage class and access mode (decision 1); files: `broker_render.py` and `runner-cnp.json` (pinned in the script), `values.json` written on the node |
 | C | `check-login.sh` | no (run after the user's `codex login --device-auth`) | none |
 | E1 | `retire-e1-disable.sh` | yes, reversible | runner image containerd digest; Pods exempt per decision 3 |
-| E2 | `retire-e2-rbac.sh` | yes, reversible | `/root/issue72/render/supply-rbac.json` (the four emptied `runner-pool-supply` objects from the rollout `resources.json`) and its SHA-256 |
+| E2 | `retire-e2-rbac.sh` | yes, reversible | `supply-rbac.json` from this directory (pinned in the script; the harness checks it against `ops.runner_rollout`) |
 | E3 | `retire-e3-files.sh` | yes, reversible from evidence | none |
 | E4 | `retire-e4-final.sh` | **yes, no return** | stable-period end (decision 2), credential file names (from F), supply database role |
+
+**Node-local delivery.** The user runs every command in their own session on the OCI node; nobody here has production ssh. Scripts and inputs reach the node the same way:
+1. `git -C <node checkout> fetch`;
+2. `git show <sha>:<path>` into `/root/issue72/` (scripts) or `/root/issue72/render/` (inputs), with no clobber;
+3. `sha256sum -c`;
+4. run, keeping the original rc.
+
+**The B3 render happens on the node.** The script renders the broker objects with the pinned `broker_render.py`, from a `values.json` the user writes there.
+- The ChatGPT workspace id (`accountId`) never leaves the node.
+- Every other values field must equal the script's reviewed constants.
+- The rendered copy is kept as `evidence/b3/broker.json` for the postcheck and the rollback.
 
 **What every script shares:**
 - Each script prints selected fields only. It never reads a Secret object, a credential file's content, `auth.json` or `codex login status` text.

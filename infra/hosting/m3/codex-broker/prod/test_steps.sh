@@ -32,31 +32,20 @@ build() {
   for n in database-url kube-token kubeconfig; do echo "SECRET-$n" > /etc/anxious-lookout/issue16/supply/$n; chmod 0600 /etc/anxious-lookout/issue16/supply/$n; done
   echo '{"owner":"00000000-0000-4000-8000-000000000048","state":"s","generation":1,"podUid":"p","snapshotId":"a1","result":"accepted"}' \
     > /var/lib/anxious-lookout/issue16-d4/supply/attempts/a1
-  printf '{"image":"%s","accountId":"synthetic-account","storageClass":"local-path","accessMode":"ReadWriteOnce","egress":"world"}' "$IMG" > /mock/values.json
-  ( cd /backend && python3 -B -m ops.broker_render --values /mock/values.json ) > /root/issue72/render/broker.json
+  # Node-local inputs exactly as `git show <sha>:<path>` would place them; values.json is written on the node.
+  printf '{"image":"%s","accountId":"synthetic-account","storageClass":"local-path","accessMode":"ReadWriteOnce","egress":"world"}' "$IMG" \
+    > /root/issue72/render/values.json
+  cp /backend/ops/broker_render.py /root/issue72/render/broker_render.py
   cp /m3/user-runner-e2e/40-runner-network.json /root/issue72/render/runner-cnp.json
+  cp $P/supply-rbac.json /root/issue72/render/supply-rbac.json
   python3 -I - <<'PY'
 import json
 cnp = json.load(open('/root/issue72/render/runner-cnp.json'))
 cnp['spec']['egress'] = cnp['spec']['egress'][1:]
 json.dump(cnp, open('/mock/live-cnp.json', 'w'))
-items = []
-for kind in ('Role', 'RoleBinding', 'ClusterRole', 'ClusterRoleBinding'):
-    meta = {'name': 'runner-pool-supply'}
-    if not kind.startswith('Cluster'):
-        meta['namespace'] = 'codex-runner'
-    item = {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': kind, 'metadata': meta}
-    if kind.endswith('Binding'):
-        item.update(subjects=[], roleRef={'apiGroup': 'rbac.authorization.k8s.io', 'kind': kind[:-7], 'name': 'runner-pool-supply'})
-    else:
-        item['rules'] = []
-    items.append(item)
-json.dump({'apiVersion': 'v1', 'kind': 'List', 'items': items}, open('/root/issue72/render/supply-rbac.json', 'w'))
 PY
   for s in inventory apply-broker check-login retire-e1-disable retire-e2-rbac retire-e3-files retire-e4-final; do
-    sed -e "s|@@BROKER_JSON_SHA256@@|$(sha256sum < /root/issue72/render/broker.json | cut -c1-64)|" \
-        -e "s|@@RUNNER_CNP_JSON_SHA256@@|$(sha256sum < /root/issue72/render/runner-cnp.json | cut -c1-64)|" \
-        -e "s|@@SUPPLY_RBAC_JSON_SHA256@@|$(sha256sum < /root/issue72/render/supply-rbac.json | cut -c1-64)|" \
+    sed -e "s|@@STORAGE_CLASS@@|local-path|" -e "s|@@ACCESS_MODE@@|ReadWriteOnce|" \
         -e "s|@@RUNNER_IMAGE_REF@@|$IMG|" -e "s|@@RUNNER_IMAGE_ID@@|$DIG|" -e "s|@@EXEMPT_PODS@@|runner-66|" \
         -e "s|@@NOT_BEFORE_UTC@@|2020-01-01T00:00:00Z|" -e "s|@@SUPPLY_CRED_FILE_NAMES@@|database-url kube-token kubeconfig|" \
         -e "s|@@SUPPLY_DB_ROLE@@|runner_supply|" $P/$s.sh > $B/$s.sh
@@ -82,6 +71,16 @@ t() {
 }
 creds() { [ "$(find /etc/anxious-lookout/issue16/supply -type f 2>/dev/null | wc -l)" = "$1" ]; }
 
+# The committed E2 input must equal what ops.runner_rollout renders for runner-pool-supply.
+( cd /backend && python3 -B - <<'PY'
+import json
+from ops.runner_rollout import resources
+v = json.load(open('/m3/multi-user-runners/rollout/values.example.json'))
+want = [i for i in resources(v)['items'] if i['metadata']['name'] == 'runner-pool-supply']
+assert json.load(open('/m3/codex-broker/prod/supply-rbac.json')) == {'apiVersion': 'v1', 'kind': 'List', 'items': want}
+PY
+) && { pass=$((pass+1)); echo 'ok supply-rbac.json equals the rollout render'; } || { fail=$((fail+1)); echo 'FAIL supply-rbac.json differs from the rollout render'; }
+
 # F inventory (read-only).
 build; t normal 0 inventory 'echo "$out" | grep -q "^owner66 3cb453bf" && echo "$out" | grep -q "supply.credentials f 600 root kube-token" \
   && echo "$out" | grep -q "^capacity.pods hard=3|used=2" && echo "$out" | grep -q "^supply.attempts result.accepted=1" \
@@ -104,9 +103,15 @@ build; mkdir -p /stubs; printf '#!/bin/sh\ncase "$*" in *issue16/supply*) echo "
 PATH=/stubs:$PATH t credential-scan-partial 3 inventory 'echo "$out" | grep -q "^supply.credentials lookup_failed"'; rm -rf /stubs
 
 # B3 apply-broker.
-build; sed -i 's/^BROKER_SHA=.*/BROKER_SHA=@@X@@/' $B/apply-broker.sh; t placeholders 2 apply-broker '[ ! -e /mock/applied ]'
-build; t normal 0 apply-broker '[ -f /root/issue72/evidence/b3/runner-cnp-before.json ] && grep -q CiliumNetworkPolicy/codex-runner/runner-callback-draft /mock/applied'
-build; echo ' ' >> /root/issue72/render/broker.json; t hash-mismatch 3 apply-broker '[ ! -e /mock/applied ]'
+build; sed -i 's/^STORAGE_CLASS=.*/STORAGE_CLASS=@@X@@/' $B/apply-broker.sh; t placeholders 2 apply-broker '[ ! -e /mock/applied ]'
+build; t normal 0 apply-broker '[ -f /root/issue72/evidence/b3/runner-cnp-before.json ] && grep -q CiliumNetworkPolicy/codex-runner/runner-callback-draft /mock/applied \
+  && grep -q "\"storageClassName\": \"local-path\"" /root/issue72/evidence/b3/broker.json && ! echo "$out" | grep -q synthetic-account'
+build; echo '#' >> /root/issue72/render/broker_render.py; t renderer-hash-mismatch 3 apply-broker '[ ! -e /mock/applied ]'
+build; echo ' ' >> /root/issue72/render/runner-cnp.json; t runner-cnp-hash-mismatch 3 apply-broker '[ ! -e /mock/applied ]'
+for v in '"storageClass":"local-path"/"storageClass":"openebs-lvm-ext4"' '"accessMode":"ReadWriteOnce"/"accessMode":"ReadWriteOncePod"' \
+         '"egress":"world"/"egress":"fqdn"' '"accountId":"synthetic-account"/"accountId":"has space"' '"egress":"world"/"egress":"world","extra":1'; do
+  build; sed -i "s/$v/" /root/issue72/render/values.json; t "values:${v%%/*}" 3 apply-broker '[ ! -e /mock/applied ] && echo "$out" | grep -q "values.json not as reviewed" && ! echo "$out" | grep -q "has space"'
+done
 build; IMG2=runner@sha256:$(printf 'd%.0s' $(seq 64)); sed -i "s|^RUNNER_IMAGE=.*|RUNNER_IMAGE=$IMG2|" $B/apply-broker.sh; t image-not-reviewed 3 apply-broker '[ ! -e /mock/applied ]'
 build; python3 -I -c "
 import json; p='/mock/live-cnp.json'; d=json.load(open(p)); d['spec']['egress'].append({'toEntities':['world']}); json.dump(d,open(p,'w'))"

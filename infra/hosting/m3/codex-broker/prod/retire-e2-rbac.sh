@@ -1,11 +1,12 @@
 #!/bin/sh
 # #72 E2: empty the runner-pool-supply Role/ClusterRole and their bindings. Reversible from evidence.
-# Input: /root/issue72/render/supply-rbac.json, the four runner-pool-supply objects taken from the
-# reviewed rollout resources.json (rules and subjects empty). Hash-pinned.
+# Input: /root/issue72/render/supply-rbac.json = git show <sha>:infra/hosting/m3/codex-broker/prod/supply-rbac.json,
+# the four runner-pool-supply objects exactly as ops.runner_rollout renders them (rules and subjects empty;
+# test_steps.sh compares the file with the renderer). Hash-pinned.
 # rc: 0 applied and verified; 2 placeholders left; 3 precheck refused, nothing changed;
 #     5 apply failed (report, do not rerun); 8 applied but a postcheck failed.
 set -u
-RBAC_SHA=@@SUPPLY_RBAC_JSON_SHA256@@
+RBAC_SHA=65e0ed7ea394e16706aeec9dba3486e45608caf3d100d11946b96a5375123779
 K='/usr/local/bin/k3s kubectl'
 F=/root/issue72/render/supply-rbac.json
 EV=/root/issue72/evidence/e2
