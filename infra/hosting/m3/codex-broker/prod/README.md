@@ -15,10 +15,10 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
 | F | `inventory.sh` | no | none |
 | B3 | `apply-broker.sh` | yes | the runner image reference (after A); filled: `local-path` + `ReadWriteOnce` (decision 1); files: `broker_render.py` and `runner-cnp.json` (pinned in the script), `values.json` written on the node |
 | C | `check-login.sh` | no (run after the user's `codex login --device-auth`) | none |
-| E1 | `retire-e1-disable.sh` | yes, reversible | runner image containerd digest (after A); filled: the #66 owner `runner-3cb453bfd87040dcb7e13a58aa0cbaf2` exempt (decision 3, option c). Writes `evidence/e1/stopped-at` |
+| E1 | `retire-e1-disable.sh` | yes, reversible | runner image containerd digest (after A); filled: the #66 owner `runner-3cb453bfd87040dcb7e13a58aa0cbaf2` exempt (decision 3, option c). Requires a broker login, then writes `evidence/e1/stopped-at` and `evidence/e1/session` (`auth.json` file identity) |
 | E2 | `retire-e2-rbac.sh` | yes, reversible | `supply-rbac.json` from this directory (pinned in the script; the harness checks it against `ops.runner_rollout`) |
 | E3 | `retire-e3-files.sh` | yes, reversible from evidence | none |
-| E4 | `retire-e4-final.sh` | **yes, no return** | supply database role; filled: 24 h after E1's `stopped-at`, plus a broker-recorded `scheduled` refresh with `ok` true between E1 and now (decision 2), with the `auth.json` mtime as corroboration; the five credential file names from F |
+| E4 | `retire-e4-final.sh` | **yes, no return** | supply database role; filled: 24 h after E1's `stopped-at` (decision 2), plus a broker-recorded `scheduled` `ok` refresh **in the same login session** (an unbroken `before`→`after` chain from E1's `session` identity to the current `auth.json`); the five credential file names from F |
 
 **Node-local delivery.** The user runs every command in their own session on the OCI node; nobody here has production ssh. Scripts and inputs reach the node the same way:
 1. `git -C <node checkout> fetch`;

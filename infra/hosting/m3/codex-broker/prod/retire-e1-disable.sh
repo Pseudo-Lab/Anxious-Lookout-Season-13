@@ -20,6 +20,11 @@ echo "$RUNNER_IMAGE_ID" | grep -qE '^sha256:[0-9a-f]{64}$' || refuse 'RUNNER_IMA
 # 1. Broker serving, and no Running user runner left on an image without the broker client.
 p=$(timeout 30 $K -n codex-broker get pod codex-broker-0 -o jsonpath='{.status.phase}|{.status.containerStatuses[0].ready}' 2>/dev/null)
 [ "$p" = 'Running|true' ] || refuse 'broker pod not ready'
+# The login session E4 must stay in: auth.json's file identity '<inode>:<mtime ns>' (not secret, never content).
+ident() { i=$(timeout 30 $K -n codex-broker exec codex-broker-0 -- python3 -I -c \
+  'import os; s = os.lstat("/data/codex/auth.json"); print("%d:%d" % (s.st_ino, s.st_mtime_ns))' 2>/dev/null) \
+  && echo "$i" | grep -qxE '[0-9]+:[0-9]+' && echo "$i"; }
+ident > /dev/null || refuse 'broker login identity unreadable (log in first)'
 pods=$(timeout 30 $K -n codex-runner get pods -l anxious.io/managed=user-runner \
   -o jsonpath='{range .items[*]}{.metadata.name}|{.status.phase}|{.status.containerStatuses[?(@.name=="runner")].imageID}{"\n"}{end}' 2>/dev/null) \
   || refuse 'runner pod lookup failed'
@@ -62,10 +67,13 @@ rc=0
 timeout 60 systemctl disable --now $UNITS > /dev/null 2>&1 || { echo 'systemctl disable --now failed'; rc=5; }
 if [ $rc = 0 ]; then
   bad=
-  # Decision 2: E4's 24 h stable period and its refresh check count from this moment.
+  # Decision 2: E4's 24 h stable period and its refresh check count from this moment, in this login session.
   at=$(date -u +%s)
-  { install -d -m 0700 "$EV" && ( umask 077; printf '%s\n' "$at" > "$EV/stopped-at" ) && [ "$(cat "$EV/stopped-at")" = "$at" ]; } \
-    && echo "stopped-at $(date -u -d "@$at" +%Y-%m-%dT%H:%M:%SZ)" || bad="$bad stopped-at"
+  sess=$(ident) || sess=
+  { [ -n "$sess" ] && install -d -m 0700 "$EV" \
+      && ( umask 077; printf '%s\n' "$at" > "$EV/stopped-at" && printf '%s\n' "$sess" > "$EV/session" ) \
+      && [ "$(cat "$EV/stopped-at")" = "$at" ] && [ "$(cat "$EV/session")" = "$sess" ]; } \
+    && echo "stopped-at $(date -u -d "@$at" +%Y-%m-%dT%H:%M:%SZ), session recorded" || bad="$bad stopped-at"
   for u in $UNITS; do
     # Status first, then the named properties: stdout of a failed systemctl is never trusted.
     v=$(timeout 10 systemctl show -p ActiveState -p UnitFileState "$u" 2>/dev/null) || { bad="$bad $u"; continue; }

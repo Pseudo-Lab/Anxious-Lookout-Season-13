@@ -110,9 +110,12 @@ if 'exec' in args:
         p = M / 'events'
         if p.exists():
             out(p.read_text())
-        # Default: one scheduled refresh an hour ago.
+        # Default: one scheduled refresh an hour ago, continuous from the E1 session 100:150 to the file 100:200.
         import time
-        out(json.dumps({'at': int(time.time()) - 3600, 'event': 'refresh', 'kind': 'scheduled', 'ok': True}) + '\n')
+        out(json.dumps({'at': int(time.time()) - 3600, 'event': 'refresh', 'kind': 'scheduled', 'ok': True,
+                        'before': '100:150', 'after': '100:200'}) + '\n')
+    if cmd[0] == 'python3' and 'auth.json' in cmd[-1]:
+        out(env('MOCK_IDENT', '100:200') + '\n')  # auth.json identity '<inode>:<mtime ns>'
     if cmd[0] == 'stat':
         import time
         mtime = env('MOCK_AUTH_MTIME', str(int(time.time()) - 60))  # rewritten a minute ago

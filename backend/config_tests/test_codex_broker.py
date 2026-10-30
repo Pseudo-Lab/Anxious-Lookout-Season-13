@@ -1,6 +1,7 @@
 """#60 codex-broker: TokenReview + Pod identity, credential freshness, HTTP front. Fake API, synthetic tokens."""
 import json
 import os
+import re
 import stat
 import time
 from types import SimpleNamespace
@@ -163,10 +164,33 @@ def test_refresh_events_are_fixed_fields_only_and_tell_scheduled_from_forced(hom
         Credentials(home, ACCOUNT, server=FakeServer(lambda home: None)).access(force=True)  # Provider kept the token.
     (first, second), now = events(home), int(time.time())
     assert first['kind'] == 'scheduled' and first['ok'] is True and second['kind'] == 'forced' and second['ok'] is False
-    assert all(set(e) == {'at', 'event', 'kind', 'ok'} and e['event'] == 'refresh' and now - 5 <= e['at'] <= now for e in (first, second))
+    assert all(set(e) == {'at', 'event', 'kind', 'ok', 'before', 'after'} and e['event'] == 'refresh'
+               and now - 5 <= e['at'] <= now for e in (first, second))
+    assert all(re.fullmatch(r'\d+:\d+', e[k]) for e in (first, second) for k in ('before', 'after'))
     text = (home.parent/'broker-events.jsonl').read_text()
     assert renewed not in text and ACCOUNT not in text
     assert stat.S_IMODE((home.parent/'broker-events.jsonl').stat().st_mode) == 0o600
+
+
+def identity(home):
+    info = (home/'auth.json').lstat()
+    return '%d:%d' % (info.st_ino, info.st_mtime_ns)
+
+
+def test_events_chain_auth_json_identity_and_a_relogin_breaks_the_chain(home):
+    # #72 review: a scheduled success from an earlier login must not survive a new device login.
+    write_auth(home, jwt(int(time.time()) + 600))
+    login = identity(home)
+    credentials = Credentials(home, ACCOUNT, server=FakeServer(lambda home: write_auth(home, jwt(int(time.time()) + 7200))))
+    credentials.access()
+    (refresh,) = events(home)
+    assert refresh['before'] == login and refresh['after'] == identity(home) != login  # Continuous with the login.
+    time.sleep(0.01)
+    write_auth(home, jwt(int(time.time()) + 600))  # A new device login replaces auth.json; it writes no event.
+    assert events(home) == [refresh] and identity(home) != refresh['after']  # The chain no longer reaches the file.
+    credentials.access()
+    later = events(home)[-1]
+    assert later['before'] != refresh['after'] and later['after'] == identity(home)  # The break is visible.
 
 
 def test_failed_scheduled_refresh_is_recorded_as_not_ok(home):

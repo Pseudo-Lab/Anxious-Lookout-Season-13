@@ -54,7 +54,8 @@ after_e1() { echo 'loaded inactive disabled' > /mock/unit.issue16-supply.timer; 
 after_e2() { after_e1; touch /mock/rbac-emptied; }
 after_e3() { after_e2; rm -f /etc/systemd/system/issue16-supply.* /usr/local/lib/anxious-lookout/issue16/supply.sh /usr/local/lib/anxious-lookout/issue16/stop-supply.sh
              echo 'not-found inactive -' > /mock/unit.issue16-supply.timer; echo 'not-found inactive -' > /mock/unit.issue16-supply.service
-             install -d -m 0700 /root/issue72/evidence/e1; echo $(( $(date -u +%s) - 90000 )) > /root/issue72/evidence/e1/stopped-at; }
+             install -d -m 0700 /root/issue72/evidence/e1; echo $(( $(date -u +%s) - 90000 )) > /root/issue72/evidence/e1/stopped-at
+             echo 100:150 > /root/issue72/evidence/e1/session; }
 
 pass=0 fail=0
 # t name want script [check] -- environment assignments come before t.
@@ -140,7 +141,9 @@ build; MOCK_AUTH_MTIME='12' t auth-mtime-malformed 3 check-login; unset MOCK_AUT
 
 # E1.
 build; t normal 0 retire-e1-disable 'grep -q disabled /mock/unit.issue16-supply.timer && echo "$out" | grep -q "exempt (decision 3): runner-3cb453bfd87040dcb7e13a58aa0cbaf2" \
-  && grep -qE "^[0-9]{10}$" /root/issue72/evidence/e1/stopped-at && echo "$out" | grep -q "^stopped-at 20"'
+  && grep -qE "^[0-9]{10}$" /root/issue72/evidence/e1/stopped-at && echo "$out" | grep -q "^stopped-at 20" \
+  && [ "$(cat /root/issue72/evidence/e1/session)" = 100:200 ]'
+build; MOCK_KFAIL='os.lstat' MOCK_KFAIL_PARTIAL='100:200' t not-logged-in-yet 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer && [ ! -e /root/issue72/evidence/e1 ]'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
 build; sed -i "s|^EXEMPT_PODS=.*|EXEMPT_PODS='none'|" $B/retire-e1-disable.sh; t old-image-runner 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer && echo "$out" | grep -q "runner-3cb453bfd87040dcb7e13a58aa0cbaf2"'
 build; sed -i "s|^EXEMPT_PODS=.*|EXEMPT_PODS='runner-3cb453bf'|" $B/retire-e1-disable.sh; t partial-exemption-name 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer'
 build; install -d -m 0700 /root/issue72/evidence/e1; t e1-record-exists 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer'
@@ -202,23 +205,32 @@ PATH=/stubs:$PATH t unlink-fails-midway 7 retire-e3-files '[ -e /usr/local/lib/a
 # E4.
 build; after_e3; t normal 0 retire-e4-final 'creds 0 && [ ! -e /etc/anxious-lookout/issue16/supply ] && [ -f /var/lib/anxious-lookout/issue16-d4/supply/attempts/a1 ] && [ -e /mock/sa-deleted ] && grep -q false /mock/role'
 build; after_e3; date -u +%s > /root/issue72/evidence/e1/stopped-at; t too-early 3 retire-e4-final 'creds 5 && grep -q true /mock/role && echo "$out" | grep -q "stable period not over"'
-build; after_e3; MOCK_AUTH_MTIME=1000000000 t mtime-not-after-e1 3 retire-e4-final 'creds 5 && echo "$out" | grep -q "auth.json not rewritten since E1"'; unset MOCK_AUTH_MTIME
-# Decision 2 as reviewed: only a scheduled, successful refresh between E1 and now counts.
-ev() { printf '{"at": %s, "event": "refresh", "kind": "%s", "ok": %s}\n' "$1" "$2" "$3"; }
+# Decision 2 as reviewed: a scheduled, successful refresh between E1 and now, in one unbroken chain of
+# auth.json identities from E1's session record (100:150) to the current file (mock default 100:200).
+ev() { printf '{"at": %s, "event": "refresh", "kind": "%s", "ok": %s, "before": "%s", "after": "%s"}\n' "$1" "$2" "$3" "$4" "$5"; }
 now=$(date -u +%s)
-build; after_e3; : > /mock/events; t no-events 3 retire-e4-final 'creds 5 && grep -q true /mock/role && echo "$out" | grep -q "no scheduled refresh"'
-build; after_e3; ev $((now-3600)) forced true > /mock/events; t forced-only 3 retire-e4-final 'creds 5 && grep -q true /mock/role'
-build; after_e3; ev $((now-3600)) scheduled false > /mock/events; t scheduled-failed-only 3 retire-e4-final 'creds 5'
-build; after_e3; ev $((now-100000)) scheduled true > /mock/events; t scheduled-before-e1-only 3 retire-e4-final 'creds 5'
-build; after_e3; { ev $((now-3600)) scheduled true; ev $((now+3600)) forced true; } > /mock/events; t future-event 3 retire-e4-final 'creds 5'
-build; after_e3; { ev $((now-3600)) scheduled true; echo '{"at": 1, "event": "refresh", "kind": "scheduled", "ok": true, "token": "SECRET-x"}'; } > /mock/events
-t extra-field 3 retire-e4-final 'creds 5'
-build; after_e3; { ev $((now-3600)) scheduled true; echo 'not json'; } > /mock/events; t malformed-line 3 retire-e4-final 'creds 5'
-build; after_e3; MOCK_KFAIL='cat /data/broker-events.jsonl' MOCK_KFAIL_PARTIAL="$(ev $((now-3600)) scheduled true)" t events-partial-then-fails 3 retire-e4-final 'creds 5 && echo "$out" | grep -q "event lookup failed"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
-build; after_e3; { ev $((now-3600)) forced true; ev $((now-1800)) scheduled true; } > /mock/events; t scheduled-among-forced 0 retire-e4-final 'creds 0 && echo "$out" | grep -q "scheduled refresh recorded at"'
+refused='creds 5 && grep -q true /mock/role && echo "$out" | grep -q "no scheduled refresh in the same login session"'
+build; after_e3; : > /mock/events; t no-events 3 retire-e4-final "$refused"
+build; after_e3; ev $((now-3600)) forced true 100:150 100:200 > /mock/events; t forced-only 3 retire-e4-final "$refused"
+build; after_e3; ev $((now-3600)) scheduled false 100:150 100:200 > /mock/events; t scheduled-failed-only 3 retire-e4-final "$refused"
+build; after_e3; ev $((now-100000)) scheduled true 100:150 100:200 > /mock/events; t scheduled-before-e1-only 3 retire-e4-final "$refused"
+# Review round 2: a success from the session, then a device login (no event) must refuse.
+build; after_e3; MOCK_IDENT=300:400 t relogin-after-success 3 retire-e4-final "$refused"; unset MOCK_IDENT
+build; after_e3; { ev $((now-7200)) scheduled true 100:150 100:200; ev $((now-1800)) scheduled true 300:350 300:400; } > /mock/events
+MOCK_IDENT=300:400 t relogin-then-new-session-refresh 3 retire-e4-final "$refused"; unset MOCK_IDENT
+build; after_e3; { ev $((now-3600)) forced true 100:150 100:170; ev $((now-1800)) scheduled true 100:170 100:200; } > /mock/events
+t chain-through-forced 0 retire-e4-final 'creds 0 && echo "$out" | grep -q "same login session since E1"'
+build; after_e3; st=$(cat /root/issue72/evidence/e1/stopped-at); { ev $st forced true 100:120 100:150; ev $((now-1800)) scheduled true 100:150 100:200; } > /mock/events
+t event-in-stop-second-before-record 0 retire-e4-final 'creds 0'
+build; after_e3; { ev $((now-3600)) scheduled true 100:150 100:200; ev $((now+3600)) forced true 100:200 100:200; } > /mock/events; t future-event 3 retire-e4-final "$refused"
+build; after_e3; { ev $((now-3600)) scheduled true 100:150 100:200; echo '{"at": 1, "event": "refresh", "kind": "scheduled", "ok": true, "before": "1:1", "after": "1:1", "token": "SECRET-x"}'; } > /mock/events
+t extra-field 3 retire-e4-final "$refused"
+build; after_e3; { ev $((now-3600)) scheduled true 100:150 100:200; echo 'not json'; } > /mock/events; t malformed-line 3 retire-e4-final "$refused"
+build; after_e3; MOCK_KFAIL='cat /data/broker-events.jsonl' MOCK_KFAIL_PARTIAL="$(ev $((now-3600)) scheduled true 100:150 100:200)" t events-partial-then-fails 3 retire-e4-final 'creds 5 && echo "$out" | grep -q "event lookup failed"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
+build; after_e3; MOCK_KFAIL='os.lstat' MOCK_KFAIL_PARTIAL='100:200' t identity-partial-then-fails 3 retire-e4-final 'creds 5 && echo "$out" | grep -q "identity lookup failed"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
+build; after_e3; rm /root/issue72/evidence/e1/session; t session-record-missing 3 retire-e4-final 'creds 5 && echo "$out" | grep -q "session record missing"'
 build; after_e3; MOCK_SYSTEMCTL_PARTIAL=1 t systemctl-partial-then-fails 3 retire-e4-final 'creds 5 && grep -q true /mock/role'; unset MOCK_SYSTEMCTL_PARTIAL
 build; after_e3; rm -rf /root/issue72/evidence/e1; t e1-record-missing 3 retire-e4-final 'creds 5'
-build; after_e3; MOCK_KFAIL='stat -c %Y' t mtime-lookup-refused 3 retire-e4-final 'creds 5 && echo "$out" | grep -q "mtime lookup failed"'; unset MOCK_KFAIL
 build; after_e2; t e3-not-done 3 retire-e4-final 'creds 5'
 build; after_e3; echo SECRET-extra > /etc/anxious-lookout/issue16/supply/extra; t unexpected-credential-file 3 retire-e4-final 'creds 6'
 build; after_e3; echo 'true|1' > /mock/role; t role-in-use 3 retire-e4-final 'creds 5'

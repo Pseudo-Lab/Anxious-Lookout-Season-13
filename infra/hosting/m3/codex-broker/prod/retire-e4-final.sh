@@ -22,35 +22,54 @@ q() { timeout 30 $K -n m2-hosting exec postgres-0 -- psql -U postgres -d hosting
 echo "$DB_ROLE" | grep -qE '^[a-z_][a-z0-9_]{0,62}$' || refuse 'DB_ROLE is not a plain identifier'
 for n in $CRED_ENTRIES; do echo "$n" | grep -qE '^[A-Za-z0-9._-]+$' || refuse 'bad credential file name'; done
 
-# 1. Stable period, and a scheduled refresh since E1. The broker appends one fixed-field line per refresh it
-#    drives to /data/broker-events.jsonl ({"at","event":"refresh","kind","ok"}; backend/broker/credentials.py).
-#    Only kind "scheduled" with ok true counts: "forced" follows a runner 401, and a login writes no event.
-#    The auth.json mtime corroborates it (stat only). Any malformed line or future timestamp refuses.
+# 1. Stable period, and a scheduled refresh in the same login session since E1.
+#    The broker appends one line per refresh it drives to /data/broker-events.jsonl
+#    ({"at","event":"refresh","kind","ok","before","after"}; backend/broker/credentials.py), where before/after
+#    are auth.json's file identity '<inode>:<mtime ns>'. E1 recorded the identity at the stop. The events after E1
+#    must form one unbroken chain from that identity to the current one: a device login replaces auth.json without
+#    an event, so it breaks the chain and E4 refuses, whatever was recorded before it. At least one link must be
+#    kind "scheduled" with ok true ("forced" follows a runner 401). Malformed lines or future times refuse.
 [ -f "$E1" ] && [ ! -L "$E1" ] || refuse 'E1 record missing'
 stopped=$(cat "$E1" 2>/dev/null) && echo "$stopped" | grep -qE '^[0-9]{10}$' || refuse 'E1 record unreadable'
+S=$(dirname "$E1")/session
+[ -f "$S" ] && [ ! -L "$S" ] || refuse 'E1 session record missing'
+session=$(cat "$S" 2>/dev/null) && echo "$session" | grep -qxE '[0-9]+:[0-9]+' || refuse 'E1 session record unreadable'
 now=$(date -u +%s)
 [ "$stopped" -le "$now" ] || refuse 'E1 record is in the future'
 [ "$now" -ge $((stopped + STABLE_SECONDS)) ] || refuse "stable period not over (E1 at $(date -u -d "@$stopped" +%Y-%m-%dT%H:%M:%SZ), 24 h)"
 ev=$(timeout 30 $K -n codex-broker exec codex-broker-0 -- cat /data/broker-events.jsonl 2>/dev/null) || refuse 'broker event lookup failed'
+current=$(timeout 30 $K -n codex-broker exec codex-broker-0 -- python3 -I -c \
+  'import os; s = os.lstat("/data/codex/auth.json"); print("%d:%d" % (s.st_ino, s.st_mtime_ns))' 2>/dev/null) \
+  && echo "$current" | grep -qxE '[0-9]+:[0-9]+' || refuse 'broker login identity lookup failed'
 seen=$(printf '%s\n' "$ev" | python3 -I -c '
-import json, sys
-stopped, now = int(sys.argv[1]), int(sys.argv[2])
-seen = []
+import json, re, sys
+stopped, now, chain, current = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4]
+ident = re.compile(r"\d+:\d+|-")
+links = []
 for line in sys.stdin.read().splitlines():
     if not line:
         continue
     e = json.loads(line)
-    assert set(e) == {"at", "event", "kind", "ok"} and e["event"] == "refresh"
+    assert set(e) == {"at", "event", "kind", "ok", "before", "after"} and e["event"] == "refresh"
     assert type(e["at"]) is int and e["kind"] in ("scheduled", "forced") and type(e["ok"]) is bool
+    assert ident.fullmatch(e["before"]) and ident.fullmatch(e["after"])
     assert e["at"] <= now + 60  # no future events
-    if e["kind"] == "scheduled" and e["ok"] and stopped < e["at"] <= now:
+    if e["at"] >= stopped:
+        links.append(e)
+# Events in the stop second that already ended at the recorded identity happened before E1 read it.
+while links and links[0]["after"] == chain and links[0]["before"] != chain:
+    links.pop(0)
+seen = []
+for e in links:
+    assert e["before"] == chain  # a break: auth.json was replaced by something other than a broker refresh
+    chain = e["after"]
+    if e["kind"] == "scheduled" and e["ok"]:
         seen.append(e["at"])
+assert chain == current and seen  # unbroken to the current file, with a scheduled refresh in it
 print(max(seen))
-' "$stopped" "$now" 2>/dev/null) || refuse 'no scheduled refresh recorded since E1, or the event record is malformed'
-m=$(timeout 30 $K -n codex-broker exec codex-broker-0 -- stat -c %Y /data/codex/auth.json 2>/dev/null) \
-  && echo "$m" | grep -qE '^[0-9]{10}$' || refuse 'auth.json mtime lookup failed'
-[ "$m" -gt "$stopped" ] && [ "$m" -le $((now + 60)) ] || refuse 'auth.json not rewritten since E1, or its mtime is in the future'
-echo "scheduled refresh recorded at $(date -u -d "@$seen" +%Y-%m-%dT%H:%M:%SZ) after E1; auth.json rewritten $(date -u -d "@$m" +%Y-%m-%dT%H:%M:%SZ)"
+' "$stopped" "$now" "$session" "$current" 2>/dev/null) \
+  || refuse 'no scheduled refresh in the same login session since E1 (a login, a gap or a malformed event record)'
+echo "scheduled refresh recorded at $(date -u -d "@$seen" +%Y-%m-%dT%H:%M:%SZ), same login session since E1"
 # 2. E3 done, broker serving.
 for u in issue16-supply.timer issue16-supply.service; do
   v=$(timeout 10 systemctl show -p LoadState "$u" 2>/dev/null) || refuse "systemctl show $u failed"
