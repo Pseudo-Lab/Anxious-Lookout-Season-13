@@ -63,6 +63,13 @@ def broker_pod(jsonpath):
     out('|'.join(fields))
 
 
+ignore = '--ignore-not-found' in args
+# Generic lookup failure: any call whose arguments contain MOCK_KFAIL fails like an RBAC refusal,
+# after optionally printing partial output.
+if env('MOCK_KFAIL') and env('MOCK_KFAIL') in line:
+    sys.stdout.write(env('MOCK_KFAIL_PARTIAL', ''))
+    sys.stderr.write('Error from server (Forbidden): mock refusal\n')
+    sys.exit(1)
 if args[:1] == ['diff']:
     f = args[args.index('-f') + 1]
     if env('MOCK_DIFF_STDERR'):
@@ -96,8 +103,8 @@ if 'exec' in args:
     sys.exit(99)
 if args[:2] == ['get', 'ns'] and 'codex-broker' in args:
     if (M / 'ns-exists').exists():
-        out('codex-broker')
-    notfound()
+        out('namespace/codex-broker')
+    out('') if ignore else notfound()
 if 'rollout' in args:
     sys.exit(1 if env('MOCK_ROLLOUT_FAIL') else 0)
 if 'delete' in args and 'serviceaccount' in args:
@@ -107,8 +114,12 @@ if 'delete' in args and 'serviceaccount' in args:
     out('deleted\n')
 if 'serviceaccount' in args:
     if (M / 'sa-deleted').exists():
-        notfound()
+        out('') if ignore else notfound()
+    if '-o' in args and args[args.index('-o') + 1] == 'name':
+        out('serviceaccount/runner-pool-supply')
     out('runner-pool-supply' if 'jsonpath={.metadata.name}' in line else 'sa-uid')
+if 'resourcequota' in args:
+    out(json.dumps({'status': {'hard': {'count/pods': '3'}, 'used': {'count/pods': '2'}}}))
 if 'cilium-config' in args:
     if '-o' in args and args[args.index('-o') + 1] == 'json':
         changed = (M / 'cilium-changed').exists()
@@ -137,9 +148,14 @@ if any(a.startswith('role/') for a in args):
                   'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': kind.replace('Binding', ''), 'name': 'runner-pool-supply'}})}
              for kind in ('Role', 'RoleBinding', 'ClusterRole', 'ClusterRoleBinding')]
     out(json.dumps({'kind': 'List', 'items': items}))
+if 'runner-pool-supply' in args and '{.metadata.name}|' in line:
+    if (M / 'rbac-deleted').exists():
+        out('') if ignore else notfound()
+    emptied = (M / 'rbac-emptied').exists()
+    out('runner-pool-supply|' + ('' if emptied else '{.rules}' in line and '[{"verbs":["get"]}]' or '[{"kind":"ServiceAccount"}]'))
 if 'runner-pool-supply' in args and 'jsonpath={.rules}' in line:
     out('' if (M / 'rbac-emptied').exists() else '[{"verbs":["get"]}]')
-if 'runner-pool-supply' in args:
-    out('Role|[]\n' if (M / 'rbac-emptied').exists() else 'Role|[{"verbs":["get"]}]\n')
+if 'runner-pool-supply' in args and 'jsonpath={.subjects}' in line:
+    out('' if (M / 'rbac-emptied').exists() else '[{"kind":"ServiceAccount","name":"runner-pool-supply"}]')
 sys.stderr.write('stub: unhandled ' + hashlib.sha256(line.encode()).hexdigest()[:8] + ' ' + line + '\n')
 sys.exit(99)

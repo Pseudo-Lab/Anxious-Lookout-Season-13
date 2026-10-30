@@ -63,8 +63,10 @@ PY
 # 3. Fresh install only, Cilium snapshot, and diff gates. kubectl diff also exits 1 on most errors,
 #    so a gate needs both the rc and an empty stderr. Objects inside the absent namespace cannot be
 #    server-diffed yet; the absent namespace proves they are new.
-timeout 30 $K get ns codex-broker > /dev/null 2> "$tmp/ns.err"; grep -q NotFound "$tmp/ns.err" || refuse 'namespace codex-broker exists or lookup failed'
-cil() { timeout 30 $K -n kube-system get configmap cilium-config -o json 2>/dev/null | python3 -I -c 'import hashlib,json,sys; print(hashlib.sha256(json.dumps(json.load(sys.stdin)["data"],sort_keys=True).encode()).hexdigest())'; }
+n=$(timeout 30 $K get ns codex-broker --ignore-not-found -o name 2>/dev/null) || refuse 'namespace lookup failed'
+[ -z "$n" ] || refuse 'namespace codex-broker exists'
+cil() { j=$(timeout 30 $K -n kube-system get configmap cilium-config -o json 2>/dev/null) || return 1
+  printf '%s' "$j" | python3 -I -c 'import hashlib,json,sys; print(hashlib.sha256(json.dumps(json.load(sys.stdin)["data"],sort_keys=True).encode()).hexdigest())'; }
 cilium_before=$(cil) && [ -n "$cilium_before" ] || refuse 'cilium-config lookup failed'
 diffrc() { timeout 60 $K diff -f "$1" > /dev/null 2> "$tmp/diff.err"; d=$?; [ -s "$tmp/diff.err" ] && d=err; echo $d; }
 d=$(diffrc "$tmp/outside.json"); [ "$d" = 1 ] || refuse "broker diff outside the namespace: $d (want 1)"

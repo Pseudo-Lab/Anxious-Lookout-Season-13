@@ -19,11 +19,18 @@ done
 for d in /etc/systemd/system/issue16-supply.timer.d /etc/systemd/system/issue16-supply.service.d; do
   [ ! -e "$d" ] || refuse "unexpected drop-in $d"
 done
-grep -lE 'postgres(ql)?://|eyJhbGci|BEGIN [A-Z ]*(KEY|CERTIFICATE)|password=' $FILES > /dev/null 2>&1 && refuse 'credential marker in a file'
+# grep: 0 = match, 1 = none, >=2 = read error; only 1 passes.
+for f in $FILES; do
+  grep -qE 'postgres(ql)?://|eyJhbGci|BEGIN [A-Z ]*(KEY|CERTIFICATE)|password=' "$f" 2>/dev/null; s=$?
+  [ $s = 1 ] || refuse "credential marker in $f, or it could not be read"
+done
 # No other unit may still call the scripts being removed.
-others=$(grep -lE 'supply\.sh' /etc/systemd/system/*.service /etc/systemd/system/*.timer 2>/dev/null \
-  | grep -vxE '/etc/systemd/system/issue16-supply\.(service|timer)')
-[ -z "$others" ] || refuse "other units reference the supply scripts: $(echo $others)"
+units=$(find /etc/systemd/system -maxdepth 1 -type f \( -name '*.service' -o -name '*.timer' \) 2>/dev/null) || refuse 'unit file scan failed'
+for f in $units; do
+  case "$f" in /etc/systemd/system/issue16-supply.service|/etc/systemd/system/issue16-supply.timer) continue;; esac
+  grep -qE 'supply\.sh' "$f" 2>/dev/null; s=$?
+  [ $s = 1 ] || refuse "another unit references the supply scripts, or could not be read: $f"
+done
 # 2. E1 and E2 done.
 for u in issue16-supply.timer issue16-supply.service; do
   v=$(timeout 10 systemctl show -p ActiveState -p UnitFileState --value "$u" 2>/dev/null | tr '\n' ' ')

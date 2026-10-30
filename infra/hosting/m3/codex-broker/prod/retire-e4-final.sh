@@ -29,7 +29,8 @@ p=$(timeout 30 $K -n codex-broker get pod codex-broker-0 -o jsonpath='{.status.p
 [ "$p" = 'Running|true' ] || refuse 'broker pod not ready'
 # 3. The credential directory holds exactly the expected regular files (names only, never contents).
 [ -d "$D" ] && [ ! -L "$D" ] || refuse "$D is not a directory"
-have=$(find "$D" -mindepth 1 -printf '%y %f\n' 2>/dev/null | LC_ALL=C sort) || refuse 'credential directory lookup failed'
+have=$(find "$D" -mindepth 1 -printf '%y %f\n' 2>/dev/null) || refuse 'credential directory lookup failed'
+have=$(printf '%s\n' "$have" | LC_ALL=C sort)
 want=$(for n in $CRED_ENTRIES; do echo "f $n"; done | LC_ALL=C sort)
 [ "$have" = "$want" ] || refuse 'credential directory is not exactly the expected files'
 [ -d "$A" ] || refuse 'attempts evidence directory missing'
@@ -51,7 +52,8 @@ fi
 if [ $rc = 0 ]; then
   bad=
   [ "$(q "select rolcanlogin::text from pg_roles where rolname='$DB_ROLE'")" = false ] || bad="$bad role"
-  timeout 30 $K -n codex-runner get serviceaccount runner-pool-supply > /dev/null 2>&1 && bad="$bad serviceaccount"
+  # Absence must be confirmed: --ignore-not-found gives rc 0 and empty output only when it is gone.
+  g=$(timeout 30 $K -n codex-runner get serviceaccount runner-pool-supply --ignore-not-found -o name 2>/dev/null) && [ -z "$g" ] || bad="$bad serviceaccount"
   [ ! -e "$D" ] || bad="$bad directory"
   [ -d "$A" ] || bad="$bad attempts"
   [ -z "$bad" ] && echo 'retirement ok' || { echo "postcheck failed:$bad"; rc=8; }

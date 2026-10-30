@@ -50,7 +50,8 @@ if [ $rc = 0 ]; then
     echo "$u: $v"
     case "$v" in 'inactive disabled '|'failed disabled '|'inactive static '|'failed static ') ;; *) bad="$bad $u";; esac
   done
-  pgrep -f "$SUPPLY" > /dev/null && bad="$bad process"
+  pgrep -f "$SUPPLY" > /dev/null 2>&1; s=$?  # 1 = none; 0 = still running; >=2 = lookup error
+  [ $s = 1 ] || bad="$bad process"
   [ -z "$bad" ] && rc=0 || { echo "postcheck failed:$bad"; rc=8; }
 fi
 echo "rollback: for each unit recorded as enabled above: systemctl enable <unit>; then systemctl start issue16-supply.timer"
