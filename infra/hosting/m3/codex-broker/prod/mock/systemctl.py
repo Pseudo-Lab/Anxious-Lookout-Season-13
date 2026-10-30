@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Stub systemctl for test_steps.sh: unit state in /mock/unit.<name> as 'Load Active UnitFile'."""
+import os
+import sys
+from pathlib import Path
+
+M = Path('/mock')
+args = sys.argv[1:]
+names = ('LoadState', 'ActiveState', 'UnitFileState')
+
+
+def state(u):
+    p = M / f'unit.{u}'
+    return p.read_text().split() if p.exists() else ['not-found', 'inactive', '']
+
+
+if os.environ.get('MOCK_SYSTEMCTL_FAIL'):
+    sys.exit(1)
+if args[0] == 'show':
+    props = [args[i + 1] for i, a in enumerate(args) if a == '-p']
+    unit = [a for a in args[1:] if not a.startswith('-') and a not in props][0]
+    s = dict(zip(names, state(unit)))
+    for p in props:
+        print(s[p] if '--value' in args else f'{p}={s[p]}')
+    sys.exit(0)
+if args[0] == 'disable':
+    if os.environ.get('MOCK_DISABLE_FAIL'):
+        sys.exit(1)
+    for u in [a for a in args[1:] if not a.startswith('-')]:
+        s = state(u)
+        (M / f'unit.{u}').write_text(f'{s[0]} inactive {"static" if u.endswith(".service") else "disabled"}')
+    sys.exit(0)
+if args[0] == 'daemon-reload':
+    for u in ('issue16-supply.timer', 'issue16-supply.service'):
+        if not Path('/etc/systemd/system', u).exists():
+            (M / f'unit.{u}').write_text('not-found inactive -')
+    sys.exit(0)
+sys.exit(99)

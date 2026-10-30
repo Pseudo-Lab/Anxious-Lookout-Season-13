@@ -110,7 +110,9 @@ The runner side adds an explicit egress rule to `codex-broker:8080` in
 
 ## Applying to production
 
-This document does not authorize execution; production apply is a separate approval. Order:
+This document does not authorize execution; production apply is a separate approval. The plan is
+[#72](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/72); its single-run step scripts are in
+[`prod/`](prod/README.md). Order:
 
 1. Render and review.
 2. Apply the objects and the runner CNP.

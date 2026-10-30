@@ -1,0 +1,58 @@
+#!/bin/sh
+# #72 E1: stop host supply (timer and service). Reversible: files and RBAC stay until E2/E3.
+# Run as root, once, after the D canary was accepted and review cleared this SHA-256 with the @@ values.
+# rc: 0 disabled and verified; 2 placeholders left; 3 precheck refused, nothing changed;
+#     5 systemctl failed (report, do not rerun); 8 changed but a postcheck failed.
+set -u
+RUNNER_IMAGE_ID=@@RUNNER_IMAGE_ID@@   # containerd digest of the e9337f7 runner image, sha256:<64 hex>
+EXEMPT_PODS='@@EXEMPT_PODS@@'         # #72 decision 3: Running pods allowed on an old image, or "none"
+K='/usr/local/bin/k3s kubectl'
+UNITS='issue16-supply.timer issue16-supply.service'
+SUPPLY=/usr/local/lib/anxious-lookout/issue16/supply.sh
+case "$RUNNER_IMAGE_ID$EXEMPT_PODS" in *@@*) echo 'placeholders not filled'; exit 2;; esac
+refuse() { echo "precheck: $1; nothing changed"; exit 3; }
+echo "$RUNNER_IMAGE_ID" | grep -qE '^sha256:[0-9a-f]{64}$' || refuse 'RUNNER_IMAGE_ID is not a digest'
+
+# 1. Broker serving, and no Running user runner left on an image without the broker client.
+p=$(timeout 30 $K -n codex-broker get pod codex-broker-0 -o jsonpath='{.status.phase}|{.status.containerStatuses[0].ready}' 2>/dev/null)
+[ "$p" = 'Running|true' ] || refuse 'broker pod not ready'
+pods=$(timeout 30 $K -n codex-runner get pods -l anxious.io/managed=user-runner \
+  -o jsonpath='{range .items[*]}{.metadata.name}|{.status.phase}|{.status.containerStatuses[0].imageID}{"\n"}{end}' 2>/dev/null) \
+  || refuse 'runner pod lookup failed'
+old=
+for l in $pods; do
+  name=${l%%|*}; rest=${l#*|}; phase=${rest%%|*}; image=${rest#*|}
+  [ "$phase" = Running ] || continue
+  case "$image" in "$RUNNER_IMAGE_ID"|*"@$RUNNER_IMAGE_ID") continue;; esac
+  case " $EXEMPT_PODS " in *" $name "*) echo "exempt (decision 3): $name"; continue;; esac
+  old="$old $name"
+done
+[ -z "$old" ] || refuse "Running runners on an old image:$old"
+
+# 2. Units loaded, no delivery in progress; record the unit-file state for the rollback.
+before=
+for u in $UNITS; do
+  v=$(timeout 10 systemctl show -p LoadState -p ActiveState -p UnitFileState "$u" 2>/dev/null) || refuse "systemctl show $u failed"
+  load=$(echo "$v" | sed -n 's/^LoadState=//p'); act=$(echo "$v" | sed -n 's/^ActiveState=//p'); file=$(echo "$v" | sed -n 's/^UnitFileState=//p')
+  [ "$load" = loaded ] || refuse "$u LoadState=$load"
+  [ "$u" = issue16-supply.service ] && case "$act" in active|activating|deactivating|reloading) refuse "$u ActiveState=$act (delivery in progress)";; esac
+  before="$before $u=$file"
+done
+echo "precheck ok: broker ready, no old-image runner, units loaded and idle; before:$before"
+
+# 3. Disable and stop.
+rc=0
+timeout 60 systemctl disable --now $UNITS > /dev/null 2>&1 || { echo 'systemctl disable --now failed'; rc=5; }
+if [ $rc = 0 ]; then
+  bad=
+  for u in $UNITS; do
+    v=$(timeout 10 systemctl show -p ActiveState -p UnitFileState --value "$u" 2>/dev/null | tr '\n' ' ')
+    echo "$u: $v"
+    case "$v" in 'inactive disabled '|'failed disabled '|'inactive static '|'failed static ') ;; *) bad="$bad $u";; esac
+  done
+  pgrep -f "$SUPPLY" > /dev/null && bad="$bad process"
+  [ -z "$bad" ] && rc=0 || { echo "postcheck failed:$bad"; rc=8; }
+fi
+echo "rollback: for each unit recorded as enabled above: systemctl enable <unit>; then systemctl start issue16-supply.timer"
+echo "result rc=$rc"
+exit $rc
