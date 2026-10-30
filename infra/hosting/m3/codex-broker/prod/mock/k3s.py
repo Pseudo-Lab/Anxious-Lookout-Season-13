@@ -137,6 +137,11 @@ if 'cnp' in args and 'codex-broker' in args:
 if 'codex-broker-0' in args:
     broker_pod(line)
 if 'pods' in args and '-l' in args and 'anxious.io/managed=user-runner' in args:
+    if '[?(@.name=="runner")]' not in line:
+        # Production runner Pods also carry the shell executor (F inventory), whose status may come
+        # first; an unselected index would read the executor image.
+        executor = 'docker.io/library/anxious-s13-issue23-shell-executor@sha256:' + 'e' * 64
+        out(''.join(l.rsplit('|', 1)[0] + '|' + executor + '\n' for l in (M / 'runners').read_text().splitlines()))
     out((M / 'runners').read_text())
 if 'pods' in args:
     out('runner-x|uid|Running|0|runner@sha256:' + 'b' * 64 + '\n')

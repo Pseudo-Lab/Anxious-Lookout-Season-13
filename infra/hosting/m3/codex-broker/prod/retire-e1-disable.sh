@@ -17,7 +17,7 @@ echo "$RUNNER_IMAGE_ID" | grep -qE '^sha256:[0-9a-f]{64}$' || refuse 'RUNNER_IMA
 p=$(timeout 30 $K -n codex-broker get pod codex-broker-0 -o jsonpath='{.status.phase}|{.status.containerStatuses[0].ready}' 2>/dev/null)
 [ "$p" = 'Running|true' ] || refuse 'broker pod not ready'
 pods=$(timeout 30 $K -n codex-runner get pods -l anxious.io/managed=user-runner \
-  -o jsonpath='{range .items[*]}{.metadata.name}|{.status.phase}|{.status.containerStatuses[0].imageID}{"\n"}{end}' 2>/dev/null) \
+  -o jsonpath='{range .items[*]}{.metadata.name}|{.status.phase}|{.status.containerStatuses[?(@.name=="runner")].imageID}{"\n"}{end}' 2>/dev/null) \
   || refuse 'runner pod lookup failed'
 old=
 for l in $pods; do
