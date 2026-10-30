@@ -50,6 +50,8 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
 **What each script checks:**
 - **`kubectl diff` gates:** `kubectl diff` exits 1 on most errors as well as on differences, so each gate needs both the rc and an empty stderr. B3 server-diffs only the objects outside the absent `codex-broker` namespace before the apply; the absent namespace proves the rest are new.
 - **B3, the runner CNP:** applied only if the live `runner-callback-draft` spec equals the reviewed file without the one `codex-broker:8080` egress rule. The live copy is kept as `evidence/b3/runner-cnp-before.json` for the rollback.
+- **E1, runner images:** Running user-runner Pods are matched on the `runner` container's status by name. Production Pods also carry the shell executor. Every `runner_bindings` `plan.image` must be the reviewed digest too; decision-3 names are exempt.
+- **E1, execution conditions:** these are a point-in-time SELECT and Pod list, not a fence. E1's user command must therefore run only with entry, controller and observer quiesced (as for the D binding moves), and right after a fresh `inventory.sh` read of the binding and registry lines.
 - **B3, Cilium:** `cilium-config` must be unchanged afterwards. No Cilium upgrade or restart is part of this rollout.
 
 **Mock harness** (Docker only, never on a node):
