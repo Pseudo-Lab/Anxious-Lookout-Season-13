@@ -56,6 +56,11 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
   - the unit search roots (fragments, drop-ins, wants links, vendor units);
   - `/usr/local/lib/anxious-lookout` and `/usr/local/sbin`;
   - cron.
+- **E4, assumptions:** the file identities show filesystem continuity; they are not a transactional session lock. E4's user command therefore states two operating assumptions:
+  - no device login or logout between E1 and E4;
+  - E4 runs in the coordinated window, not concurrently with a login.
+
+  A login concurrent with an in-flight refresh, a file replacement between E4's reads and its first change, and the app-server's own refresh were not exercised (review, `bacf694`).
 - **E1, execution conditions:** these are a point-in-time SELECT and Pod list, not a fence. E1's user command must therefore run only with entry, controller and observer quiesced (as for the D binding moves), and right after a fresh `inventory.sh` read of the binding and registry lines.
 - **B3, Cilium:** `cilium-config` must be unchanged afterwards. No Cilium upgrade or restart is part of this rollout.
 
