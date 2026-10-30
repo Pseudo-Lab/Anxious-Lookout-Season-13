@@ -22,7 +22,8 @@ if args[0] == 'show':
     s = dict(zip(names, state(unit)))
     for p in props:
         print(s[p] if '--value' in args else f'{p}={s[p]}')
-    sys.exit(0)
+    # Review round 1 probe: correct-looking stdout, then a failure status.
+    sys.exit(1 if os.environ.get('MOCK_SYSTEMCTL_PARTIAL') else 0)
 if args[0] == 'disable':
     if os.environ.get('MOCK_DISABLE_FAIL'):
         sys.exit(1)

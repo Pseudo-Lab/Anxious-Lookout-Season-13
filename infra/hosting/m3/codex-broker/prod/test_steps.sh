@@ -131,6 +131,12 @@ build; t normal 0 check-login 'echo "$out" | grep -q "auth.json: 600 10001 1890"
 build; MOCK_LOGIN_RC=1 t not-logged-in 3 check-login; unset MOCK_LOGIN_RC
 build; MOCK_AUTH_STAT='644 10001 1890' t auth-mode 3 check-login; unset MOCK_AUTH_STAT
 build; MOCK_HOME_STAT='755 10001' t home-mode 3 check-login; unset MOCK_HOME_STAT
+# Review C/E2/E3 round 1: correct-looking output followed by a failure status must not pass.
+build; MOCK_KFAIL='stat -c %a %u %s %Y' MOCK_KFAIL_PARTIAL='600 10001 1890 4102444800' t auth-stat-partial-then-fails 3 check-login 'echo "$out" | grep -q "auth.json: lookup_failed"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
+build; MOCK_KFAIL='stat -c %a %u /data/codex' MOCK_KFAIL_PARTIAL='700 10001' t home-stat-partial-then-fails 3 check-login 'echo "$out" | grep -q "CODEX_HOME: lookup_failed"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
+build; MOCK_KFAIL='get pod codex-broker-0' MOCK_KFAIL_PARTIAL='Running|true|0' t pod-partial-then-fails 3 check-login 'echo "$out" | grep -q "broker pod: lookup_failed"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
+build; MOCK_AUTH_STAT='600 10001 0' t auth-size-zero 3 check-login; unset MOCK_AUTH_STAT
+build; MOCK_AUTH_MTIME='12' t auth-mtime-malformed 3 check-login; unset MOCK_AUTH_MTIME
 
 # E1.
 build; t normal 0 retire-e1-disable 'grep -q disabled /mock/unit.issue16-supply.timer && echo "$out" | grep -q "exempt (decision 3): runner-3cb453bfd87040dcb7e13a58aa0cbaf2" \
@@ -150,6 +156,7 @@ build; sh -c 'sleep 20; :' /usr/local/lib/anxious-lookout/issue16/supply.sh & sp
 t process-remains 8 retire-e1-disable 'echo "$out" | grep -q "postcheck failed: process"'; kill $sp 2>/dev/null
 build; mkdir -p /stubs; printf '#!/bin/sh\nexit 2\n' > /stubs/pgrep; chmod 0755 /stubs/pgrep
 PATH=/stubs:$PATH t pgrep-error 8 retire-e1-disable 'echo "$out" | grep -q "postcheck failed: process"'; rm -rf /stubs
+build; MOCK_SYSTEMCTL_PARTIAL=1 t systemctl-partial-then-fails 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer && [ ! -e /root/issue72/evidence/e1 ]'; unset MOCK_SYSTEMCTL_PARTIAL
 
 # E2.
 build; t e1-not-done 3 retire-e2-rbac '[ ! -e /mock/rbac-emptied ]'
@@ -159,6 +166,8 @@ build; after_e1; python3 -I -c "
 import json; p='/root/issue72/render/supply-rbac.json'; d=json.load(open(p)); d['items'][0]['rules']=[{'verbs':['get']}]; json.dump(d,open(p,'w'))"
 sed -i "s|^RBAC_SHA=.*|RBAC_SHA=$(sha256sum < /root/issue72/render/supply-rbac.json | cut -c1-64)|" $B/retire-e2-rbac.sh; t render-not-empty 3 retire-e2-rbac '[ ! -e /mock/rbac-emptied ]'
 build; after_e1; MOCK_APPLY_FAIL=runner-pool-supply t apply-fails 5 retire-e2-rbac; unset MOCK_APPLY_FAIL
+build; after_e1; MOCK_SYSTEMCTL_PARTIAL=1 t systemctl-partial-then-fails 3 retire-e2-rbac '[ ! -e /mock/rbac-emptied ] && [ ! -e /mock/applied ] && [ ! -e /root/issue72/evidence/e2 ]'; unset MOCK_SYSTEMCTL_PARTIAL
+build; after_e1; MOCK_CANI_NO_RC0=1 t can-i-no-with-rc0 8 retire-e2-rbac 'echo "$out" | grep -q "postcheck failed: can-i"'; unset MOCK_CANI_NO_RC0
 
 # E3.
 build; after_e2; t normal 0 retire-e3-files '[ "$(grep -c . /root/issue72/evidence/e3/MANIFEST.sha256)" = 5 ] && [ ! -e /usr/local/lib/anxious-lookout/issue16/supply.sh ] && grep -q not-found /mock/unit.issue16-supply.timer && creds 5'
@@ -166,6 +175,20 @@ build; after_e1; t e2-not-done 3 retire-e3-files '[ -e /usr/local/lib/anxious-lo
 build; after_e2; echo 'DSN=postgresql://x' >> /usr/local/lib/anxious-lookout/issue16/stop-supply.sh; t credential-marker 3 retire-e3-files '[ ! -e /root/issue72/evidence/e3 ]'
 build; after_e2; printf 'ExecStart=/usr/local/lib/anxious-lookout/issue16/stop-supply.sh\n' > /etc/systemd/system/issue16-other.service; t other-unit-uses-script 3 retire-e3-files
 build; after_e2; mkdir /etc/systemd/system/issue16-supply.service.d; t drop-in 3 retire-e3-files
+# Review round 1: consumers outside top-level unit files. Each must refuse with the four files and evidence untouched.
+e3intact='[ -e /usr/local/lib/anxious-lookout/issue16/stop-supply.sh ] && [ -e /etc/systemd/system/issue16-supply.service ] && [ ! -e /root/issue72/evidence/e3 ]'
+build; after_e2; mkdir /etc/systemd/system/issue16-controller.service.d
+printf '[Service]\nExecStartPost=/usr/local/lib/anxious-lookout/issue16/stop-supply.sh\n' > /etc/systemd/system/issue16-controller.service.d/supply.conf
+t other-units-drop-in 3 retire-e3-files "$e3intact && echo \"\$out\" | grep -q issue16-controller.service.d/supply.conf"
+build; after_e2; mkdir -p /usr/lib/systemd/system; printf '[Service]\nExecStart=/usr/local/lib/anxious-lookout/issue16/supply.sh\n' > /usr/lib/systemd/system/vendor-x.service
+t vendor-unit 3 retire-e3-files "$e3intact"; rm -rf /usr/lib/systemd/system
+build; after_e2; mkdir -p /opt/units /etc/systemd/system/timers.target.wants; printf 'ExecStart=/usr/local/lib/anxious-lookout/issue16/stop-supply.sh\n' > /opt/units/linked.service
+ln -s /opt/units/linked.service /etc/systemd/system/timers.target.wants/linked.service; t linked-unit 3 retire-e3-files "$e3intact"; rm -rf /opt/units
+build; after_e2; printf '#!/bin/sh\n/usr/local/lib/anxious-lookout/issue16/stop-supply.sh\n' > /usr/local/lib/anxious-lookout/issue16/controller.sh
+t script-calls-it 3 retire-e3-files "$e3intact"
+build; after_e2; mkdir -p /etc/systemd/system/multi-user.target.wants; ln -s /nonexistent.service /etc/systemd/system/multi-user.target.wants/gone.service
+t dangling-link-skipped 0 retire-e3-files '[ ! -e /usr/local/lib/anxious-lookout/issue16/supply.sh ]'
+build; after_e2; MOCK_SYSTEMCTL_PARTIAL=1 t systemctl-partial-then-fails 3 retire-e3-files "$e3intact"; unset MOCK_SYSTEMCTL_PARTIAL
 build; after_e2; mkdir -p /stubs; printf '#!/bin/sh\ncase "$*" in *postgres*) exit 2;; esac\nexec /bin/grep "$@"\n' > /stubs/grep; chmod 0755 /stubs/grep
 PATH=/stubs:$PATH t marker-scan-error 3 retire-e3-files '[ ! -e /root/issue72/evidence/e3 ]'; rm -rf /stubs
 build; after_e2; mkdir -p /stubs; printf '#!/bin/sh\ncase "$*" in *supply.sh*) exit 2;; esac\nexec /bin/grep "$@"\n' > /stubs/grep; chmod 0755 /stubs/grep
@@ -179,7 +202,21 @@ PATH=/stubs:$PATH t unlink-fails-midway 7 retire-e3-files '[ -e /usr/local/lib/a
 # E4.
 build; after_e3; t normal 0 retire-e4-final 'creds 0 && [ ! -e /etc/anxious-lookout/issue16/supply ] && [ -f /var/lib/anxious-lookout/issue16-d4/supply/attempts/a1 ] && [ -e /mock/sa-deleted ] && grep -q false /mock/role'
 build; after_e3; date -u +%s > /root/issue72/evidence/e1/stopped-at; t too-early 3 retire-e4-final 'creds 5 && grep -q true /mock/role && echo "$out" | grep -q "stable period not over"'
-build; after_e3; MOCK_AUTH_MTIME=1000000000 t no-refresh-since-e1 3 retire-e4-final 'creds 5 && echo "$out" | grep -q "no refresh observed"'; unset MOCK_AUTH_MTIME
+build; after_e3; MOCK_AUTH_MTIME=1000000000 t mtime-not-after-e1 3 retire-e4-final 'creds 5 && echo "$out" | grep -q "auth.json not rewritten since E1"'; unset MOCK_AUTH_MTIME
+# Decision 2 as reviewed: only a scheduled, successful refresh between E1 and now counts.
+ev() { printf '{"at": %s, "event": "refresh", "kind": "%s", "ok": %s}\n' "$1" "$2" "$3"; }
+now=$(date -u +%s)
+build; after_e3; : > /mock/events; t no-events 3 retire-e4-final 'creds 5 && grep -q true /mock/role && echo "$out" | grep -q "no scheduled refresh"'
+build; after_e3; ev $((now-3600)) forced true > /mock/events; t forced-only 3 retire-e4-final 'creds 5 && grep -q true /mock/role'
+build; after_e3; ev $((now-3600)) scheduled false > /mock/events; t scheduled-failed-only 3 retire-e4-final 'creds 5'
+build; after_e3; ev $((now-100000)) scheduled true > /mock/events; t scheduled-before-e1-only 3 retire-e4-final 'creds 5'
+build; after_e3; { ev $((now-3600)) scheduled true; ev $((now+3600)) forced true; } > /mock/events; t future-event 3 retire-e4-final 'creds 5'
+build; after_e3; { ev $((now-3600)) scheduled true; echo '{"at": 1, "event": "refresh", "kind": "scheduled", "ok": true, "token": "SECRET-x"}'; } > /mock/events
+t extra-field 3 retire-e4-final 'creds 5'
+build; after_e3; { ev $((now-3600)) scheduled true; echo 'not json'; } > /mock/events; t malformed-line 3 retire-e4-final 'creds 5'
+build; after_e3; MOCK_KFAIL='cat /data/broker-events.jsonl' MOCK_KFAIL_PARTIAL="$(ev $((now-3600)) scheduled true)" t events-partial-then-fails 3 retire-e4-final 'creds 5 && echo "$out" | grep -q "event lookup failed"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
+build; after_e3; { ev $((now-3600)) forced true; ev $((now-1800)) scheduled true; } > /mock/events; t scheduled-among-forced 0 retire-e4-final 'creds 0 && echo "$out" | grep -q "scheduled refresh recorded at"'
+build; after_e3; MOCK_SYSTEMCTL_PARTIAL=1 t systemctl-partial-then-fails 3 retire-e4-final 'creds 5 && grep -q true /mock/role'; unset MOCK_SYSTEMCTL_PARTIAL
 build; after_e3; rm -rf /root/issue72/evidence/e1; t e1-record-missing 3 retire-e4-final 'creds 5'
 build; after_e3; MOCK_KFAIL='stat -c %Y' t mtime-lookup-refused 3 retire-e4-final 'creds 5 && echo "$out" | grep -q "mtime lookup failed"'; unset MOCK_KFAIL
 build; after_e2; t e3-not-done 3 retire-e4-final 'creds 5'

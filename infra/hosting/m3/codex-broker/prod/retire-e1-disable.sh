@@ -51,7 +51,7 @@ before=
 for u in $UNITS; do
   v=$(timeout 10 systemctl show -p LoadState -p ActiveState -p UnitFileState "$u" 2>/dev/null) || refuse "systemctl show $u failed"
   load=$(echo "$v" | sed -n 's/^LoadState=//p'); act=$(echo "$v" | sed -n 's/^ActiveState=//p'); file=$(echo "$v" | sed -n 's/^UnitFileState=//p')
-  [ "$load" = loaded ] || refuse "$u LoadState=$load"
+  [ "$load" = loaded ] && [ -n "$act" ] || refuse "$u LoadState=$load ActiveState=$act"
   [ "$u" = issue16-supply.service ] && case "$act" in active|activating|deactivating|reloading) refuse "$u ActiveState=$act (delivery in progress)";; esac
   before="$before $u=$file"
 done
@@ -67,9 +67,11 @@ if [ $rc = 0 ]; then
   { install -d -m 0700 "$EV" && ( umask 077; printf '%s\n' "$at" > "$EV/stopped-at" ) && [ "$(cat "$EV/stopped-at")" = "$at" ]; } \
     && echo "stopped-at $(date -u -d "@$at" +%Y-%m-%dT%H:%M:%SZ)" || bad="$bad stopped-at"
   for u in $UNITS; do
-    v=$(timeout 10 systemctl show -p ActiveState -p UnitFileState --value "$u" 2>/dev/null | tr '\n' ' ')
+    # Status first, then the named properties: stdout of a failed systemctl is never trusted.
+    v=$(timeout 10 systemctl show -p ActiveState -p UnitFileState "$u" 2>/dev/null) || { bad="$bad $u"; continue; }
+    v="$(echo "$v" | sed -n 's/^ActiveState=//p') $(echo "$v" | sed -n 's/^UnitFileState=//p')"
     echo "$u: $v"
-    case "$v" in 'inactive disabled '|'failed disabled '|'inactive static '|'failed static ') ;; *) bad="$bad $u";; esac
+    case "$v" in 'inactive disabled'|'failed disabled'|'inactive static'|'failed static') ;; *) bad="$bad $u";; esac
   done
   pgrep -f "$SUPPLY" > /dev/null 2>&1; s=$?  # 1 = none; 0 = still running; >=2 = lookup error
   [ $s = 1 ] || bad="$bad process"

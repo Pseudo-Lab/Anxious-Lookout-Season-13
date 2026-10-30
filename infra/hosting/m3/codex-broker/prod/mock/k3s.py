@@ -95,7 +95,10 @@ if args[:1] == ['apply']:
         (M / 'cilium-changed').touch()
     out('configured\n')
 if args[:2] == ['auth', 'can-i']:
-    out('no\n' if (M / 'rbac-emptied').exists() else 'yes\n')
+    # kubectl answers "no" with exit 1 and "yes" with exit 0.
+    if (M / 'rbac-emptied').exists():
+        out('no\n', 0 if env('MOCK_CANI_NO_RC0') else 1)
+    out('yes\n')
 if 'exec' in args:
     cmd = args[args.index('--') + 1:]
     if cmd[0] == 'psql':
@@ -103,8 +106,16 @@ if 'exec' in args:
     if cmd[:3] == ['codex', 'login', 'status']:
         sys.stdout.write('Logged in using ChatGPT\n')
         sys.exit(int(env('MOCK_LOGIN_RC', '0')))
+    if cmd[:2] == ['cat', '/data/broker-events.jsonl']:
+        p = M / 'events'
+        if p.exists():
+            out(p.read_text())
+        # Default: one scheduled refresh an hour ago.
+        import time
+        out(json.dumps({'at': int(time.time()) - 3600, 'event': 'refresh', 'kind': 'scheduled', 'ok': True}) + '\n')
     if cmd[0] == 'stat':
-        mtime = env('MOCK_AUTH_MTIME', '4102444800')
+        import time
+        mtime = env('MOCK_AUTH_MTIME', str(int(time.time()) - 60))  # rewritten a minute ago
         if cmd[-1].endswith('auth.json'):
             out(mtime if cmd[2] == '%Y' else env('MOCK_AUTH_STAT', '600 10001 1890') + ' ' + mtime)
         out(env('MOCK_HOME_STAT', '700 10001'))

@@ -30,8 +30,10 @@ PY
 
 # E1 must be done: both units disabled and not running.
 for u in issue16-supply.timer issue16-supply.service; do
-  v=$(timeout 10 systemctl show -p ActiveState -p UnitFileState --value "$u" 2>/dev/null | tr '\n' ' ')
-  case "$v" in 'inactive disabled '|'failed disabled '|'inactive static '|'failed static ') ;; *) refuse "E1 not complete: $u $v";; esac
+  # Status first, then the named properties: stdout of a failed systemctl is never trusted.
+  v=$(timeout 10 systemctl show -p LoadState -p ActiveState -p UnitFileState "$u" 2>/dev/null) || refuse "systemctl show $u failed"
+  v="$(echo "$v" | sed -n 's/^LoadState=//p') $(echo "$v" | sed -n 's/^ActiveState=//p') $(echo "$v" | sed -n 's/^UnitFileState=//p')"
+  case "$v" in 'loaded inactive disabled'|'loaded failed disabled'|'loaded inactive static'|'loaded failed static') ;; *) refuse "E1 not complete: $u $v";; esac
 done
 timeout 60 $K diff -f "$F" > /dev/null 2> "$tmp/diff.err"; d=$?; [ -s "$tmp/diff.err" ] && d=err
 [ "$d" = 1 ] || refuse "diff: $d (want 1)"
@@ -59,8 +61,9 @@ if [ $rc = 0 ]; then
   bad=
   timeout 60 $K diff -f "$F" > /dev/null 2>&1 || bad="$bad diff"
   for check in 'get pods -n codex-runner' 'create pods/exec -n codex-runner' 'list pods -n codex-runner'; do
-    a=$(timeout 30 $K auth can-i $check --as="$SA" 2>/dev/null); echo "can-i $check: $a"
-    [ "$a" = no ] || bad="$bad can-i"
+    # can-i answers "no" with exit 1; any other status or answer is not a confirmed denial.
+    a=$(timeout 30 $K auth can-i $check --as="$SA" 2>/dev/null); s=$?; echo "can-i $check: $a (rc $s)"
+    [ "$a" = no ] && [ $s = 1 ] || bad="$bad can-i"
   done
   [ -z "$bad" ] || { echo "postcheck failed:$bad"; rc=8; }
 fi

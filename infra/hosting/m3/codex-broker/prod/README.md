@@ -18,7 +18,7 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
 | E1 | `retire-e1-disable.sh` | yes, reversible | runner image containerd digest (after A); filled: the #66 owner `runner-3cb453bfd87040dcb7e13a58aa0cbaf2` exempt (decision 3, option c). Writes `evidence/e1/stopped-at` |
 | E2 | `retire-e2-rbac.sh` | yes, reversible | `supply-rbac.json` from this directory (pinned in the script; the harness checks it against `ops.runner_rollout`) |
 | E3 | `retire-e3-files.sh` | yes, reversible from evidence | none |
-| E4 | `retire-e4-final.sh` | **yes, no return** | supply database role; filled: 24 h after E1's `stopped-at` plus a refresh since then, shown by a newer broker `auth.json` mtime (decision 2); the five credential file names from F |
+| E4 | `retire-e4-final.sh` | **yes, no return** | supply database role; filled: 24 h after E1's `stopped-at`, plus a broker-recorded `scheduled` refresh with `ok` true between E1 and now (decision 2), with the `auth.json` mtime as corroboration; the five credential file names from F |
 
 **Node-local delivery.** The user runs every command in their own session on the OCI node; nobody here has production ssh. Scripts and inputs reach the node the same way:
 1. `git -C <node checkout> fetch`;
@@ -51,6 +51,11 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
 - **`kubectl diff` gates:** `kubectl diff` exits 1 on most errors as well as on differences, so each gate needs both the rc and an empty stderr. B3 server-diffs only the objects outside the absent `codex-broker` namespace before the apply; the absent namespace proves the rest are new.
 - **B3, the runner CNP:** applied only if the live `runner-callback-draft` spec equals the reviewed file without the one `codex-broker:8080` egress rule. The live copy is kept as `evidence/b3/runner-cnp-before.json` for the rollback.
 - **E1, runner images:** Running user-runner Pods are matched on the `runner` container's status by name. Production Pods also carry the shell executor. Every `runner_bindings` `plan.image` must be the reviewed digest too; decision-3 names are exempt.
+- **`systemctl` and `stat` lookups:** a lookup's own exit status is checked before any property in its output is used. Correct-looking stdout followed by a failure status never passes.
+- **E3, other consumers:** before removing anything, E3 reads every file reachable with `find -L` for references to the supply scripts. It covers:
+  - the unit search roots (fragments, drop-ins, wants links, vendor units);
+  - `/usr/local/lib/anxious-lookout` and `/usr/local/sbin`;
+  - cron.
 - **E1, execution conditions:** these are a point-in-time SELECT and Pod list, not a fence. E1's user command must therefore run only with entry, controller and observer quiesced (as for the D binding moves), and right after a fresh `inventory.sh` read of the binding and registry lines.
 - **B3, Cilium:** `cilium-config` must be unchanged afterwards. No Cilium upgrade or restart is part of this rollout.
 

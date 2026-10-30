@@ -11,6 +11,15 @@ FILES='/etc/systemd/system/issue16-supply.timer
 /usr/local/lib/anxious-lookout/issue16/supply.sh
 /usr/local/lib/anxious-lookout/issue16/stop-supply.sh'
 refuse() { echo "precheck: $1; nothing changed"; exit 3; }
+# systemctl show with its own status checked before parsing: "<LoadState> <ActiveState> <UnitFileState|->".
+unit() { v=$(timeout 10 systemctl show -p LoadState -p ActiveState -p UnitFileState "$1" 2>/dev/null) || return 1
+  l=$(echo "$v" | sed -n 's/^LoadState=//p'); a=$(echo "$v" | sed -n 's/^ActiveState=//p'); f=$(echo "$v" | sed -n 's/^UnitFileState=//p')
+  [ -n "$l" ] && [ -n "$a" ] || return 1
+  echo "$l $a ${f:--}"; }
+# Every place that could still start or call the scripts: unit search roots (fragments, drop-ins, wants
+# links, vendor units), the issue16 scripts themselves, local sbin and cron.
+ROOTS='/etc/systemd/system /run/systemd/system /usr/local/lib/systemd/system /usr/lib/systemd/system /lib/systemd/system
+/usr/local/lib/anxious-lookout /usr/local/sbin /etc/cron.d /etc/crontab /var/spool/cron'
 
 # 1. Exactly these regular root-owned files, no drop-ins, no credential-looking content.
 for f in $FILES; do
@@ -24,17 +33,26 @@ for f in $FILES; do
   grep -qE 'postgres(ql)?://|eyJhbGci|BEGIN [A-Z ]*(KEY|CERTIFICATE)|password=' "$f" 2>/dev/null; s=$?
   [ $s = 1 ] || refuse "credential marker in $f, or it could not be read"
 done
-# No other unit may still call the scripts being removed.
-units=$(find /etc/systemd/system -maxdepth 1 -type f \( -name '*.service' -o -name '*.timer' \) 2>/dev/null) || refuse 'unit file scan failed'
-for f in $units; do
-  case "$f" in /etc/systemd/system/issue16-supply.service|/etc/systemd/system/issue16-supply.timer) continue;; esac
-  grep -qE 'supply\.sh' "$f" 2>/dev/null; s=$?
-  [ $s = 1 ] || refuse "another unit references the supply scripts, or could not be read: $f"
+# Nothing else may still call the scripts being removed. find -L follows symlinks (linked units, wants
+# links, linked directories), so every regular file reachable under the roots is read; a dangling link has
+# nothing to run and is not listed. A loop or an unreadable path fails the scan.
+for r in $ROOTS; do
+  [ -e "$r" ] || continue
+  list=$(find -L "$r" -type f 2>/dev/null) || refuse "scan of $r failed"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in /etc/systemd/system/issue16-supply.service|/etc/systemd/system/issue16-supply.timer|\
+                 /usr/local/lib/anxious-lookout/issue16/supply.sh|/usr/local/lib/anxious-lookout/issue16/stop-supply.sh) continue;; esac
+    grep -qE 'supply\.sh' "$f" 2>/dev/null; s=$?
+    [ $s = 1 ] || refuse "something else references the supply scripts, or could not be read: $f"
+  done <<EOF
+$list
+EOF
 done
 # 2. E1 and E2 done.
 for u in issue16-supply.timer issue16-supply.service; do
-  v=$(timeout 10 systemctl show -p ActiveState -p UnitFileState --value "$u" 2>/dev/null | tr '\n' ' ')
-  case "$v" in 'inactive disabled '|'failed disabled '|'inactive static '|'failed static ') ;; *) refuse "E1 not complete: $u $v";; esac
+  v=$(unit "$u") || refuse "systemctl show $u failed"
+  case "$v" in 'loaded inactive disabled'|'loaded failed disabled'|'loaded inactive static'|'loaded failed static') ;; *) refuse "E1 not complete: $u $v";; esac
 done
 for o in 'role -n codex-runner' clusterrole; do
   r=$(timeout 30 $K get $o runner-pool-supply -o jsonpath='{.rules}' 2>/dev/null) || refuse "E2 lookup failed ($o)"
@@ -64,7 +82,7 @@ if [ $rc = 0 ]; then
   bad=
   for f in $FILES; do [ ! -e "$f" ] && [ ! -L "$f" ] || bad="$bad $f"; done
   for u in issue16-supply.timer issue16-supply.service; do
-    [ "$(timeout 10 systemctl show -p LoadState --value "$u" 2>/dev/null)" = not-found ] || bad="$bad $u"
+    v=$(unit "$u") && case "$v" in 'not-found '*) ;; *) false;; esac || bad="$bad $u"
   done
   ( cd "$EV" && sha256sum -c --quiet MANIFEST.sha256 ) || bad="$bad manifest"
   [ -z "$bad" ] && echo 'removal ok' || { echo "postcheck failed:$bad"; rc=8; }

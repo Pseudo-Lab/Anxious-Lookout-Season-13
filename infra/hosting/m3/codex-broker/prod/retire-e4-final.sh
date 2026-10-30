@@ -22,17 +22,39 @@ q() { timeout 30 $K -n m2-hosting exec postgres-0 -- psql -U postgres -d hosting
 echo "$DB_ROLE" | grep -qE '^[a-z_][a-z0-9_]{0,62}$' || refuse 'DB_ROLE is not a plain identifier'
 for n in $CRED_ENTRIES; do echo "$n" | grep -qE '^[A-Za-z0-9._-]+$' || refuse 'bad credential file name'; done
 
-# 1. Stable period and a refresh since E1.
+# 1. Stable period, and a scheduled refresh since E1. The broker appends one fixed-field line per refresh it
+#    drives to /data/broker-events.jsonl ({"at","event":"refresh","kind","ok"}; backend/broker/credentials.py).
+#    Only kind "scheduled" with ok true counts: "forced" follows a runner 401, and a login writes no event.
+#    The auth.json mtime corroborates it (stat only). Any malformed line or future timestamp refuses.
 [ -f "$E1" ] && [ ! -L "$E1" ] || refuse 'E1 record missing'
 stopped=$(cat "$E1" 2>/dev/null) && echo "$stopped" | grep -qE '^[0-9]{10}$' || refuse 'E1 record unreadable'
-[ "$(date -u +%s)" -ge $((stopped + STABLE_SECONDS)) ] || refuse "stable period not over (E1 at $(date -u -d "@$stopped" +%Y-%m-%dT%H:%M:%SZ), 24 h)"
+now=$(date -u +%s)
+[ "$stopped" -le "$now" ] || refuse 'E1 record is in the future'
+[ "$now" -ge $((stopped + STABLE_SECONDS)) ] || refuse "stable period not over (E1 at $(date -u -d "@$stopped" +%Y-%m-%dT%H:%M:%SZ), 24 h)"
+ev=$(timeout 30 $K -n codex-broker exec codex-broker-0 -- cat /data/broker-events.jsonl 2>/dev/null) || refuse 'broker event lookup failed'
+seen=$(printf '%s\n' "$ev" | python3 -I -c '
+import json, sys
+stopped, now = int(sys.argv[1]), int(sys.argv[2])
+seen = []
+for line in sys.stdin.read().splitlines():
+    if not line:
+        continue
+    e = json.loads(line)
+    assert set(e) == {"at", "event", "kind", "ok"} and e["event"] == "refresh"
+    assert type(e["at"]) is int and e["kind"] in ("scheduled", "forced") and type(e["ok"]) is bool
+    assert e["at"] <= now + 60  # no future events
+    if e["kind"] == "scheduled" and e["ok"] and stopped < e["at"] <= now:
+        seen.append(e["at"])
+print(max(seen))
+' "$stopped" "$now" 2>/dev/null) || refuse 'no scheduled refresh recorded since E1, or the event record is malformed'
 m=$(timeout 30 $K -n codex-broker exec codex-broker-0 -- stat -c %Y /data/codex/auth.json 2>/dev/null) \
   && echo "$m" | grep -qE '^[0-9]{10}$' || refuse 'auth.json mtime lookup failed'
-[ "$m" -gt "$stopped" ] || refuse 'no refresh observed since E1 (auth.json not rewritten)'
-echo "refresh observed: auth.json rewritten $(date -u -d "@$m" +%Y-%m-%dT%H:%M:%SZ), after E1"
+[ "$m" -gt "$stopped" ] && [ "$m" -le $((now + 60)) ] || refuse 'auth.json not rewritten since E1, or its mtime is in the future'
+echo "scheduled refresh recorded at $(date -u -d "@$seen" +%Y-%m-%dT%H:%M:%SZ) after E1; auth.json rewritten $(date -u -d "@$m" +%Y-%m-%dT%H:%M:%SZ)"
 # 2. E3 done, broker serving.
 for u in issue16-supply.timer issue16-supply.service; do
-  [ "$(timeout 10 systemctl show -p LoadState --value "$u" 2>/dev/null)" = not-found ] || refuse "E3 not complete: $u"
+  v=$(timeout 10 systemctl show -p LoadState "$u" 2>/dev/null) || refuse "systemctl show $u failed"
+  [ "$v" = LoadState=not-found ] || refuse "E3 not complete: $u"
 done
 p=$(timeout 30 $K -n codex-broker get pod codex-broker-0 -o jsonpath='{.status.phase}|{.status.containerStatuses[0].ready}' 2>/dev/null)
 [ "$p" = 'Running|true' ] || refuse 'broker pod not ready'
