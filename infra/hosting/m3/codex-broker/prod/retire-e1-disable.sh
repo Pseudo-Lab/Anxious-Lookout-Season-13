@@ -4,7 +4,7 @@
 # rc: 0 disabled and verified; 2 placeholders left; 3 precheck refused, nothing changed;
 #     5 systemctl failed (report, do not rerun); 8 changed but a postcheck failed.
 set -u
-RUNNER_IMAGE_ID=@@RUNNER_IMAGE_ID@@   # containerd digest of the e9337f7 runner image, sha256:<64 hex>
+RUNNER_IMAGE_ID=@@RUNNER_IMAGE_ID@@   # containerd digest of the runner image step A built from the #72 merge, sha256:<64 hex>
 # #72 decision 3 (option c): the #66 owner 3cb453bf-d870-40dc-b7e1-3a58aa0cbaf2 keeps its issue28 Pod and binding;
 # its binding moves in the #66 runbook before that owner's next entry. runner-<owner hex>, or "none".
 EXEMPT_PODS='runner-3cb453bfd87040dcb7e13a58aa0cbaf2'
@@ -52,12 +52,24 @@ done
 [ -z "$oldb" ] || refuse "bindings still on an old runner image:$oldb"
 
 # 2. Units loaded, no delivery in progress; record the unit-file state for the rollback.
+#    Production's timer starts a batch about every 15 s and each lasts a few seconds (node read 2026-10-31), so a
+#    running batch is waited out, read-only, for up to WAIT_SECONDS before refusing.
+WAIT_SECONDS=30
+show() {
+  v=$(timeout 10 systemctl show -p LoadState -p ActiveState -p UnitFileState "$1" 2>/dev/null) || refuse "systemctl show $1 failed"
+  load=$(echo "$v" | sed -n 's/^LoadState=//p'); act=$(echo "$v" | sed -n 's/^ActiveState=//p'); file=$(echo "$v" | sed -n 's/^UnitFileState=//p')
+  [ "$load" = loaded ] && [ -n "$act" ] || refuse "$1 LoadState=$load ActiveState=$act"
+}
 before=
 for u in $UNITS; do
-  v=$(timeout 10 systemctl show -p LoadState -p ActiveState -p UnitFileState "$u" 2>/dev/null) || refuse "systemctl show $u failed"
-  load=$(echo "$v" | sed -n 's/^LoadState=//p'); act=$(echo "$v" | sed -n 's/^ActiveState=//p'); file=$(echo "$v" | sed -n 's/^UnitFileState=//p')
-  [ "$load" = loaded ] && [ -n "$act" ] || refuse "$u LoadState=$load ActiveState=$act"
-  [ "$u" = issue16-supply.service ] && case "$act" in active|activating|deactivating|reloading) refuse "$u ActiveState=$act (delivery in progress)";; esac
+  show "$u"
+  if [ "$u" = issue16-supply.service ]; then
+    waited=0
+    while case "$act" in active|activating|deactivating|reloading) true;; *) false;; esac; do
+      [ $waited -lt $WAIT_SECONDS ] || refuse "$u ActiveState=$act for ${WAIT_SECONDS}s (delivery in progress)"
+      sleep 1; waited=$((waited + 1)); show "$u"
+    done
+  fi
   before="$before $u=$file"
 done
 echo "precheck ok: broker ready, no old-image runner, units loaded and idle; before:$before"

@@ -18,7 +18,7 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
 | E1 | `retire-e1-disable.sh` | yes, reversible | runner image containerd digest (after A); filled: the #66 owner `runner-3cb453bfd87040dcb7e13a58aa0cbaf2` exempt (decision 3, option c). Requires a broker login, then writes `evidence/e1/stopped-at` and `evidence/e1/session` (`auth.json` file identity) |
 | E2 | `retire-e2-rbac.sh` | yes, reversible | `supply-rbac.json` from this directory (pinned in the script; the harness checks it against `ops.runner_rollout`) |
 | E3 | `retire-e3-files.sh` | yes, reversible from evidence | none |
-| E4 | `retire-e4-final.sh` | **yes, no return** | supply database role; filled: 24 h after E1's `stopped-at` (decision 2), plus a broker-recorded `scheduled` `ok` refresh **in the same login session** (an unbroken `before`→`after` chain from E1's `session` identity to the current `auth.json`); the five credential file names from F |
+| E4 | `retire-e4-final.sh` | **yes, no return** | none; filled: 24 h after E1's `stopped-at` (decision 2), plus a broker-recorded `scheduled` `ok` refresh **in the same login session** (an unbroken `before`→`after` chain from E1's `session` identity to the current `auth.json`); the five credential file names from F. Deletes the supply ServiceAccount and the credential directory only; **no database step** (below) |
 
 **Node-local delivery.** The user runs every command in their own session on the OCI node; nobody here has production ssh. Scripts and inputs reach the node the same way:
 1. `git -C <node checkout> fetch`;
@@ -61,6 +61,8 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
   - E4 runs in the coordinated window, not concurrently with a login.
 
   A login concurrent with an in-flight refresh, a file replacement between E4's reads and its first change, and the app-server's own refresh were not exercised (review, `bacf694`).
+- **E4, no database step:** production has no supply database role. The supply `database-url` is a copy of the observer login (`OBSERVER_DATABASE_URL`; rollout README before #60, `HOST-SUPPLY.md`), and the observer worker keeps that login until #61. E4 removes the copy with the credential directory and never connects to the database; the harness fails any E4 case that reaches `psql`. Rotating the observer login's password, so the removed copy is no longer valid anywhere, is a separate change with the observer's own `database-url`.
+- **E1, a running batch:** production's timer starts a supply batch about every 15 s, and each batch currently ends `failed` after a few seconds (node read, 2026-10-31). E1 accepts a `failed` service (the F baseline) and waits out an `active`/`activating` one, read-only, for up to 30 s before it refuses. A batch the timer starts between that check and `disable --now` is stopped by it. Supply records each attempt as `unknown` before it delivers and never redelivers one, so a stopped batch is not retried.
 - **E1, execution conditions:** these are a point-in-time SELECT and Pod list, not a fence. E1's user command must therefore run only with entry, controller and observer quiesced (as for the D binding moves), and right after a fresh `inventory.sh` read of the binding and registry lines.
 - **B3, Cilium:** `cilium-config` must be unchanged afterwards. No Cilium upgrade or restart is part of this rollout.
 

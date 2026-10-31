@@ -34,6 +34,8 @@ def notfound():
 
 
 def psql(sql):
+    with open(M / 'psql.log', 'a') as log:  # E4 must never reach the database
+        log.write(sql.split()[0] + '\n')
     if env('MOCK_PSQL_FAIL'):
         sys.exit(1)
     if 'pg_stat_activity' in sql:
