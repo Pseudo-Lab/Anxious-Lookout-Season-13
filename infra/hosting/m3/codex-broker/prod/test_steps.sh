@@ -122,7 +122,7 @@ build; t normal 0 inventory 'echo "$out" | grep -q "^owner66 3cb453bf" && echo "
   && echo "$out" | grep -q "^capacity.pods hard=3|used=2" && echo "$out" | grep -q "^supply.attempts result.accepted=1" \
   && echo "$out" | grep -q "^supply.attempts newest .*|00000000-0000-4000-8000-000000000048|accepted" \
   && echo "$out" | grep -q "^rbac.supply.clusterrolebinding runner-pool-supply|\[{"'
-build; touch /mock/rbac-emptied; t emptied-rbac-is-present 0 inventory 'echo "$out" | grep -q "^rbac.supply.role runner-pool-supply|$"'
+build; touch /mock/rbac-emptied; t emptied-rbac-is-present 0 inventory 'echo "$out" | grep -q "^rbac.supply.role runner-pool-supply|null$"'
 build; touch /mock/rbac-deleted /mock/sa-deleted; t absent-objects 0 inventory 'echo "$out" | grep -q "^sa.supply absent" && echo "$out" | grep -q "^rbac.supply.role absent"'
 build; MOCK_PSQL_FAIL=1 t psql-fails 3 inventory 'echo "$out" | grep -q "^registry lookup_failed"'; unset MOCK_PSQL_FAIL
 # Review round 1: every refused lookup must end in lookup_failed and rc 3, never in "absent" or a count.
@@ -169,6 +169,9 @@ build; t normal 0 check-login 'echo "$out" | grep -q "auth.json: 600 10001 1890"
 build; MOCK_LOGIN_RC=1 t not-logged-in 3 check-login; unset MOCK_LOGIN_RC
 build; MOCK_AUTH_STAT='644 10001 1890' t auth-mode 3 check-login; unset MOCK_AUTH_STAT
 build; MOCK_HOME_STAT='755 10001' t home-mode 3 check-login; unset MOCK_HOME_STAT
+# #74: the default fixture is production's 2700 (setgid inherited from the fsGroup'd volume root); plain 0700 passes too.
+build; MOCK_HOME_STAT='700 10001' t home-mode-plain 0 check-login; unset MOCK_HOME_STAT
+build; MOCK_HOME_STAT='2700 10002' t home-owner 3 check-login; unset MOCK_HOME_STAT
 # Review C/E2/E3 round 1: correct-looking output followed by a failure status must not pass.
 build; MOCK_KFAIL='stat -c %a %u %s %Y' MOCK_KFAIL_PARTIAL='600 10001 1890 4102444800' t auth-stat-partial-then-fails 3 check-login 'echo "$out" | grep -q "auth.json: lookup_failed"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
 build; MOCK_KFAIL='stat -c %a %u /data/codex' MOCK_KFAIL_PARTIAL='700 10001' t home-stat-partial-then-fails 3 check-login 'echo "$out" | grep -q "CODEX_HOME: lookup_failed"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
@@ -333,6 +336,10 @@ build; b5_window; MOCK_PATCH_FAIL=1 t patch-fails 5 b5-release "old_api && grep 
 build; b5_window; MOCK_PATCH_RV_BUMP=1 t deployment-changed-after-read 5 b5-release 'old_api && echo "$out" | grep -q "api deployment patch failed"'; unset MOCK_PATCH_RV_BUMP
 build; b5_window; MOCK_ROLLOUT_FAIL=1 t rollout-fails 5 b5-release; unset MOCK_ROLLOUT_FAIL
 build; b5_window; MOCK_API_NOT_READY=1 t api-pod-not-ready 8 b5-release 'echo "$out" | grep -q "postcheck failed: api-pods"'; unset MOCK_API_NOT_READY
+# #74 (production 2026-10-31 09:30Z): the previous ReplicaSet's Pod is still listed as Running/ready on the old image,
+# deletionTimestamp set, when rollout status returns. It is terminating, not a failed release.
+build; b5_window; MOCK_API_TERMINATING=1 t api-old-pod-terminating 0 b5-release '[ -f /root/issue72/evidence/b5/done ] && echo "$out" | grep -q "terminating: api-0"'; unset MOCK_API_TERMINATING
+build; b5_window; MOCK_API_TERMINATING=1 MOCK_API_NOT_READY=1 t api-new-pod-not-ready-old-terminating 8 b5-release 'echo "$out" | grep -q "postcheck failed: api-pods"'; unset MOCK_API_TERMINATING MOCK_API_NOT_READY
 build; b5_window; MOCK_API_RELEASE=$(printf '0%.0s' $(seq 40)) t api-other-release 8 b5-release 'echo "$out" | grep -q "postcheck failed: api-release"'; unset MOCK_API_RELEASE
 build; b5_window; MOCK_KFAIL='app=hosting-api' MOCK_KFAIL_PARTIAL="api-1|Running|true|$APIIMG" t api-pods-partial-then-fails 8 b5-release 'echo "$out" | grep -q "postcheck failed: api-pods"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
 

@@ -116,8 +116,16 @@ if 'deployment' in args and 'api' in args:
     s = d['spec']['template']['spec']
     out(s['containers'][0]['image'] + '|' + s['initContainers'][0]['image'])
 if 'pods' in args and '[?(@.name=="api")]' in line:
+    # Production (#72 B5, 2026-10-31 09:30Z): right after `rollout status` returns, the previous ReplicaSet's Pod is
+    # still listed, phase Running and ready, with deletionTimestamp set and the old image. The field is printed
+    # only when the jsonpath asks for it, as kubectl does.
     image = json.loads(DEP.read_text())['spec']['template']['spec']['containers'][0]['image']
-    out('api-1|Running|' + ('false' if env('MOCK_API_NOT_READY') else 'true') + '|' + image + '\n')
+    ts = 'deletionTimestamp' in line
+    rows = []
+    if env('MOCK_API_TERMINATING'):
+        rows.append('api-0|Running|true|docker.io/library/anxious-s13-issue36-runtime@sha256:' + '7' * 64 + ('|2026-10-31T09:30:10Z' if ts else ''))
+    rows.append('api-1|Running|' + ('false' if env('MOCK_API_NOT_READY') else 'true') + '|' + image + ('|' if ts else ''))
+    out(''.join(r + '\n' for r in rows))
 if 'pods' in args and 'status.phase!=Failed,status.phase!=Succeeded' in line:
     rows = [l.split('|') for l in (M / 'runners').read_text().splitlines()]
     out(''.join(r[0] + '\n' for r in rows if r[1] not in ('Failed', 'Succeeded')))
@@ -175,7 +183,9 @@ if 'exec' in args:
         mtime = env('MOCK_AUTH_MTIME', str(int(time.time()) - 60))  # rewritten a minute ago
         if cmd[-1].endswith('auth.json'):
             out(mtime if cmd[2] == '%Y' else env('MOCK_AUTH_STAT', '600 10001 1890') + ' ' + mtime)
-        out(env('MOCK_HOME_STAT', '700 10001'))
+        # Production (#72 C, 2026-10-31): kubelet applies the StatefulSet fsGroup to the local-path volume root
+        # (2777 root:10001), so CODEX_HOME created 0700 inherits setgid and stats as 2700.
+        out(env('MOCK_HOME_STAT', '2700 10001'))
     sys.exit(99)
 if args[:2] == ['get', 'ns'] and 'codex-broker' in args:
     if (M / 'ns-exists').exists():
@@ -232,11 +242,13 @@ if any(a.startswith('role/') for a in args):
 if 'runner-pool-supply' in args and '{.metadata.name}|' in line:
     if (M / 'rbac-deleted').exists():
         out('') if ignore else notfound()
+    # Production (#72 E3, 2026-10-31 10:29Z): the API server stores emptied rules/subjects as null, and
+    # kubectl jsonpath prints the literal `null` for them, not an empty string.
     emptied = (M / 'rbac-emptied').exists()
-    out('runner-pool-supply|' + ('' if emptied else '{.rules}' in line and '[{"verbs":["get"]}]' or '[{"kind":"ServiceAccount"}]'))
+    out('runner-pool-supply|' + ('null' if emptied else '{.rules}' in line and '[{"verbs":["get"]}]' or '[{"kind":"ServiceAccount"}]'))
 if 'runner-pool-supply' in args and 'jsonpath={.rules}' in line:
-    out('' if (M / 'rbac-emptied').exists() else '[{"verbs":["get"]}]')
+    out('null' if (M / 'rbac-emptied').exists() else '[{"verbs":["get"]}]')
 if 'runner-pool-supply' in args and 'jsonpath={.subjects}' in line:
-    out('' if (M / 'rbac-emptied').exists() else '[{"kind":"ServiceAccount","name":"runner-pool-supply"}]')
+    out('null' if (M / 'rbac-emptied').exists() else '[{"kind":"ServiceAccount","name":"runner-pool-supply"}]')
 sys.stderr.write('stub: unhandled ' + hashlib.sha256(line.encode()).hexdigest()[:8] + ' ' + line + '\n')
 sys.exit(99)
