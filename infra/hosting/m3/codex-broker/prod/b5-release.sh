@@ -80,11 +80,20 @@ for s in $SCRIPTS; do
 done
 echo "precheck ok: workers stopped, no live runner Pod, new images present, api deployment $uid at $rv, worker scripts on the old image"
 
-# 6. Evidence before any change.
-{ install -d -m 0700 "$EV" && ( umask 077; printf '%s\n' "$dep" > "$EV/api-deployment-before.json" ) \
-  && ( for s in $SCRIPTS; do cp -p "$BIN/$s" "$EV/$s" || exit 1; done ) \
-  && ( cd "$EV" && umask 077 && sha256sum $SCRIPTS api-deployment-before.json > MANIFEST.sha256 ); } \
-  || { echo 'evidence failed; nothing changed'; exit 6; }
+# 6. Evidence before any change, as E3: copy, compare with the source, record mode/owner, manifest, verify.
+install -d -m 0700 "$EV" || { echo 'evidence directory failed; nothing changed'; exit 6; }
+( umask 077; printf '%s\n' "$dep" > "$EV/api-deployment-before.json" ) \
+  && printf '%s\n' "$dep" | cmp -s - "$EV/api-deployment-before.json" || { echo 'evidence deployment copy failed; nothing changed'; exit 6; }
+: > "$EV/MODES" && chmod 0600 "$EV/MODES" || { echo 'evidence MODES failed; nothing changed'; exit 6; }
+for s in $SCRIPTS; do
+  cp -p "$BIN/$s" "$EV/$s" && cmp -s "$BIN/$s" "$EV/$s" \
+    && [ "$(stat -c '%a %u %g' "$EV/$s")" = "$(stat -c '%a %u %g' "$BIN/$s")" ] && stat -c '%a %U %G %n' "$BIN/$s" >> "$EV/MODES" \
+    || { echo "evidence copy failed at $s; nothing changed"; exit 6; }
+done
+( cd "$EV" && umask 077 && sha256sum $SCRIPTS api-deployment-before.json MODES > MANIFEST.sha256 ) \
+  && [ "$(grep -c . "$EV/MANIFEST.sha256")" = 4 ] && [ "$(grep -c . "$EV/MODES")" = 2 ] \
+  && ( cd "$EV" && sha256sum -c --quiet MANIFEST.sha256 ) || { echo 'evidence manifest failed; nothing changed'; exit 6; }
+echo 'evidence ok: 2 scripts + MODES + deployment copied, compared and checksum-verified'
 
 # 7. Change. Stop at the first failure.
 rc=0
@@ -125,6 +134,10 @@ if [ $rc = 0 ]; then
     [ "$n" = '0 1' ] || bad="$bad $s"
   done
   [ -z "$bad" ] && echo "release ok: api and workers on $RELEASE_SHA" || { echo "postcheck failed:$bad"; rc=8; }
+fi
+# D requires this record (and rechecks the live state): written only when every step and the postcheck passed.
+if [ $rc = 0 ]; then
+  ( umask 077; date -u +%Y-%m-%dT%H:%M:%SZ > "$EV/done" ) || { echo 'completion record failed'; rc=8; }
 fi
 echo "rollback: $K -n m2-hosting patch deployment api --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"$OLD_API_IMAGE\"},{\"op\":\"replace\",\"path\":\"/spec/template/spec/initContainers/0/image\",\"value\":\"$OLD_API_IMAGE\"}]'; for each script in $EV: install -m <its mode> -o root -g root $EV/<script> $BIN/<script>. Workers stay stopped either way."
 echo "result rc=$rc"

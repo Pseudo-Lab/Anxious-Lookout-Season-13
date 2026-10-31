@@ -77,7 +77,8 @@ PY
 }
 # B5's window: only the exempt #66 Pod and a Failed one remain.
 b5_window() { printf 'runner-3cb453bfd87040dcb7e13a58aa0cbaf2|Running|old@sha256:%s\nrunner-gone|Failed|old@sha256:c\n' "$(printf 'c%.0s' $(seq 64))" > /mock/runners; }
-after_b5() { b5_window; sed -i "s|$OLDWID|$WID|" /usr/local/lib/anxious-lookout/issue16/controller.sh /usr/local/lib/anxious-lookout/issue16/observer.sh; }
+# D's precondition is a completed B5: run the real script, which must end rc 0.
+after_b5() { b5_window; sh $B/b5-release.sh > /dev/null 2>&1 || { fail=$((fail+1)); echo 'FAIL after_b5: B5 did not complete'; }; }
 after_e1() { echo 'loaded inactive disabled' > /mock/unit.issue16-supply.timer; echo 'loaded inactive static' > /mock/unit.issue16-supply.service; }
 after_e2() { after_e1; touch /mock/rbac-emptied; }
 after_e3() { after_e2; rm -f /etc/systemd/system/issue16-supply.* /usr/local/lib/anxious-lookout/issue16/supply.sh /usr/local/lib/anxious-lookout/issue16/stop-supply.sh
@@ -303,7 +304,8 @@ untouched="old_api && grep -q $OLDWID $L/controller.sh && grep -q $OLDWID $L/obs
 build; b5_window; t normal 0 b5-release "! old_api && [ \"\$(grep -o 'issue72-runtime' /mock/api-deployment.json | wc -l)\" = 2 ] \
   && grep -q $WID $L/controller.sh && grep -q $WID $L/observer.sh && ! grep -q $OLDWID $L/controller.sh \
   && [ \"\$(stat -c %a $L/controller.sh)\" = 700 ] && [ -f /root/issue72/evidence/b5/controller.sh ] && grep -q $OLDWID /root/issue72/evidence/b5/observer.sh \
-  && (cd /root/issue72/evidence/b5 && sha256sum -c --quiet MANIFEST.sha256) && echo \"\$out\" | grep -q 'exempt (decision 3): runner-3cb453bfd87040dcb7e13a58aa0cbaf2'"
+  && (cd /root/issue72/evidence/b5 && sha256sum -c --quiet MANIFEST.sha256) && grep -q 'MODES' /root/issue72/evidence/b5/MANIFEST.sha256 \
+  && [ \"\$(grep -c . /root/issue72/evidence/b5/MODES)\" = 2 ] && [ -f /root/issue72/evidence/b5/done ] && echo \"\$out\" | grep -q 'exempt (decision 3): runner-3cb453bfd87040dcb7e13a58aa0cbaf2'"
 build; b5_window; sed -i 's/^RELEASE_SHA=.*/RELEASE_SHA=@@X@@/' $B/b5-release.sh; t placeholders 2 b5-release "$untouched"
 build; b5_window; echo 'loaded active static' > /mock/unit.issue16-controller.service; t controller-running 3 b5-release "$untouched"
 build; b5_window; echo 'loaded active enabled' > /mock/unit.issue16-observer.timer; t observer-timer-running 3 b5-release "$untouched"
@@ -318,6 +320,15 @@ build; b5_window; sed -i 's/}\],"initContainers"/},{"name":"sidecar","image":"y"
 build; b5_window; MOCK_KFAIL='get deployment api -o json' MOCK_KFAIL_PARTIAL="$(cat /mock/api-deployment.json)" t deployment-partial-then-fails 3 b5-release "$untouched"; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
 build; b5_window; echo "# $OLDWID" >> $L/observer.sh; t script-names-old-twice 3 b5-release "old_api && grep -q $OLDWID $L/controller.sh"
 build; b5_window; install -d -m 0700 /root/issue72/evidence/b5; t evidence-exists 3 b5-release "old_api && grep -q $OLDWID $L/controller.sh"
+# Review early findings on 27be753: an evidence copy must equal its source (content, mode, owner) and the manifest
+# must verify before any change; otherwise rc 6 with scripts and api untouched.
+unchanged6="old_api && grep -q $OLDWID $L/controller.sh && grep -q $OLDWID $L/observer.sh && [ ! -e /root/issue72/evidence/b5/done ]"
+build; b5_window; mkdir -p /stubs; printf '#!/bin/sh\n/bin/cp "$@" || exit $?\nfor l; do :; done\ncase "$l" in */evidence/b5/controller.sh) : > "$l";; esac\n' > /stubs/cp; chmod 0755 /stubs/cp
+PATH=/stubs:$PATH t evidence-copy-truncated 6 b5-release "$unchanged6 && echo \"\$out\" | grep -q 'evidence copy failed at controller.sh'"; rm -rf /stubs
+build; b5_window; mkdir -p /stubs; printf '#!/bin/sh\n/bin/cp "$@" || exit $?\nfor l; do :; done\ncase "$l" in */evidence/b5/observer.sh) chmod 0644 "$l";; esac\n' > /stubs/cp; chmod 0755 /stubs/cp
+PATH=/stubs:$PATH t evidence-copy-wrong-mode 6 b5-release "$unchanged6"; rm -rf /stubs
+build; b5_window; mkdir -p /stubs; printf '#!/bin/sh\ncase "$1" in -c) exit 1;; esac\nexec /usr/bin/sha256sum "$@"\n' > /stubs/sha256sum; chmod 0755 /stubs/sha256sum
+PATH=/stubs:$PATH t evidence-manifest-unverified 6 b5-release "$unchanged6 && echo \"\$out\" | grep -q 'evidence manifest failed'"; rm -rf /stubs
 build; b5_window; MOCK_PATCH_FAIL=1 t patch-fails 5 b5-release "old_api && grep -q $WID $L/controller.sh && echo \"\$out\" | grep -q 'rollback:'"; unset MOCK_PATCH_FAIL
 build; b5_window; MOCK_PATCH_RV_BUMP=1 t deployment-changed-after-read 5 b5-release 'old_api && echo "$out" | grep -q "api deployment patch failed"'; unset MOCK_PATCH_RV_BUMP
 build; b5_window; MOCK_ROLLOUT_FAIL=1 t rollout-fails 5 b5-release; unset MOCK_ROLLOUT_FAIL
@@ -336,7 +347,19 @@ build; after_b5; t report-then-apply 0 d-binding-move "grep -q issue72-shell-exe
 build; after_b5; t apply-without-report 3 d-binding-move on_old "$A"
 build; after_b5; t apply-twice 3 d-binding-move "echo \"\$out\" | grep -q 'already applied'" "$R" "$A" "$A"
 build; after_b5; t exempt-owner 3 d-binding-move "on_old && [ ! -e /root/issue72/d/3cb453bf-d870-40dc-b7e1-3a58aa0cbaf2 ]" 'sh $S report 3cb453bf-d870-40dc-b7e1-3a58aa0cbaf2'
-build; b5_window; t b5-not-done 3 d-binding-move "$refusedD" "$R"
+build; b5_window; t b5-not-done 3 d-binding-move "$refusedD && echo \"\$out\" | grep -q 'B5 not completed'" "$R"
+# Review early findings on 27be753: a B5 that stopped midway or failed its postcheck leaves no completion record,
+# and a completed B5 whose live state was changed back is refused too. No report, no plan change.
+B5="sh $B/b5-release.sh"
+build; b5_window; t b5-patch-failed 3 d-binding-move "$refusedD && grep -q $WID $L/controller.sh && echo \"\$out\" | grep -q 'B5 not completed'" "MOCK_PATCH_FAIL=1 $B5" "$R"
+build; b5_window; t b5-rollout-failed 3 d-binding-move "$refusedD && echo \"\$out\" | grep -q 'B5 not completed'" "MOCK_ROLLOUT_FAIL=1 $B5" "$R"
+build; b5_window; t b5-postcheck-failed 3 d-binding-move "$refusedD && echo \"\$out\" | grep -q 'B5 not completed'" "MOCK_API_NOT_READY=1 $B5" "$R"
+build; after_b5; sed -i 's/issue72-runtime/issue36-runtime/' /mock/api-deployment.json
+t api-reverted-after-b5 3 d-binding-move "$refusedD && echo \"\$out\" | grep -q 'api deployment is not on the new image'" "$R"
+build; after_b5; sed -i "s|$WID|$OLDWID|" $L/observer.sh; t script-reverted-after-b5 3 d-binding-move "$refusedD" "$R"
+build; after_b5; t api-other-release 3 d-binding-move "$refusedD && echo \"\$out\" | grep -q 'not the reviewed release'" "MOCK_API_RELEASE=$(printf '0%.0s' $(seq 40)) $R"
+build; after_b5; t deployment-partial-then-fails 3 d-binding-move "$refusedD && echo \"\$out\" | grep -q 'api deployment lookup failed'" \
+  "MOCK_KFAIL='get deployment api -o jsonpath' MOCK_KFAIL_PARTIAL='$APIIMG|$APIIMG' $R"
 build; after_b5; echo 'loaded activating static' > /mock/unit.issue16-controller.service; t controller-running 3 d-binding-move "$refusedD" "$R"
 build; after_b5; echo "runner-$(echo $OWN | tr -d -)" > /mock/d-pods; t pod-exists 3 d-binding-move "$refusedD" "$R"
 build; after_b5; rm /root/issue72/d/private/admin-dsn; t dsn-missing 3 d-binding-move "$refusedD" "$R"

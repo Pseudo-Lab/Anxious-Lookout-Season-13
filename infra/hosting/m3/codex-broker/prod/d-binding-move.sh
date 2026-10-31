@@ -13,16 +13,20 @@ set -u
 WORKER_IMAGE_ID=@@PROVISIONER_IMAGE_ID@@  # A's provisioner image in the Docker store, sha256:<64 hex>
 RUNNER_IMAGE=@@RUNNER_IMAGE_REF@@         # A's runner image, <repo>@sha256:<64 hex>
 EXECUTOR_IMAGE=@@EXECUTOR_IMAGE_REF@@     # A's shell-executor image, <repo>@sha256:<64 hex>
+RELEASE_SHA=@@RELEASE_SHA@@               # the #72 merge commit (as B5)
+API_IMAGE=@@API_IMAGE_REF@@               # A's runtime image (as B5)
+OLD_WORKER_ID=sha256:1c3ce2683832a187ef207abe4daa7989589a996cde8214ce374237fa94ea81e6  # node read 2 (as B5)
 EXEMPT_OWNERS='3cb453bf-d870-40dc-b7e1-3a58aa0cbaf2'  # decision 3: moved in the #66 runbook
 K='/usr/local/bin/k3s kubectl'
 BIN=/usr/local/lib/anxious-lookout/issue16
 UNITS='issue16-controller.timer issue16-controller.service issue16-observer.timer issue16-observer.service'
 W=/root/issue72/d
 action=${1:-}; owner=${2:-}
-case "$WORKER_IMAGE_ID$RUNNER_IMAGE$EXECUTOR_IMAGE" in *@@*) echo 'placeholders not filled'; exit 2;; esac
+case "$WORKER_IMAGE_ID$RUNNER_IMAGE$EXECUTOR_IMAGE$RELEASE_SHA$API_IMAGE" in *@@*) echo 'placeholders not filled'; exit 2;; esac
 refuse() { echo "precheck: $1; nothing changed"; exit 3; }
 echo "$WORKER_IMAGE_ID" | grep -qxE 'sha256:[0-9a-f]{64}' || refuse 'WORKER_IMAGE_ID is not an image ID'
-for i in "$RUNNER_IMAGE" "$EXECUTOR_IMAGE"; do echo "$i" | grep -qxE '[a-z0-9./_-]+@sha256:[0-9a-f]{64}' || refuse 'image is not a digest reference'; done
+for i in "$RUNNER_IMAGE" "$EXECUTOR_IMAGE" "$API_IMAGE"; do echo "$i" | grep -qxE '[a-z0-9./_-]+@sha256:[0-9a-f]{64}' || refuse 'image is not a digest reference'; done
+echo "$RELEASE_SHA" | grep -qxE '[0-9a-f]{40}' || refuse 'RELEASE_SHA is not a full commit'
 
 if [ "$action" = close ]; then
   [ -z "$owner" ] || refuse 'close takes no owner'
@@ -37,8 +41,22 @@ case " $EXEMPT_OWNERS " in *" $owner "*) refuse "$owner is exempt (decision 3; t
 O=$W/$owner
 q() { timeout 30 $K -n m2-hosting exec postgres-0 -- psql -U postgres -d hosting -At -v ON_ERROR_STOP=1 -c "$1" 2>/dev/null; }
 
-# 1. Window: B5 done, workers stopped, this owner's Pod absent, the admin DSN in place (mode/owner only).
-grep -qF "$WORKER_IMAGE_ID" "$BIN/controller.sh" 2>/dev/null || refuse 'B5 not done (controller.sh is not on the new worker image)'
+# 1. Window: B5 completed and still in place, workers stopped, this owner's Pod absent, the admin DSN in place
+#    (mode/owner only). B5 writes evidence/b5/done only after its postcheck passed; a B5 that stopped midway
+#    (scripts changed, api not) has no record, and the live state is rechecked anyway.
+[ -f /root/issue72/evidence/b5/done ] && [ ! -L /root/issue72/evidence/b5/done ] || refuse 'B5 not completed (no evidence/b5/done)'
+for s in controller.sh observer.sh; do
+  n=$(python3 -I -c 'import sys; t = open(sys.argv[1]).read(); print(t.count(sys.argv[2]), t.count(sys.argv[3]))' "$BIN/$s" "$OLD_WORKER_ID" "$WORKER_IMAGE_ID" 2>/dev/null) \
+    || refuse "read $BIN/$s failed"
+  [ "$n" = '0 1' ] || refuse "B5 state: $s is not on the new worker image"
+done
+img=$(timeout 30 $K -n m2-hosting get deployment api \
+  -o jsonpath='{.spec.template.spec.containers[0].image}|{.spec.template.spec.initContainers[0].image}' 2>/dev/null) \
+  || refuse 'api deployment lookup failed'
+[ "$img" = "$API_IMAGE|$API_IMAGE" ] || refuse 'B5 state: the api deployment is not on the new image'
+r=$(timeout 30 $K -n m2-hosting exec deploy/api -c api -- cat /app/release.json 2>/dev/null) || refuse 'api release lookup failed'
+printf '%s' "$r" | python3 -I -c 'import json, sys; assert json.load(sys.stdin)["sha"] == sys.argv[1]' "$RELEASE_SHA" 2>/dev/null \
+  || refuse 'B5 state: the running api is not the reviewed release'
 for u in $UNITS; do
   v=$(timeout 10 systemctl show -p LoadState -p ActiveState "$u" 2>/dev/null) || refuse "systemctl show $u failed"
   v="$(echo "$v" | sed -n 's/^LoadState=//p') $(echo "$v" | sed -n 's/^ActiveState=//p')"

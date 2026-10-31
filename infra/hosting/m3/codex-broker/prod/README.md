@@ -92,7 +92,9 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
 - **B5, the #59 gate:** neither production release contains #59, so B5 changes the runner Pod manifest. The new api and workers refuse a live Pod rendered by the old code (`KubePods._pod`). B5 therefore refuses while any runner Pod is Pending or Running, except the #66 owner's issue28 Pod (decision 3). After B5, lookups of that Pod refuse as "requires reconciliation": fail closed, never deleted, until the #66 runbook.
 - **B5 and D, one window:** the new manifest has no `RUNNER_TOKEN_FILE`, so an old runner image cannot start under it. Every existing binding moves in the same window, before the next entry.
   - Window order: the user stops entry and the controller and observer timers and services → B5 → `d-binding-move.sh report` per owner → review → `apply` per owner → `close` → canary.
-  - B5 and D both refuse while a controller or observer unit is active. D refuses before B5 is done.
+  - B5 and D both refuse while a controller or observer unit is active.
+  - B5 writes `evidence/b5/done` only after its postcheck passed. D requires that record and rechecks the live state: both worker scripts on the new ID and none on the old one, both api Deployment images, and the running api's `/app/release.json`. A B5 that stopped midway (rc 5) or failed its postcheck (rc 8) therefore blocks D.
+  - B5's evidence follows E3: each copy is compared with its source (content, mode, owner) and recorded in `MODES`, and the manifest is verified before any change; otherwise rc 6 with nothing changed.
 - **D, per owner:**
   - `report` reads the registry fence (`idle_stopped`, no Pod) and the plan, which must be v2 and not already on the new images. It computes `plan_digest` inside A's provisioner image (`--network none`), writes the root 0600 inputs, then runs the tool's `report`.
   - `apply` rechecks the fence and images against the inputs, then runs the tool with the report mounted read-only.
