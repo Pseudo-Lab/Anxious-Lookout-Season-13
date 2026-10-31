@@ -20,7 +20,12 @@ Docker and k3s containerd stores differ. Record each web/API image digest, platf
 
 ```sh
 sudo /usr/local/bin/k3s ctr -n k8s.io images import /PRIVATE/RELEASE/images.tar
+# import registers only the tag; create the digest reference the manifests use (#74, 2026-10-31):
+sudo /usr/local/bin/k3s ctr -n k8s.io images tag docker.io/library/NAME:TAG docker.io/library/NAME@sha256:DIGEST
+sudo /usr/local/bin/k3s crictl inspecti docker.io/library/NAME@sha256:DIGEST   # must resolve before rendering
 ```
+
+Do not use `images import --digests`: it creates `import-<date>@sha256:` reference names for the archive index instead of the repository digest reference.
 
 Building these linux/arm64 images on the x86_64 development server instead of the node: [CROSS-BUILD.md](CROSS-BUILD.md). Production ↔ development differences (images, policy state, worker DB route, login/origin): [PARITY.md](../k3s/PARITY.md). Use actual digest-qualified image names returned by containerd when rendering. Do not assume a Docker build alone made images available to kubelet. No embedded/private registry or host firewall change is introduced.
 

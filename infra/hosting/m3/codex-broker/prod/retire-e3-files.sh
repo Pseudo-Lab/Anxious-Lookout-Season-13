@@ -54,9 +54,11 @@ for u in issue16-supply.timer issue16-supply.service; do
   v=$(unit "$u") || refuse "systemctl show $u failed"
   case "$v" in 'loaded inactive disabled'|'loaded failed disabled'|'loaded inactive static'|'loaded failed static') ;; *) refuse "E1 not complete: $u $v";; esac
 done
+# The API server stores emptied rules as null and jsonpath prints the literal `null` (production, #72 E3 run
+# 2026-10-31 10:29Z); an absent field prints nothing and a client-side render would print [].
 for o in 'role -n codex-runner' clusterrole; do
   r=$(timeout 30 $K get $o runner-pool-supply -o jsonpath='{.rules}' 2>/dev/null) || refuse "E2 lookup failed ($o)"
-  case "$r" in ''|'[]') ;; *) refuse "E2 not complete ($o has rules)";; esac
+  case "$r" in ''|'[]'|null) ;; *) refuse "E2 not complete ($o has rules)";; esac
 done
 [ ! -e "$EV" ] || refuse "$EV already exists"
 echo 'precheck ok: four files, no drop-ins, no markers, E1 and E2 complete'

@@ -15,6 +15,7 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
 | F | `inventory.sh` | no | none |
 | B3 | `apply-broker.sh` | yes | the runner image reference (after A); filled: `local-path` + `ReadWriteOnce` (decision 1); files: `broker_render.py` and `runner-cnp.json` (pinned in the script), `values.json` written on the node |
 | B5 | `b5-release.sh` | yes, reversible | the #72 merge SHA, A's runtime image reference and A's provisioner image ID (after A); filled: the live baselines from node reads 2 and 3 (api `issue36-runtime@sha256:7998b73d…`, worker `sha256:1c3ce268…`) and the #66 Pod exemption (decision 3). Run in the B5+D window, after C |
+| B5b | `b5b-worker-inputs.sh` | yes, reversible | A's runner and shell-executor references (after A); rewrites only `image` and `executor.image` in the controller's `inputs.json` (first-time bindings are published from it — #74, production observation 2026-10-31); run with controller and observer stopped, after B5 |
 | D | `d-binding-move.sh report\|apply <owner>`, then `close` | yes (one CAS per owner; a reverse move is a new report/apply) | A's provisioner image ID, runner and shell-executor references, plus B5's `RELEASE_SHA` and `API_IMAGE_REF` (same values, for D's B5-state recheck) (after A); filled: the #66 owner exempt; the admin DSN file the user creates on the node |
 | C | `check-login.sh` | no (run after the user's `codex login --device-auth`) | none |
 | E1 | `retire-e1-disable.sh` | yes, reversible | runner image containerd digest (after A); filled: the #66 owner `runner-3cb453bfd87040dcb7e13a58aa0cbaf2` exempt (decision 3, option c). Requires a broker login, then writes `evidence/e1/stopped-at` and `evidence/e1/session` (`auth.json` file identity) |
@@ -91,7 +92,7 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
     - `restore.sh` (no restore code changed since `d890447`).
 - **B5, the #59 gate:** neither production release contains #59, so B5 changes the runner Pod manifest. The new api and workers refuse a live Pod rendered by the old code (`KubePods._pod`). B5 therefore refuses while any runner Pod is Pending or Running, except the #66 owner's issue28 Pod (decision 3). After B5, lookups of that Pod refuse as "requires reconciliation": fail closed, never deleted, until the #66 runbook.
 - **B5 and D, one window:** the new manifest has no `RUNNER_TOKEN_FILE`, so an old runner image cannot start under it. Every existing binding moves in the same window, before the next entry.
-  - Window order: the user stops entry and the controller and observer timers and services → B5 → `d-binding-move.sh report` per owner → review → `apply` per owner → `close` → canary.
+  - Window order: the operator stops entry (`CODEX_USER_RUNNERS_ENABLE=false` on the api Deployment) and the controller and observer timers and services → B5 → B5b → `d-binding-move.sh report` per owner → review → `apply` per owner → `close` → **restart the controller and observer timers, re-enable entry** → canary. The controller creates the runner Pod on entry (the api only registers it), so an entry with the timers stopped sits in `provisioning` (production, #72 canary 2026-10-31 10:10Z). E1 is run later in its own quiesced window.
   - B5 and D both refuse while a controller or observer unit is active.
   - B5 writes `evidence/b5/done` only after its postcheck passed. D requires that record and rechecks the live state: both worker scripts on the new ID and none on the old one, both api Deployment images, and the running api's `/app/release.json`. A B5 that stopped midway (rc 5) or failed its postcheck (rc 8) therefore blocks D.
   - B5's evidence follows E3: each copy is compared with its source (content, mode, owner) and recorded in `MODES`, and the manifest is verified before any change; otherwise rc 6 with nothing changed.
@@ -103,7 +104,15 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
 - **E1, execution conditions:** these are a point-in-time SELECT and Pod list, not a fence. E1's user command must therefore run only with entry, controller and observer quiesced (as for the D binding moves), and right after a fresh `inventory.sh` read of the binding and registry lines.
 - **B3, Cilium:** `cilium-config` must be unchanged afterwards. No Cilium upgrade or restart is part of this rollout.
 
-**Mock harness** (Docker only, never on a node):
+**Production observations folded into the scripts and mocks (#74, 2026-10-31 run):**
+- `kubectl get … -o jsonpath='{.rules}'` prints the literal `null` for an emptied Role/ClusterRole (the server stores `rules: null`); E3's E2 check accepts `''`, `[]` and `null`.
+- Right after `rollout status` returns, the previous ReplicaSet's api Pod can still be listed Running/ready on the old image with `deletionTimestamp` set; B5's postcheck reports and skips terminating Pods and requires at least one live Pod on the new image.
+- kubelet applies the StatefulSet `fsGroup` to the local-path volume root (`2777 root:10001`), so `CODEX_HOME` stats as `2700`; C accepts `700` and `2700`.
+- The broker runs uvicorn `--no-access-log`; a `/v1/access` call leaves no broker log line. Its evidence is the runner ledger: `deadline` in `/control/service-access.sqlite3` `metadata` equals the broker token's expiry (login + 10 days), read with non-secret fields only.
+- The upstream token lives about 10 days and the broker refreshes only within `margin` (1800 s) of expiry, so the first `scheduled` event — and decision 2's "24 h incl. a natural refresh" — resolves to login + 10 days. E4 waits for that event; `forced` only follows a runner 401.
+- `ctr images import` registers only the tag; the digest reference the manifests use is created with `ctr -n k8s.io images tag <tag> <repo>@<digest>`.
+
+**Mock harness** (Docker, mocks only, no cluster access — may run on the node's Docker as well as the development server):
 
 ```sh
 docker run --rm --network bridge --user 0 -v "$PWD/infra/hosting/m3:/m3:ro" -v "$PWD/backend:/backend:ro" \
