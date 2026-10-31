@@ -8,6 +8,12 @@ and measurements are in #58 C.
 - **Refresh:**
   - The broker runs the pinned Codex app-server in managed mode with the `file` store. The app-server refreshes on its own about five minutes before expiry.
   - When a token with less than 30 minutes left is requested, the broker forces `account/read {refreshToken: true}` first.
+  - **Refresh events (#72):** every refresh the broker drives appends one line to `/data/broker-events.jsonl` (0600, beside `CODEX_HOME`): `{"at": <epoch>, "event": "refresh", "kind": "scheduled"|"forced", "ok": true|false, "before": "<inode>:<mtime ns>", "after": "<inode>:<mtime ns>"}`.
+    - `scheduled`: the token was within the margin of its expiry.
+    - `forced`: a runner reported a 401.
+    - `before`/`after` are `auth.json`'s file identity around the refresh. A device login replaces the file without an event, so it breaks the chain.
+    - No token, claim or account value is recorded.
+    - The #72 E4 gate needs an unbroken chain from E1's recorded identity to the current file, with at least one `scheduled` `ok` link.
 - **Delivery (pull):**
   - Each runner Pod has a projected ServiceAccount token (audience `codex-broker`, 600 s) at `/run/codex-broker/token`. `automountServiceAccountToken` stays false.
   - The runner calls `POST /v1/access` at start and about 15 minutes before its access expires.
@@ -110,7 +116,9 @@ The runner side adds an explicit egress rule to `codex-broker:8080` in
 
 ## Applying to production
 
-This document does not authorize execution; production apply is a separate approval. Order:
+This document does not authorize execution; production apply is a separate approval. The plan is
+[#72](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/72); its single-run step scripts are in
+[`prod/`](prod/README.md). Order:
 
 1. Render and review.
 2. Apply the objects and the runner CNP.

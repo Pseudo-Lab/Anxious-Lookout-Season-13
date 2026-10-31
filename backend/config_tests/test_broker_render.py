@@ -39,6 +39,15 @@ def test_single_writer_statefulset_restricted_and_private_home():
     assert container['command'][:2] == ['uvicorn', 'broker.app:create_app']
 
 
+def test_production_local_path_read_write_once():
+    # #72 decision 1 candidate: no CSI in production, so local-path with RWO; replicas 1 stays the single writer.
+    objects = lookup(storageClass='local-path', accessMode='ReadWriteOnce', egress='world')
+    claim = objects['StatefulSet', 'codex-broker']['spec']['volumeClaimTemplates'][0]['spec']
+    assert claim == {'accessModes': ['ReadWriteOnce'], 'storageClassName': 'local-path', 'resources': {'requests': {'storage': '1Gi'}}}
+    assert objects['StatefulSet', 'codex-broker']['spec']['replicas'] == 1
+    assert {k: v for k, v in objects.items() if k[0] != 'StatefulSet'} == {k: v for k, v in lookup().items() if k[0] != 'StatefulSet'}
+
+
 PORT_8080 = [{'ports': [{'port': '8080', 'protocol': 'TCP'}]}]
 API = {'toEntities': ['kube-apiserver'], 'toPorts': [{'ports': [{'port': '6443', 'protocol': 'TCP'}]}]}
 

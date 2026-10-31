@@ -4,6 +4,14 @@ The operator logs in once with `codex login --device-auth` in the broker Pod. Th
 app-server refreshes on its own about five minutes before expiry; issuing access
 with less than `margin` seconds left forces `account/read {refreshToken: true}`.
 Only the access token leaves this module. The refresh token stays in auth.json.
+
+Every refresh the broker drives appends one fixed-field line to `broker-events.jsonl`
+next to CODEX_HOME on the volume (#72): {"at", "event": "refresh", "kind", "ok",
+"before", "after"}. `scheduled` is the normal one, because the token came within `margin`
+of its expiry; `forced` follows a runner's 401. `before`/`after` are auth.json's file
+identity ("<inode>:<mtime ns>") around the refresh, so a chain of events shows that nothing
+else (a device login) replaced the file in between. No token, claim or account value is
+recorded.
 """
 import json
 import os
@@ -100,6 +108,28 @@ class Credentials:
         self.binary, self.server_factory, self.clock = binary, server, clock
         self.server, self.server_source = None, None
         self.lock, self.forced_at = threading.Lock(), None
+        self.events = self.home.parent/'broker-events.jsonl'
+
+    def identity(self):
+        """auth.json's file identity, '<inode>:<mtime ns>', or '-' when absent. Not secret."""
+        try:
+            ino, mtime = self.source()[1]
+            return '%d:%d' % (ino, mtime)
+        except CodexFailure:
+            return '-'
+
+    def record(self, kind, ok, before):
+        """Best effort: a lost line only makes the E4 gate refuse, never issues anything."""
+        line = json.dumps({'at': int(self.clock()), 'event': 'refresh', 'kind': kind, 'ok': ok,
+                           'before': before, 'after': self.identity()}, sort_keys=True)+'\n'
+        try:
+            fd = os.open(self.events, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+            try:
+                os.write(fd, line.encode())
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
 
     def source(self):
         path = self.home/'auth.json'
@@ -143,13 +173,20 @@ class Credentials:
             server = self.ensure_server()
             if force:
                 self.forced_at = self.clock()
-            # A failed workspace-routing call after a successful refresh is not a refresh
-            # failure; the file decides.
-            server.rpc('account/read', {'refreshToken': True}, timeout=60)
-            self.server_source = self.source()[1]  # The app-server itself rewrote auth.json.
-            renewed = self.read()
+            kind, before = ('forced' if force else 'scheduled'), self.identity()
+            try:
+                # A failed workspace-routing call after a successful refresh is not a refresh
+                # failure; the file decides.
+                server.rpc('account/read', {'refreshToken': True}, timeout=60)
+                self.server_source = self.source()[1]  # The app-server itself rewrote auth.json.
+                renewed = self.read()
+            except Exception:
+                self.record(kind, False, before)
+                raise
             if not renewed or renewed[2] - self.clock() < self.margin or (force and current and renewed[0] == current[0]):
+                self.record(kind, False, before)
                 raise CodexFailure('auth_expired')
+            self.record(kind, True, before)
             return renewed
 
     def logged_in(self):

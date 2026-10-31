@@ -397,7 +397,8 @@ kubectl -n codex-runner delete serviceaccount runner-pool-supply
 
 - Keep `/var/lib/anxious-lookout/issue16-d4/supply/attempts` as evidence of past deliveries.
   Remove `/etc/anxious-lookout/issue16/supply` (database URL, kube token, kubeconfig) once
-  the canary succeeded; revoke that database login with the other #16 grants.
+  the canary succeeded. Its database URL is a copy of the observer login, which the observer
+  worker still uses: do not disable that login. Rotating its password is a separate change.
 - The host's `/home/opc/.codex/auth.json` is no longer read. Logging it out (`codex logout`
   as `opc`) revokes that host session; whether to keep it for the operator's own use is the
   operator's choice. It must never be copied into the broker volume (single writer).
