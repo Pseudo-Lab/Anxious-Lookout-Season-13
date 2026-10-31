@@ -110,9 +110,12 @@ if [ "$rc" = 0 ]; then
   bad=
   [ "$(diffrc "$EV/broker.json")" = 0 ] || bad="$bad broker-diff"
   [ "$(diffrc "$R/runner-cnp.json")" = 0 ] || bad="$bad runner-cnp-diff"
-  p=$(timeout 30 $K -n codex-broker get pod codex-broker-0 -o jsonpath='{.status.phase}|{.status.containerStatuses[0].ready}|{.status.containerStatuses[0].restartCount}|{.status.containerStatuses[0].imageID}' 2>/dev/null)
+  # A failed lookup's stdout is discarded, never matched.
+  p=$(timeout 30 $K -n codex-broker get pod codex-broker-0 -o jsonpath='{.status.phase}|{.status.containerStatuses[0].ready}|{.status.containerStatuses[0].restartCount}|{.status.containerStatuses[0].imageID}' 2>/dev/null) \
+    || p=lookup-failed
   case "$p" in Running\|true\|0\|*) ;; *) bad="$bad broker-pod";; esac
-  v=$(timeout 30 $K -n codex-broker get cnp codex-broker -o jsonpath='{.status.conditions[?(@.type=="Valid")].status}' 2>/dev/null)
+  v=$(timeout 30 $K -n codex-broker get cnp codex-broker -o jsonpath='{.status.conditions[?(@.type=="Valid")].status}' 2>/dev/null) \
+    || v=lookup-failed
   [ "$v" = True ] || bad="$bad cnp-valid"
   [ "$(cil)" = "$cilium_before" ] || bad="$bad cilium-config-changed"
   echo "broker pod: $p"

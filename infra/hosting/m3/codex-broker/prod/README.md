@@ -20,6 +20,22 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
 | E3 | `retire-e3-files.sh` | yes, reversible from evidence | none |
 | E4 | `retire-e4-final.sh` | **yes, no return** | none; filled: 24 h after E1's `stopped-at` (decision 2), plus a broker-recorded `scheduled` `ok` refresh **in the same login session** (an unbroken `before`→`after` chain from E1's `session` identity to the current `auth.json`); the five credential file names from F. Deletes the supply ServiceAccount and the credential directory only; **no database step** (below) |
 
+**A and D (decision 6, user, 2026-10-31).** The full plan is in #72; this records what the scripts here depend on.
+- **A builds four images** from the #72 merge commit on the OCI node (`linux/arm64`, `APP_GIT_SHA` = the full merge SHA):
+
+  | Image | `backend/Dockerfile` target | Store |
+  |---|---|---|
+  | runner (and the broker) | `runner` | containerd (`k3s ctr -n k8s.io images import`) |
+  | api | `runtime` | containerd |
+  | provisioner | `provisioner` | containerd, **and the Docker store**: the worker units and the D wrappers run it as a local image ID with `--pull=never` |
+  | shell-executor | `shell-executor` | containerd |
+
+  Each archive's `sha256sum` and each containerd digest go on #72. B3's `RUNNER_IMAGE_REF` and E1's `RUNNER_IMAGE_ID` come from the runner row.
+- **D moves the runner and the executor image in one CAS** per binding: `ops.runner_binding_image` with `newImage` (A's runner) and `executorImage` (A's shell-executor) for v2 plans.
+  - It runs from **A's provisioner image**, after B5. That image carries the `executorImage` swap (#59, `bec1764`) and the `plan_digest` of the schema B5 leaves.
+  - Since #23 (`dab0c7d`), the executor changed only by #59's SIGTERM handler (`0643d9f`). The interface with the runner is unchanged; moving the executor makes Pod stops end at once instead of at the grace limit.
+  - Each D window uses a fresh short-lived admin DSN file (`root:root 0600`). It points at the database address the workers use today; the 10-25 change left no after record, so nothing older is a source for it. The file is unlinked after `apply`. Nothing from earlier windows is reused, and the before-plan is captured fresh.
+
 **Node-local delivery.** The user runs every command in their own session on the OCI node; nobody here has production ssh. Scripts and inputs reach the node the same way:
 1. `git -C <node checkout> fetch`;
 2. `git show <sha>:<path>` into `/root/issue72/` (scripts) or `/root/issue72/render/` (inputs), with no clobber;

@@ -73,7 +73,8 @@ for u in issue16-supply.timer issue16-supply.service; do
   v=$(timeout 10 systemctl show -p LoadState "$u" 2>/dev/null) || refuse "systemctl show $u failed"
   [ "$v" = LoadState=not-found ] || refuse "E3 not complete: $u"
 done
-p=$(timeout 30 $K -n codex-broker get pod codex-broker-0 -o jsonpath='{.status.phase}|{.status.containerStatuses[0].ready}' 2>/dev/null)
+p=$(timeout 30 $K -n codex-broker get pod codex-broker-0 -o jsonpath='{.status.phase}|{.status.containerStatuses[0].ready}' 2>/dev/null) \
+  || refuse 'broker pod lookup failed'
 [ "$p" = 'Running|true' ] || refuse 'broker pod not ready'
 # 3. The credential directory holds exactly the expected regular files (names only, never contents).
 [ -d "$D" ] && [ ! -L "$D" ] || refuse "$D is not a directory"
@@ -83,8 +84,9 @@ want=$(for n in $CRED_ENTRIES; do echo "f $n"; done | LC_ALL=C sort)
 [ "$have" = "$want" ] || refuse 'credential directory is not exactly the expected files'
 [ -d "$A" ] || refuse 'attempts evidence directory missing'
 # 4. ServiceAccount present.
-s=$(timeout 30 $K -n codex-runner get serviceaccount runner-pool-supply -o jsonpath='{.metadata.name}' 2>/dev/null)
-[ "$s" = runner-pool-supply ] || refuse 'supply ServiceAccount lookup failed or absent'
+s=$(timeout 30 $K -n codex-runner get serviceaccount runner-pool-supply -o jsonpath='{.metadata.name}' 2>/dev/null) \
+  || refuse 'supply ServiceAccount lookup failed'
+[ "$s" = runner-pool-supply ] || refuse 'supply ServiceAccount absent'
 echo "precheck ok: stable period over, E3 complete, broker ready, credential directory exact"
 
 # 5. No return from here. Stop at the first failure.

@@ -18,7 +18,8 @@ echo "$RUNNER_IMAGE_ID" | grep -qE '^sha256:[0-9a-f]{64}$' || refuse 'RUNNER_IMA
 [ ! -e "$EV" ] || refuse "$EV already exists"
 
 # 1. Broker serving, and no Running user runner left on an image without the broker client.
-p=$(timeout 30 $K -n codex-broker get pod codex-broker-0 -o jsonpath='{.status.phase}|{.status.containerStatuses[0].ready}' 2>/dev/null)
+p=$(timeout 30 $K -n codex-broker get pod codex-broker-0 -o jsonpath='{.status.phase}|{.status.containerStatuses[0].ready}' 2>/dev/null) \
+  || refuse 'broker pod lookup failed'
 [ "$p" = 'Running|true' ] || refuse 'broker pod not ready'
 # The login session E4 must stay in: auth.json's file identity '<inode>:<mtime ns>' (not secret, never content).
 ident() { i=$(timeout 30 $K -n codex-broker exec codex-broker-0 -- python3 -I -c \
@@ -53,21 +54,26 @@ done
 
 # 2. Units loaded, no delivery in progress; record the unit-file state for the rollback.
 #    Production's timer starts a batch about every 15 s and each lasts a few seconds (node read 2026-10-31), so a
-#    running batch is waited out, read-only, for up to WAIT_SECONDS before refusing.
+#    running batch is waited out, read-only, until a WAIT_SECONDS deadline before refusing.
 WAIT_SECONDS=30
-show() {
-  v=$(timeout 10 systemctl show -p LoadState -p ActiveState -p UnitFileState "$1" 2>/dev/null) || refuse "systemctl show $1 failed"
+show() { # unit, lookup time limit in seconds
+  v=$(timeout "$2" systemctl show -p LoadState -p ActiveState -p UnitFileState "$1" 2>/dev/null) || refuse "systemctl show $1 failed"
   load=$(echo "$v" | sed -n 's/^LoadState=//p'); act=$(echo "$v" | sed -n 's/^ActiveState=//p'); file=$(echo "$v" | sed -n 's/^UnitFileState=//p')
   [ "$load" = loaded ] && [ -n "$act" ] || refuse "$1 LoadState=$load ActiveState=$act"
 }
+# One deadline covers this whole step: every read, every sleep and every re-read. Each lookup gets at most
+# 10 s and never more than the time left. date gives whole seconds (floored), so 2 s are held back and the
+# step ends before WAIT_SECONDS of real time.
+deadline=$(( $(date -u +%s) + WAIT_SECONDS ))
+left() { l=$(( deadline - $(date -u +%s) - 2 )); [ $l -le 10 ] || l=10; }
 before=
 for u in $UNITS; do
-  show "$u"
+  left; [ $l -gt 0 ] || refuse "the ${WAIT_SECONDS}s deadline passed before $u was read"
+  show "$u" "$l"
   if [ "$u" = issue16-supply.service ]; then
-    waited=0
     while case "$act" in active|activating|deactivating|reloading) true;; *) false;; esac; do
-      [ $waited -lt $WAIT_SECONDS ] || refuse "$u ActiveState=$act for ${WAIT_SECONDS}s (delivery in progress)"
-      sleep 1; waited=$((waited + 1)); show "$u"
+      left; [ $l -gt 1 ] || refuse "$u still ActiveState=$act at the ${WAIT_SECONDS}s deadline (delivery in progress)"
+      sleep 1; show "$u" $((l - 1))
     done
   fi
   before="$before $u=$file"

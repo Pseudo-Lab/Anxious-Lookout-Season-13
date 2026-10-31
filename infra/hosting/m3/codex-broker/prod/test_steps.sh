@@ -125,6 +125,8 @@ build; MOCK_APPLY_FAIL=StatefulSet t apply-fails-at-sts 5 apply-broker '! grep -
 build; MOCK_ROLLOUT_FAIL=1 t rollout-timeout 5 apply-broker '! grep -q runner-callback-draft /mock/applied'; unset MOCK_ROLLOUT_FAIL
 build; MOCK_CILIUM_CHANGE=1 t cilium-changed 8 apply-broker 'echo "$out" | grep -q cilium-config-changed'; unset MOCK_CILIUM_CHANGE
 build; MOCK_BROKER_RESTARTS=1 t broker-restarted 8 apply-broker 'echo "$out" | grep -q broker-pod'; unset MOCK_BROKER_RESTARTS
+build; MOCK_KFAIL='get pod codex-broker-0' MOCK_KFAIL_PARTIAL="Running|true|0|$IMG" t postcheck-pod-partial-then-fails 8 apply-broker 'echo "$out" | grep -q "postcheck failed: broker-pod"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
+build; MOCK_KFAIL='get cnp codex-broker' MOCK_KFAIL_PARTIAL='True' t postcheck-cnp-partial-then-fails 8 apply-broker 'echo "$out" | grep -q "postcheck failed: cnp-valid"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
 
 # C check-login (read-only).
 build; t normal 0 check-login 'echo "$out" | grep -q "auth.json: 600 10001 1890" && ! echo "$out" | grep -q "Logged in"'
@@ -146,7 +148,18 @@ build; MOCK_KFAIL='os.lstat' MOCK_KFAIL_PARTIAL='100:200' t not-logged-in-yet 3 
 build; sed -i "s|^EXEMPT_PODS=.*|EXEMPT_PODS='none'|" $B/retire-e1-disable.sh; t old-image-runner 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer && echo "$out" | grep -q "runner-3cb453bfd87040dcb7e13a58aa0cbaf2"'
 build; sed -i "s|^EXEMPT_PODS=.*|EXEMPT_PODS='runner-3cb453bf'|" $B/retire-e1-disable.sh; t partial-exemption-name 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer'
 build; install -d -m 0700 /root/issue72/evidence/e1; t e1-record-exists 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer'
-build; echo 'loaded active static' > /mock/unit.issue16-supply.service; t delivery-running 3 retire-e1-disable 'grep -q enabled /mock/unit.issue16-supply.timer && echo "$out" | grep -q "for 30s (delivery in progress)"'
+# Review round 1 on d23550c: one real 30 s deadline covers lookups too. Elapsed is the whole script, measured here.
+t0() { s0=$(date +%s.%N); }
+within() { awk -v a="$s0" -v b="$(date +%s.%N)" -v m="$1" 'BEGIN { d = b - a; printf "    elapsed %.2fs\n", d; exit !(d < m) }'; }
+waited='grep -q enabled /mock/unit.issue16-supply.timer && [ ! -e /root/issue72/evidence/e1 ] && within 31'
+build; echo 'loaded active static' > /mock/unit.issue16-supply.service; t0
+t delivery-running 3 retire-e1-disable "$waited"' && echo "$out" | grep -q "at the 30s deadline (delivery in progress)"'
+build; echo 'loaded active static' > /mock/unit.issue16-supply.service; t0
+MOCK_SYSTEMCTL_DELAY=0.5 t slow-lookups-stay-in-bound 3 retire-e1-disable "$waited"; unset MOCK_SYSTEMCTL_DELAY
+build; echo 'loaded active static' > /mock/unit.issue16-supply.service; t0
+MOCK_SYSTEMCTL_DELAY=7 t lookup-cut-at-deadline 3 retire-e1-disable "$waited"; unset MOCK_SYSTEMCTL_DELAY
+build; MOCK_KFAIL='get pod codex-broker-0' MOCK_KFAIL_PARTIAL='Running|true' t broker-pod-partial-then-fails 3 retire-e1-disable \
+  'grep -q enabled /mock/unit.issue16-supply.timer && [ ! -e /root/issue72/evidence/e1 ] && echo "$out" | grep -q "broker pod lookup failed"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
 # Production cadence: a batch every ~15 s that fails after ~3 s. One that ends during the wait is waited out.
 build; echo 'loaded activating static' > /mock/unit.issue16-supply.service; ( sleep 3; echo 'loaded failed static' > /mock/unit.issue16-supply.service ) &
 t delivery-ends-during-wait 0 retire-e1-disable 'grep -q "inactive disabled" /mock/unit.issue16-supply.timer && [ -f /root/issue72/evidence/e1/stopped-at ]'; wait
@@ -242,6 +255,11 @@ build; after_e3; MOCK_SA_DELETE_FAIL=1 t sa-delete-fails 5 retire-e4-final 'cred
 build; after_e3; mkdir -p /stubs; printf '#!/bin/sh\ncase "$*" in *issue16/supply*) printf "f database-url\\nf kube-token\\nf kubeconfig\\n"; exit 1;; esac\nexec /usr/bin/find "$@"\n' > /stubs/find; chmod 0755 /stubs/find
 PATH=/stubs:$PATH t credential-scan-fails 3 retire-e4-final 'nodb && [ ! -e /mock/sa-deleted ]'; rm -rf /stubs
 build; after_e3; MOCK_KFAIL='--ignore-not-found -o name' t sa-absence-unconfirmed 8 retire-e4-final 'echo "$out" | grep -q "postcheck failed: serviceaccount"'; unset MOCK_KFAIL
+# Review round 1 on d23550c: correct-looking stdout followed by a failure status must refuse with nothing changed.
+build; after_e3; MOCK_KFAIL='get pod codex-broker-0' MOCK_KFAIL_PARTIAL='Running|true' t broker-pod-partial-then-fails 3 retire-e4-final \
+  'creds 5 && nodb && [ ! -e /mock/sa-deleted ] && echo "$out" | grep -q "broker pod lookup failed"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
+build; after_e3; MOCK_KFAIL='get serviceaccount runner-pool-supply -o jsonpath' MOCK_KFAIL_PARTIAL='runner-pool-supply' t sa-partial-then-fails 3 retire-e4-final \
+  'creds 5 && nodb && [ ! -e /mock/sa-deleted ] && echo "$out" | grep -q "ServiceAccount lookup failed"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
 
 echo "passed $pass failed $fail"
 [ $fail = 0 ]
