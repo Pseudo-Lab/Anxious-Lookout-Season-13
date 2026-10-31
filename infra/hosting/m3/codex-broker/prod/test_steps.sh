@@ -18,6 +18,8 @@ chmod 0755 /usr/local/bin/k3s /usr/bin/systemctl /usr/bin/docker
 REL=$(printf 'f%.0s' $(seq 40))
 APIIMG=docker.io/library/anxious-s13-issue72-runtime@sha256:$(printf 'a%.0s' $(seq 64))
 OLDAPI=docker.io/library/anxious-s13-issue36-runtime@sha256:7998b73da0f267e59b91da36a52ba571992365fd0f4056b59ce9640295978e67
+OLDRUNNER=docker.io/library/anxious-s13-issue36-runner@sha256:0efaa9f741e04f1fc9d92544932139d39834de4c483ba1e73d3ec8aed3373f01
+OLDEXEC=docker.io/library/anxious-s13-issue23-shell-executor@sha256:bae153febf222fbe2919cc50afd7c1564730b77bd0a45fbb036f567e5035d958
 WID=sha256:$(printf '9%.0s' $(seq 64))
 OLDWID=sha256:1c3ce2683832a187ef207abe4daa7989589a996cde8214ce374237fa94ea81e6
 EXEC=docker.io/library/anxious-s13-issue72-shell-executor@sha256:$(printf 'd%.0s' $(seq 64))
@@ -61,7 +63,12 @@ PY
     chmod 0700 /usr/local/lib/anxious-lookout/issue16/$r.sh
   done
   printf '%s %s\n%s d890447f385b38614a4dfdef752647b65e678e5d\n' "$WID" "$REL" "$OLDWID" > /mock/docker-images
-  echo "$APIIMG" > /mock/ctr-images
+  printf '%s\n%s\n%s\n' "$APIIMG" "$IMG" "$EXEC" > /mock/ctr-images
+  # B5b fixture: the controller inputs as the node has them (#72 window record), on the pre-#72 images.
+  mkdir -p /etc/anxious-lookout/issue16/controller
+  printf '{\n  "api": "https://127.0.0.1:6443",\n  "namespace": "codex-runner",\n  "namespaceUid": "415c3924-0000-4000-8000-000000000001",\n  "podCIDR": "10.42.0.0/16",\n  "caFile": "/private/ca.crt",\n  "kubeTokenFile": "/private/kube-token",\n  "hostRoot": "/var/lib/anxious-lookout/user-runners",\n  "node": "anxious-lookout",\n  "providerAccountId": "synthetic-account",\n  "image": "%s",\n  "callback": "http://api.m2-hosting.svc.cluster.local:8080/api/internal/research/tools",\n  "executor": {\n    "image": "%s",\n    "wallSeconds": 30,\n    "outputBytes": 65536\n  }\n}\n' \
+    "$OLDRUNNER" "$OLDEXEC" > /etc/anxious-lookout/issue16/controller/inputs.json
+  chmod 0600 /etc/anxious-lookout/issue16/controller/inputs.json
   printf '{"metadata":{"name":"api","uid":"dep-uid","resourceVersion":"41"},"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"api","image":"%s"}],"initContainers":[{"name":"runner-pool-input","image":"%s"}]}}}}' \
     "$OLDAPI" "$OLDAPI" > /mock/api-deployment.json
   install -d -m 0700 /root/issue72/d /root/issue72/d/private
@@ -69,7 +76,7 @@ PY
   echo '11111111-0000-4000-8000-000000000048|idle_stopped|3|7|-' > /mock/d-registry
   printf '{"version":2,"image":"docker.io/library/anxious-s13-issue28-runner@sha256:%s","executor":{"image":"docker.io/library/anxious-s13-issue23-shell-executor@sha256:%s","wallSeconds":30,"outputBytes":65536},"identity":{"owner":"%s"}}' \
     "$(printf 'c%.0s' $(seq 64))" "$(printf 'e%.0s' $(seq 64))" "$OWN" > /mock/d-plan.json
-  for s in inventory apply-broker check-login retire-e1-disable retire-e2-rbac retire-e3-files retire-e4-final b5-release d-binding-move; do
+  for s in inventory apply-broker check-login retire-e1-disable retire-e2-rbac retire-e3-files retire-e4-final b5-release b5b-worker-inputs d-binding-move; do
     sed -e "s|@@STORAGE_CLASS@@|local-path|" -e "s|@@ACCESS_MODE@@|ReadWriteOnce|" \
         -e "s|@@RUNNER_IMAGE_REF@@|$IMG|" -e "s|@@RUNNER_IMAGE_ID@@|$DIG|" -e "s|@@RELEASE_SHA@@|$REL|" \
         -e "s|@@API_IMAGE_REF@@|$APIIMG|" -e "s|@@PROVISIONER_IMAGE_ID@@|$WID|" -e "s|@@EXECUTOR_IMAGE_REF@@|$EXEC|" $P/$s.sh > $B/$s.sh
@@ -342,6 +349,31 @@ build; b5_window; MOCK_API_TERMINATING=1 t api-old-pod-terminating 0 b5-release 
 build; b5_window; MOCK_API_TERMINATING=1 MOCK_API_NOT_READY=1 t api-new-pod-not-ready-old-terminating 8 b5-release 'echo "$out" | grep -q "postcheck failed: api-pods"'; unset MOCK_API_TERMINATING MOCK_API_NOT_READY
 build; b5_window; MOCK_API_RELEASE=$(printf '0%.0s' $(seq 40)) t api-other-release 8 b5-release 'echo "$out" | grep -q "postcheck failed: api-release"'; unset MOCK_API_RELEASE
 build; b5_window; MOCK_KFAIL='app=hosting-api' MOCK_KFAIL_PARTIAL="api-1|Running|true|$APIIMG" t api-pods-partial-then-fails 8 b5-release 'echo "$out" | grep -q "postcheck failed: api-pods"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
+
+# B5b b5b-worker-inputs (#74): the controller's first-binding images.
+CI=/etc/anxious-lookout/issue16/controller/inputs.json
+ci_old() { grep -q "$OLDRUNNER" $CI && grep -q "$OLDEXEC" $CI && [ ! -e /root/issue72/evidence/b5b ]; }
+ci_new() { python3 -I -c '
+import json, sys
+v = json.load(open(sys.argv[1])); assert v["image"] == sys.argv[2] and v["executor"]["image"] == sys.argv[3]
+assert v["executor"]["wallSeconds"] == 30 and v["callback"].startswith("http://api.") and v["providerAccountId"] == "synthetic-account"' $CI "$IMG" "$EXEC"; }
+build; t normal 0 b5b-worker-inputs "ci_new && [ \"\$(stat -c %a $CI)\" = 600 ] && grep -q $OLDRUNNER /root/issue72/evidence/b5b/inputs.json \
+  && (cd /root/issue72/evidence/b5b && sha256sum -c --quiet MANIFEST.sha256) && [ \"\$(grep -c . /root/issue72/evidence/b5b/MODES)\" = 1 ] && [ ! -e $CI.b5b ]"
+build; chmod 0640 $CI; t normal-keeps-mode 0 b5b-worker-inputs "ci_new && [ \"\$(stat -c %a $CI)\" = 640 ]"
+build; sed -i 's/^RUNNER_IMAGE=.*/RUNNER_IMAGE=@@X@@/' $B/b5b-worker-inputs.sh; t placeholders 2 b5b-worker-inputs ci_old
+build; echo 'loaded active static' > /mock/unit.issue16-controller.service; t controller-running 3 b5b-worker-inputs ci_old
+build; echo 'loaded active enabled' > /mock/unit.issue16-observer.timer; t observer-timer-running 3 b5b-worker-inputs ci_old
+build; MOCK_SYSTEMCTL_PARTIAL=1 t systemctl-partial-then-fails 3 b5b-worker-inputs ci_old; unset MOCK_SYSTEMCTL_PARTIAL
+build; echo "$APIIMG" > /mock/ctr-images; t images-not-imported 3 b5b-worker-inputs "ci_old && echo \"\$out\" | grep -q 'image not in containerd'"
+build; sed -i "s|$OLDRUNNER|docker.io/library/other@sha256:$(printf '1%.0s' $(seq 64))|" $CI; t baseline-differs 3 b5b-worker-inputs '[ ! -e /root/issue72/evidence/b5b ]'
+build; sed -i "s|\"callback\"|\"note\": \"$OLDEXEC\", \"callback\"|" $CI; t old-image-named-twice 3 b5b-worker-inputs ci_old
+build; sed -i "s|$OLDRUNNER|$IMG|" $CI; t already-moved 3 b5b-worker-inputs '[ ! -e /root/issue72/evidence/b5b ]'
+build; mv $CI $CI.real; ln -s $CI.real $CI; t symlink 3 b5b-worker-inputs '[ ! -e /root/issue72/evidence/b5b ]'
+build; install -d -m 0700 /root/issue72/evidence/b5b; t evidence-exists 3 b5b-worker-inputs "grep -q $OLDRUNNER $CI"
+build; mkdir -p /stubs; printf '#!/bin/sh\n/bin/cp "$@" || exit $?\nfor l; do :; done\ncase "$l" in */evidence/b5b/inputs.json) : > "$l";; esac\n' > /stubs/cp; chmod 0755 /stubs/cp
+PATH=/stubs:$PATH t evidence-copy-truncated 6 b5b-worker-inputs "grep -q $OLDRUNNER $CI && echo \"\$out\" | grep -q 'evidence copy failed'"; rm -rf /stubs
+build; mkdir -p /stubs; printf '#!/bin/sh\ncase "$*" in *.b5b*) exit 1;; esac\nexec /bin/chmod "$@"\n' > /stubs/chmod; chmod 0755 /stubs/chmod
+PATH=/stubs:$PATH t update-fails-midway 5 b5b-worker-inputs "grep -q $OLDRUNNER $CI && [ ! -e $CI.b5b ] && echo \"\$out\" | grep -q 'rollback:'"; rm -rf /stubs
 
 # D d-binding-move.
 OD=/root/issue72/d/$OWN

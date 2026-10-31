@@ -118,13 +118,24 @@ if [ $rc = 0 ]; then
   img=$(timeout 30 $K -n m2-hosting get deployment api \
     -o jsonpath='{.spec.template.spec.containers[0].image}|{.spec.template.spec.initContainers[0].image}' 2>/dev/null) || img=lookup-failed
   [ "$img" = "$API_IMAGE|$API_IMAGE" ] || bad="$bad deployment-images"
+  # The previous ReplicaSet's Pod can still be listed Running and ready on the old image, with deletionTimestamp
+  # set, when `rollout status` has already returned (production, #72 B5 run 2026-10-31 09:30Z). A terminating Pod
+  # is reported and skipped; at least one non-terminating Pod must be Running, ready and on the new image.
   ap=$(timeout 30 $K -n m2-hosting get pods -l app=hosting-api \
-    -o jsonpath='{range .items[*]}{.metadata.name}|{.status.phase}|{.status.containerStatuses[?(@.name=="api")].ready}|{.status.containerStatuses[?(@.name=="api")].imageID}{"\n"}{end}' 2>/dev/null) \
+    -o jsonpath='{range .items[*]}{.metadata.name}|{.status.phase}|{.status.containerStatuses[?(@.name=="api")].ready}|{.status.containerStatuses[?(@.name=="api")].imageID}|{.metadata.deletionTimestamp}{"\n"}{end}' 2>/dev/null) \
     || ap=lookup-failed
-  echo "api pods: $(echo "$ap" | cut -d'|' -f1-3 | tr '\n' ' ')"
-  [ -n "$ap" ] || bad="$bad api-pods"
+  live=
   for l in $ap; do
-    case "$l" in *"|Running|true|"*"@${API_IMAGE#*@}") ;; *) bad="$bad api-pods"; break;; esac
+    case "$l" in
+      lookup-failed) bad="$bad api-pods";;
+      *"|"*"|"*"|"*"|"?*) echo "terminating: ${l%%|*}";;
+      *) live="$live $l";;
+    esac
+  done
+  echo "api pods:$(for l in $live; do printf ' %s' "$(echo "$l" | cut -d'|' -f1-3)"; done)"
+  [ -n "$live" ] || bad="$bad api-pods"
+  for l in $live; do
+    case "$l" in *"|Running|true|"*"@${API_IMAGE#*@}|") ;; *) bad="$bad api-pods"; break;; esac
   done
   r=$(timeout 30 $K -n m2-hosting exec deploy/api -c api -- cat /app/release.json 2>/dev/null) || r=
   printf '%s' "$r" | python3 -I -c 'import json, sys; assert json.load(sys.stdin)["sha"] == sys.argv[1]' "$RELEASE_SHA" 2>/dev/null \
