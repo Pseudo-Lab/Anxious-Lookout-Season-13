@@ -14,6 +14,8 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
 |---|---|---|---|
 | F | `inventory.sh` | no | none |
 | B3 | `apply-broker.sh` | yes | the runner image reference (after A); filled: `local-path` + `ReadWriteOnce` (decision 1); files: `broker_render.py` and `runner-cnp.json` (pinned in the script), `values.json` written on the node |
+| B5 | `b5-release.sh` | yes, reversible | the #72 merge SHA, A's runtime image reference and A's provisioner image ID (after A); filled: the live baselines from node reads 2 and 3 (api `issue36-runtime@sha256:7998b73d…`, worker `sha256:1c3ce268…`) and the #66 Pod exemption (decision 3). Run in the B5+D window, after C |
+| D | `d-binding-move.sh report\|apply <owner>`, then `close` | yes (one CAS per owner; a reverse move is a new report/apply) | A's provisioner image ID, runner and shell-executor references (after A); filled: the #66 owner exempt; the admin DSN file the user creates on the node |
 | C | `check-login.sh` | no (run after the user's `codex login --device-auth`) | none |
 | E1 | `retire-e1-disable.sh` | yes, reversible | runner image containerd digest (after A); filled: the #66 owner `runner-3cb453bfd87040dcb7e13a58aa0cbaf2` exempt (decision 3, option c). Requires a broker login, then writes `evidence/e1/stopped-at` and `evidence/e1/session` (`auth.json` file identity) |
 | E2 | `retire-e2-rbac.sh` | yes, reversible | `supply-rbac.json` from this directory (pinned in the script; the harness checks it against `ops.runner_rollout`) |
@@ -57,7 +59,7 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
   | 2 | placeholders left |
   | 3 | precheck refused; nothing changed |
   | 5 | a change failed midway; stop |
-  | 6 | evidence failed; nothing removed (E3) |
+  | 6 | evidence failed; nothing removed or changed (E3, B5) |
   | 7 | a removal failed midway (E3) |
   | 8 | changed, but a postcheck failed |
 
@@ -79,6 +81,23 @@ A non-zero or unclear rc is reported and never rerun, and partial evidence is ke
   A login concurrent with an in-flight refresh, a file replacement between E4's reads and its first change, and the app-server's own refresh were not exercised (review, `bacf694`).
 - **E4, no database step:** production has no supply database role. The supply `database-url` is a copy of the observer login (`OBSERVER_DATABASE_URL`; rollout README before #60, `HOST-SUPPLY.md`), and the observer worker keeps that login until #61. E4 removes the copy with the credential directory and never connects to the database; the harness fails any E4 case that reaches `psql`. Rotating the observer login's password, so the removed copy is no longer valid anywhere, is a separate change with the observer's own `database-url`.
 - **E1, a running batch:** production's timer starts a supply batch about every 15 s, and each batch currently ends `failed` after a few seconds (node read, 2026-10-31). E1 accepts a `failed` service (the F baseline) and waits out an `active`/`activating` one, read-only, for up to 30 s before it refuses. A batch the timer starts between that check and `disable --now` is stopped by it. Supply records each attempt as `unknown` before it delivers and never redelivers one, so a stopped batch is not retried.
+- **B5, image references only:**
+  - Since the running api (`d026b77`, node read 3) the release has no migration, no settings change, and no rollout-values change except the retired supply keys. The api change is the runner Pod manifest in `runner_kube.py`.
+  - The live Deployment also carries the 10-25 IP/domain change, which a re-render from the 10-21 values would revert. So B5 patches only the `api` container and `runner-pool-input` initContainer images. It uses a JSON Patch whose `test` ops pin the uid, the resourceVersion and both old images as read in the precheck.
+  - It replaces the one image ID in `controller.sh` and `observer.sh`, keeping each file's mode.
+  - It leaves alone:
+    - the supply units and `supply.sh` (E1–E3 retire them);
+    - `worker.py` (the installed wrapper still runs the controller and observer modules);
+    - `restore.sh` (no restore code changed since `d890447`).
+- **B5, the #59 gate:** neither production release contains #59, so B5 changes the runner Pod manifest. The new api and workers refuse a live Pod rendered by the old code (`KubePods._pod`). B5 therefore refuses while any runner Pod is Pending or Running, except the #66 owner's issue28 Pod (decision 3). After B5, lookups of that Pod refuse as "requires reconciliation": fail closed, never deleted, until the #66 runbook.
+- **B5 and D, one window:** the new manifest has no `RUNNER_TOKEN_FILE`, so an old runner image cannot start under it. Every existing binding moves in the same window, before the next entry.
+  - Window order: the user stops entry and the controller and observer timers and services → B5 → `d-binding-move.sh report` per owner → review → `apply` per owner → `close` → canary.
+  - B5 and D both refuse while a controller or observer unit is active. D refuses before B5 is done.
+- **D, per owner:**
+  - `report` reads the registry fence (`idle_stopped`, no Pod) and the plan, which must be v2 and not already on the new images. It computes `plan_digest` inside A's provisioner image (`--network none`), writes the root 0600 inputs, then runs the tool's `report`.
+  - `apply` rechecks the fence and images against the inputs, then runs the tool with the report mounted read-only.
+  - The postcheck reads both plan images and an unchanged registry row.
+  - The tool runs as CUTOVER §6 shows (`--network=host` as the workers' units, the admin DSN mounted read-only). The DSN file's mode and owner are checked; its content is never read.
 - **E1, execution conditions:** these are a point-in-time SELECT and Pod list, not a fence. E1's user command must therefore run only with entry, controller and observer quiesced (as for the D binding moves), and right after a fresh `inventory.sh` read of the binding and registry lines.
 - **B3, Cilium:** `cilium-config` must be unchanged afterwards. No Cilium upgrade or restart is part of this rollout.
 
@@ -92,8 +111,5 @@ docker run --rm --network bridge --user 0 -v "$PWD/infra/hosting/m3:/m3:ro" -v "
 - The production node runs Python 3.9 (F inventory, 2026-10-31). Run the harness on `alpine:3.15` (Python 3.9) as well as `alpine:3.20`: every `python3 -I` snippet and the node-side B3 render run under it.
 - `mock/k3s.py` and `mock/systemctl.py` stand in for the cluster and systemd.
 - The credential fixtures carry `SECRET` markers. Any marker in any output fails the case.
-- **Not covered yet:**
-  - B5, the api and provisioner image update with the supply RBAC held back;
-  - the D binding moves (`ops.runner_binding_image` report and apply).
-
-  Both depend on the rollout bundle inputs and come next.
+- `mock/docker.py` stands in for A's provisioner image: its release record, `plan_digest`, and `ops.runner_binding_image` report and apply.
+- **What the mocks cannot show:** the real image's import paths and the tool's database checks (`config_tests/test_runner_binding_image.py` covers the tool on disposable PostgreSQL; review's tier). It also cannot show the real Deployment rollout, or whether `k3s crictl inspecti` resolves A's reference.

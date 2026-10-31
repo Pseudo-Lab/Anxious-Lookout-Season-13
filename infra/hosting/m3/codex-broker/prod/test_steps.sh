@@ -12,7 +12,16 @@ IMG=runner@sha256:$(printf 'b%.0s' $(seq 64))
 DIG=sha256:$(printf 'b%.0s' $(seq 64))
 printf '#!/bin/sh\nexec python3 %s/mock/k3s.py "$@"\n' $P > /usr/local/bin/k3s
 printf '#!/bin/sh\nexec python3 %s/mock/systemctl.py "$@"\n' $P > /usr/bin/systemctl
-chmod 0755 /usr/local/bin/k3s /usr/bin/systemctl
+printf '#!/bin/sh\nexec python3 %s/mock/docker.py "$@"\n' $P > /usr/bin/docker
+chmod 0755 /usr/local/bin/k3s /usr/bin/systemctl /usr/bin/docker
+# B5/D: A's images (synthetic) and the production baselines from the node reads.
+REL=$(printf 'f%.0s' $(seq 40))
+APIIMG=docker.io/library/anxious-s13-issue72-runtime@sha256:$(printf 'a%.0s' $(seq 64))
+OLDAPI=docker.io/library/anxious-s13-issue36-runtime@sha256:7998b73da0f267e59b91da36a52ba571992365fd0f4056b59ce9640295978e67
+WID=sha256:$(printf '9%.0s' $(seq 64))
+OLDWID=sha256:1c3ce2683832a187ef207abe4daa7989589a996cde8214ce374237fa94ea81e6
+EXEC=docker.io/library/anxious-s13-issue72-shell-executor@sha256:$(printf 'd%.0s' $(seq 64))
+OWN=00000000-0000-4000-8000-000000000048
 
 build() {
   rm -rf /mock /root/issue72 /etc/systemd/system /usr/local/lib/anxious-lookout /etc/anxious-lookout /var/lib/anxious-lookout
@@ -44,11 +53,31 @@ cnp = json.load(open('/root/issue72/render/runner-cnp.json'))
 cnp['spec']['egress'] = cnp['spec']['egress'][1:]
 json.dump(cnp, open('/mock/live-cnp.json', 'w'))
 PY
-  for s in inventory apply-broker check-login retire-e1-disable retire-e2-rbac retire-e3-files retire-e4-final; do
+  # B5/D fixtures: stopped workers on the old worker image, the live api Deployment, a stopped v2 owner.
+  for r in controller observer; do
+    echo 'loaded inactive enabled' > /mock/unit.issue16-$r.timer; echo 'loaded inactive static' > /mock/unit.issue16-$r.service
+    printf '#!/bin/sh\nset -eu\nexec docker run --rm --pull=never --network=host --entrypoint=python %s /rollout/worker.py %s\n' \
+      "$OLDWID" $r > /usr/local/lib/anxious-lookout/issue16/$r.sh
+    chmod 0700 /usr/local/lib/anxious-lookout/issue16/$r.sh
+  done
+  printf '%s %s\n%s d890447f385b38614a4dfdef752647b65e678e5d\n' "$WID" "$REL" "$OLDWID" > /mock/docker-images
+  echo "$APIIMG" > /mock/ctr-images
+  printf '{"metadata":{"name":"api","uid":"dep-uid","resourceVersion":"41"},"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"api","image":"%s"}],"initContainers":[{"name":"runner-pool-input","image":"%s"}]}}}}' \
+    "$OLDAPI" "$OLDAPI" > /mock/api-deployment.json
+  install -d -m 0700 /root/issue72/d /root/issue72/d/private
+  ( umask 077; echo 'SECRET-dsn' > /root/issue72/d/private/admin-dsn )
+  echo '11111111-0000-4000-8000-000000000048|idle_stopped|3|7|-' > /mock/d-registry
+  printf '{"version":2,"image":"docker.io/library/anxious-s13-issue28-runner@sha256:%s","executor":{"image":"docker.io/library/anxious-s13-issue23-shell-executor@sha256:%s","wallSeconds":30,"outputBytes":65536},"identity":{"owner":"%s"}}' \
+    "$(printf 'c%.0s' $(seq 64))" "$(printf 'e%.0s' $(seq 64))" "$OWN" > /mock/d-plan.json
+  for s in inventory apply-broker check-login retire-e1-disable retire-e2-rbac retire-e3-files retire-e4-final b5-release d-binding-move; do
     sed -e "s|@@STORAGE_CLASS@@|local-path|" -e "s|@@ACCESS_MODE@@|ReadWriteOnce|" \
-        -e "s|@@RUNNER_IMAGE_REF@@|$IMG|" -e "s|@@RUNNER_IMAGE_ID@@|$DIG|" $P/$s.sh > $B/$s.sh
+        -e "s|@@RUNNER_IMAGE_REF@@|$IMG|" -e "s|@@RUNNER_IMAGE_ID@@|$DIG|" -e "s|@@RELEASE_SHA@@|$REL|" \
+        -e "s|@@API_IMAGE_REF@@|$APIIMG|" -e "s|@@PROVISIONER_IMAGE_ID@@|$WID|" -e "s|@@EXECUTOR_IMAGE_REF@@|$EXEC|" $P/$s.sh > $B/$s.sh
   done
 }
+# B5's window: only the exempt #66 Pod and a Failed one remain.
+b5_window() { printf 'runner-3cb453bfd87040dcb7e13a58aa0cbaf2|Running|old@sha256:%s\nrunner-gone|Failed|old@sha256:c\n' "$(printf 'c%.0s' $(seq 64))" > /mock/runners; }
+after_b5() { b5_window; sed -i "s|$OLDWID|$WID|" /usr/local/lib/anxious-lookout/issue16/controller.sh /usr/local/lib/anxious-lookout/issue16/observer.sh; }
 after_e1() { echo 'loaded inactive disabled' > /mock/unit.issue16-supply.timer; echo 'loaded inactive static' > /mock/unit.issue16-supply.service; }
 after_e2() { after_e1; touch /mock/rbac-emptied; }
 after_e3() { after_e2; rm -f /etc/systemd/system/issue16-supply.* /usr/local/lib/anxious-lookout/issue16/supply.sh /usr/local/lib/anxious-lookout/issue16/stop-supply.sh
@@ -57,14 +86,20 @@ after_e3() { after_e2; rm -f /etc/systemd/system/issue16-supply.* /usr/local/lib
              echo 100:150 > /root/issue72/evidence/e1/session; }
 
 pass=0 fail=0
-# t name want script [check] -- environment assignments come before t.
+# t name want script [check [step...]] -- environment assignments come before t (or inside a step).
+# Each step is a shell fragment with $S = the script under test (default 'sh $S'); rc and $out come from the
+# last step, and no step's output may carry a SECRET marker or reach an unhandled stub.
 t() {
   name=$1 want=$2 script=$3 check=${4:-true}
-  out=$(sh $B/$script.sh 2>&1); rc=$?
+  [ $# -ge 4 ] && shift 4 || shift $#
+  S=$B/$script.sh
+  [ $# -gt 0 ] || set -- 'sh $S'
+  all=
+  for step; do out=$(eval "$step" 2>&1); rc=$?; all="$all$out"; done
   ok=ok
   [ $rc = "$want" ] || ok=FAIL
-  echo "$out" | grep -q SECRET && ok=FAIL
-  echo "$out" | grep -q 'stub: unhandled' && ok=FAIL
+  echo "$all" | grep -q SECRET && ok=FAIL
+  echo "$all" | grep -q 'stub: unhandled' && ok=FAIL
   eval "$check" || ok=FAIL
   [ $ok = ok ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "$out" | sed 's/^/    /'; }
   echo "$ok $script/$name rc=$rc want=$want | $(echo "$out" | tail -1)"
@@ -260,6 +295,68 @@ build; after_e3; MOCK_KFAIL='get pod codex-broker-0' MOCK_KFAIL_PARTIAL='Running
   'creds 5 && nodb && [ ! -e /mock/sa-deleted ] && echo "$out" | grep -q "broker pod lookup failed"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
 build; after_e3; MOCK_KFAIL='get serviceaccount runner-pool-supply -o jsonpath' MOCK_KFAIL_PARTIAL='runner-pool-supply' t sa-partial-then-fails 3 retire-e4-final \
   'creds 5 && nodb && [ ! -e /mock/sa-deleted ] && echo "$out" | grep -q "ServiceAccount lookup failed"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
+
+# B5 b5-release.
+L=/usr/local/lib/anxious-lookout/issue16
+old_api() { grep -q issue36 /mock/api-deployment.json; }
+untouched="old_api && grep -q $OLDWID $L/controller.sh && grep -q $OLDWID $L/observer.sh && [ ! -e /root/issue72/evidence/b5 ]"
+build; b5_window; t normal 0 b5-release "! old_api && [ \"\$(grep -o 'issue72-runtime' /mock/api-deployment.json | wc -l)\" = 2 ] \
+  && grep -q $WID $L/controller.sh && grep -q $WID $L/observer.sh && ! grep -q $OLDWID $L/controller.sh \
+  && [ \"\$(stat -c %a $L/controller.sh)\" = 700 ] && [ -f /root/issue72/evidence/b5/controller.sh ] && grep -q $OLDWID /root/issue72/evidence/b5/observer.sh \
+  && (cd /root/issue72/evidence/b5 && sha256sum -c --quiet MANIFEST.sha256) && echo \"\$out\" | grep -q 'exempt (decision 3): runner-3cb453bfd87040dcb7e13a58aa0cbaf2'"
+build; b5_window; sed -i 's/^RELEASE_SHA=.*/RELEASE_SHA=@@X@@/' $B/b5-release.sh; t placeholders 2 b5-release "$untouched"
+build; b5_window; echo 'loaded active static' > /mock/unit.issue16-controller.service; t controller-running 3 b5-release "$untouched"
+build; b5_window; echo 'loaded active enabled' > /mock/unit.issue16-observer.timer; t observer-timer-running 3 b5-release "$untouched"
+build; b5_window; MOCK_SYSTEMCTL_PARTIAL=1 t systemctl-partial-then-fails 3 b5-release "$untouched"; unset MOCK_SYSTEMCTL_PARTIAL
+build; t live-runner-pod-59-gate 3 b5-release "$untouched && echo \"\$out\" | grep -q 'runner Pods still live (#59 gate): runner-a'"
+build; b5_window; MOCK_KFAIL='status.phase!=Failed' t runner-pod-lookup-fails 3 b5-release "$untouched"; unset MOCK_KFAIL
+build; b5_window; sed -i "/^$WID /d" /mock/docker-images; t worker-image-missing 3 b5-release "$untouched"
+build; b5_window; sed -i "s|^$WID .*|$WID 0000000000000000000000000000000000000000|" /mock/docker-images; t worker-image-other-release 3 b5-release "$untouched"
+build; b5_window; : > /mock/ctr-images; t api-image-not-imported 3 b5-release "$untouched"
+build; b5_window; sed -i 's/"name":"api","image"/"name":"api","image":"x","imageX"/' /mock/api-deployment.json; t api-deployment-image-differs 3 b5-release "grep -q $OLDWID $L/controller.sh"
+build; b5_window; sed -i 's/}\],"initContainers"/},{"name":"sidecar","image":"y"}],"initContainers"/' /mock/api-deployment.json; t api-deployment-extra-container 3 b5-release "$untouched"
+build; b5_window; MOCK_KFAIL='get deployment api -o json' MOCK_KFAIL_PARTIAL="$(cat /mock/api-deployment.json)" t deployment-partial-then-fails 3 b5-release "$untouched"; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
+build; b5_window; echo "# $OLDWID" >> $L/observer.sh; t script-names-old-twice 3 b5-release "old_api && grep -q $OLDWID $L/controller.sh"
+build; b5_window; install -d -m 0700 /root/issue72/evidence/b5; t evidence-exists 3 b5-release "old_api && grep -q $OLDWID $L/controller.sh"
+build; b5_window; MOCK_PATCH_FAIL=1 t patch-fails 5 b5-release "old_api && grep -q $WID $L/controller.sh && echo \"\$out\" | grep -q 'rollback:'"; unset MOCK_PATCH_FAIL
+build; b5_window; MOCK_PATCH_RV_BUMP=1 t deployment-changed-after-read 5 b5-release 'old_api && echo "$out" | grep -q "api deployment patch failed"'; unset MOCK_PATCH_RV_BUMP
+build; b5_window; MOCK_ROLLOUT_FAIL=1 t rollout-fails 5 b5-release; unset MOCK_ROLLOUT_FAIL
+build; b5_window; MOCK_API_NOT_READY=1 t api-pod-not-ready 8 b5-release 'echo "$out" | grep -q "postcheck failed: api-pods"'; unset MOCK_API_NOT_READY
+build; b5_window; MOCK_API_RELEASE=$(printf '0%.0s' $(seq 40)) t api-other-release 8 b5-release 'echo "$out" | grep -q "postcheck failed: api-release"'; unset MOCK_API_RELEASE
+build; b5_window; MOCK_KFAIL='app=hosting-api' MOCK_KFAIL_PARTIAL="api-1|Running|true|$APIIMG" t api-pods-partial-then-fails 8 b5-release 'echo "$out" | grep -q "postcheck failed: api-pods"'; unset MOCK_KFAIL MOCK_KFAIL_PARTIAL
+
+# D d-binding-move.
+OD=/root/issue72/d/$OWN
+on_old() { grep -q issue28-runner /mock/d-plan.json && grep -q issue23-shell-executor /mock/d-plan.json; }
+R="sh \$S report $OWN"; A="sh \$S apply $OWN"; refusedD="on_old && [ ! -e $OD ]"
+build; after_b5; t report 0 d-binding-move "on_old && [ -f $OD/report/binding-image.json ] && [ \"\$(stat -c %a $OD/inputs/binding-image.json)\" = 600 ] \
+  && grep -q '\"executorImage\": \"$EXEC\"' $OD/inputs/binding-image.json && echo \"\$out\" | grep -q 'oldPlanSha256'" "$R"
+build; after_b5; t report-then-apply 0 d-binding-move "grep -q issue72-shell-executor /mock/d-plan.json && grep -q '\"image\": \"$IMG\"' /mock/d-plan.json && [ -f $OD/applied ] \
+  && grep -q wallSeconds /mock/d-plan.json" "$R" "$A"
+build; after_b5; t apply-without-report 3 d-binding-move on_old "$A"
+build; after_b5; t apply-twice 3 d-binding-move "echo \"\$out\" | grep -q 'already applied'" "$R" "$A" "$A"
+build; after_b5; t exempt-owner 3 d-binding-move "on_old && [ ! -e /root/issue72/d/3cb453bf-d870-40dc-b7e1-3a58aa0cbaf2 ]" 'sh $S report 3cb453bf-d870-40dc-b7e1-3a58aa0cbaf2'
+build; b5_window; t b5-not-done 3 d-binding-move "$refusedD" "$R"
+build; after_b5; echo 'loaded activating static' > /mock/unit.issue16-controller.service; t controller-running 3 d-binding-move "$refusedD" "$R"
+build; after_b5; echo "runner-$(echo $OWN | tr -d -)" > /mock/d-pods; t pod-exists 3 d-binding-move "$refusedD" "$R"
+build; after_b5; rm /root/issue72/d/private/admin-dsn; t dsn-missing 3 d-binding-move "$refusedD" "$R"
+build; after_b5; chmod 0644 /root/issue72/d/private/admin-dsn; t dsn-mode-0644 3 d-binding-move "$refusedD" "$R"
+build; after_b5; ln /root/issue72/d/private/admin-dsn /root/issue72/d/dsn-link; t dsn-hard-linked 3 d-binding-move "$refusedD" "$R"
+build; after_b5; echo '11111111-0000-4000-8000-000000000048|runner_unreachable|3|7|22222222-0000-4000-8000-000000000001' > /mock/d-registry
+t not-idle-stopped 3 d-binding-move "$refusedD" "$R"
+build; after_b5; t registry-partial-then-fails 3 d-binding-move "$refusedD" \
+  "MOCK_KFAIL='from runner_runtime.registry' MOCK_KFAIL_PARTIAL='11111111-0000-4000-8000-000000000048|idle_stopped|3|7|-' $R"
+build; after_b5; sed -i 's/"version":2,//' /mock/d-plan.json; t v1-plan 3 d-binding-move "$refusedD" "$R"
+build; after_b5; sed -i "s|docker.io/library/anxious-s13-issue28-runner@sha256:[c]*|$IMG|; s|docker.io/library/anxious-s13-issue23-shell-executor@sha256:[e]*|$EXEC|" /mock/d-plan.json
+t already-moved 3 d-binding-move "[ ! -e $OD ]" "$R"
+build; after_b5; t tool-refuses-report 3 d-binding-move "on_old && [ ! -e $OD/report/binding-image.json ]" "MOCK_TOOL_FAIL=1 $R"
+build; after_b5; t fence-moved-after-report 3 d-binding-move "on_old && echo \"\$out\" | grep -q 'registry fence or images changed'" "$R" \
+  "sed -i 's/|7|/|8|/' /mock/d-registry" "$A"
+build; after_b5; t ambiguous-apply 5 d-binding-move "[ ! -e $OD/applied ] && echo \"\$out\" | grep -q 'never repeat'" "$R" "MOCK_TOOL_AMBIGUOUS=1 $A"
+build; after_b5; t postcheck-plan-lookup-fails 8 d-binding-move "echo \"\$out\" | grep -q 'postcheck failed: plan-images'" "$R" \
+  "MOCK_KFAIL='plan::jsonb-' MOCK_KFAIL_PARTIAL='$IMG|$EXEC' $A"
+build; after_b5; t close 0 d-binding-move "[ ! -e /root/issue72/d/private/admin-dsn ] && [ -d /root/issue72/d/private ]" 'sh $S close'
+build; after_b5; rm /root/issue72/d/private/admin-dsn; t close-when-absent 0 d-binding-move "echo \"\$out\" | grep -q 'already absent'" 'sh $S close'
 
 echo "passed $pass failed $fail"
 [ $fail = 0 ]

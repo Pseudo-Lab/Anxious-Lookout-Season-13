@@ -38,6 +38,14 @@ def psql(sql):
         log.write(sql.split()[0] + '\n')
     if env('MOCK_PSQL_FAIL'):
         sys.exit(1)
+    # D: one owner's registry fence and binding plan.
+    if 'from runner_runtime.registry where owner_id=' in sql:
+        out((M / 'd-registry').read_text())
+    if sql.startswith('select plan::text'):
+        out((M / 'd-plan.json').read_text() + '\n')
+    if "(plan::jsonb->>'image')||'|'||" in sql:
+        p = json.loads((M / 'd-plan.json').read_text())
+        out(p['image'] + '|' + p['executor']['image'] + '\n')
     if 'pg_stat_activity' in sql:
         out((M / 'role').read_text())
     if sql.startswith('alter role'):
@@ -77,6 +85,46 @@ if env('MOCK_KFAIL') and env('MOCK_KFAIL') in line:
     sys.stdout.write(env('MOCK_KFAIL_PARTIAL', ''))
     sys.stderr.write('Error from server (Forbidden): mock refusal\n')
     sys.exit(1)
+if sys.argv[1] == 'crictl':  # B5: `k3s crictl inspecti <ref>` succeeds only for an imported reference
+    p = M / 'ctr-images'
+    sys.exit(0 if p.exists() and sys.argv[-1] in p.read_text().split() else 1)
+DEP = M / 'api-deployment.json'
+if 'deployment' in args and 'patch' in args:
+    # B5: JSON Patch with test ops on the api Deployment.
+    if env('MOCK_PATCH_FAIL'):
+        sys.exit(1)
+    d = json.loads(DEP.read_text())
+    if env('MOCK_PATCH_RV_BUMP'):  # someone changed the Deployment after the precheck read it
+        d['metadata']['resourceVersion'] = str(int(d['metadata']['resourceVersion']) + 1)
+    for op in json.loads(args[args.index('-p') + 1]):
+        *parents, leaf = [int(x) if x.isdigit() else x for x in op['path'].strip('/').split('/')]
+        node = d
+        for x in parents:
+            node = node[x]
+        if op['op'] == 'test' and node[leaf] != op['value']:
+            sys.stderr.write('error: testing value failed\n')
+            sys.exit(1)
+        if op['op'] == 'replace':
+            node[leaf] = op['value']
+    d['metadata']['resourceVersion'] = str(int(d['metadata']['resourceVersion']) + 1)
+    DEP.write_text(json.dumps(d))
+    out('deployment.apps/api patched\n')
+if 'deployment' in args and 'api' in args:
+    d = json.loads(DEP.read_text())
+    if '-o' in args and args[args.index('-o') + 1] == 'json':
+        out(json.dumps(d))
+    s = d['spec']['template']['spec']
+    out(s['containers'][0]['image'] + '|' + s['initContainers'][0]['image'])
+if 'pods' in args and '[?(@.name=="api")]' in line:
+    image = json.loads(DEP.read_text())['spec']['template']['spec']['containers'][0]['image']
+    out('api-1|Running|' + ('false' if env('MOCK_API_NOT_READY') else 'true') + '|' + image + '\n')
+if 'pods' in args and 'status.phase!=Failed,status.phase!=Succeeded' in line:
+    rows = [l.split('|') for l in (M / 'runners').read_text().splitlines()]
+    out(''.join(r[0] + '\n' for r in rows if r[1] not in ('Failed', 'Succeeded')))
+if 'pod' in args and args[args.index('pod') + 1].startswith('runner-'):
+    name = args[args.index('pod') + 1]
+    p = M / 'd-pods'
+    out(('pod/' + name) if p.exists() and name in p.read_text().split() else '')
 if args[:1] == ['diff']:
     f = args[args.index('-f') + 1]
     if env('MOCK_DIFF_STDERR'):
@@ -105,6 +153,10 @@ if 'exec' in args:
     cmd = args[args.index('--') + 1:]
     if cmd[0] == 'psql':
         psql(cmd[-1])
+    if cmd == ['cat', '/app/release.json'] and 'deploy/api' in args:
+        image = json.loads(DEP.read_text())['spec']['template']['spec']['containers'][0]['image']
+        sha = 'd026b77212063e8f4eeb8b92aba116b9a9a9a8c6' if 'issue36' in image else env('MOCK_API_RELEASE', 'f' * 40)
+        out(json.dumps({'sha': sha, 'builtAt': '2026-11-01T00:00:00Z'}))
     if cmd[:3] == ['codex', 'login', 'status']:
         sys.stdout.write('Logged in using ChatGPT\n')
         sys.exit(int(env('MOCK_LOGIN_RC', '0')))
