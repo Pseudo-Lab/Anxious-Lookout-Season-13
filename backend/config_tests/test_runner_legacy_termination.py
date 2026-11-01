@@ -122,7 +122,9 @@ def test_current_spec_pod_is_also_accepted_by_identity(port, server, plan):
                                     'finalizer', 'deleting', 'owner-reference', 'namespace', 'name', 'runner-image',
                                     'executor-image', 'init-image', 'extra-init', 'sidecar', 'duplicate-name', 'no-executor',
                                     'ephemeral', 'hostNetwork', 'hostPID', 'hostIPC', 'share-pid', 'serviceaccount',
-                                    'legacy-serviceaccount', 'automount', 'automount-missing', 'kind'])
+                                    'legacy-serviceaccount', 'automount', 'automount-missing', 'kind',
+                                    'foreign-claim', 'missing-claim', 'extra-claim', 'hostpath', 'foreign-secret-volume',
+                                    'projected-secret', 'env-from', 'foreign-secret-env', 'configmap-env'])
 def test_identity_mismatch_fails_closed(port, server, plan, damage):
     obj = server.pod
     meta, spec = obj['metadata'], obj['spec']
@@ -154,6 +156,17 @@ def test_identity_mismatch_fails_closed(port, server, plan, damage):
     elif damage == 'automount': spec['automountServiceAccountToken'] = True
     elif damage == 'automount-missing': del spec['automountServiceAccountToken']
     elif damage == 'kind': obj['kind'] = 'Deployment'
+    elif damage == 'foreign-claim': spec['volumes'][0]['persistentVolumeClaim']['claimName'] = 'native-foreign'
+    elif damage == 'missing-claim': spec['volumes'][1] = {'name': 'control', 'emptyDir': {}}
+    elif damage == 'extra-claim': spec['volumes'].append({'name': 'x', 'persistentVolumeClaim': {'claimName': 'other'}})
+    elif damage == 'hostpath': spec['volumes'].append({'name': 'x', 'hostPath': {'path': '/'}})
+    elif damage == 'foreign-secret-volume': spec['volumes'][2]['secret']['secretName'] = 'transport-foreign'
+    elif damage == 'projected-secret': spec['volumes'].append({'name': 'x', 'projected': {'sources': [{'secret': {'name': 'other'}}]}})
+    elif damage == 'env-from': spec['containers'][0]['envFrom'] = [{'secretRef': {'name': 'other'}}]
+    elif damage == 'foreign-secret-env': spec['containers'][1]['env'].append(
+        {'name': 'T', 'valueFrom': {'secretKeyRef': {'name': 'other', 'key': 'token'}}})
+    elif damage == 'configmap-env': spec['containers'][0]['env'].append(
+        {'name': 'C', 'valueFrom': {'configMapKeyRef': {'name': 'other', 'key': 'k'}}})
     with pytest.raises(Refused) as caught:
         port.terminating_pod(obj, plan, uid)
     assert str(caught.value) == 'Kubernetes termination identity requires reconciliation'

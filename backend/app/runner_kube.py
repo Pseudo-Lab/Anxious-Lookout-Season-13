@@ -340,6 +340,28 @@ class KubePods:
         else:
             require(images == {'runner': plan.image, 'shell-executor': plan.executor.image}
                     and init == {'prepare-shell': plan.image})
+        # The live Pod must use exactly the binding's claims and transport Secret (what _references
+        # verifies); no other storage or credential source, whichever release rendered it.
+        volumes = spec.get('volumes', [])
+        require(type(volumes) is list)
+        claims = []
+        for volume in volumes:
+            kinds = set(volume) - {'name'}
+            require(len(kinds) == 1 and kinds <= {'persistentVolumeClaim', 'emptyDir', 'secret', 'projected'})
+            if 'persistentVolumeClaim' in volume:
+                claims.append(volume['persistentVolumeClaim']['claimName'])
+            elif 'secret' in volume:
+                require(volume['secret']['secretName'] == plan.transport.name)
+            elif 'projected' in volume:
+                require(all(set(source) == {'serviceAccountToken'} for source in volume['projected']['sources']))
+        require(sorted(claims) == sorted([plan.native.name, plan.control.name]))
+        for container in spec.get('containers', []) + spec.get('initContainers', []):
+            require(not container.get('envFrom'))
+            for value in container.get('env', []):
+                source = value.get('valueFrom') or {}
+                require(set(source) <= {'secretKeyRef', 'fieldRef'})
+                if 'secretKeyRef' in source:
+                    require(source['secretKeyRef']['name'] == plan.transport.name)
         self._references(plan)
         return Pod(plan.identity, uid)
 

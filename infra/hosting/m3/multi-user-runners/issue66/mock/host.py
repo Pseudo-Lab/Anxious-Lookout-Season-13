@@ -19,6 +19,8 @@ def save(name, rows):
 
 
 mounts, loops = lines('mounts'), lines('loops')
+if tool == 'findmnt' and os.environ.get('MOCK_FINDMNT_FAIL'):
+    sys.exit(1)
 if tool == 'findmnt':
     columns = args[args.index('-o') + 1].split(',') if '-o' in args else ['TARGET', 'SOURCE', 'FSTYPE']
     rows = mounts
@@ -31,6 +33,14 @@ if tool == 'findmnt':
     sys.exit(0)
 if tool == 'losetup':
     assert args[:3] == ['-n', '-O', 'NAME'] and args[3] == '-j'
+    counter = M / 'losetup.calls'
+    calls = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(calls))
+    # MOCK_LOSETUP_FAIL: every call fails; MOCK_LOSETUP_FAIL_FROM=N: the Nth call on fails; MOCK_LOSETUP_EMPTY: rc 0, no rows.
+    if os.environ.get('MOCK_LOSETUP_FAIL') or calls >= int(os.environ.get('MOCK_LOSETUP_FAIL_FROM') or 10**9):
+        sys.stderr.write('losetup: cannot get loop info\n'); sys.exit(1)
+    if os.environ.get('MOCK_LOSETUP_EMPTY'):
+        sys.exit(0)
     for f, dev in loops:
         if f == args[4]:
             print(dev)

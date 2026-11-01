@@ -71,7 +71,9 @@ listing() { # the host paths `host` deletes, with sizes; names only, never file 
   if [ -d "$S" ]; then
     for e in "$S"/* "$S"/.[!.]*; do [ -e "$e" ] || [ -L "$e" ] || continue
       echo "  $(stat -c '%n %F uid=%u mode=%a size=%s' "$e") allocated=$(du -sk "$e" 2>/dev/null | cut -f1)K"; done
-    for m in native control; do echo "  mount $S/$m: $(findmnt -rn -M "$S/$m" -o SOURCE,FSTYPE 2>/dev/null || echo none)"; done
+    if lt=$(findmnt -rn -o TARGET,SOURCE,FSTYPE); then
+      for m in native control; do echo "  mount $S/$m: $(echo "$lt" | awk -v t="$S/$m" '$1 == t {print $2, $3; f = 1} END {if (!f) print "none"}')"; done
+    else echo '  mounts: findmnt failed (host refuses until it works)'; fi
   else echo '  absent'; fi
   echo "delete: $O"
   if [ -d "$O" ]; then find "$O" -mindepth 1 -printf '  %p %y uid=%U mode=%m size=%s\n' 2>/dev/null
@@ -181,29 +183,48 @@ $(objects)
 EOF
 [ -z "$bad" ] || refuse "Kubernetes objects still present:$bad"
 listing
+# Every lookup below is rc-checked: a failed findmnt/losetup/ls/stat refuses (before deletion) or fails
+# (after an unmount); only a successful empty answer means "none".
+table() { mt=$(findmnt -rn -o TARGET,SOURCE) && [ -n "$mt" ]; }
+loops() { devs=$(losetup -n -O NAME -j "$1"); }
 if [ -e "$S" ] || [ -L "$S" ]; then
-  [ -d "$S" ] && [ ! -L "$S" ] && [ "$(stat -c %u "$S")" = 0 ] || refuse "$S is not a root directory"
+  u=$(stat -c %u "$S") || refuse "stat $S failed"
+  [ -d "$S" ] && [ ! -L "$S" ] && [ "$u" = 0 ] || refuse "$S is not a root directory (observed uid $u)"
+  table || refuse 'findmnt (mount table) failed'
   # Only this state's own loop mounts may use its images (no kubelet bind of a PV path remains).
   for m in native control; do
-    [ -e "$S/$m.ext4" ] || continue
-    for dev in $(losetup -n -O NAME -j "$S/$m.ext4" 2>/dev/null); do
-      o=$(findmnt -rn -o TARGET,SOURCE | awk -v d="$dev" -v t="$S/$m" '($2 == d || index($2, d"[") == 1) && $1 != t')
+    own=$(echo "$mt" | awk -v t="$S/$m" '$1 == t {print $2}')
+    if [ -e "$S/$m.ext4" ]; then
+      loops "$S/$m.ext4" || refuse "losetup -j $S/$m.ext4 failed"
+    else devs=; fi
+    # The mount at $S/$m must come from a loop device of this image; anything else is an inconsistent view.
+    if [ -n "$own" ]; then
+      echo "$devs" | grep -qxF -- "$own" || refuse "$S/$m is mounted from $own, but losetup lists for $S/$m.ext4: ${devs:-none}"
+    fi
+    for dev in $devs; do
+      o=$(echo "$mt" | awk -v d="$dev" -v t="$S/$m" '($2 == d || index($2, d"[") == 1) && $1 != t')
       [ -z "$o" ] || refuse "$dev ($S/$m.ext4) is also mounted at: $(echo $o)"
     done
   done
-  o=$(findmnt -rn -o TARGET | awk -v s="$S/" 'index($1, s) == 1 && $1 != s"native" && $1 != s"control"')
+  o=$(echo "$mt" | awk -v s="$S/" 'index($1, s) == 1 && $1 != s"native" && $1 != s"control"')
   [ -z "$o" ] || refuse "other mounts under $S: $(echo $o)"
-  extra=$(ls -A "$S" | grep -vxE 'native|control|native\.ext4|control\.ext4')
+  entries=$(ls -A "$S") || refuse "ls $S failed"
+  extra=$(printf '%s\n' "$entries" | awk 'NF && !/^(native|control|native\.ext4|control\.ext4)$/')
   [ -z "$extra" ] || refuse "unexpected entries in $S: $(echo $extra)"
   for m in native control; do
-    if findmnt -rn -M "$S/$m" >/dev/null 2>&1; then
+    if echo "$mt" | awk -v t="$S/$m" '$1 == t {f = 1} END {exit !f}'; then
       umount "$S/$m" || fail "umount $S/$m failed (busy?); nothing deleted yet; run host again" 5
       echo "unmounted $S/$m"
+      table || fail "findmnt failed after unmounting $S/$m; nothing deleted yet; run host again" 5
+      ! echo "$mt" | awk -v t="$S/$m" '$1 == t {f = 1} END {exit !f}' || fail "$S/$m is still mounted after umount" 5
     fi
-    [ -e "$S/$m.ext4" ] && [ -n "$(losetup -n -O NAME -j "$S/$m.ext4" 2>/dev/null)" ] \
-      && fail "$S/$m.ext4 is still attached to a loop device: $(losetup -n -O NAME -j "$S/$m.ext4")" 5
+    if [ -e "$S/$m.ext4" ]; then
+      loops "$S/$m.ext4" || fail "losetup -j $S/$m.ext4 failed after unmount; nothing deleted yet; run host again" 5
+      [ -z "$devs" ] || fail "$S/$m.ext4 is still attached to a loop device: $(echo $devs); nothing deleted yet" 5
+    fi
     if [ -d "$S/$m" ]; then
-      [ -z "$(ls -A "$S/$m")" ] || fail "$S/$m is not empty after unmount: $(ls -A "$S/$m" | head -5 | tr '\n' ' ')" 5
+      c=$(ls -A "$S/$m") || fail "ls $S/$m failed; nothing deleted yet" 5
+      [ -z "$c" ] || fail "$S/$m is not empty after unmount: $(echo "$c" | head -5 | tr '\n' ' '); nothing deleted yet" 5
     fi
   done
   for m in native control; do
@@ -214,8 +235,11 @@ if [ -e "$S" ] || [ -L "$S" ]; then
   echo "deleted $S"
 fi
 if [ -e "$O" ] || [ -L "$O" ]; then
-  [ -d "$O" ] && [ ! -L "$O" ] && [ "$(stat -c %u "$O")" = 10001 ] && ! findmnt -rn -M "$O" >/dev/null 2>&1 \
-    || refuse "$O is not the provisioner's output directory (observed: $(stat -c '%F uid=%u' "$O"))"
+  u=$(stat -c %u "$O") || refuse "stat $O failed"
+  table || refuse 'findmnt (mount table) failed'
+  [ -d "$O" ] && [ ! -L "$O" ] && [ "$u" = 10001 ] || refuse "$O is not the provisioner's output directory (observed uid $u)"
+  o=$(echo "$mt" | awk -v s="$O" '$1 == s || index($1, s"/") == 1')
+  [ -z "$o" ] || refuse "mounts at or under $O: $(echo $o)"
   rm -rf --one-file-system -- "$O" || fail "rm $O failed" 5
   echo "deleted $O"
 fi

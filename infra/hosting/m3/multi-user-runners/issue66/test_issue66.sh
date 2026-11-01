@@ -203,7 +203,24 @@ echo "/var/lib/kubelet/pods/x/volumes/native /dev/loop1[/data] ext4" >> /mock/mo
 t 'host: a second mount of the loop refuses' 3 $B/decommission.sh host
 has 'host: delete list printed first' "delete: $S"
 check 'host: refusal deleted nothing' "[ -f $S/native.ext4 ] && [ -d $O ] && grep -q '^$S/native ' /mock/mounts"
+# Review round 1: a failed lookup must never read as "none".
+rm -f /mock/losetup.calls
+MOCK_LOSETUP_FAIL=1 t 'host: losetup failing with a foreign bind refuses' 3 $B/decommission.sh host
+has 'host: losetup failure named' "losetup -j $S/native.ext4 failed"
+check 'host: losetup failure kept files and mounts' \
+  "[ -f $S/native.ext4 ] && [ -f $S/control.ext4 ] && [ -d $O ] && grep -q kubelet /mock/mounts && grep -q '^$S/native ' /mock/mounts"
+MOCK_LOSETUP_EMPTY=1 t 'host: losetup empty while mounted from a loop refuses' 3 $B/decommission.sh host
+has 'host: inconsistent view named' "$S/native is mounted from /dev/loop1, but losetup lists"
 sed -i '/kubelet/d' /mock/mounts
+MOCK_FINDMNT_FAIL=1 t 'host: findmnt failing refuses' 3 $B/decommission.sh host
+has 'host: listing marks the failed mount lookup' 'mounts: findmnt failed'
+check 'host: findmnt failure kept files and mounts' "[ -f $S/native.ext4 ] && [ -d $O ] && grep -q '^$S/native ' /mock/mounts"
+rm -f /mock/losetup.calls
+MOCK_LOSETUP_FAIL_FROM=3 t 'host: losetup failing after the unmount is rc 5' 5 $B/decommission.sh host
+check 'host: post-unmount failure deleted no file' "[ -f $S/native.ext4 ] && [ -f $S/control.ext4 ] && [ -d $O ]"
+rm -f /mock/losetup.calls
+printf '%s\n' "$S/native /dev/loop1 ext4" "$S/control /dev/loop2 ext4" >> /mock/mounts
+printf '%s\n' "$S/native.ext4 /dev/loop1" "$S/control.ext4 /dev/loop2" >> /mock/loops
 touch $S/unexpected
 t 'host: an unexpected entry refuses' 3 $B/decommission.sh host
 rm $S/unexpected
