@@ -307,64 +307,6 @@ class KubePods:
         self._references(plan)
         return Pod(plan.identity, uid)
 
-    def terminating_pod(self, obj, plan, pod_uid):
-        """Termination-only identity check for a Pod rendered by an earlier release (#66).
-
-        Never used by entry, creation or idle evidence. Spec equality is not required,
-        because the manifest changed under a live Pod; identity, the binding's image
-        digests and the references are. The drain call only sends the Pod its own token.
-        """
-        try:
-            return self._terminating_pod(obj, plan, pod_uid)
-        except (ValueError, TypeError, KeyError, AttributeError):
-            raise Refused('Kubernetes termination identity requires reconciliation') from None
-
-    def _terminating_pod(self, obj, plan, pod_uid):
-        require(isinstance(pod_uid, UUID))
-        uid = self._metadata(obj, 'Pod', plan.identity.name, plan.identity, uid=pod_uid, generation=True)
-        manifest = plan.manifest(self.namespace)
-        require(obj['metadata'].get('labels') == manifest['metadata']['labels']
-                and not obj['metadata'].get('annotations') and not obj['metadata'].get('finalizers'))
-        spec = obj.get('spec')
-        require(type(spec) is dict)
-        for key in ('hostNetwork', 'hostPID', 'hostIPC', 'shareProcessNamespace'):
-            require(spec.get(key, False) is False)
-        require(spec.get('serviceAccountName') == plan.service_account
-                and spec.get('serviceAccount', plan.service_account) == plan.service_account
-                and spec.get('automountServiceAccountToken') is False and not spec.get('ephemeralContainers'))
-        images = {container['name']: container['image'] for container in spec.get('containers', [])}
-        init = {container['name']: container['image'] for container in spec.get('initContainers', [])}
-        require(len(images) == len(spec.get('containers', [])) and len(init) == len(spec.get('initContainers', [])))
-        if plan.executor is None:
-            require(images == {'runner': plan.image} and init == {})
-        else:
-            require(images == {'runner': plan.image, 'shell-executor': plan.executor.image}
-                    and init == {'prepare-shell': plan.image})
-        # The live Pod must use exactly the binding's claims and transport Secret (what _references
-        # verifies); no other storage or credential source, whichever release rendered it.
-        volumes = spec.get('volumes', [])
-        require(type(volumes) is list)
-        claims = []
-        for volume in volumes:
-            kinds = set(volume) - {'name'}
-            require(len(kinds) == 1 and kinds <= {'persistentVolumeClaim', 'emptyDir', 'secret', 'projected'})
-            if 'persistentVolumeClaim' in volume:
-                claims.append(volume['persistentVolumeClaim']['claimName'])
-            elif 'secret' in volume:
-                require(volume['secret']['secretName'] == plan.transport.name)
-            elif 'projected' in volume:
-                require(all(set(source) == {'serviceAccountToken'} for source in volume['projected']['sources']))
-        require(sorted(claims) == sorted([plan.native.name, plan.control.name]))
-        for container in spec.get('containers', []) + spec.get('initContainers', []):
-            require(not container.get('envFrom'))
-            for value in container.get('env', []):
-                source = value.get('valueFrom') or {}
-                require(set(source) <= {'secretKeyRef', 'fieldRef'})
-                if 'secretKeyRef' in source:
-                    require(source['secretKeyRef']['name'] == plan.transport.name)
-        self._references(plan)
-        return Pod(plan.identity, uid)
-
     def lookup(self, identity):
         try:
             require(identity in self.plans)

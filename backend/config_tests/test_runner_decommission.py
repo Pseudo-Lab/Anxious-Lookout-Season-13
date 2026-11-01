@@ -1,4 +1,4 @@
-"""#66 decommission against real PostgreSQL (review's DB suite); fake Kube/native/host as the observer tests."""
+"""#66 decommission against real PostgreSQL (review's DB suite); fake Kube/runner HTTP as the #61 controller tests."""
 import json
 from uuid import uuid4
 
@@ -12,7 +12,7 @@ from config_tests.test_user_runner_http import research_schema, client, identity
 from config_tests.test_runner_kube import plan
 from config_tests.test_user_runner_runtime import runtime
 from config_tests.test_runner_termination_control import login
-from config_tests.test_runner_stop_observer import observer
+from config_tests.test_runner_controller_service import service
 from config_tests.test_runner_bindings import binding_schema
 
 
@@ -41,12 +41,12 @@ def fence(admin, owner):
 
 
 @pytest.fixture
-def stopped(observer, admin):
-    instance, owner, rt, server, deletes, receipts, stop = observer
-    publish(admin, owner, rt)
-    instance.process(owner)
-    assert instance.process(owner).phase == Phase.STOPPED
-    return owner, rt, stop
+def stopped(service, admin):
+    publish(admin, service.owner, service.rt)
+    assert service.service.step(service.owner, 300) == 'deleting'
+    assert service.service.step(service.owner, 300) == 'released'
+    assert read(admin, service.owner).phase == Phase.STOPPED
+    return service.owner, service.rt, service.stop
 
 
 def remaining(admin, owner):
@@ -73,9 +73,9 @@ def test_report_then_apply_removes_runner_rows_only_and_repeats_safely(stopped, 
         assert tool.apply(db, f, value) == 'already_applied'
 
 
-def test_open_stop_is_refused_with_observed_phase(observer, admin):
-    instance, owner, rt, server, deletes, receipts, stop = observer
-    publish(admin, owner, rt)
+def test_open_stop_is_refused_with_observed_phase(service, admin):
+    owner = service.owner
+    publish(admin, owner, service.rt)
     with admin.begin() as db, pytest.raises(tool.Refusal) as caught:
         tool.export(db, fence(admin, owner))
     assert caught.value.code == 'not_idle_stopped' and caught.value.observed['phase'] != 'idle_stopped'

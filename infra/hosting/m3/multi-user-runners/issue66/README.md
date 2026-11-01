@@ -1,5 +1,9 @@
 # #66: terminate the legacy runner Pod and decommission owner `3cb453bf…`
 
+> **Executed 2026-11-01** (see #66). Kept as the record of that window. `legacy-stop.sh` and `worker-swap.sh`
+> drive the host observer of the #66 merge image (`789faff`). #61 removes that observer from `backend/ops/`, so
+> these scripts only work with that pinned image. Do not reuse them on a later release.
+
 Production runbook. PM runs it as root on the OCI node in one window, with the user's go. Scope (user
 decision, 2026-10-31): remove this owner's **runner state only**. Kept: `auth.accounts`, sessions,
 conversations and posts. Removed:
@@ -27,11 +31,11 @@ All three scripts use the same rc legend:
 A refusal names the observed value. Post every output to #66. Never delete a Pod, an object or a file by hand,
 and never edit the DB by hand.
 
-Mock harness (Docker only; Python 3.9 as on the node, and 3.12):
+Mock harness (Docker only; Python 3.9 as on the node, and 3.12). The worker scripts it runs against are the
+#66 merge's rendered `controller.sh`/`observer.sh`, frozen in `mock/*.sh.789faff`:
 
 ```sh
-docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" -v "$PWD/backend:/backend:ro" alpine:3.15 \
-  sh /m3/multi-user-runners/issue66/test_issue66.sh
+docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" alpine:3.15 sh /m3/multi-user-runners/issue66/test_issue66.sh
 ```
 
 ## Inputs and install
