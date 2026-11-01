@@ -18,6 +18,7 @@ The images are built on the host from `5e73bc4` (`--platform linux/amd64`) and m
 | --- | --- | --- | --- |
 | W0 | `w0-baseline.sh` | back, after clearance | Nothing. Read-only baseline, including the …5804 ledger probe (`mode=ro`, one read transaction, fixed fields only) |
 | W1 | `w1-import.sh` | user | Imports the three archives into k3s containerd and loads the runtime image into guest Docker for the renderer. Prints the image chain |
+| W1c | `w1c-finalize-ns.py` | user, after the W2 rollback | Finalizes only the empty, Terminating `runner-control` with the development UID `54a486c3-…` (UID and resourceVersion precondition, full content enumeration, absence postcheck). Never for another environment |
 | W1b | `w1b-tag.sh` | user, after a W2 rollback | Tags the three `NAME@sha256:DIGEST` references (infra/hosting/README.md) and checks each resolves to its host ID; refuses while the api points at the new digest |
 | W2 | `w2-apply.py apply` | user | 061 grants, Namespace, DB Secret, RBAC/pool objects, CNP, api image, controller Deployment |
 | W2 rollback | `w2-apply.py rollback <evidence dir>` | user | Restores every object W2 changed from its backup. Deletes only objects W2 created, by UID; the namespace goes last and only if it is empty |

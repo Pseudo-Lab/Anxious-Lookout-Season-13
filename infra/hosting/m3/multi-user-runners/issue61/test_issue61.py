@@ -51,7 +51,7 @@ def setup(*, units=None, waiting=0, mutate=None, fail=()):
     for path in ('/mock', INSTALL, '/root/r4-rollout', '/home/opc/issue61-images'):
         os.makedirs(path, mode=0o700)
     shutil.copy(SRC + '/mock/resources.json', '/mock/resources.json')
-    for name in ('lib.sh', 'w0-lib.sh', 'w1-import.sh', 'w1b-tag.sh', 'w3-reclaim.py'):
+    for name in ('lib.sh', 'w0-lib.sh', 'w1-import.sh', 'w1b-tag.sh', 'w1c-finalize-ns.py', 'w3-reclaim.py'):
         shutil.copy(os.path.join(SRC, name), INSTALL)
     with open(os.path.join(SRC, 'w2-apply.py')) as stream:
         text = stream.read()
@@ -565,6 +565,20 @@ def main():
     mode = oct(os.stat(ev2 + '/changes.json').st_mode & 0o777)
     check('w2 evidence files are 0600', mode == '0o600', mode)
 
+    for name, flag, want in [('accepted but Terminating', 'nsTerminating', 'still Terminating'),
+                             ('absence lookup failing', 'failNsGetAfterDelete', 'absence lookup failed')]:
+        setup(mutate=imported, fail=['set-image'])
+        rc, out = w2('apply')
+        ev3 = evidence(out)
+        os.unlink('/mock/fail')
+        st = state(); st[flag] = True; json.dump(st, open('/mock/state.json', 'w'))
+        env_rc = subprocess.run(['python3', '-I', INSTALL + '/w2-apply.py', 'rollback', ev3], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, env=dict(os.environ, W2_NS_WAIT_SECONDS='2'), timeout=120)
+        out = env_rc.stdout.decode()
+        check('w2 rollback: namespace %s is rc 8 and not certified' % name,
+              env_rc.returncode == 8 and want in out and not os.path.exists(ev3 + '/rolled-back.json')
+              and os.path.exists(ev3 + '/rollback-started.json'), out)
+
     def two_runs(first):
         w3_state()
         os.makedirs('/root/issue61/evidence/w2-a', mode=0o700)
@@ -595,6 +609,90 @@ def main():
     rc, out, _ = w3('--expected-running', '0')
     check('w3: a started but uncertified rollback refuses before reclaim',
           rc == 3 and 'uncertified rollback' in out and not state().get('reclaimCalls'), out)
+
+    # W1c ----------------------------------------------------------------------------------------------
+    NSUID = '54a486c3-0750-411b-82bb-70a39b3c80b4'
+    METRICS_MSG = ('Discovery failed for some groups, 1 failing: unable to retrieve the complete list of server APIs: '
+                   'metrics.k8s.io/v1beta1: stale GroupVersion discovery: metrics.k8s.io/v1beta1')
+
+    def w1c_state(**over):
+        def mutate(st):
+            conditions = [{'type': 'NamespaceDeletionDiscoveryFailure', 'status': 'True', 'message': METRICS_MSG},
+                          {'type': 'NamespaceContentRemaining', 'status': 'False'},
+                          {'type': 'NamespaceDeletionContentFailure', 'status': 'False'},
+                          {'type': 'NamespaceFinalizersRemaining', 'status': 'False'}]
+            ns = {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': 'runner-control', 'uid': NSUID,
+                  'resourceVersion': '42', 'deletionTimestamp': '2026-11-01T15:57:11Z'},
+                  'spec': {'finalizers': ['kubernetes']}, 'status': {'phase': 'Terminating', 'conditions': conditions}}
+            for kind in over.get('drop', []):
+                conditions[:] = [c for c in conditions if c['type'] != kind]
+            for kind, value in over.get('cond', {}).items():
+                [c for c in conditions if c['type'] == kind][0].update(value)
+            ns['metadata'].update(over.get('meta', {}))
+            ns['status'].update(over.get('status', {}))
+            st['objects'][okey('Namespace', None, 'runner-control')] = ns
+            st['objects'][okey('Namespace', None, 'shell-pilot')] = {'kind': 'Namespace', 'metadata': {
+                'name': 'shell-pilot', 'uid': 'sp', 'resourceVersion': '7'}, 'status': {'phase': 'Terminating'}}
+            base = '/api/v1/namespaces/runner-control/'
+            st['raw'] = {'/api/v1': {'resources': [{'name': 'pods', 'namespaced': True, 'verbs': ['list']},
+                                                   {'name': 'pods/log', 'namespaced': True, 'verbs': ['get']},
+                                                   {'name': 'nodes', 'namespaced': False, 'verbs': ['list']},
+                                                   {'name': 'secrets', 'namespaced': True, 'verbs': ['list']}]},
+                         '/apis': {'groups': [{'versions': [{'groupVersion': 'apps/v1'}]},
+                                              {'versions': [{'groupVersion': 'metrics.k8s.io/v1beta1'}]}]},
+                         '/apis/apps/v1': {'resources': [{'name': 'deployments', 'namespaced': True, 'verbs': ['list']}]},
+                         base + 'pods?limit=5': {'items': []}, base + 'secrets?limit=5': {'items': []},
+                         '/apis/apps/v1/namespaces/runner-control/deployments?limit=5': {'items': []}}
+            for path, value in over.get('raw', {}).items():
+                if value is None:
+                    st['raw'].pop(path, None)
+                else:
+                    st['raw'][path] = value
+            for flag in over.get('flags', []):
+                st[flag] = True
+        setup(mutate=mutate)
+
+    def w1c(wait=None):
+        env = dict(os.environ, **({'W1C_WAIT_SECONDS': str(wait)} if wait else {}))
+        done = subprocess.run(['python3', '-I', INSTALL + '/w1c-finalize-ns.py'], stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, timeout=120, env=env)
+        return done.returncode, done.stdout.decode()
+
+    w1c_state()
+    rc, out = w1c()
+    s = state()
+    check('w1c: finalizes exactly runner-control, proves it gone, leaves shell-pilot',
+          rc == 0 and s.get('finalizeCalls') == ['/api/v1/namespaces/runner-control/finalize']
+          and okey('Namespace', None, 'runner-control') not in s['objects'] and okey('Namespace', None, 'shell-pilot') in s['objects']
+          and 'skipped (failing, allowed): metrics.k8s.io/v1beta1' in out and '3 namespaced resource types listed empty' in out, out)
+    for name, over in [
+            ('another UID', dict(meta={'uid': 'other'})),
+            ('not Terminating', dict(status={'phase': 'Active'})),
+            ('no deletionTimestamp', dict(meta={'deletionTimestamp': None})),
+            ('ContentRemaining True', dict(cond={'NamespaceContentRemaining': {'status': 'True'}})),
+            ('ContentRemaining missing', dict(drop=['NamespaceContentRemaining'])),
+            ('FinalizersRemaining missing', dict(drop=['NamespaceFinalizersRemaining'])),
+            ('discovery failure names another group', dict(cond={'NamespaceDeletionDiscoveryFailure': {
+                'message': METRICS_MSG.replace('1 failing', '2 failing') + ', example.io/v1'}})),
+            ('apps/v1 discovery fails', dict(raw={'/apis/apps/v1': None})),
+            ('a list fails', dict(raw={'/api/v1/namespaces/runner-control/secrets?limit=5': None})),
+            ('an object remains', dict(raw={'/apis/apps/v1/namespaces/runner-control/deployments?limit=5':
+                                            {'items': [{'metadata': {'name': 'runner-controller'}}]}}))]:
+        w1c_state(**over)
+        rc, out = w1c()
+        s = state()
+        check('w1c: %s refuses before any write (rc 3)' % name,
+              rc == 3 and not s.get('finalizeCalls') and okey('Namespace', None, 'runner-control') in s['objects'], out)
+    w1c_state(flags=['rvChanged'])
+    rc, out = w1c()
+    check('w1c: a namespace changed between read and finalize is refused by the API (rc 5)',
+          rc == 5 and okey('Namespace', None, 'runner-control') in state()['objects'], out)
+    w1c_state(flags=['finalizeKeeps'])
+    rc, out = w1c(wait=2)
+    check('w1c: finalize answered but the namespace stays is rc 8, not done', rc == 8 and 'still present' in out, out)
+    w1c_state(flags=['finalizeKeeps', 'failNsGetAfterFinalize'])
+    rc, out = w1c(wait=2)
+    check('w1c: a failed absence lookup is rc 8, not done', rc == 8 and 'lookup failed' in out, out)
 
     print('passed %d, failed %d' % (passed, failed))
     return 1 if failed else 0

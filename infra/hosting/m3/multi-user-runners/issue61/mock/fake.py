@@ -81,6 +81,32 @@ def kubectl(args):
     verb = args[0] if args[0] != '-n' else args[2]
     rest = [a for i, a in enumerate(args) if not (a == '-n' or (i > 0 and args[i-1] == '-n'))]
     verb = rest[0]
+    if verb == 'get' and rest[1] == '--raw':
+        doc = state.get('raw', {}).get(rest[2])
+        if doc is None:
+            die()
+        print(json.dumps(doc))
+        return
+    if verb == 'replace' and rest[1] == '--raw':
+        state.setdefault('finalizeCalls', []).append(rest[2])
+        with open(opt(rest, '-f')) as stream:
+            body = json.load(stream)
+        k = okey('namespace', None, body['metadata']['name'])
+        live = state['objects'].get(k)
+        if state.get('rvChanged') and live:
+            live['metadata']['resourceVersion'] = str(int(live['metadata']['resourceVersion']) + 1)
+        if live is None or live['metadata']['uid'] != body['metadata'].get('uid') or \
+                live['metadata'].get('resourceVersion') != body['metadata'].get('resourceVersion') or body['spec']['finalizers']:
+            save(state); die()  # 409 Conflict / precondition failed
+        if not state.get('finalizeKeeps'):
+            del state['objects'][k]
+        if state.get('failNsGetAfterFinalize'):
+            state['failNsGet'] = True
+        save(state)
+        print(json.dumps(body))
+        return
+    if verb == 'get' and state.get('failNsGet') and rest[1:3] == ['namespace', 'runner-control']:
+        die()
     if verb == 'get':
         if '-l' in rest:
             print('\n'.join('pod/'+p for p in state.get('controllerPods', [])))
@@ -92,6 +118,9 @@ def kubectl(args):
                 if space == ns and kind in kinds:
                     print('%s/%s' % (kind, name))
             return
+        if state.get('failNsGetAfterDelete') and rest[1:3] == ['Namespace', 'runner-control'] \
+                and 'namespace||runner-control' in state.get('deleted', []):
+            die()
         if rest[1] == 'pod' and state.get('slowPodGet'):
             time.sleep(state['slowPodGet'])
         gone = state.get('podGetsBeforeGone', {})
@@ -267,6 +296,16 @@ def kubectl(args):
             die()
         if obj['metadata']['uid'] != options['preconditions']['uid']:
             die()
+        if kind == 'namespace' and state.get('nsTerminating'):
+            # Accepted, but finalization waits (as on the dev VM): same UID, Terminating, content removed.
+            for other in [o for o in state['objects'] if o.split('|')[1] == name]:
+                del state['objects'][other]
+            obj['metadata']['deletionTimestamp'] = '2026-11-01T15:57:11Z'
+            obj['status'] = {'phase': 'Terminating', 'conditions': [
+                {'type': 'NamespaceDeletionDiscoveryFailure', 'status': 'True'}]}
+            state.setdefault('deleted', []).append(k)
+            save(state)
+            return
         del state['objects'][k]
         if kind == 'namespace':
             for other in [o for o in state['objects'] if o.split('|')[1] == name]:

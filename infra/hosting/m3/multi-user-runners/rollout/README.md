@@ -506,7 +506,14 @@ Order:
 
    Address the database as `postgres.m2-hosting.svc.cluster.local:5432` (cluster DNS works
    in-cluster; host files use the Pod IP only because the host cannot resolve it).
-   Create the Namespace, then the Secret from files. Never put DSNs on argv or in Git:
+   **If `runner-control` already exists** (left by an earlier rollback, see "Rollback"), do not
+   create it again:
+   - it must be `Active`, with no `deletionTimestamp`, holding only its default ServiceAccount and
+     `kube-root-ca.crt`, and with the UID recorded at the rollback;
+   - if so, reuse it and go straight to the Secret;
+   - **if it is `Terminating`, stop.** No re-apply goes ahead, because nothing can be created in it.
+
+   Otherwise create the Namespace, then the Secret from files. Never put DSNs on argv or in Git:
    ```sh
    jq '.items[] | select(.kind == "Namespace" and .metadata.name == "runner-control")' \
      /private-rollout/candidate/resources.json | kubectl apply -f -
@@ -599,6 +606,36 @@ Order:
     Role and ClusterRole with grants again).
   - Re-apply the previous `40-runner-network.json` (host ingress).
   - The 061 grants may stay: they are column UPDATEs used only by the observer login.
+- **Remove the new objects, but keep the namespace `runner-control`** (#61 dev-VM finding, 2026-11-02):
+  - **Why.** Namespace deletion finishes only when API discovery works. On the development VM, the
+    `v1beta1.metrics.k8s.io` APIService has no endpoints: there is no TCP10250 grant, by the #13
+    decision. So a deleted `runner-control` stayed `Terminating`, with
+    `NamespaceDeletionDiscoveryFailure=True`, even after all its content was gone. Nothing can be
+    created in a Terminating namespace, so it blocks every re-apply.
+  - **Production.** A read-only check on 2026-11-01 showed the same APIService
+    `Available=False (MissingEndpoints)`, and no Terminating namespace. Production has not shown
+    the hang itself, but it must be expected. Fixing metrics-server, the APIService or the firewall
+    is outside #61; that needs a separate issue.
+  - **So the production rollback never deletes `runner-control`.** Record the UID of each object
+    first, then delete each object with a UID precondition (`kubectl delete --raw <path>` with
+    `DeleteOptions.preconditions.uid`):
+    1. Deployment `runner-controller`. Delete it after the scale to 0 above, and wait until its
+       ReplicaSets and Pods are gone.
+    2. Secret `runner-controller-db` and ServiceAccount `runner-controller`.
+    3. Role and RoleBinding `runner-controller` in `codex-runner`, then ClusterRole and
+       ClusterRoleBinding `runner-controller`.
+  - **What stays.** The namespace stays Active with only its default ServiceAccount and the
+    `kube-root-ca.crt` ConfigMap, under PSA restricted. Check it with
+    `kubectl get all,secret,sa,role,rolebinding -n runner-control`: only the defaults.
+  - **Never delete the namespace while `kubectl get apiservice v1beta1.metrics.k8s.io` is not
+    `True`.**
+  - **If it was deleted anyway and is stuck Terminating:**
+    - Nothing in this README finalizes it. Stop, and record its UID and conditions.
+    - Any finalize is a separately reviewed, environment-specific step: the exact UID of that
+      environment's namespace, a full content enumeration that fails closed, a UID and
+      resourceVersion precondition on `/finalize`, and an absence postcheck.
+    - The development VM's `w1c-finalize-ns.py` (`issue61/`) is that step for the development UID
+      only. Never reuse it or its UID elsewhere.
 - **Observer identity:**
   - Before step 9, the retained units, inputs and token still work. Check that the token has
     not expired.

@@ -95,6 +95,7 @@ PATHS = {'Namespace': '/api/v1/namespaces/{name}',
          'ClusterRole': '/apis/rbac.authorization.k8s.io/v1/clusterroles/{name}',
          'ClusterRoleBinding': '/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/{name}',
          'ResourceQuota': '/api/v1/namespaces/{ns}/resourcequotas/{name}'}
+NS_WAIT = max(1, min(120, int(os.environ.get('W2_NS_WAIT_SECONDS', 120))))  # harness may only shorten it
 DEFAULT_CHILDREN = {'serviceaccount/default', 'configmap/kube-root-ca.crt'}
 
 
@@ -566,6 +567,7 @@ def rollback(ev):
     with open(os.path.join(ev, 'rollback-started.json'), 'w') as stream:
         json.dump({'started': True}, stream)
     done = []
+    deleted_ns = []
     try:
         if ctrl is not None:
             scale = {'metadata': {'uid': ctrl['metadata']['uid']}, 'spec': {'replicas': 0}}
@@ -631,7 +633,8 @@ def rollback(ev):
                 raise Stop(5, 'rollback: namespace %s not deleted; unexpected contents %s or UID differs'
                            % (e['name'], extra))
             delete_exact('Namespace', None, e['name'], live['metadata']['uid'], 'delete namespace')
-            done.append('deleted Namespace ' + e['name'])
+            done.append('delete requested for Namespace %s (uid %s)' % (e['name'], live['metadata']['uid']))
+            deleted_ns.append((e['name'], live['metadata']['uid']))
     except Stop:
         say('partial: rollback changed: ' + ('; '.join(done) or 'nothing'))
         raise
@@ -644,6 +647,28 @@ def rollback(ev):
     if api['spec']['template']['spec']['containers'][0]['image'] != \
             before['spec']['template']['spec']['containers'][0]['image']:
         raise Stop(8, 'postcheck failed: api image not restored')
+    # Namespace deletion is asynchronous (finalization can wait on API discovery, e.g. metrics.k8s.io). Certify
+    # only after a bounded, read-only check that the namespace W2 created is gone; never finalize here.
+    for name, uid in deleted_ns:
+        deadline = time.monotonic() + NS_WAIT
+        while True:
+            try:
+                live = get('Namespace', None, name, 'namespace absence lookup', rc=8)
+            except Stop:
+                raise Stop(8, 'postcheck failed: namespace %s absence lookup failed; rollback not certified' % name)
+            if live is None:
+                say('rollback: Namespace %s is gone' % name)
+                break
+            if live['metadata']['uid'] != uid:
+                raise Stop(8, 'postcheck failed: namespace %s has another UID %s now; rollback not certified'
+                           % (name, live['metadata']['uid']))
+            if time.monotonic() >= deadline:
+                conditions = ['%s=%s' % (c.get('type'), c.get('status')) for c in
+                              (live.get('status') or {}).get('conditions', []) if c.get('status') == 'True']
+                raise Stop(8, 'postcheck failed: namespace %s (uid %s) still %s after %d s (%s); rollback not '
+                              'certified, nothing finalized' % (name, uid, (live.get('status') or {}).get('phase'),
+                                                                NS_WAIT, ', '.join(conditions) or 'no true condition'))
+            time.sleep(min(5, max(0.1, deadline - time.monotonic())))
     # Only a complete rollback whose postcheck passed is certified; W3 never selects it.
     with open(os.path.join(ev, 'rolled-back.json'), 'w') as stream:
         json.dump({'done': done}, stream, indent=1)
