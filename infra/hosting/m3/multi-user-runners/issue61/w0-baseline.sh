@@ -104,7 +104,11 @@ try:
           % (value.get("blocked"), rejected, member, value.get("snapshotId")))
 except sqlite3.Error as error:
     print("ledger unreadable: " + type(error).__name__)
-' 2>/dev/null) && note "5804 $probe" || fail_lookup '5804 ledger probe'
+' 2>/dev/null) || probe='exec failed'
+case "$probe" in
+  'ledger blocked='*) note "5804 $probe";;
+  *) fail_lookup "5804 ledger probe: $probe";;  # missing, unreadable (busy, hot journal, schema) or exec failed
+esac
 
 echo "w0 summary lookups_failed=$lookups differs=$differs"
 [ "$lookups" = 0 ] || { echo 'result rc=3'; exit 3; }
