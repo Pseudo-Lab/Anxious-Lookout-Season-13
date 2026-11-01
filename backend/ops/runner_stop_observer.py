@@ -3,6 +3,9 @@
 API records a stop before native drain; this worker anchors the actual scheduled
 Node before any destructive call, then drains, deletes exactly that Pod UID, and
 only releases capacity after retained receipt plus trusted host proof.
+
+--legacy-pod-uid (#66) lets anchor and drain accept one named owner's Pod that an
+earlier release rendered, by identity instead of spec equality. Never idle or entry.
 """
 from datetime import datetime, timezone
 import ipaddress
@@ -21,10 +24,20 @@ from runner.lifecycle import require
 
 
 class Observer:
-    def __init__(self, engine, pool, host, storage_root, *, read=retained_file, runner=Runner):
+    def __init__(self, engine, pool, host, storage_root, *, read=retained_file, runner=Runner, legacy_pod=None):
         self.engine, self.pool, self.host = engine, pool, host
         self.storage_root, self.read, self.runner = Path(storage_root), read, runner
         require(self.storage_root.is_absolute() and self.storage_root == self.storage_root.resolve())
+        # (owner, pod UID) named by the operator for one run; None keeps the exact check.
+        require(legacy_pod is None or (type(legacy_pod) is tuple and len(legacy_pod) == 2
+                                       and all(isinstance(value, UUID) for value in legacy_pod)))
+        self.legacy_pod = legacy_pod
+
+    def stopping_pod(self, runtime, obj, state):
+        """Pod check for the anchor/drain of an open stop only (never idle or entry)."""
+        if self.legacy_pod is not None and self.legacy_pod == (state.owner, state.pod_uid):
+            return runtime.pods.terminating_pod(obj,runtime.plan,state.pod_uid).uid
+        return runtime.pods._pod(obj,runtime.plan).uid
 
     def current(self, db, runtime, owner):
         db.execute(text('SELECT id FROM auth.accounts WHERE id=:owner FOR SHARE'),{'owner':owner}).one()
@@ -64,7 +77,7 @@ class Observer:
             require(stop['pod_uid'] == state.pod_uid)
             if stop['node_uid'] is None:
                 obj = self.pod(runtime)
-                require(obj is not None and runtime.pods._pod(obj,runtime.plan).uid == state.pod_uid
+                require(obj is not None and self.stopping_pod(runtime,obj,state) == state.pod_uid
                         and obj['spec']['nodeName'] == self.host.node_name)
                 self.host.node_matches(self.node(runtime),datetime.now(timezone.utc))
                 db.execute(text('''UPDATE runner_termination.stops SET node_name=:name,node_uid=:uid,boot_id=:boot
@@ -111,7 +124,7 @@ class Observer:
                     if obj['metadata'].get('deletionTimestamp'):
                         require(stop['receipt'] is not None)
                         return state  # Preserve slot until kubelet/CRI/proc prove death.
-                    require(runtime.pods._pod(obj,runtime.plan).uid == state.pod_uid)
+                    require(self.stopping_pod(runtime,obj,state) == state.pod_uid)
                     address = ipaddress.ip_address(obj['status']['podIP'])
                     require(address in runtime.network and not address.is_loopback and not address.is_link_local)
                     host = '['+str(address)+']' if address.version == 6 else str(address)
@@ -129,6 +142,14 @@ class Observer:
             return result
 
 
+def legacy_target(args):
+    """One named owner and Pod, never with batch, cursor or idle selection."""
+    if args.legacy_pod_uid is None:
+        return None
+    require(args.owner is not None and args.cursor_file is None and not args.idle)
+    return (args.owner,args.legacy_pod_uid)
+
+
 def main():
     import argparse
     import os
@@ -143,15 +164,19 @@ def main():
     parser.add_argument('--cursor-file')
     parser.add_argument('--limit',type=int,default=10)
     parser.add_argument('--idle',action='store_true',help='Also record eligible idle stop intents before normal observation')
+    parser.add_argument('--legacy-pod-uid',type=UUID,
+                        help='#66: accept this Pod UID of --owner by identity for anchor/drain of its open stop')
     args = parser.parse_args()
     engine = None
     try:
         require(os.geteuid() == 0 and 1 <= args.limit <= 100)
         require(args.owner is not None or args.cursor_file is not None)
+        legacy = legacy_target(args)
         config = read_private(Path(args.inputs))
         require(set(config) == {'pool','host','storageRoot'})
         engine = create_engine(secret('OBSERVER_DATABASE_URL'),hide_parameters=True)
-        observer = Observer(engine,Pool(engine,config['pool']),HostTermination(**config['host']),config['storageRoot'])
+        observer = Observer(engine,Pool(engine,config['pool']),HostTermination(**config['host']),config['storageRoot'],
+                            legacy_pod=legacy)
         idle_seconds = load_limits().idle_seconds
         cursor = Path(args.cursor_file) if args.cursor_file else None
         after = UUID(read_private(cursor)['after']) if cursor is not None and cursor.exists() else None
