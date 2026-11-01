@@ -135,3 +135,67 @@ def test_idle_evidence_uses_native_clock_and_refuses_pending_work(setup):
     assert client.post('/lifecycle/idle',json=query,headers=headers).json()['idle'] is False
     assert client.post('/lifecycle/idle',json=query).status_code == 401
     assert client.post('/lifecycle/idle',json={'idleSeconds':True},headers=headers).status_code == 422
+
+
+# #61 R1: a runner whose native never started ------------------------------------------------------
+@pytest.fixture
+def unavailable(tmp_path, monkeypatch):
+    from app.codex_policy import CodexFailure
+    owner, state, pod = (str(uuid4()) for _ in range(3))
+    root = tmp_path/'native'
+    initialize_binding(root, owner, state)
+    token = tmp_path/'token'; token.write_text('t'*40)
+    for key, value in {'APP_ENV':'test', 'RUNNER_ACCOUNT_ID':owner, 'RUNNER_STATE_ID':state,
+                       'RUNNER_POD_UID':pod, 'RUNNER_TOKEN_FILE':str(token), 'RUNNER_STATE_DIR':str(root),
+                       'CODEX_AUTH_MODE':'none', 'RESEARCH_TOOL_CALLBACK_URL':'http://callback.invalid/tools'}.items():
+        monkeypatch.setenv(key, value)
+    def failed_start(*args, **kwargs): raise CodexFailure('auth_revoked')
+    monkeypatch.setattr('runner.app.Native', failed_start)
+    body = dict(stopId=str(uuid4()),ownerId=owner,stateId=state,podUid=pod,generation=1)
+    headers = {'Authorization':'Bearer '+'t'*40,'X-Runner-State-Id':state}
+    with TestClient(create_app()) as client:
+        assert client.app.state.native is None and client.app.state.auth_failure == 'auth_revoked'
+        yield client, body, headers, root
+
+
+def test_unavailable_runner_reports_its_failure_idles_and_refuses_work(unavailable):
+    client, body, headers, root = unavailable
+    health = client.get('/health', headers=headers).json()
+    assert (health['available'], health['reason'], health['failure'], health['verification']) == (
+        False, 'auth_revoked', 'auth_revoked', 'unverified')
+    query = {'idleSeconds': 300}
+    assert client.post('/lifecycle/idle', json=query, headers=headers).json()['idle'] is False
+    client.app.state.idle_since -= 301
+    assert client.post('/lifecycle/idle', json=query, headers=headers).json() == {
+        'ownerId': body['ownerId'], 'stateId': body['stateId'], 'podUid': body['podUid'], 'idle': True}
+    turn = dict(requestId=str(uuid4()), text='never accepted', tools=[], toolToken='u'*40)
+    assert client.post('/sessions/'+str(uuid4())+'/turn', json=turn, headers=headers).status_code == 503
+
+
+@pytest.mark.parametrize('leftover', [None, 'codex', 'broker.json'])
+def test_unavailable_runner_drains_with_a_version_3_receipt(unavailable, leftover):
+    client, body, headers, root = unavailable
+    if leftover == 'codex': (root/'codex').mkdir()
+    if leftover == 'broker.json': (root/'broker.json').write_text('{}')
+    response = client.post('/lifecycle/drain', json=body, headers=headers)
+    expected = {**body, 'version': 3, 'unavailable': {'reason': 'auth_revoked', 'clean': leftover is None}}
+    assert response.status_code == 200 and response.json() == expected
+    assert read_private(root/('termination-'+body['podUid']+'.json')) == expected
+    assert client.post('/lifecycle/drain', json=body, headers=headers).json() == expected  # Same request: same receipt.
+    assert client.post('/lifecycle/drain', json={**body, 'stopId': str(uuid4())}, headers=headers).status_code == 409
+    health = client.get('/health', headers=headers).json()
+    assert (health['reason'], health['failure']) == ('unavailable', 'auth_revoked')  # Stopping keeps the failure.
+    assert client.post('/lifecycle/idle', json={'idleSeconds': 1}, headers=headers).json()['idle'] is False
+
+
+def test_unavailable_drain_never_overwrites_an_existing_receipt(unavailable):
+    client, body, headers, root = unavailable
+    file = root/('termination-'+body['podUid']+'.json')
+    file.write_text('preserve evidence')
+    assert client.post('/lifecycle/drain', json=body, headers=headers).status_code == 409
+    assert file.read_text() == 'preserve evidence' and not client.app.state.stopping
+
+
+def test_native_runner_health_has_no_failure_field(setup):
+    client, body, headers, root = setup
+    assert 'failure' not in client.get('/health', headers=headers).json()

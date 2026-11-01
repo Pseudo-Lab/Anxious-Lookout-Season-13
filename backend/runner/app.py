@@ -955,16 +955,30 @@ def create_app():
             elif not app.state.stopping and app.state.auth_failure == 'not_configured':
                 idle = (not (root/'broker.json').exists() and not (root/'codex').exists()
                         and time.monotonic()-app.state.idle_since >= body.idleSeconds)
+            elif not app.state.stopping and unavailable_reason() is not None:
+                # #61 R1: native never started (supply or startup failure). Every turn and read is
+                # refused without native, so no work can be in flight in this process.
+                idle = time.monotonic()-app.state.idle_since >= body.idleSeconds
             return {'ownerId':owner,'stateId':state_id,'podUid':pod_uid,'idle':idle}
+
+    def unavailable_reason():
+        """The startup/supply failure of a runner whose native never started, else None."""
+        reason = app.state.auth_failure
+        if app.state.native is None and isinstance(reason, str) and reason and reason != 'not_configured':
+            return reason
+        return None
 
     @app.get("/health")
     def health():
         native = app.state.native
+        # #61 R1: `failure` names why native never started, also while stopping, so the controller
+        # can match it against an unavailable drain receipt.
+        failure = {"failure": unavailable_reason()} if unavailable_reason() is not None else {}
         if app.state.stopping:
             return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid,
-                    "verification": "unverified", "available": False, "reason": "unavailable", "model": MODEL}
+                    "verification": "unverified", "available": False, "reason": "unavailable", "model": MODEL, **failure}
         if not native:
-            return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, "verification": "unverified", "available": False, "reason": app.state.auth_failure, "model": MODEL}
+            return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, "verification": "unverified", "available": False, "reason": app.state.auth_failure, "model": MODEL, **failure}
         reason = native.availability()
         return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, "verification": "fixture" if native.fixture else "real" if native.real_verified else "unverified", "available": reason is None, "reason": reason, "model": MODEL,
                 **(native.auth.status() if getattr(native, 'external', False) else {})}
@@ -1014,15 +1028,21 @@ def create_app():
                         return JSONResponse({'error': 'conflict'}, status_code=409)
                     app.state.stopping = True
                     native.closing = True
-                clean = native.close() is True
-            else:
-                # No native constructed is safe only for a never-supplied runner.
-                # A startup failure may have spawned a child before raising.
-                if app.state.auth_failure != 'not_configured':
-                    return JSONResponse({'error': 'codex_unavailable'}, status_code=503)
+                receipt = {**value, 'version': 1, 'clean': native.close() is True}
+            elif app.state.auth_failure == 'not_configured':
+                # Never supplied: nothing was installed or started.
                 app.state.stopping = True
                 clean = not (root / 'broker.json').exists() and not (root / 'codex').exists()
-            receipt = {**value, 'version': 1, 'clean': clean}
+                receipt = {**value, 'version': 1, 'clean': clean}
+            elif unavailable_reason() is not None:
+                # #61 R1: native never started, so no turn was ever accepted. A child spawned by the
+                # failed start dies with the Pod, which the controller deletes next; the receipt says
+                # so (version 3) instead of claiming a clean native drain. `clean` is evidence only.
+                app.state.stopping = True
+                clean = not (root / 'broker.json').exists() and not (root / 'codex').exists()
+                receipt = {**value, 'version': 3, 'unavailable': {'reason': unavailable_reason(), 'clean': clean}}
+            else:
+                return JSONResponse({'error': 'codex_unavailable'}, status_code=503)
             require_binding(root, owner, state_id)
             write_private(root / ('termination-'+pod_uid+'.json'), receipt)
             app.state.drain = value

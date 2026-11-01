@@ -383,6 +383,8 @@ It replaces the host observer and the host worker's Pod creation:
   Running conversations become `failed`/`codex_runner_lost` (the existing frontend text),
   open admissions are completed, a v2 `terminal` receipt is recorded, then DELETE → 404 → release.
 - **Idle:** the same native idle evidence as before, then an ordinary stop intent.
+- **Native never started** (#61 R1, runner images from #61 on): see "Blocked runners" below.
+  Such a runner reports idle and drains with a v3 `unavailable` receipt, then DELETE → 404 → release.
 - **Wake-ups:** Postgres `NOTIFY runner_runtime` (sent by API code on entry/stop and by the
   host worker on publication), the Pod watch (errors back off 1 s → 60 s) and a 30 s rescan.
 - **Logs:** one JSON line per owner per pass: `{"owner", "stage": "controller", "result"}`.
@@ -398,6 +400,67 @@ Rendered objects (`resources.json`):
 - `runner-pool-observer` Role/ClusterRole and bindings rendered empty.
 
 The host controller role loses all Pod verbs except GET.
+
+### Blocked runners (#61 R1, R2; user decision 2026-11-01)
+
+A runner Pod can be Running while its runner can do no work. Which path frees it depends on
+its state and on the runner image:
+
+| Runner state | `/health` | Path |
+| --- | --- | --- |
+| Native started, mapping idle (for example auth revoked at runtime) | `available=false` | Ordinary idle stop and v1 drain. Nothing new |
+| Native started, a mapping entry `failed`/`unknown`, or a turn lock held | any | Drain refuses with 409 on purpose: R2 |
+| Native never started (startup or broker supply failed, for example `auth_revoked`); image from #61 on | `available=false`, `reason` and `failure` = that failure | **R1**, automatic |
+| Native never started; image **before #61** (for example the dev VM's …5804) | `available=false`, no `failure` field | Never idle, drain refuses with 503: **R2 only** |
+
+**R1 (automatic).**
+- The runner reports idle once it has been up `idleSeconds`. Without native it refused every
+  turn and read, so nothing is in flight.
+- Its drain sets `stopping` and returns a v3 receipt, `unavailable: {reason, clean}`.
+  `clean` (no `broker.json` and no `codex/` on the volume) is evidence only.
+- runner-controller reads `/health` before the drain. It accepts the receipt only if `/health`
+  is `available=false` and its `failure` equals the receipt's `reason`. Otherwise it records
+  nothing, logs `unavailable_reason_mismatch`, and tries again next pass. `/health` keeps
+  `failure` while the runner is stopping, so a retry after a lost response still matches.
+- It then fails `running` conversations with `codex_runner_lost`, closes open admissions, and
+  runs DELETE → 404 → release, as on the dead-runner path.
+
+**R2 (operator).** A cluster admin, after deciding that losing any uncertain turn is acceptable:
+
+```sh
+kubectl -n runner-control exec deploy/runner-controller -- \
+  python -B -m ops.runner_controller_service reclaim --owner <owner-uuid> --pod-uid <pod-uid>
+```
+
+The controller SA has no exec right; this needs the admin's own credentials. The command
+observes everything itself, at that moment, and refuses (rc 3, one JSON line
+`{stage: reclaim, result: refused, code, observed}`) unless all of these hold:
+
+| Refusal code | Means |
+| --- | --- |
+| `pod_uid_mismatch`, `pod_missing` | The registry's Pod UID and the live Pod's UID must both equal `--pod-uid` |
+| `phase` | Registry phase must be `ready`, `runner_unreachable` or `stopping` |
+| `pod_deleting` | Kubelet is already stopping it: wait for the loop |
+| `runner_dead` | Pod Failed or `runner` terminated: the loop's dead-runner path handles it |
+| `receipt_exists` | The stop already has a receipt: the loop continues on its own |
+| `pod_address_invalid`, `health_failed`, `health_identity`, `health_invalid` | The runner could not be asked, or answered for another Pod |
+| `runner_available` | `/health` says `available=true`: stop it the ordinary way |
+| `runner_stopping` | `/health` reason `unavailable`: it is already stopping |
+| `drain_accepted` | The drain, asked now, succeeded: the loop accepts that receipt normally |
+| `drain_status`, `drain_unreachable` | The drain failed with something other than 409 or 503 |
+
+- A refusal that comes after `/health` passed may already have opened the stop intent
+  (`observed.stopOpenedByThisRun`). That is intent only: nothing is deleted.
+- **On success (rc 0)** it writes a v4 receipt
+  `operator: {health: {available, reason, verification}, drainStatus, at}`, holding what it
+  observed. It fails `running` conversations with `codex_runner_lost`, closes open admissions
+  and sets `stopping`, all in one transaction. The output reports `failedConversations`.
+- The loop then deletes that Pod UID, waits for 404 and releases.
+- Running it again is safe: it refuses with `receipt_exists`.
+- Any other error is rc 1 with fixed text.
+
+There is no automatic timeout (rejected option C): an uncertain conversation is never failed
+without a person deciding it.
 
 ### Production window: #61 and #63 together
 
@@ -523,13 +586,13 @@ Order:
 - **Receipts decide what the old release can finish.** It reads only open stops
   (`completed_at IS NULL`) and accepts only v1 drain receipts:
   - Completed stops are history, whatever their receipt version, and are never read again.
-  - An open stop with a v2 `terminal` receipt would stay STOPPING under the old release, as
-    such an owner did before #61. Nothing is corrupted.
+  - An open stop with a v2 `terminal`, v3 `unavailable` or v4 `operator` receipt would stay
+    STOPPING under the old release, as such an owner did before #61. Nothing is corrupted.
   - Before rolling back, finish those owners with runner-controller. Otherwise record them as
     left for the next roll-forward. The check:
     ```sql
     SELECT owner_id FROM runner_termination.stops
-     WHERE completed_at IS NULL AND receipt->>'version' = '2';   -- finish or record these
+     WHERE completed_at IS NULL AND receipt->>'version' IN ('2','3','4');   -- finish or record these
     ```
 - **Restore the old objects:**
   - Re-apply the previous bundle's `resources.json` (it renders the `runner-pool-observer` SA,

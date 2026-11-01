@@ -100,11 +100,45 @@ def terminal_receipt(stop, evidence):
     return {**drain_body(stop), 'version': 2, 'terminal': evidence}
 
 
+def unavailable_receipt(stop, unavailable):
+    """The runner's own drain answer when its native never started (#61 R1): no work was accepted."""
+    # Any startup/supply failure except "never supplied" (that one drains with a version 1 receipt).
+    require(type(unavailable) is dict and set(unavailable) == {'reason', 'clean'}
+            and type(unavailable['reason']) is str and 0 < len(unavailable['reason']) <= 63
+            and unavailable['reason'] != 'not_configured' and type(unavailable['clean']) is bool)
+    return {**drain_body(stop), 'version': 3, 'unavailable': {'reason': unavailable['reason'], 'clean': unavailable['clean']}}
+
+
+OPERATOR_HEALTH = {'available', 'reason', 'verification'}
+
+
+def operator_receipt(stop, operator):
+    """An operator's reclaim of a blocked runner that refuses its drain (#61 R2), with what the
+    controller observed at that moment. The operator accepts losing an uncertain turn."""
+    require(type(operator) is dict and set(operator) == {'health', 'drainStatus', 'at'})
+    health = operator['health']
+    require(type(health) is dict and set(health) == OPERATOR_HEALTH and health['available'] is False
+            and type(health['reason']) is str and 0 < len(health['reason']) <= 63 and health['reason'] != 'unavailable'
+            and health['verification'] in {'unverified', 'real', 'fixture'})
+    require(operator['drainStatus'] in {409, 503} and type(operator['drainStatus']) is int)
+    at = datetime.fromisoformat(operator['at'])
+    require(at.tzinfo is not None)
+    return {**drain_body(stop), 'version': 4,
+            'operator': {'health': dict(health), 'drainStatus': operator['drainStatus'], 'at': operator['at']}}
+
+
 def receipt_valid(stop):
     receipt = stop['receipt']
-    return receipt == {**drain_body(stop), 'version': 1, 'clean': True} or (
-        type(receipt) is dict and receipt.get('version') == 2 and type(receipt.get('terminal')) is dict
-        and receipt == terminal_receipt(stop, receipt['terminal']))
+    if receipt == {**drain_body(stop), 'version': 1, 'clean': True}:
+        return True
+    builders = {2: ('terminal', terminal_receipt), 3: ('unavailable', unavailable_receipt), 4: ('operator', operator_receipt)}
+    if type(receipt) is not dict or type(receipt.get('version')) is not int or receipt['version'] not in builders:
+        return False
+    key, build = builders[receipt['version']]
+    try:
+        return receipt == build(stop, receipt.get(key))
+    except Exception:
+        return False
 
 
 def no_pending_work(db, state):
@@ -137,25 +171,55 @@ def accept_drain(db, owner, stop_id, receipt):
     return result
 
 
-@atomic
-def accept_terminal(db, owner, stop_id, evidence):
-    """Record a dead runner Pod as the stop receipt before the controller deletes it."""
+def _accept_closed(db, owner, stop_id, make, replay):
+    """Record a receipt for a runner that cannot drain normally; the caller has closed its work."""
     validate(db)
     registry = Registry(db)
     state = registry._current(owner)
     stop = stop_for(db, state)
     require(stop is not None and stop['stop_id'] == stop_id and stop['pod_uid'] == state.pod_uid)
-    receipt = terminal_receipt(stop, evidence)
-    no_pending_work(db, state)  # The controller has already closed the dead Pod's work.
+    receipt = make(stop)
+    no_pending_work(db, state)
     require(state.phase in {Phase.READY, Phase.UNREACHABLE, Phase.STOPPING})
     if stop['receipt'] is not None:
-        require(receipt_valid(stop) and state.phase == Phase.STOPPING)
+        require(replay(stop, receipt) and state.phase == Phase.STOPPING)
         return state
     result = change(state, phase=Phase.STOPPING, active_requests=0, ambiguous=False)
     registry._save(state, result)
     db.execute(text('UPDATE runner_termination.stops SET receipt=CAST(:receipt AS jsonb) WHERE stop_id=:stop'),
                {'stop': stop_id, 'receipt': json.dumps(receipt)})
     return result
+
+
+@atomic
+def accept_terminal(db, owner, stop_id, evidence):
+    """Record a dead runner Pod as the stop receipt before the controller deletes it."""
+    return _accept_closed(db, owner, stop_id, lambda stop: terminal_receipt(stop, evidence),
+                          lambda stop, receipt: receipt_valid(stop))
+
+
+def health_failure_matches(health, stop, reason):
+    """/health of this exact runner says native never started, for the same reason."""
+    return (type(health) is dict and health.get('ownerId') == str(stop['owner_id'])
+            and health.get('stateId') == str(stop['state_id']) and health.get('podUid') == str(stop['pod_uid'])
+            and health.get('available') is False and type(reason) is str and health.get('failure') == reason)
+
+
+@atomic
+def accept_unavailable(db, owner, stop_id, receipt, health):
+    """#61 R1: accept a version 3 receipt only if /health names the same failure."""
+    def make(stop):
+        require(type(receipt) is dict and receipt == unavailable_receipt(stop, receipt.get('unavailable')))
+        require(health_failure_matches(health, stop, receipt['unavailable']['reason']))
+        return receipt
+    return _accept_closed(db, owner, stop_id, make, lambda stop, value: stop['receipt'] == value)
+
+
+@atomic
+def accept_operator(db, owner, stop_id, operator):
+    """#61 R2: an operator reclaim; never replaces an existing receipt."""
+    return _accept_closed(db, owner, stop_id, lambda stop: operator_receipt(stop, operator),
+                          lambda stop, value: False)
 
 
 @atomic
@@ -173,7 +237,7 @@ def release(db, owner, stop_id, proof, *, allow_entry):
         return state  # Evidence already consumed; never release a later UID.
     require(state.phase == Phase.STOPPING and state.state_id == stop['state_id']
             and state.generation == stop['generation'] and state.pod_uid == stop['pod_uid'])
-    require(receipt_valid(stop))  # Clean drain receipt, or the terminal-Pod receipt (#61).
+    require(receipt_valid(stop))  # Clean drain (v1), terminal Pod (v2), unavailable (v3) or operator (v4), #61.
     require(proof['podUid'] == str(state.pod_uid) and proof['nodeName'] == stop['node_name']
             and proof['nodeUid'] == str(stop['node_uid']) and proof['bootId'] == str(stop['boot_id']))
     when = datetime.fromisoformat(proof['verifiedAt'])

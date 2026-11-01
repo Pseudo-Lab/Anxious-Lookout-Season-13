@@ -8,7 +8,11 @@
 > controller holds Pod DELETE among the rendered identities and it never force-deletes; a
 > manual force delete would void this. A dead runner (Pod Failed or `runner` container exited)
 > gets a version 2 `terminal` receipt instead of a drain, and its running conversation
-> becomes `failed`/`codex_runner_lost`. `ops.runner_termination` (HostTermination),
+> becomes `failed`/`codex_runner_lost`. A runner whose native never started drains with a
+> version 3 `unavailable` receipt, accepted only when `/health` names the same failure (R1). An
+> operator's `reclaim` of a blocked runner that refuses its drain writes a version 4 `operator`
+> receipt holding what the controller observed (R2). See rollout/README.md "Blocked runners".
+> `ops.runner_termination` (HostTermination),
 > `ops.runner_stop_observer`, `ops.runner_observer_diagnostics` and
 > `ops.runner_legacy_reconcile` are removed. The drain contract and the DB schema below
 > still apply. The host CRI/proc, observer and legacy sections are the historical record.

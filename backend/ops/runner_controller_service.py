@@ -25,20 +25,34 @@ import threading
 import time
 from uuid import UUID
 
+import httpx
 from sqlalchemy import text
 
 from app.conversations import Runner
 from app.runner_controller import Controller
 from app.runner_limits import load_limits
 from app.runner_registry import CHANNEL, Registry
-from app.runner_termination_control import (accept_drain, accept_terminal, drain_body, no_pending_work,
-                                            release, request_idle_stop, request_stop, stop_for)
+from app.runner_termination_control import (accept_drain, accept_operator, accept_terminal, accept_unavailable,
+                                            drain_body, health_failure_matches, no_pending_work, release,
+                                            request_idle_stop, request_stop, stop_for, OPERATOR_HEALTH)
 from app.runner_termination_schema import validate as validate_termination
 from ops.runner_one_shot import request
 from ops.runner_provision_worker import allowed
 from runner.lifecycle import Fence, Phase, require
 
 TERMINAL_PHASES = {'Failed', 'Succeeded'}
+
+
+class Refusal(Exception):
+    """A reclaim precondition failed: a fixed code and the observed values (#66 convention)."""
+    def __init__(self, code, **observed):
+        super().__init__(code)
+        self.code, self.observed = code, observed
+
+
+def check(condition, code, **observed):
+    if not condition:
+        raise Refusal(code, **observed)
 RESCAN_SECONDS = 30
 
 
@@ -183,10 +197,20 @@ class Service:
                             self.close_dead_work(db, state)
                             accept_terminal(db, owner, stop['stop_id'], dead)
                     else:
-                        receipt = self.runner(self.address(runtime, obj), runtime.token, owner, str(state.state_id)).call(
-                            'POST', '/lifecycle/drain', drain_body(stop))
-                        with self.observer_engine.begin() as db:
-                            accept_drain(db, owner, stop['stop_id'], receipt)
+                        runner = self.runner(self.address(runtime, obj), runtime.token, owner, str(state.state_id))
+                        health = runner.call('GET', '/health', None)  # Before the drain: R1 needs the runner's own failure.
+                        receipt = runner.call('POST', '/lifecycle/drain', drain_body(stop))
+                        if type(receipt) is dict and receipt.get('version') == 3:
+                            # #61 R1: native never started. Accept only if /health names the same failure.
+                            if not health_failure_matches(health, stop, (receipt.get('unavailable') or {}).get('reason')):
+                                return 'unavailable_reason_mismatch'
+                            with self.observer_engine.begin() as db:
+                                state = Registry(db)._current(owner)
+                                self.close_dead_work(db, state)
+                                accept_unavailable(db, owner, stop['stop_id'], receipt, health)
+                        else:
+                            with self.observer_engine.begin() as db:
+                                accept_drain(db, owner, stop['stop_id'], receipt)
                 with self.observer_engine.begin() as db:
                     self.anchor(db, runtime, stop)
                 # Receipt and dispatch fence are committed; ordinary graceful deletion of that UID only.
@@ -222,6 +246,74 @@ class Service:
             WHERE stop_id=:stop'''), {'name': node['nodeName'], 'uid': node['nodeUid'], 'boot': node['bootId'],
                                       'stop': stop['stop_id']})
         return {'podUid': str(state.pod_uid), **node, 'verifiedAt': self.now().isoformat(), 'evidence': 'pod-deleted'}
+
+    # Operator reclaim (#61 R2) ---------------------------------------------
+    def reclaim(self, owner, pod_uid):
+        """Reclaim a Running runner that is blocked and refuses its drain, on an operator's command.
+
+        Every precondition is observed now, by this process. On success the version 4 receipt holds
+        what was observed; the running loop then deletes that Pod UID, waits for 404 and releases,
+        as on the dead-runner path. The operator accepts losing an uncertain turn.
+        """
+        require(isinstance(owner, UUID) and isinstance(pod_uid, UUID))
+        with self.observer_pool.bound(owner) as runtime:
+            runtime.namespace()
+            obj = self.pod(runtime)
+            with self.observer_engine.begin() as db:
+                state = Registry(db)._current(owner)
+                stop = stop_for(db, state)
+            seen = {'phase': str(state.phase), 'registryPodUid': None if state.pod_uid is None else str(state.pod_uid)}
+            check(state.pod_uid == pod_uid, 'pod_uid_mismatch', requested=str(pod_uid), **seen)
+            check(state.phase in {Phase.READY, Phase.UNREACHABLE, Phase.STOPPING}, 'phase', **seen)
+            live = None if obj is None else obj['metadata'].get('uid')
+            check(live == str(pod_uid), 'pod_missing' if obj is None else 'pod_uid_mismatch', livePodUid=live, **seen)
+            check(not obj['metadata'].get('deletionTimestamp'), 'pod_deleting',
+                  deletionTimestamp=obj['metadata'].get('deletionTimestamp'))
+            dead = terminal_evidence(obj)
+            check(dead is None, 'runner_dead', evidence=dead)  # The loop's dead-runner path handles it.
+            check(stop is None or stop['receipt'] is None, 'receipt_exists',
+                  receiptVersion=None if stop is None else (stop['receipt'] or {}).get('version'))
+            try:
+                address = self.address(runtime, obj)
+            except Exception:
+                raise Refusal('pod_address_invalid', podPhase=(obj.get('status') or {}).get('phase')) from None
+            runner = self.runner(address, runtime.token, owner, str(state.state_id))
+            try:
+                health = runner.call('GET', '/health', None)
+            except httpx.HTTPStatusError as failure:
+                raise Refusal('health_failed', status=failure.response.status_code) from None
+            except Exception:
+                raise Refusal('health_failed', status=None) from None
+            observed = {key: health.get(key) for key in sorted(OPERATOR_HEALTH)}
+            check(health.get('podUid') == str(pod_uid), 'health_identity', healthPodUid=health.get('podUid'))
+            check(observed['available'] is False, 'runner_available', health=observed)
+            check(observed['reason'] != 'unavailable', 'runner_stopping', health=observed)
+            check(type(observed['reason']) is str and 0 < len(observed['reason']) <= 63
+                  and observed['verification'] in {'unverified', 'real', 'fixture'}, 'health_invalid', health=observed)
+            opened = stop is None
+            with self.observer_engine.begin() as db:
+                stop = request_stop(db, owner)  # Intent only; nothing is deleted on a refusal below.
+            after = {'stopId': str(stop['stop_id']), 'stopOpenedByThisRun': opened, 'health': observed}
+            try:
+                receipt = runner.call('POST', '/lifecycle/drain', drain_body(stop))
+            except httpx.HTTPStatusError as failure:
+                status = failure.response.status_code
+            except Exception:
+                raise Refusal('drain_unreachable', **after) from None
+            else:
+                # The runner drained after all: the loop accepts that receipt on its normal path.
+                raise Refusal('drain_accepted', receiptVersion=(receipt or {}).get('version'), **after)
+            check(status in {409, 503}, 'drain_status', drainStatus=status, **after)
+            operator = {'health': observed, 'drainStatus': status, 'at': self.now().isoformat()}
+            with self.observer_engine.begin() as db:
+                state = Registry(db)._current(owner)
+                require(state.pod_uid == pod_uid)
+                lost = db.execute(text("""SELECT count(*) FROM research.conversations
+                    WHERE owner_id=:owner AND state='running'"""), {'owner': owner}).scalar_one()
+                self.close_dead_work(db, state)
+                accept_operator(db, owner, stop['stop_id'], operator)
+        return {'result': 'accepted', 'owner': str(owner), 'podUid': str(pod_uid), 'stopId': str(stop['stop_id']),
+                'stopOpenedByThisRun': opened, 'failedConversations': lost, 'operator': operator}
 
     # Loop -----------------------------------------------------------------
     def reconcile(self):
@@ -290,10 +382,8 @@ class Wake:
                 delay = min(delay*2, 60)
 
 
-def main():
+def build():
     from sqlalchemy import create_engine
-    import httpx
-    import ssl
     from app.runner_pool import Pool
     from app.settings import secret
     sa = Path('/var/run/secrets/kubernetes.io/serviceaccount')
@@ -305,6 +395,13 @@ def main():
     observer_engine = create_engine(secret('OBSERVER_DATABASE_URL'), hide_parameters=True)
     service = Service(controller_engine, observer_engine, Pool(controller_engine, config), Pool(observer_engine, config),
                       NodeEvidence(os.environ['RUNNER_NODE_NAME']))
+    return service, config, sa
+
+
+def serve():
+    import ssl
+    from app.settings import secret
+    service, config, sa = build()
     wake = Wake()
     threading.Thread(target=wake.listen, args=(secret('OBSERVER_DATABASE_URL').replace('postgresql+psycopg://', 'postgresql://'),),
                      daemon=True).start()
@@ -313,7 +410,7 @@ def main():
         def auth_flow(self, request):
             request.headers['Authorization'] = 'Bearer '+token()
             yield request
-    watcher = httpx.Client(base_url=api, auth=Bearer(), verify=ssl.create_default_context(cafile=str(sa/'ca.crt')),
+    watcher = httpx.Client(base_url=config['api'], auth=Bearer(), verify=ssl.create_default_context(cafile=str(sa/'ca.crt')),
                            trust_env=False, follow_redirects=False)
     threading.Thread(target=wake.watch, args=(watcher, config['namespace']), daemon=True).start()
     while True:
@@ -323,5 +420,31 @@ def main():
             print(json.dumps({'owner': str(owner), 'stage': 'controller', 'result': outcome}), flush=True)
 
 
+def main(argv=None, *, factory=build):
+    """No arguments: the resident controller. `reclaim --owner U --pod-uid U`: the operator's R2 command,
+    run with `kubectl -n runner-control exec deploy/runner-controller -- python -B -m ops.runner_controller_service ...`.
+    rc 0 accepted, 3 refused (code and observed values printed), 1 any other failure (fixed text)."""
+    import argparse
+    parser = argparse.ArgumentParser(prog='ops.runner_controller_service')
+    commands = parser.add_subparsers(dest='command')
+    reclaim = commands.add_parser('reclaim')
+    reclaim.add_argument('--owner', type=UUID, required=True)
+    reclaim.add_argument('--pod-uid', type=UUID, required=True)
+    args = parser.parse_args(argv)
+    if args.command is None:
+        return serve()
+    try:
+        result = factory()[0].reclaim(args.owner, args.pod_uid)
+    except Refusal as refusal:
+        print(json.dumps({'stage': 'reclaim', 'result': 'refused', 'code': refusal.code, 'observed': refusal.observed},
+                         sort_keys=True, default=str), flush=True)
+        return 3
+    except Exception:
+        print(json.dumps({'stage': 'reclaim', 'result': 'failed', 'error': 'unexpected error; running reclaim again is safe and shows where it stops'}), flush=True)
+        return 1
+    print(json.dumps({'stage': 'reclaim', **result}, sort_keys=True), flush=True)
+    return 0
+
+
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())
