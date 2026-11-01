@@ -508,8 +508,9 @@ Order:
    in-cluster; host files use the Pod IP only because the host cannot resolve it).
    **If `runner-control` already exists** (left by an earlier rollback, see "Rollback"), do not
    create it again:
-   - it must be `Active`, with no `deletionTimestamp`, holding only its default ServiceAccount and
-     `kube-root-ca.crt`, and with the UID recorded at the rollback;
+   - it must be `Active`, with no `deletionTimestamp`, and with the UID recorded at the rollback;
+   - `python3 -I ns-contents.py runner-control` must end with rc 0 (only the default ServiceAccount
+     and `kube-root-ca.crt`). rc 3 or 4 stops the re-apply;
    - if so, reuse it and go straight to the Secret;
    - **if it is `Terminating`, stop.** No re-apply goes ahead, because nothing can be created in it.
 
@@ -625,8 +626,17 @@ Order:
     3. Role and RoleBinding `runner-controller` in `codex-runner`, then ClusterRole and
        ClusterRoleBinding `runner-controller`.
   - **What stays.** The namespace stays Active with only its default ServiceAccount and the
-    `kube-root-ca.crt` ConfigMap, under PSA restricted. Check it with
-    `kubectl get all,secret,sa,role,rolebinding -n runner-control`: only the defaults.
+    `kube-root-ca.crt` ConfigMap, under PSA restricted.
+  - **Prove it with `python3 -I ns-contents.py runner-control`** (read-only, this directory, run
+    with the cluster's `kubectl` on `PATH`). It lists every namespaced, listable type of every
+    discovered group version, each in one complete page:
+    - rc 0: only those two defaults
+    - rc 4: anything else, listed
+    - rc 3: any lookup, discovery, malformed answer or continuation token (a failed proof)
+
+    The only allowed discovery failure is `metrics.k8s.io/v1beta1`, which stores no objects.
+    `kubectl get all,…` is not a proof: it skips ConfigMaps, PVCs, NetworkPolicies and custom
+    types.
   - **Never delete the namespace while `kubectl get apiservice v1beta1.metrics.k8s.io` is not
     `True`.**
   - **If it was deleted anyway and is stuck Terminating:**

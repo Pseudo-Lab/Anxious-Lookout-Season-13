@@ -81,6 +81,8 @@ def kubectl(args):
     verb = args[0] if args[0] != '-n' else args[2]
     rest = [a for i, a in enumerate(args) if not (a == '-n' or (i > 0 and args[i-1] == '-n'))]
     verb = rest[0]
+    if verb in ('get', 'exec') and state.get('failAllGets'):
+        die()
     if verb == 'get' and rest[1] == '--raw':
         doc = state.get('raw', {}).get(rest[2])
         if doc is None:
@@ -321,6 +323,8 @@ def main():
     with open(LOG, 'a') as stream:
         stream.write(tool + ' ' + ' '.join(args) + '\n')
     state = load()
+    if tool == 'kubectl':
+        return kubectl(args)
     if tool == 'k3s':
         if args[0] == 'kubectl':
             return kubectl(args[1:])

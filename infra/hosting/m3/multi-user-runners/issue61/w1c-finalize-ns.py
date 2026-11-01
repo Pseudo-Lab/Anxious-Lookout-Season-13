@@ -104,40 +104,63 @@ def precheck():
     return ns
 
 
+def resources_of(doc, gv):
+    """The resource list of a discovery document; any missing or malformed field refuses."""
+    if not isinstance(doc, dict) or not isinstance(doc.get('resources'), list):
+        raise Stop(3, 'precheck: discovery of %s has no resource list' % gv)
+    for resource in doc['resources']:
+        if not (isinstance(resource, dict) and isinstance(resource.get('name'), str) and resource['name']
+                and isinstance(resource.get('namespaced'), bool) and isinstance(resource.get('verbs'), list)):
+            raise Stop(3, 'precheck: discovery of %s has a malformed resource entry' % gv)
+    return doc['resources']
+
+
 def enumerate_content():
+    """Every namespaced, listable resource type must list empty in one complete page.
+
+    The only exception is metrics.k8s.io/v1beta1: an aggregated API that computes metrics and stores no objects,
+    and whose missing endpoints are the reason this namespace cannot finalize. Every other discovery or list
+    failure, malformed response or continuation refuses."""
     versions = []
     ok, core = raw('/api/v1')
     if not ok:
         raise Stop(3, 'precheck: discovery of /api/v1 failed')
-    versions.append(('v1', '/api/v1', core))
+    versions.append(('v1', '/api/v1', resources_of(core, 'v1')))
     ok, groups = raw('/apis')
-    if not ok:
-        raise Stop(3, 'precheck: discovery of /apis failed')
+    if not ok or not isinstance(groups, dict) or not isinstance(groups.get('groups'), list) or not groups['groups']:
+        raise Stop(3, 'precheck: discovery of /apis failed or has no group list')
     skipped = []
-    for group in groups.get('groups', []):
-        for version in group.get('versions', []):
-            gv = version['groupVersion']
+    for group in groups['groups']:
+        if not isinstance(group, dict) or not isinstance(group.get('versions'), list) or not group['versions']:
+            raise Stop(3, 'precheck: /apis has a group without versions')
+        for version in group['versions']:
+            gv = version.get('groupVersion') if isinstance(version, dict) else None
+            if not isinstance(gv, str) or '/' not in gv:
+                raise Stop(3, 'precheck: /apis has a malformed groupVersion')
             ok, doc = raw('/apis/' + gv)
             if not ok:
                 if gv in ALLOWED_FAILING:
                     skipped.append(gv)
                     continue
                 raise Stop(3, 'precheck: discovery of %s failed' % gv)
-            versions.append((gv, '/apis/' + gv, doc))
+            versions.append((gv, '/apis/' + gv, resources_of(doc, gv)))
     listed = 0
-    for gv, base, doc in versions:
-        for resource in doc.get('resources', []):
-            if not resource.get('namespaced') or '/' in resource['name'] or 'list' not in resource.get('verbs', []):
+    for gv, base, resources in versions:
+        for resource in resources:
+            if not resource['namespaced'] or '/' in resource['name'] or 'list' not in resource['verbs']:
                 continue
-            ok, items = raw('%s/namespaces/%s/%s?limit=5' % (base, NS, resource['name']))
-            if not ok:
-                raise Stop(3, 'precheck: listing %s %s failed' % (gv, resource['name']))
+            ok, items = raw('%s/namespaces/%s/%s?limit=500' % (base, NS, resource['name']))
+            if not ok or not isinstance(items, dict) or not isinstance(items.get('items'), list) \
+                    or not isinstance(items.get('metadata'), dict):
+                raise Stop(3, 'precheck: listing %s %s failed or is malformed' % (gv, resource['name']))
+            if items['metadata'].get('continue'):
+                raise Stop(3, 'precheck: listing %s %s is paginated; not proved empty' % (gv, resource['name']))
             listed += 1
-            left = [item.get('metadata', {}).get('name') for item in items.get('items', [])]
+            left = [item.get('metadata', {}).get('name') if isinstance(item, dict) else '?' for item in items['items']]
             if left:
                 raise Stop(3, 'precheck: %s %s still holds %s' % (gv, resource['name'], left))
-    say('enumerated %d group versions, %d namespaced resource types listed empty; skipped (failing, allowed): %s'
-        % (len(versions), listed, ', '.join(skipped) or 'none'))
+    say('enumerated %d group versions, %d namespaced resource types listed empty; skipped (failing, allowed, '
+        'stores no objects): %s' % (len(versions), listed, ', '.join(skipped) or 'none'))
     if listed == 0:
         raise Stop(3, 'precheck: no resource type was listed')
 

@@ -147,7 +147,7 @@ def imported(s, tagged=True):
 
 
 def install_fakes():
-    for tool, path in (('k3s', '/usr/local/bin/k3s'), ('docker', '/usr/local/bin/docker'),
+    for tool, path in (('k3s', '/usr/local/bin/k3s'), ('kubectl', '/usr/local/bin/kubectl'), ('docker', '/usr/local/bin/docker'),
                        ('systemctl', '/usr/local/bin/systemctl')):
         with open(path, 'w') as stream:
             stream.write('#!/bin/sh\nexec python3 -I %s/mock/fake.py %s "$@"\n' % (SRC, tool))
@@ -641,8 +641,9 @@ def main():
                          '/apis': {'groups': [{'versions': [{'groupVersion': 'apps/v1'}]},
                                               {'versions': [{'groupVersion': 'metrics.k8s.io/v1beta1'}]}]},
                          '/apis/apps/v1': {'resources': [{'name': 'deployments', 'namespaced': True, 'verbs': ['list']}]},
-                         base + 'pods?limit=5': {'items': []}, base + 'secrets?limit=5': {'items': []},
-                         '/apis/apps/v1/namespaces/runner-control/deployments?limit=5': {'items': []}}
+                         base + 'pods?limit=500': {'metadata': {}, 'items': []},
+                         base + 'secrets?limit=500': {'metadata': {}, 'items': []},
+                         '/apis/apps/v1/namespaces/runner-control/deployments?limit=500': {'metadata': {}, 'items': []}}
             for path, value in over.get('raw', {}).items():
                 if value is None:
                     st['raw'].pop(path, None)
@@ -664,7 +665,7 @@ def main():
     check('w1c: finalizes exactly runner-control, proves it gone, leaves shell-pilot',
           rc == 0 and s.get('finalizeCalls') == ['/api/v1/namespaces/runner-control/finalize']
           and okey('Namespace', None, 'runner-control') not in s['objects'] and okey('Namespace', None, 'shell-pilot') in s['objects']
-          and 'skipped (failing, allowed): metrics.k8s.io/v1beta1' in out and '3 namespaced resource types listed empty' in out, out)
+          and 'stores no objects): metrics.k8s.io/v1beta1' in out and '3 namespaced resource types listed empty' in out, out)
     for name, over in [
             ('another UID', dict(meta={'uid': 'other'})),
             ('not Terminating', dict(status={'phase': 'Active'})),
@@ -675,9 +676,15 @@ def main():
             ('discovery failure names another group', dict(cond={'NamespaceDeletionDiscoveryFailure': {
                 'message': METRICS_MSG.replace('1 failing', '2 failing') + ', example.io/v1'}})),
             ('apps/v1 discovery fails', dict(raw={'/apis/apps/v1': None})),
-            ('a list fails', dict(raw={'/api/v1/namespaces/runner-control/secrets?limit=5': None})),
-            ('an object remains', dict(raw={'/apis/apps/v1/namespaces/runner-control/deployments?limit=5':
-                                            {'items': [{'metadata': {'name': 'runner-controller'}}]}}))]:
+            ('a list fails', dict(raw={'/api/v1/namespaces/runner-control/secrets?limit=500': None})),
+            ('an object remains', dict(raw={'/apis/apps/v1/namespaces/runner-control/deployments?limit=500':
+                                            {'metadata': {}, 'items': [{'metadata': {'name': 'runner-controller'}}]}})),
+            ('/apis without groups', dict(raw={'/apis': {}})),
+            ('apps/v1 without resources', dict(raw={'/apis/apps/v1': {}})),
+            ('a list without items', dict(raw={'/api/v1/namespaces/runner-control/secrets?limit=500': {}})),
+            ('an empty first page with a continuation', dict(raw={
+                '/api/v1/namespaces/runner-control/secrets?limit=500': {'metadata': {'continue': 'next'}, 'items': []}})),
+            ('a malformed resource entry', dict(raw={'/apis/apps/v1': {'resources': [{'name': 'deployments'}]}}))]:
         w1c_state(**over)
         rc, out = w1c()
         s = state()
@@ -693,6 +700,64 @@ def main():
     w1c_state(flags=['finalizeKeeps', 'failNsGetAfterFinalize'])
     rc, out = w1c(wait=2)
     check('w1c: a failed absence lookup is rc 8, not done', rc == 8 and 'lookup failed' in out, out)
+
+    # Rollback postcheck producer: a failed lookup never reads as absent ---------------------------------
+    for case in ('ok', 'failing'):
+        setup(mutate=imported)
+        os.makedirs('/root/issue61/evidence/w2-20261101T150903Z', mode=0o700)
+        json.dump([{'kind': 'Namespace', 'namespace': None, 'name': 'runner-control', 'absent': True}],
+                  open('/root/issue61/evidence/w2-20261101T150903Z/backup.json', 'w'))
+        if case == 'failing':
+            st = state(); st['failAllGets'] = True; json.dump(st, open('/mock/state.json', 'w'))
+        done = subprocess.run(['python3', '-I', SRC + '/postcheck-w2-rollback.py'], stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, timeout=60)
+        out = done.stdout.decode()
+        if case == 'ok':
+            check('postcheck producer: lookups that answer give "absent" only from the API answer',
+                  'absent-before Namespace -/runner-control now absent' in out, out)
+        else:
+            check('postcheck producer: failed lookups exit 3 and never print absent',
+                  done.returncode == 3 and 'LOOKUP FAILED' in out and 'now absent' not in out
+                  and 'namespace runner-control absent' not in out, out)
+
+    # rollout/ns-contents.py: proof of "only the defaults" ------------------------------------------------
+    def ns_raw(**over):
+        base = '/api/v1/namespaces/runner-control/'
+        raw = {'/api/v1': {'resources': [{'name': 'serviceaccounts', 'namespaced': True, 'verbs': ['list']},
+                                         {'name': 'configmaps', 'namespaced': True, 'verbs': ['list']},
+                                         {'name': 'events', 'namespaced': True, 'verbs': ['list']},
+                                         {'name': 'persistentvolumeclaims', 'namespaced': True, 'verbs': ['list']}]},
+               '/apis': {'groups': [{'versions': [{'groupVersion': 'networking.k8s.io/v1'}]},
+                                    {'versions': [{'groupVersion': 'metrics.k8s.io/v1beta1'}]}]},
+               '/apis/networking.k8s.io/v1': {'resources': [{'name': 'networkpolicies', 'namespaced': True, 'verbs': ['list']}]},
+               base + 'serviceaccounts?limit=500': {'metadata': {}, 'items': [{'metadata': {'name': 'default'}}]},
+               base + 'configmaps?limit=500': {'metadata': {}, 'items': [{'metadata': {'name': 'kube-root-ca.crt'}}]},
+               base + 'persistentvolumeclaims?limit=500': {'metadata': {}, 'items': []},
+               '/apis/networking.k8s.io/v1/namespaces/runner-control/networkpolicies?limit=500': {'metadata': {}, 'items': []}}
+        raw.update(over)
+        return raw
+
+    def ns_contents(raw):
+        setup(mutate=lambda st: st.__setitem__('raw', {k: v for k, v in raw.items() if v is not None}))
+        done = subprocess.run(['python3', '-I', '/m3/multi-user-runners/rollout/ns-contents.py', 'runner-control'],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+        return done.returncode, done.stdout.decode()
+
+    rc, out = ns_contents(ns_raw())
+    check('ns-contents: only the defaults is rc 0 (events ignored, metrics skipped)',
+          rc == 0 and 'only the defaults' in out and 'metrics.k8s.io/v1beta1' in out, out)
+    base = '/api/v1/namespaces/runner-control/'
+    for name, over, want in [
+            ('a leftover PVC', {base + 'persistentvolumeclaims?limit=500': {'metadata': {}, 'items': [{'metadata': {'name': 'x'}}]}}, 4),
+            ('another ConfigMap', {base + 'configmaps?limit=500': {'metadata': {}, 'items': [
+                {'metadata': {'name': 'kube-root-ca.crt'}}, {'metadata': {'name': 'other'}}]}}, 4),
+            ('a list failing', {'/apis/networking.k8s.io/v1/namespaces/runner-control/networkpolicies?limit=500': None}, 3),
+            ('another group failing discovery', {'/apis/networking.k8s.io/v1': None}, 3),
+            ('a continuation token', {base + 'persistentvolumeclaims?limit=500': {'metadata': {'continue': 'n'}, 'items': []}}, 3),
+            ('a list without metadata', {base + 'persistentvolumeclaims?limit=500': {'items': []}}, 3),
+            ('/apis without groups', {'/apis': {}}, 3)]:
+        rc, out = ns_contents(ns_raw(**over))
+        check('ns-contents: %s is rc %d' % (name, want), rc == want, out)
 
     print('passed %d, failed %d' % (passed, failed))
     return 1 if failed else 0
