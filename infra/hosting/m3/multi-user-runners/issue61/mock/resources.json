@@ -1,0 +1,717 @@
+{
+ "apiVersion": "v1",
+ "items": [
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "Role",
+   "metadata": {
+    "name": "runner-pool-api",
+    "namespace": "codex-runner"
+   },
+   "rules": [
+    {
+     "apiGroups": [
+      ""
+     ],
+     "resources": [
+      "pods",
+      "persistentvolumeclaims",
+      "secrets"
+     ],
+     "verbs": [
+      "get"
+     ]
+    }
+   ]
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "RoleBinding",
+   "metadata": {
+    "name": "runner-pool-api",
+    "namespace": "codex-runner"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "Role",
+    "name": "runner-pool-api"
+   },
+   "subjects": [
+    {
+     "kind": "ServiceAccount",
+     "name": "hosting",
+     "namespace": "m2-hosting"
+    }
+   ]
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRole",
+   "metadata": {
+    "name": "runner-pool-api"
+   },
+   "rules": [
+    {
+     "apiGroups": [
+      ""
+     ],
+     "resourceNames": [
+      "codex-runner"
+     ],
+     "resources": [
+      "namespaces"
+     ],
+     "verbs": [
+      "get"
+     ]
+    }
+   ]
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRoleBinding",
+   "metadata": {
+    "name": "runner-pool-api"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "ClusterRole",
+    "name": "runner-pool-api"
+   },
+   "subjects": [
+    {
+     "kind": "ServiceAccount",
+     "name": "hosting",
+     "namespace": "m2-hosting"
+    }
+   ]
+  },
+  {
+   "apiVersion": "v1",
+   "automountServiceAccountToken": false,
+   "kind": "ServiceAccount",
+   "metadata": {
+    "name": "runner-pool-controller",
+    "namespace": "codex-runner"
+   }
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "Role",
+   "metadata": {
+    "name": "runner-pool-controller",
+    "namespace": "codex-runner"
+   },
+   "rules": [
+    {
+     "apiGroups": [
+      ""
+     ],
+     "resources": [
+      "pods",
+      "persistentvolumeclaims",
+      "secrets"
+     ],
+     "verbs": [
+      "get"
+     ]
+    },
+    {
+     "apiGroups": [
+      ""
+     ],
+     "resources": [
+      "persistentvolumeclaims",
+      "secrets"
+     ],
+     "verbs": [
+      "create"
+     ]
+    },
+    {
+     "apiGroups": [
+      ""
+     ],
+     "resourceNames": [
+      "runner-workload"
+     ],
+     "resources": [
+      "serviceaccounts"
+     ],
+     "verbs": [
+      "get"
+     ]
+    },
+    {
+     "apiGroups": [
+      "networking.k8s.io"
+     ],
+     "resourceNames": [
+      "runner-default-deny"
+     ],
+     "resources": [
+      "networkpolicies"
+     ],
+     "verbs": [
+      "get"
+     ]
+    }
+   ]
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "RoleBinding",
+   "metadata": {
+    "name": "runner-pool-controller",
+    "namespace": "codex-runner"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "Role",
+    "name": "runner-pool-controller"
+   },
+   "subjects": [
+    {
+     "kind": "ServiceAccount",
+     "name": "runner-pool-controller",
+     "namespace": "codex-runner"
+    }
+   ]
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRole",
+   "metadata": {
+    "name": "runner-pool-controller"
+   },
+   "rules": [
+    {
+     "apiGroups": [
+      ""
+     ],
+     "resourceNames": [
+      "codex-runner"
+     ],
+     "resources": [
+      "namespaces"
+     ],
+     "verbs": [
+      "get"
+     ]
+    },
+    {
+     "apiGroups": [
+      ""
+     ],
+     "resources": [
+      "persistentvolumes"
+     ],
+     "verbs": [
+      "get",
+      "create"
+     ]
+    }
+   ]
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRoleBinding",
+   "metadata": {
+    "name": "runner-pool-controller"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "ClusterRole",
+    "name": "runner-pool-controller"
+   },
+   "subjects": [
+    {
+     "kind": "ServiceAccount",
+     "name": "runner-pool-controller",
+     "namespace": "codex-runner"
+    }
+   ]
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Namespace",
+   "metadata": {
+    "labels": {
+     "pod-security.kubernetes.io/enforce": "restricted",
+     "pod-security.kubernetes.io/enforce-version": "latest"
+    },
+    "name": "runner-control"
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "ServiceAccount",
+   "metadata": {
+    "name": "runner-controller",
+    "namespace": "runner-control"
+   }
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "Role",
+   "metadata": {
+    "name": "runner-controller",
+    "namespace": "codex-runner"
+   },
+   "rules": [
+    {
+     "apiGroups": [
+      ""
+     ],
+     "resources": [
+      "pods"
+     ],
+     "verbs": [
+      "get",
+      "list",
+      "watch",
+      "create",
+      "delete"
+     ]
+    },
+    {
+     "apiGroups": [
+      ""
+     ],
+     "resources": [
+      "persistentvolumeclaims",
+      "secrets"
+     ],
+     "verbs": [
+      "get"
+     ]
+    }
+   ]
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "RoleBinding",
+   "metadata": {
+    "name": "runner-controller",
+    "namespace": "codex-runner"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "Role",
+    "name": "runner-controller"
+   },
+   "subjects": [
+    {
+     "kind": "ServiceAccount",
+     "name": "runner-controller",
+     "namespace": "runner-control"
+    }
+   ]
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRole",
+   "metadata": {
+    "name": "runner-controller"
+   },
+   "rules": [
+    {
+     "apiGroups": [
+      ""
+     ],
+     "resourceNames": [
+      "codex-runner"
+     ],
+     "resources": [
+      "namespaces"
+     ],
+     "verbs": [
+      "get"
+     ]
+    },
+    {
+     "apiGroups": [
+      ""
+     ],
+     "resourceNames": [
+      "anxious-lookout"
+     ],
+     "resources": [
+      "nodes"
+     ],
+     "verbs": [
+      "get"
+     ]
+    }
+   ]
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRoleBinding",
+   "metadata": {
+    "name": "runner-controller"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "ClusterRole",
+    "name": "runner-controller"
+   },
+   "subjects": [
+    {
+     "kind": "ServiceAccount",
+     "name": "runner-controller",
+     "namespace": "runner-control"
+    }
+   ]
+  },
+  {
+   "apiVersion": "apps/v1",
+   "kind": "Deployment",
+   "metadata": {
+    "labels": {
+     "app": "runner-controller"
+    },
+    "name": "runner-controller",
+    "namespace": "runner-control"
+   },
+   "spec": {
+    "replicas": 1,
+    "selector": {
+     "matchLabels": {
+      "app": "runner-controller"
+     }
+    },
+    "strategy": {
+     "type": "Recreate"
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "app": "runner-controller"
+      }
+     },
+     "spec": {
+      "containers": [
+       {
+        "command": [
+         "python",
+         "-B",
+         "-m",
+         "ops.runner_controller_service"
+        ],
+        "env": [
+         {
+          "name": "CODEX_USER_RUNNERS_ENABLE",
+          "value": "true"
+         },
+         {
+          "name": "CODEX_USER_RUNNER_MAX_PODS",
+          "value": "3"
+         },
+         {
+          "name": "CODEX_USER_RUNNER_IDLE_SECONDS",
+          "value": "1800"
+         },
+         {
+          "name": "CODEX_RUNNER_NATIVE_SIZE_GIB",
+          "value": "5"
+         },
+         {
+          "name": "CODEX_RUNNER_CONTROL_SIZE_GIB",
+          "value": "1"
+         },
+         {
+          "name": "CODEX_USER_RUNNER_ALLOWLIST",
+          "value": "ff4b718f-de46-4c10-9195-c993eff9ded9"
+         },
+         {
+          "name": "RUNNER_NAMESPACE",
+          "value": "codex-runner"
+         },
+         {
+          "name": "RUNNER_NAMESPACE_UID",
+          "value": "52fe679d-33b1-4e84-b377-443ff61fb38c"
+         },
+         {
+          "name": "RUNNER_POD_CIDR",
+          "value": "10.42.0.0/16"
+         },
+         {
+          "name": "RUNNER_NODE_NAME",
+          "value": "anxious-lookout"
+         },
+         {
+          "name": "CONTROLLER_DATABASE_URL_FILE",
+          "value": "/run/runner-db/controller-url"
+         },
+         {
+          "name": "OBSERVER_DATABASE_URL_FILE",
+          "value": "/run/runner-db/observer-url"
+         }
+        ],
+        "image": "docker.io/library/anxious-dev-runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "imagePullPolicy": "Never",
+        "name": "controller",
+        "resources": {
+         "requests": {
+          "cpu": "50m",
+          "memory": "128Mi"
+         }
+        },
+        "securityContext": {
+         "allowPrivilegeEscalation": false,
+         "capabilities": {
+          "drop": [
+           "ALL"
+          ]
+         },
+         "readOnlyRootFilesystem": true
+        },
+        "volumeMounts": [
+         {
+          "mountPath": "/run/runner-db",
+          "name": "db",
+          "readOnly": true
+         },
+         {
+          "mountPath": "/tmp",
+          "name": "tmp"
+         }
+        ]
+       }
+      ],
+      "enableServiceLinks": false,
+      "securityContext": {
+       "fsGroup": 10001,
+       "runAsGroup": 10001,
+       "runAsNonRoot": true,
+       "runAsUser": 10001,
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      },
+      "serviceAccountName": "runner-controller",
+      "volumes": [
+       {
+        "name": "db",
+        "secret": {
+         "defaultMode": 288,
+         "secretName": "runner-controller-db"
+        }
+       },
+       {
+        "emptyDir": {
+         "medium": "Memory",
+         "sizeLimit": "16Mi"
+        },
+        "name": "tmp"
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "Role",
+   "metadata": {
+    "name": "runner-web",
+    "namespace": "codex-runner"
+   },
+   "rules": []
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "RoleBinding",
+   "metadata": {
+    "name": "runner-web",
+    "namespace": "codex-runner"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "Role",
+    "name": "runner-web"
+   },
+   "subjects": []
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "Role",
+   "metadata": {
+    "name": "runner-preparer",
+    "namespace": "codex-runner"
+   },
+   "rules": []
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "RoleBinding",
+   "metadata": {
+    "name": "runner-preparer",
+    "namespace": "codex-runner"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "Role",
+    "name": "runner-preparer"
+   },
+   "subjects": []
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "Role",
+   "metadata": {
+    "name": "runner-pool-supply",
+    "namespace": "codex-runner"
+   },
+   "rules": []
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "RoleBinding",
+   "metadata": {
+    "name": "runner-pool-supply",
+    "namespace": "codex-runner"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "Role",
+    "name": "runner-pool-supply"
+   },
+   "subjects": []
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "Role",
+   "metadata": {
+    "name": "runner-pool-observer",
+    "namespace": "codex-runner"
+   },
+   "rules": []
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "RoleBinding",
+   "metadata": {
+    "name": "runner-pool-observer",
+    "namespace": "codex-runner"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "Role",
+    "name": "runner-pool-observer"
+   },
+   "subjects": []
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRole",
+   "metadata": {
+    "name": "runner-web-namespace"
+   },
+   "rules": []
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRoleBinding",
+   "metadata": {
+    "name": "runner-web-namespace"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "ClusterRole",
+    "name": "runner-web-namespace"
+   },
+   "subjects": []
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRole",
+   "metadata": {
+    "name": "codex-runner-preparer"
+   },
+   "rules": []
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRoleBinding",
+   "metadata": {
+    "name": "codex-runner-preparer"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "ClusterRole",
+    "name": "codex-runner-preparer"
+   },
+   "subjects": []
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRole",
+   "metadata": {
+    "name": "runner-pool-supply"
+   },
+   "rules": []
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRoleBinding",
+   "metadata": {
+    "name": "runner-pool-supply"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "ClusterRole",
+    "name": "runner-pool-supply"
+   },
+   "subjects": []
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRole",
+   "metadata": {
+    "name": "runner-pool-observer"
+   },
+   "rules": []
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRoleBinding",
+   "metadata": {
+    "name": "runner-pool-observer"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "ClusterRole",
+    "name": "runner-pool-observer"
+   },
+   "subjects": []
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Secret",
+   "metadata": {
+    "name": "hosting-runner-pool-v2",
+    "namespace": "m2-hosting"
+   },
+   "stringData": {
+    "pool.json": "{\"version\": 2, \"api\": \"https://10.43.0.1:443\", \"namespace\": \"codex-runner\", \"namespaceUid\": \"52fe679d-33b1-4e84-b377-443ff61fb38c\", \"podCIDR\": \"10.42.0.0/16\", \"caFile\": \"/run/runner-kube/ca.crt\", \"kubeTokenFile\": \"/run/runner-kube/token\"}"
+   },
+   "type": "Opaque"
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "ResourceQuota",
+   "metadata": {
+    "name": "runner-bootstrap-no-pods",
+    "namespace": "codex-runner"
+   },
+   "spec": {
+    "hard": {
+     "count/pods": "3"
+    }
+   }
+  }
+ ],
+ "kind": "List"
+}
