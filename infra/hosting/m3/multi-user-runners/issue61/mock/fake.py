@@ -57,8 +57,12 @@ def opt(args, flag):
 
 
 def upsert(state, obj):
+    """Create or update; a payload UID is a precondition (the API refuses a write to a replaced object)."""
     k = okey(obj['kind'], obj['metadata'].get('namespace'), obj['metadata']['name'])
     old = state['objects'].get(k)
+    want = obj['metadata'].get('uid')
+    if want and (old is None or old['metadata']['uid'] != want):
+        die()
     obj = json.loads(json.dumps(obj))
     obj['metadata']['uid'] = old['metadata']['uid'] if old else str(uuid.uuid4())
     if obj['kind'] == 'Secret' and 'stringData' in obj:
@@ -100,16 +104,25 @@ def kubectl(args):
         if failing(stage):
             save(state); die()
         doc = json.load(sys.stdin)
+        written = []
         for obj in (doc['items'] if doc.get('kind') == 'List' else [doc]):
             upsert(state, obj)
+            k = okey(obj['kind'], obj['metadata'].get('namespace'), obj['metadata']['name'])
+            written.append(state['objects'][k])
+        if stage == 'apply-ns' and state.get('foreignAfterNs'):  # Another actor creates a name W2 will create.
+            upsert(state, state.pop('foreignAfterNs'))
         save(state)
+        if failing(stage + '-lost'):
+            die()  # Applied on the server, answer lost.
+        print(json.dumps({'kind': 'List', 'items': written}))
         return
     if verb == 'replace':
         if failing('replace'):
             die()
         obj = json.load(sys.stdin)
-        for field in ('uid', 'resourceVersion', 'managedFields'):
+        for field in ('resourceVersion', 'managedFields'):
             assert field not in obj['metadata'], 'replace payload kept ' + field
+        assert obj['metadata'].get('uid'), 'replace payload must carry the backup UID'
         upsert(state, obj)
         save(state)
         return
@@ -118,24 +131,40 @@ def kubectl(args):
         if failing('secret'):
             die()
         data = {}
-        for arg in rest[4:]:
+        assert opt(rest, '-o') == 'json', rest
+        for arg in [a for a in rest[4:] if a.startswith('--from-file=')]:
             name, path = arg.split('=', 1)[1].split('=', 1)
             with open(path) as stream:
                 value = stream.read()
             data[name] = '<set>'
             state.setdefault('dsnHosts', {})[name] = re.sub(r'^.*@', '', value).split('/')[0]
             state.setdefault('dsnTemp', []).append(path)
-        state['objects'][okey('secret', ns, 'runner-controller-db')] = {
-            'kind': 'Secret', 'metadata': {'name': 'runner-controller-db', 'namespace': ns, 'uid': str(uuid.uuid4())},
-            'data': data}
+        obj = {'kind': 'Secret', 'metadata': {'name': 'runner-controller-db', 'namespace': ns, 'uid': str(uuid.uuid4())},
+               'data': data}
+        state['objects'][okey('secret', ns, 'runner-controller-db')] = obj
         save(state)
-        return
-    if verb == 'set':
-        if failing('set-image'):
+        if failing('secret-lost'):
             die()
-        image = rest[3].split('=', 1)[1]
-        state['objects'][okey('deployment', ns, 'api')]['spec']['template']['spec']['containers'][0]['image'] = image
-        save(state)
+        print(json.dumps(obj))
+        return
+    if verb == 'patch':
+        patch = json.loads(opt(rest, '-p'))
+        obj = state['objects'].get(okey(rest[1], ns, rest[2]))
+        if obj is None or patch['metadata']['uid'] != obj['metadata']['uid']:
+            die()
+        if rest[2] == 'api':
+            if failing('set-image'):
+                die()
+            obj['spec']['template']['spec']['containers'][0]['image'] = \
+                patch['spec']['template']['spec']['containers'][0]['image']
+            save(state)
+            if failing('set-image-lost'):
+                die()
+        else:
+            obj.setdefault('spec', {})['replicas'] = patch['spec']['replicas']
+            state['scaled'] = True
+            state['controllerPods'] = []
+            save(state)
         return
     if verb == 'rollout':
         if failing('rollout-' + rest[2].split('/')[1]):
@@ -156,16 +185,18 @@ def kubectl(args):
         save(state)
         if failing('grants') and 'GRANT' in query:
             die()
+        if 'GRANT' in query:
+            state['granted'] = query.count('GRANT')
+            save(state)
+            if failing('grants-lost'):
+                die()
         if 'capacity_wait' in query:
             print(state.get('waiting', 0))
         elif 'runner_termination.stops' in query:
             print('\n'.join(state.get('openStops', [])))
         return
     if verb == 'scale':
-        state['scaled'] = True
-        state['controllerPods'] = []
-        save(state)
-        return
+        die(97)  # Scaling by name is not allowed: only the UID-preconditioned patch.
     if verb == 'wait':
         return
     if verb == 'api-resources':
@@ -215,6 +246,8 @@ def main():
                 save(state)
                 return
             if args[3:5] == ['images', 'ls']:
+                if failing('ctr-ls'):
+                    die()
                 if '-q' in args:
                     print('\n'.join(state['images']))
                 else:

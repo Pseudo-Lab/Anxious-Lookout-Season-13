@@ -10,6 +10,7 @@ set -u
 umask 077
 here=$(dirname "$0")
 . "$here/lib.sh"
+. "$here/w0-lib.sh"
 trap 'exit 130' INT TERM
 
 echo "w0: $(date -u +%Y-%m-%dT%H:%M:%SZ) read-only baseline"
@@ -80,9 +81,7 @@ q=$(k -n codex-runner get resourcequota runner-bootstrap-no-pods -o go-template=
 # W1 inputs: archives on the guest, and whether the images are already imported.
 ( cd "$ARCHIVES" && sha256sum -c --quiet "$here/archives.sha256" ) >/dev/null 2>&1 \
   && note 'archives sha256 ok' || fail_lookup 'archives sha256'
-for ref in $IMAGE_REFS; do
-  if ctr_has "$ref"; then note "imported $ref"; else note "not imported $ref"; fi
-done
+check_imports
 
 # …5804 ledger probe (read-only, see header). Output: one line, fixed fields.
 probe=$(k -n codex-runner exec "$(pod_name "$OWNER_5804")" -c runner -- python -I -c '

@@ -51,7 +51,7 @@ def setup(*, units=None, waiting=0, mutate=None, fail=()):
     for path in ('/mock', INSTALL, '/root/r4-rollout', '/home/opc/issue61-images'):
         os.makedirs(path, mode=0o700)
     shutil.copy(SRC + '/mock/resources.json', '/mock/resources.json')
-    for name in ('lib.sh', 'w1-import.sh'):
+    for name in ('lib.sh', 'w0-lib.sh', 'w1-import.sh'):
         shutil.copy(os.path.join(SRC, name), INSTALL)
     with open(os.path.join(SRC, 'w2-apply.py')) as stream:
         text = stream.read()
@@ -227,14 +227,22 @@ def main():
     check('w2: only JSON outcome log lines shown', '"result": "deleting"' in out)
     check('w2: host role rules recorded before', 'rules before=' in out, out)
     check('w2: backup and created UIDs recorded', ev is not None and os.path.exists(ev + '/backup.json')
-          and os.path.exists(ev + '/created.json'), out)
+          and os.path.exists(ev + '/changes.json'), out)
     backup = json.load(open(ev + '/backup.json'))
     check('w2: Secret data never in evidence', all('object' not in e for e in backup if e['kind'] == 'Secret')
           and 'SECRETPW' not in open(ev + '/backup.json').read())
     check('w2: values dropped the host-observer keys', "dropped=['bootId', 'criSocket', 'crictl'" in out, out)
     check('w2: allowlist taken from the live api', "allowlist=['00000000-0000-4000-8000-000000000048', "
           "'00000000-0000-4000-8000-000000005804']" in out, out)
-    created = json.load(open(ev + '/created.json'))
+    changes = json.load(open(ev + '/changes.json'))
+    check('w2: created UIDs come from the answers and match the live objects',
+          set(changes['created']) == {'Namespace -/runner-control', 'ServiceAccount runner-control/runner-controller',
+              'Role codex-runner/runner-controller', 'RoleBinding codex-runner/runner-controller',
+              'ClusterRole -/runner-controller', 'ClusterRoleBinding -/runner-controller',
+              'Deployment runner-control/runner-controller', 'Secret runner-control/runner-controller-db'}
+          and changes['creationUncertain'] == [] and not changes['uncertain'], json.dumps(changes))
+    check('w2: grants sent in one transaction', any(q.startswith('BEGIN;') and q.rstrip().endswith('COMMIT;')
+                                                   for q in s.get('queries', [])))
 
     # W2 rollback after a full apply ----------------------------------------------------------------
     s = state()
@@ -274,8 +282,9 @@ def main():
     # Partial failure -------------------------------------------------------------------------------
     setup(mutate=imported, fail=['set-image'])
     rc, out = w2('apply')
-    check('w2: failure at the api image is rc 5 and lists what changed', rc == 5 and 'partial: already changed by this run: '
-          'granted 061' in out and 'applied CNP' in out and 'rollback: python3 -I' in out, out)
+    check('w2: failure at the api image is rc 5 and lists what changed', rc == 5 and 'partial: done: granted 061' in out
+          and 'applied CNP' in out and 'uncertain (may have been applied): set api image' in out
+          and 'rollback: python3 -I' in out, out)
     ev = evidence(out)
     os.unlink('/mock/fail')
     rc, out = w2('rollback', ev)
@@ -285,6 +294,68 @@ def main():
           and okey('Namespace', None, 'runner-control') not in s['objects'], out)
     rc, out = w2('rollback', '/tmp/elsewhere')
     check('w2: rollback outside the evidence root is refused', rc == 3, out)
+
+
+    # Review round 1 counterexamples ------------------------------------------------------------------
+    for name, change in [
+            ('controller Deployment replaced after apply',
+             lambda s: s['objects'][okey('Deployment', 'runner-control', 'runner-controller')]['metadata'].__setitem__('uid', 'foreign')),
+            ('pre-existing CNP replaced after apply',
+             lambda s: s['objects'][okey('CiliumNetworkPolicy', 'codex-runner', 'runner-callback-draft')]['metadata'].__setitem__('uid', 'foreign'))]:
+        setup(mutate=imported)
+        rc, out = w2('apply')
+        ev = evidence(out)
+        s = state()
+        change(s)
+        s['controllerPods'] = ['runner-controller-abc']
+        json.dump(s, open('/mock/state.json', 'w'))
+        before = json.dumps(state()['objects'], sort_keys=True)
+        rc, out = w2('rollback', ev)
+        s = state()
+        check('w2 rollback: %s refuses before any change (rc 3, not scaled)' % name,
+              rc == 3 and not s.get('scaled') and json.dumps(s['objects'], sort_keys=True) == before
+              and 'refused before any change' in out, out)
+
+    def foreign(s):
+        imported(s)
+        s['foreignAfterNs'] = {'kind': 'ClusterRole', 'metadata': {'name': 'runner-controller'}, 'rules': []}
+    setup(mutate=foreign)
+    rc, out = w2('apply')
+    s = state()
+    check('w2: a name that appears before its step is never adopted (rc 5, nothing applied over it)',
+          rc == 5 and 'appeared before this run created it' in out
+          and s['objects'][okey('ClusterRole', None, 'runner-controller')]['rules'] == [], out)
+
+    for stage, text in [('grants-lost', 'granted 061'), ('apply-ns-lost', 'applied Namespace runner-control'),
+                        ('secret-lost', 'created Secret runner-control/runner-controller-db'),
+                        ('set-image-lost', 'set api image')]:
+        setup(mutate=imported, fail=[stage])
+        rc, out = w2('apply')
+        ev = evidence(out)
+        changes = json.load(open(ev + '/changes.json'))
+        check('w2: lost answer at %s is reported as uncertain, not as nothing' % stage,
+              rc == 5 and any(u.startswith(text) for u in changes['uncertain'])
+              and 'uncertain (may have been applied): ' + text in out, out)
+        if stage in {'apply-ns-lost', 'secret-lost'}:
+            os.unlink('/mock/fail')
+            rc, out = w2('rollback', ev)
+            s = state()
+            check('w2 rollback after %s: the uncertain object is reported, never deleted' % stage,
+                  rc == 5 and okey('Namespace', None, 'runner-control') in s['objects']
+                  and ('creation uncertain' in out or 'not deleted' in out), out)
+
+    # W0 helper: ctr_has rc 0/1/2 and check_imports ----------------------------------------------------
+    for case, mutate, want_rc, want in [('imported', imported, 0, 'imported docker.io'),
+                                        ('absent', None, 1, 'not imported docker.io'),
+                                        ('lookup failed', None, 2, 'LOOKUP FAILED: containerd image list')]:
+        setup(mutate=mutate, fail=['ctr-ls'] if case == 'lookup failed' else [])
+        rc, out = run('sh', '-c', '. %s/lib.sh; ctr_has docker.io/library/anxious-dev-runner:61-5e73bc4; echo "rc=$?"' % INSTALL)
+        check('w0 helper: ctr_has %s is rc %d' % (case, want_rc), out.strip().endswith('rc=%d' % want_rc), out)
+        rc, out = run('sh', '-c', 'lookups=0; note() { echo "$1"; }; fail_lookup() { echo "LOOKUP FAILED: $1"; '
+                      'lookups=$((lookups+1)); }; . %s/lib.sh; . %s/w0-lib.sh; check_imports; echo "lookups=$lookups"'
+                      % (INSTALL, INSTALL))
+        check('w0 check_imports: %s' % case, want in out and out.strip().endswith(
+            'lookups=%d' % (3 if case == 'lookup failed' else 0)), out)
 
     print('passed %d, failed %d' % (passed, failed))
     return 1 if failed else 0

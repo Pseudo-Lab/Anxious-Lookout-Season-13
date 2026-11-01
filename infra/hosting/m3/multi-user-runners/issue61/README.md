@@ -24,7 +24,8 @@ The images are built on the host from `5e73bc4` (`--platform linux/amd64`) and m
 
 ## Files installed next to the scripts
 
-- `lib.sh`: shared constants and read helpers.
+- `lib.sh`: shared constants and read helpers (part of the W1 clearance; unchanged since).
+- `w0-lib.sh`: W0-only helpers (`check_imports`), kept apart from `lib.sh` so W1's cleared set stays the same.
 - `archives.sha256`: the archive manifest.
 - `40-runner-network.json`, from `infra/hosting/m3/user-runner-e2e/`.
 - `061_runner_controller_grants.sql`, from `backend/db/`.

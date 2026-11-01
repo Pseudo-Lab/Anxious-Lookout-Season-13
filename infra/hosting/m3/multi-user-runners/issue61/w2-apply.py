@@ -19,16 +19,25 @@ apply, in this order (every lookup, the render and every backup finish before th
   4 rbac     every other resources.json object except the Deployment (host roles lose Pod verbs / become empty)
   5 cnp      user-runner-e2e/40-runner-network.json (8080 ingress from runner-control instead of host)
   6 api      api Deployment image -> the 5e73bc4 runtime reference (rollout status)
-  7 deploy   Deployment runner-controller (rollout status), can-i checks, created UIDs recorded
+  7 deploy   Deployment runner-controller (rollout status), can-i checks, created UIDs (from the create answers)
 After step 7 runner-controller starts its loop: …0048/…5802 take the dead-runner path on their own (back's
 read-only postcheck records it). …5804 is left for W3 (R2).
 
+Ownership: every change is logged as attempted, then done or uncertain (changes.json). The UID of an object
+that was absent before W2 is taken only from the answer of the command that created it, never from a later
+lookup, and never overwritten; a lost answer leaves it "creation uncertain". Before each step, objects W2 is
+about to create must still be absent (a name that appeared meanwhile is never adopted). Writes to objects that
+existed before carry their backup UID, so the API refuses a write to a replaced object (apply, the api image
+patch, rollback's replace and scale).
+
 rollback (restores what W2 changed; never claims to undo a reclaim):
-  scale runner-controller to 0 and wait for its Pod; list open v2/v3/v4 stops (recorded, not finished here);
-  replace every object that existed before W2 with its backup (server fields stripped); delete only objects
-  that were absent before W2 and whose live UID equals the UID recorded after creation, each with a UID
-  precondition; Namespace runner-control last, only if nothing but default children remain in it.
-  The 061 grants stay (rollout README). Already failed conversations and deleted Pods stay so.
+  first, with nothing changed yet: every pre-existing object must still have its backup UID and a present
+  runner-controller Deployment must have the UID this run created, else refuse (rc 3);
+  scale runner-controller to 0 by a UID-preconditioned patch and wait for its Pod; list open v2/v3/v4 stops
+  (recorded, not finished here); replace every object that existed before W2 with its backup (UID kept as the
+  precondition); delete only objects this run created, by the recorded UID with a UID precondition (creation
+  uncertain: reported, never deleted); Namespace runner-control last, only if nothing but its default children
+  remain. The 061 grants stay (rollout README). Already failed conversations and deleted Pods stay so.
 
 rc: 0 done and verified; 2 placeholders left; 3 precheck/render/backup refused, nothing changed; 5 a change
 failed or was ambiguous (the output lists what this run changed; run rollback with the printed directory);
@@ -272,21 +281,80 @@ def backup(ev, items):
 
 # Apply ------------------------------------------------------------------------------------------------
 class Changes:
-    def __init__(self, ev):
-        self.ev, self.done = ev, []
+    """What this run changed, in three states written before and after every attempt (changes.json):
+    done (confirmed), uncertain (the command failed or its answer was lost: the server may have applied it).
 
-    def mark(self, text):
+    created holds the UID of each object that was absent before W2, taken only from the server's answer to the
+    command that created it, and never overwritten. An object whose creation answer was lost is "uncertain" and
+    is never adopted by a later lookup; rollback refuses to delete it."""
+    def __init__(self, ev, record):
+        self.ev, self.done, self.uncertain, self.created, self.unsure = ev, [], [], {}, []
+        self.absent = {label((e['kind'], e['namespace'], e['name'])) for e in record if e['absent']}
+        self.uids = {label((e['kind'], e['namespace'], e['name'])): (e.get('object') or {}).get('metadata', {}).get('uid')
+                     or e.get('uid') for e in record if not e['absent']}
+        self.save()
+
+    def save(self):
+        path = os.path.join(self.ev, 'changes.json')
+        with open(path + '.tmp', 'w') as stream:
+            json.dump({'done': self.done, 'uncertain': self.uncertain, 'created': self.created,
+                       'creationUncertain': self.unsure}, stream, indent=1)
+        os.replace(path + '.tmp', path)
+
+    def step(self, text, objs, action):
+        """Run one change. Objects absent before W2 must still be absent (no adoption of a foreign object)."""
+        mine = [label(key(o)) for o in objs if label(key(o)) in self.absent]
+        for name in mine:
+            kind, rest = name.split(' ', 1)
+            ns, obj = rest.split('/', 1)
+            if get(kind, None if ns == '-' else ns, obj, 'pre-step lookup', rc=5) is not None:
+                raise Stop(5, '%s appeared before this run created it; not adopted' % name)
+        try:
+            answer = action()
+        except Exception:
+            self.uncertain.append(text)
+            self.unsure.extend(mine)
+            self.save()
+            raise
         self.done.append(text)
-        with open(os.path.join(self.ev, 'changed.txt'), 'a') as stream:
-            stream.write(text + '\n')
+        for name in mine:
+            uid = (answer or {}).get(name)
+            if uid:
+                self.created[name] = uid
+            else:
+                self.unsure.append(name)
+        self.save()
+
+    def summary(self):
+        return 'done: %s | uncertain (may have been applied): %s' % ('; '.join(self.done) or 'nothing',
+                                                                   '; '.join(self.uncertain) or 'nothing')
 
 
-def apply_objects(objs, stage):
-    payload = json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': objs}).encode()
-    kubectl(['apply', '-f', '-'], stage, rc=5, stdin=payload, timeout=120)
+def with_uids(objs, uids):
+    """Pre-existing objects carry their backup UID: the API refuses the write if the live object was replaced."""
+    result = []
+    for obj in objs:
+        obj = json.loads(json.dumps(obj))
+        uid = uids.get(label(key(obj)))
+        if uid:
+            obj['metadata']['uid'] = uid
+        result.append(obj)
+    return result
 
 
-def db_secret(changes):
+def answered(out):
+    """label -> uid from a kubectl -o json answer (one object or a List)."""
+    doc = json.loads(out)
+    items = doc['items'] if doc.get('kind') == 'List' else [doc]
+    return {label(key(obj)): obj['metadata']['uid'] for obj in items}
+
+
+def apply_objects(objs, stage, uids):
+    payload = json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': with_uids(objs, uids)}).encode()
+    return answered(kubectl(['apply', '-o', 'json', '-f', '-'], stage, rc=5, stdin=payload, timeout=120))
+
+
+def db_secret():
     tmp = tempfile.mkdtemp(prefix='issue61-w2-', dir='/run')
     try:
         files = []
@@ -301,9 +369,10 @@ def db_secret(changes):
             with os.fdopen(fd, 'w') as stream:
                 stream.write(urlunsplit((url.scheme, netloc, url.path, url.query, '')))
             files += ['--from-file=%s=%s' % (name, target)]
-        kubectl(['-n', 'runner-control', 'create', 'secret', 'generic', 'runner-controller-db'] + files,
-                'secret create', rc=5)
-        changes.mark('created Secret runner-control/runner-controller-db')
+        out = kubectl(['-n', 'runner-control', 'create', 'secret', 'generic', 'runner-controller-db', '-o', 'json']
+                      + files, 'secret create', rc=5)
+        doc = json.loads(out)
+        return {label(DB_SECRET): doc['metadata']['uid']}  # Only the UID is read; data never printed or kept.
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -312,23 +381,6 @@ def can_i(verb, resource, ns, sa):
     out = run([K3S, 'kubectl', 'auth', 'can-i', verb, resource, '-n', ns, '--as=system:serviceaccount:' + sa],
               'can-i', rc=8, ok=(0, 1)).strip()
     return out
-
-
-def created_uids(ev, record, rc=8):
-    """Record the live UID of every object that was absent before W2 (None: not created yet).
-
-    Called after each change step and on failure, so a rollback after a partial apply still knows exactly
-    which objects this run created; rollback deletes nothing else."""
-    uids = {}
-    for e in record:
-        if e['absent']:
-            live = get(e['kind'], e['namespace'], e['name'], 'created lookup', rc=rc)
-            uids[label((e['kind'], e['namespace'], e['name']))] = None if live is None else live['metadata']['uid']
-    path = os.path.join(ev, 'created.json')
-    with open(path + '.tmp', 'w') as stream:
-        json.dump(uids, stream, indent=1)
-    os.replace(path + '.tmp', path)
-    return uids
 
 
 def apply(ev):
@@ -354,43 +406,42 @@ def apply(ev):
     record = backup(ev, items)
     say('evidence: ' + ev)
 
-    changes = Changes(ev)
+    changes = Changes(ev, record)
+    uids = changes.uids
+    api_uid = uids[label(API)]
+    patch = {'metadata': {'uid': api_uid},
+             'spec': {'template': {'spec': {'containers': [{'name': 'api', 'image': RUNTIME_REF}]}}}}
     try:
         with open(os.path.join(HERE, '061_runner_controller_grants.sql')) as stream:
-            sql(stream.read(), 'grants 061', rc=5)
-        changes.mark('granted 061 (stays on rollback)')
-        apply_objects(by_kind['Namespace'], 'namespace')
-        changes.mark('applied Namespace runner-control')
-        created_uids(ev, record, rc=5)
-        db_secret(changes)
-        created_uids(ev, record, rc=5)
+            grants = 'BEGIN;\n' + stream.read() + '\nCOMMIT;\n'  # One transaction: all three GRANTs or none.
+        changes.step('granted 061 (stays on rollback)', [], lambda: sql(grants, 'grants 061', rc=5))
+        changes.step('applied Namespace runner-control', by_kind['Namespace'],
+                     lambda: apply_objects(by_kind['Namespace'], 'namespace', uids))
+        changes.step('created Secret runner-control/runner-controller-db', [
+            {'kind': 'Secret', 'metadata': {'namespace': 'runner-control', 'name': 'runner-controller-db'}}], db_secret)
         rest = [o for o in items if o['kind'] not in {'Namespace', 'Deployment'}]
-        apply_objects(rest, 'rbac and pool objects')
-        changes.mark('applied %d RBAC/SA/pool objects' % len(rest))
-        created_uids(ev, record, rc=5)
-        apply_objects(cnp_items, 'cnp')
-        changes.mark('applied CNP codex-runner/runner-callback-draft')
-        kubectl(['-n', 'm2-hosting', 'set', 'image', 'deployment/api', 'api=' + RUNTIME_REF], 'api image', rc=5)
-        changes.mark('set api image %s -> %s' % (old_image, RUNTIME_REF))
+        changes.step('applied %d RBAC/SA/pool objects' % len(rest), rest, lambda: apply_objects(rest, 'rbac and pool objects', uids))
+        changes.step('applied CNP codex-runner/runner-callback-draft', cnp_items,
+                     lambda: apply_objects(cnp_items, 'cnp', uids))
+        changes.step('set api image %s -> %s' % (old_image, RUNTIME_REF), [],
+                     lambda: kubectl(['-n', 'm2-hosting', 'patch', 'deployment', 'api', '--type=strategic', '-p',
+                                      json.dumps(patch)], 'api image', rc=5))
         kubectl(['-n', 'm2-hosting', 'rollout', 'status', 'deployment/api', '--timeout=180s'], 'api rollout',
                 rc=5, timeout=200)
-        apply_objects(by_kind['Deployment'], 'controller deployment')
-        changes.mark('applied Deployment runner-control/runner-controller')
-        created_uids(ev, record, rc=5)
+        changes.step('applied Deployment runner-control/runner-controller', by_kind['Deployment'],
+                     lambda: apply_objects(by_kind['Deployment'], 'controller deployment', uids))
         kubectl(['-n', 'runner-control', 'rollout', 'status', 'deployment/runner-controller', '--timeout=180s'],
                 'controller rollout', rc=5, timeout=200)
     except Exception as failure:
-        try:
-            created_uids(ev, record, rc=5)
-        except Exception:
-            say('partial: could not re-read the created objects; rollback deletes only UIDs recorded before')
-        say('partial: already changed by this run: ' + ('; '.join(changes.done) or 'nothing'))
+        say('partial: ' + changes.summary())
+        if changes.unsure:
+            say('partial: creation uncertain, never deleted by rollback: ' + ', '.join(changes.unsure))
         say('rollback: python3 -I %s rollback %s' % (os.path.abspath(__file__), ev))
         if isinstance(failure, Stop):
             raise
         raise Stop(5, 'unexpected error during the changes (no detail printed)') from None
 
-    uids = created_uids(ev, record)
+    created = changes.created
     checks = {
         'controller creates pods': (can_i('create', 'pods', 'codex-runner', 'runner-control:runner-controller'), 'yes'),
         'host controller creates pods': (can_i('create', 'pods', 'codex-runner', 'codex-runner:runner-pool-controller'), 'no'),
@@ -405,8 +456,9 @@ def apply(ev):
     say('api after: generation=%s image=%s' % (now['metadata']['generation'], image))
     if image != RUNTIME_REF:
         bad.append('api image')
-    if None in uids.values():
-        bad.append('created object missing')
+    missing = sorted(changes.absent - set(created))
+    if missing:
+        bad.append('created UID not recorded for ' + ', '.join(missing))
     logs = run([K3S, 'kubectl', '-n', 'runner-control', 'logs', 'deployment/runner-controller', '--tail=20'],
                'controller logs', rc=8)
     shown = [line for line in logs.splitlines() if re.fullmatch(r'\{"owner": "[0-9a-f-]{36}", "stage": "controller", '
@@ -422,7 +474,8 @@ def apply(ev):
 def strip(obj):
     obj = json.loads(json.dumps(obj))
     meta = obj['metadata']
-    for field in ('uid', 'resourceVersion', 'creationTimestamp', 'managedFields', 'generation', 'selfLink'):
+    # uid stays: the API refuses the replace if the live object is not the one backed up.
+    for field in ('resourceVersion', 'creationTimestamp', 'managedFields', 'generation', 'selfLink'):
         meta.pop(field, None)
     obj.pop('status', None)
     return obj
@@ -446,23 +499,41 @@ def rollback(ev):
     try:
         with open(os.path.join(ev, 'backup.json')) as stream:
             record = json.load(stream)
-        created = {}
-        if os.path.exists(os.path.join(ev, 'created.json')):
-            with open(os.path.join(ev, 'created.json')) as stream:
-                created = json.load(stream)
+        with open(os.path.join(ev, 'changes.json')) as stream:
+            changes = json.load(stream)
+        created, unsure = changes['created'], set(changes['creationUncertain'])
     except Exception:
         raise Stop(3, 'rollback: evidence directory unreadable') from None
+    # Every check before the first change: a replaced object is never overwritten, stopped or deleted.
+    problems = []
+    for e in record:
+        if e['absent'] or e['kind'] == 'Secret':
+            continue
+        k = (e['kind'], e['namespace'], e['name'])
+        live = get(k[0], k[1], k[2], 'lookup ' + label(k))
+        if live is None or live['metadata']['uid'] != e['object']['metadata']['uid']:
+            problems.append('%s live UID %s, backup %s' % (label(k), None if live is None else live['metadata']['uid'],
+                                                          e['object']['metadata']['uid']))
+    ctrl_key = ('Deployment', 'runner-control', 'runner-controller')
+    ctrl = get(*ctrl_key, 'controller lookup')
+    if ctrl is not None and created.get(label(ctrl_key)) != ctrl['metadata']['uid']:
+        problems.append('%s live UID %s is not the one this run created (%s)'
+                        % (label(ctrl_key), ctrl['metadata']['uid'], created.get(label(ctrl_key))))
+    if problems:
+        raise Stop(3, 'rollback refused before any change: ' + '; '.join(problems))
     done = []
     try:
-        if get('Deployment', 'runner-control', 'runner-controller', 'controller lookup', rc=5) is not None:
-            kubectl(['-n', 'runner-control', 'scale', 'deployment/runner-controller', '--replicas=0'], 'scale 0', rc=5)
+        if ctrl is not None:
+            scale = {'metadata': {'uid': ctrl['metadata']['uid']}, 'spec': {'replicas': 0}}
+            kubectl(['-n', 'runner-control', 'patch', 'deployment', 'runner-controller', '--type=merge', '-p',
+                     json.dumps(scale)], 'scale 0', rc=5)
+            done.append('runner-controller scaled to 0')
             kubectl(['-n', 'runner-control', 'wait', '--for=delete', 'pod', '-l', 'app=runner-controller',
                      '--timeout=120s'], 'controller pod gone', rc=5, timeout=140, ok=(0, 1))
             pods = kubectl(['-n', 'runner-control', 'get', 'pods', '-l', 'app=runner-controller', '-o', 'name'],
                            'controller pods', rc=5).split()
             if pods:
                 raise Stop(5, 'rollback: runner-controller Pod still present')
-            done.append('runner-controller scaled to 0')
         stops = sql("SELECT owner_id||'|'||generation||'|'||pod_uid||'|v'||(receipt->>'version') FROM "
                     "runner_termination.stops WHERE completed_at IS NULL AND receipt->>'version' IN ('2','3','4') "
                     "ORDER BY owner_id;", 'open stops', rc=5).split()
@@ -470,14 +541,13 @@ def rollback(ev):
             % (', '.join(stops) or 'none'))
         for e in record:
             if e['absent'] or e['kind'] == 'Secret':
-                continue  # Existing Secrets are never rewritten by W2 except through resources.json apply.
+                continue  # The only pre-existing Secret was re-applied identical (W2 refuses otherwise).
             payload = json.dumps(strip(e['object'])).encode()
             kubectl(['replace', '-f', '-'], 'restore ' + label((e['kind'], e['namespace'], e['name'])), rc=5,
                     stdin=payload, timeout=120)
             done.append('restored ' + label((e['kind'], e['namespace'], e['name'])))
-        if any(k == API for k in [(e['kind'], e['namespace'], e['name']) for e in record if not e['absent']]):
-            kubectl(['-n', 'm2-hosting', 'rollout', 'status', 'deployment/api', '--timeout=180s'], 'api rollout',
-                    rc=5, timeout=200)
+        kubectl(['-n', 'm2-hosting', 'rollout', 'status', 'deployment/api', '--timeout=180s'], 'api rollout',
+                rc=5, timeout=200)
         say('rollback: Secret m2-hosting/hosting-runner-pool-v2 left as is: W2 re-applied it only because the '
             'render was identical to the live data')
         later = []
@@ -491,9 +561,10 @@ def rollback(ev):
             live = get(k[0], k[1], k[2], 'lookup ' + label(k), rc=5)
             if live is None:
                 continue
-            if created.get(label(k)) != live['metadata']['uid'] or k[0] not in PATHS:
-                say('rollback: %s not deleted (live UID %s, recorded %s)' % (label(k), live['metadata']['uid'],
-                                                                             created.get(label(k))))
+            if label(k) in unsure or created.get(label(k)) != live['metadata']['uid'] or k[0] not in PATHS:
+                say('rollback: %s not deleted (live UID %s, recorded %s%s)' % (
+                    label(k), live['metadata']['uid'], created.get(label(k)),
+                    ', creation uncertain' if label(k) in unsure else ''))
                 continue
             delete_exact(k[0], k[1], k[2], live['metadata']['uid'], 'delete ' + label(k))
             done.append('deleted ' + label(k))
@@ -511,7 +582,8 @@ def rollback(ev):
                 if not extra:
                     break
                 time.sleep(9)
-            if extra or created.get(label(('Namespace', None, e['name']))) != live['metadata']['uid']:
+            if extra or label(('Namespace', None, e['name'])) in unsure or \
+                    created.get(label(('Namespace', None, e['name']))) != live['metadata']['uid']:
                 raise Stop(5, 'rollback: namespace %s not deleted; unexpected contents %s or UID differs'
                            % (e['name'], extra))
             delete_exact('Namespace', None, e['name'], live['metadata']['uid'], 'delete namespace')
