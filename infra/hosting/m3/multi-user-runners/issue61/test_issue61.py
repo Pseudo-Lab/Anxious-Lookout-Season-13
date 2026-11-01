@@ -584,6 +584,12 @@ def main():
     open('/root/issue61/evidence/w2-a/rolled-back.json', 'w').write('{}')
     rc, out, _ = w3('--expected-running', '0', wait=30)
     check('w3: a rolled-back W2 run is never selected', rc == 0 and 'live: w2-x' in out, out)
+    for name, flags in [('pending', {'pending': {'text': 't', 'objects': []}}), ('uncertain', {'uncertain': ['set api image']}),
+                        ('creationUncertain', {'creationUncertain': ['Deployment runner-control/runner-controller']})]:
+        two_runs(dict(partial, **flags))
+        rc, out, _ = w3('--expected-running', '0')
+        check('w3: another W2 run with %s refuses before reclaim even when a clean run exists' % name,
+              rc == 3 and 'pending/uncertain' in out and not state().get('reclaimCalls'), out)
     two_runs(partial)
     open('/root/issue61/evidence/w2-a/rollback-started.json', 'w').write('{}')
     rc, out, _ = w3('--expected-running', '0')

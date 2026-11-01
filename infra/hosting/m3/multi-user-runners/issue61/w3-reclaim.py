@@ -108,7 +108,10 @@ def precheck(expect):
             clean = not changes.get('pending') and not changes['uncertain'] and not changes['creationUncertain']
         except Exception:
             raise Stop(3, 'precheck: W2 evidence %s unreadable' % d) from None
-        if uid and clean:
+        if not clean:
+            # An unresolved mutation of any W2 run that was not certified rolled back blocks R2.
+            raise Stop(3, 'precheck: W2 evidence %s has a pending/uncertain attempt; back checks' % d)
+        if uid:
             live.append((d, uid))
     say('W2 evidence: %s; live: %s' % (', '.join(dirs) or 'none', ', '.join(d for d, _ in live) or 'none'))
     if len(live) != 1:
