@@ -51,7 +51,7 @@ def setup(*, units=None, waiting=0, mutate=None, fail=()):
     for path in ('/mock', INSTALL, '/root/r4-rollout', '/home/opc/issue61-images'):
         os.makedirs(path, mode=0o700)
     shutil.copy(SRC + '/mock/resources.json', '/mock/resources.json')
-    for name in ('lib.sh', 'w0-lib.sh', 'w1-import.sh', 'w3-reclaim.py'):
+    for name in ('lib.sh', 'w0-lib.sh', 'w1-import.sh', 'w1b-tag.sh', 'w3-reclaim.py'):
         shutil.copy(os.path.join(SRC, name), INSTALL)
     with open(os.path.join(SRC, 'w2-apply.py')) as stream:
         text = stream.read()
@@ -136,9 +136,13 @@ def run(*args):
     return done.returncode, done.stdout.decode()
 
 
-def imported(s):
+def imported(s, tagged=True):
+    """W1 done (tag references); with tagged, W1b done too (digest references resolve)."""
     for name, archive in s['archives'].items():
         s['images'][archive['ref']] = archive
+        if tagged:
+            digest_ref = archive['ref'].split(':61-')[0] + '@' + archive['digest']
+            s['images'][digest_ref] = dict(archive, ref=digest_ref)
     s['docker']['anxious-dev-runtime:61-5e73bc4'] = REFS['runtime'].split('@')[1]  # containerd image store
 
 
@@ -207,6 +211,7 @@ def main():
             ('pool secret differs', dict(mutate=lambda s: (imported(s), s['objects'][okey('Secret', 'm2-hosting',
                 'hosting-runner-pool-v2')]['data'].__setitem__('pool.json', base64.b64encode(b'{"version": 1}').decode())))),
             ('render refused', dict(mutate=imported, fail=['render'])),
+            ('digest references not tagged (W1b not run)', dict(mutate=lambda s: imported(s, tagged=False))),
             ('docker holds another runtime image', dict(mutate=lambda s: (imported(s), s['docker'].__setitem__(
                 'anxious-dev-runtime:61-5e73bc4', 'sha256:' + 'd'*64))))]:
         setup(**kwargs)
@@ -504,6 +509,86 @@ def main():
     w3_state(slow=2, gets=99)
     rc, out, took = w3('--expected-running', '0', wait=4)
     check('w3: slow lookups are capped by the wall-clock deadline', rc == 6 and took < 15, '%s took %.1f' % (out, took))
+
+    # W1b ----------------------------------------------------------------------------------------------
+    REAL = {'runtime': ('sha256:eb3a18acd1b2856f6a95c7686c0c0ee4e5194b6237266b3443664f37feb3377c', IDS['runtime']),
+            'runner': ('sha256:067c77de5d6b3673ece9b243f7753a9184a007cd44ab0ea1c93dc3044458a5e4', IDS['runner']),
+            'shell-executor': ('sha256:9c87d626cdf6798db5bc5a562cc68af1b13a36c8f90d3738e19c6553e7cf4d12', IDS['shell-executor'])}
+
+    def w1_done(s, executor_tagged=True, wrong=None):
+        for tag, (digest, image_id) in REAL.items():
+            ref = 'docker.io/library/anxious-dev-%s:61-5e73bc4' % tag
+            s['images'][ref] = {'ref': ref, 'id': image_id, 'digest': 'sha256:' + 'b'*64 if tag == wrong else digest}
+        if executor_tagged:  # As on the guest: the identical executor manifest was tagged in #60.
+            d, i = REAL['shell-executor']
+            s['images']['docker.io/library/anxious-dev-shell-executor@' + d] = {'ref': 'x', 'id': i, 'digest': d}
+    setup(mutate=w1_done)
+    rc, out = run('sh', INSTALL + '/w1b-tag.sh')
+    s = state()
+    check('w1b: tags runtime and runner, skips the executor that already resolves, all resolve to host IDs',
+          rc == 0 and out.count('tagged ') == 2 and out.count('skip ') == 1 and out.count(' -> sha256:') == 3
+          and all(('docker.io/library/anxious-dev-%s@%s' % (t, d)) in s['images'] for t, (d, _) in REAL.items()), out)
+    rc, out = run('sh', INSTALL + '/w1b-tag.sh')
+    check('w1b: second run skips all three', rc == 0 and out.count('skip ') == 3, out)
+    setup(mutate=lambda s: w1_done(s, wrong='runner'))
+    rc, out = run('sh', INSTALL + '/w1b-tag.sh')
+    check('w1b: a source tag with another manifest refuses before any tag', rc == 3 and 'tagged docker' not in out
+          and not any('@sha256:eb3a18ac' in k for k in state()['images']), out)
+    def api_on_new(s):
+        w1_done(s)
+        s['objects'][okey('Deployment', 'm2-hosting', 'api')]['spec']['template']['spec']['containers'][0]['image'] = \
+            'docker.io/library/anxious-dev-runtime@' + REAL['runtime'][0]
+    setup(mutate=api_on_new)
+    rc, out = run('sh', INSTALL + '/w1b-tag.sh')
+    check('w1b: refuses while the api Deployment still points at the new digest (roll W2 back first)',
+          rc == 3 and 'roll W2 back first' in out and not any('@' + REAL['runtime'][0] in k for k in state()['images']), out)
+    setup(mutate=w1_done, fail=['tag'])
+    rc, out = run('sh', INSTALL + '/w1b-tag.sh')
+    check('w1b: a failed tag is rc 5', rc == 5, out)
+
+    # W2 rollback marker and W3 evidence selection ------------------------------------------------------
+    setup(mutate=imported, fail=['set-image'])
+    rc, out = w2('apply')
+    ev = evidence(out)
+    os.unlink('/mock/fail')
+    rc, out = w2('rollback', ev)
+    check('w2 rollback writes the rolled-back marker only after success', rc == 0 and os.path.exists(ev + '/rolled-back.json')
+          and os.path.exists(ev + '/rollback-started.json'), out)
+    setup(mutate=imported, fail=['set-image'])
+    rc, out = w2('apply')
+    ev2 = evidence(out)
+    with open('/mock/fail', 'w') as stream:
+        stream.write('replace')
+    rc, out = w2('rollback', ev2)
+    check('w2: a failed rollback leaves rollback-started without the certified marker',
+          rc == 5 and os.path.exists(ev2 + '/rollback-started.json') and not os.path.exists(ev2 + '/rolled-back.json'), out)
+    mode = oct(os.stat(ev2 + '/changes.json').st_mode & 0o777)
+    check('w2 evidence files are 0600', mode == '0o600', mode)
+
+    def two_runs(first):
+        w3_state()
+        os.makedirs('/root/issue61/evidence/w2-a', mode=0o700)
+        json.dump(first, open('/root/issue61/evidence/w2-a/changes.json', 'w'))
+    partial = {'pending': None, 'done': ['x'], 'uncertain': [], 'created': {'Namespace -/runner-control': 'n'},
+               'creationUncertain': []}
+    two_runs(partial)
+    rc, out, _ = w3('--expected-running', '0', wait=30)
+    check('w3: picks the clean W2 run over an earlier one that never created the controller (no marker)',
+          rc == 0 and 'live: w2-x' in out, out)
+    two_runs({'pending': None, 'done': ['x'], 'uncertain': [],
+              'created': {'Deployment runner-control/runner-controller': 'ctrl-uid'}, 'creationUncertain': []})
+    rc, out, _ = w3('--expected-running', '0')
+    check('w3: two live-looking W2 runs refuse', rc == 3 and not state().get('reclaimCalls'), out)
+    two_runs({'pending': None, 'done': ['x'], 'uncertain': [],
+              'created': {'Deployment runner-control/runner-controller': 'ctrl-uid'}, 'creationUncertain': []})
+    open('/root/issue61/evidence/w2-a/rolled-back.json', 'w').write('{}')
+    rc, out, _ = w3('--expected-running', '0', wait=30)
+    check('w3: a rolled-back W2 run is never selected', rc == 0 and 'live: w2-x' in out, out)
+    two_runs(partial)
+    open('/root/issue61/evidence/w2-a/rollback-started.json', 'w').write('{}')
+    rc, out, _ = w3('--expected-running', '0')
+    check('w3: a started but uncertified rollback refuses before reclaim',
+          rc == 3 and 'uncertified rollback' in out and not state().get('reclaimCalls'), out)
 
     print('passed %d, failed %d' % (passed, failed))
     return 1 if failed else 0

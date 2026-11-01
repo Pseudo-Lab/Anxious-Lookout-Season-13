@@ -101,6 +101,12 @@ def kubectl(args):
                 state['objects'].pop(okey(rest[1], ns, rest[2]), None)
             save(state)
         obj = state['objects'].get(okey(rest[1], ns, rest[2]))
+        if (opt(rest, '-o') or '').startswith('jsonpath=') and rest[1:3] == ['deployment', 'api']:
+            # The one jsonpath the gate uses: the api container image.
+            if obj is None:
+                die()
+            print([c for c in obj['spec']['template']['spec']['containers'] if c['name'] == 'api'][0]['image'])
+            return
         if obj is None:
             if '--ignore-not-found' in rest:
                 return
@@ -285,6 +291,15 @@ def main():
                     die()
                 name = os.path.basename(args[5])
                 state['images'][state['archives'][name]['ref']] = state['archives'][name]
+                save(state)
+                return
+            if args[3:5] == ['images', 'tag']:
+                if failing('tag'):
+                    die()
+                src, dst = args[5], args[6]
+                if src not in state['images'] or dst in state['images']:
+                    die()
+                state['images'][dst] = dict(state['images'][src], ref=dst)
                 save(state)
                 return
             if args[3:5] == ['images', 'ls']:

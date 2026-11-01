@@ -91,18 +91,29 @@ def rows(tag, query, timeout=60):
 def precheck(expect):
     if os.geteuid() != 0:
         raise Stop(3, 'precheck: not root')
-    dirs = [d for d in os.listdir(EVIDENCE) if d.startswith('w2-')] if os.path.isdir(EVIDENCE) else []
-    if len(dirs) != 1:
-        raise Stop(3, 'precheck: expected exactly one W2 evidence directory')
-    try:
-        with open(os.path.join(EVIDENCE, dirs[0], 'changes.json')) as stream:
-            changes = json.load(stream)
-        want = changes['created'].get('Deployment runner-control/runner-controller')
-        clean = not changes.get('pending') and not changes['uncertain'] and not changes['creationUncertain']
-    except Exception:
-        raise Stop(3, 'precheck: W2 changes.json unreadable') from None
-    if not want or not clean:
-        raise Stop(3, 'precheck: W2 did not finish cleanly (pending/uncertain, or no controller UID recorded)')
+    # The live W2: the one evidence directory that was not rolled back, finished cleanly and recorded the
+    # controller Deployment it created (a rolled-back or partial W2 never qualifies).
+    dirs = sorted(d for d in os.listdir(EVIDENCE) if d.startswith('w2-')) if os.path.isdir(EVIDENCE) else []
+    live = []
+    for d in dirs:
+        started = os.path.exists(os.path.join(EVIDENCE, d, 'rollback-started.json'))
+        if os.path.exists(os.path.join(EVIDENCE, d, 'rolled-back.json')):
+            continue  # certified complete rollback
+        if started:
+            raise Stop(3, 'precheck: W2 evidence %s has a started but uncertified rollback; back checks' % d)
+        try:
+            with open(os.path.join(EVIDENCE, d, 'changes.json')) as stream:
+                changes = json.load(stream)
+            uid = changes['created'].get('Deployment runner-control/runner-controller')
+            clean = not changes.get('pending') and not changes['uncertain'] and not changes['creationUncertain']
+        except Exception:
+            raise Stop(3, 'precheck: W2 evidence %s unreadable' % d) from None
+        if uid and clean:
+            live.append((d, uid))
+    say('W2 evidence: %s; live: %s' % (', '.join(dirs) or 'none', ', '.join(d for d, _ in live) or 'none'))
+    if len(live) != 1:
+        raise Stop(3, 'precheck: expected exactly one clean W2 run that created runner-controller, found %d' % len(live))
+    want = live[0][1]
     ctrl = kget('deployment', 'runner-control', 'runner-controller')
     if ctrl in (None, 'failed') or ctrl['metadata']['uid'] != want or (ctrl.get('status') or {}).get('readyReplicas') != 1:
         raise Stop(3, 'precheck: runner-controller is not the Ready Deployment W2 created (want %s)' % want)

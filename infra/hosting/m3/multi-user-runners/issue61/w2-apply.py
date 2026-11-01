@@ -187,12 +187,14 @@ def precheck():
                                                                        RUNTIME_REF.split('@', 1)[1], RUNTIME_ID))
     global RENDER_IMAGE
     RENDER_IMAGE = got
-    rows = [row.split() for row in run([K3S, 'ctr', '-n', 'k8s.io', 'images', 'ls'], 'ctr images ls').splitlines()]
     for ref, tag in ((RUNTIME_REF, 'runtime'), (RUNNER_REF, 'runner'), (EXECUTOR_REF, 'shell-executor')):
-        # The digest reference resolves only to the manifest W1 imported under the 61-5e73bc4 tag.
-        digest = ref.split('@', 1)[1]
-        if not any(row[:1] == ['docker.io/library/anxious-dev-%s:61-5e73bc4' % tag] and digest in row for row in rows):
-            raise Stop(3, 'precheck: %s is not the imported %s manifest' % (ref, tag))
+        # What kubelet will use: the digest reference itself must resolve (W1b tags it, infra/hosting/README.md)
+        # to the host image ID. Matching the digest text in a listing is not enough (W2 rc 5, ErrImageNeverPull).
+        got = run([K3S, 'crictl', 'inspecti', '-o', 'go-template', '--template', '{{.status.id}}', ref],
+                  'digest reference lookup', ok=(0, 1)).strip()
+        want = IMAGES['docker.io/library/anxious-dev-%s:61-5e73bc4' % tag]
+        if got != want:
+            raise Stop(3, 'precheck: %s does not resolve to %s (got %s); run W1b first' % (ref, want, got or 'nothing'))
     for name in ('40-runner-network.json', '061_runner_controller_grants.sql', 'worker.py', 'storage-root.sh'):
         path = os.path.join(HERE, name)
         if not os.path.isfile(path) or os.path.islink(path):
@@ -559,6 +561,10 @@ def rollback(ev):
                         % (label(ctrl_key), ctrl['metadata']['uid'], created.get(label(ctrl_key))))
     if problems:
         raise Stop(3, 'rollback refused before any change: ' + '; '.join(problems))
+    # Written before the first change: a partial or failed rollback stays visible (W3 refuses while it exists
+    # without rolled-back.json).
+    with open(os.path.join(ev, 'rollback-started.json'), 'w') as stream:
+        json.dump({'started': True}, stream)
     done = []
     try:
         if ctrl is not None:
@@ -638,9 +644,13 @@ def rollback(ev):
     if api['spec']['template']['spec']['containers'][0]['image'] != \
             before['spec']['template']['spec']['containers'][0]['image']:
         raise Stop(8, 'postcheck failed: api image not restored')
+    # Only a complete rollback whose postcheck passed is certified; W3 never selects it.
+    with open(os.path.join(ev, 'rolled-back.json'), 'w') as stream:
+        json.dump({'done': done}, stream, indent=1)
 
 
 def main(argv):
+    os.umask(0o077)  # Evidence files 0600 inside the 0700 directory.
     try:
         if '@@' in RUNTIME_REF + RUNNER_REF + EXECUTOR_REF:
             say('placeholders not filled')
