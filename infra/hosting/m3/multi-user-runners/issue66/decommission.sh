@@ -183,14 +183,23 @@ $(objects)
 EOF
 [ -z "$bad" ] || refuse "Kubernetes objects still present:$bad"
 listing
-# Every lookup below is rc-checked: a failed findmnt/losetup/ls/stat refuses (before deletion) or fails
-# (after an unmount); only a successful empty answer means "none".
+# Phase 1 checks everything (storage, output, lock) before the first change; a refusal there changes
+# nothing. Every lookup is rc-checked; only a successful empty answer means "none". Phase 2 changes; a
+# failure there reports exactly what was already changed (rc 5) and is resolved by running host again.
 table() { mt=$(findmnt -rn -o TARGET,SOURCE) && [ -n "$mt" ]; }
 loops() { devs=$(losetup -n -O NAME -j "$1"); }
+mounted() { echo "$mt" | awk -v t="$1" '$1 == t {f = 1} END {exit !f}'; }
+changed=
+partial() { echo "$1"
+  echo "partial: already changed by this run:${changed:- nothing}"
+  echo "state: $S $( [ -e "$S" ] && echo present || echo absent ), $O $( [ -e "$O" ] && echo present || echo absent )"
+  echo 'restore would refuse until both are gone: fix the cause, then run decommission.sh host again'
+  echo 'result rc=5'; exit 5; }
+L=$OUTPUTS/.lock-$OWNER_HEX
+table || refuse 'findmnt (mount table) failed'
 if [ -e "$S" ] || [ -L "$S" ]; then
   u=$(stat -c %u "$S") || refuse "stat $S failed"
   [ -d "$S" ] && [ ! -L "$S" ] && [ "$u" = 0 ] || refuse "$S is not a root directory (observed uid $u)"
-  table || refuse 'findmnt (mount table) failed'
   # Only this state's own loop mounts may use its images (no kubelet bind of a PV path remains).
   for m in native control; do
     own=$(echo "$mt" | awk -v t="$S/$m" '$1 == t {print $2}')
@@ -212,39 +221,51 @@ if [ -e "$S" ] || [ -L "$S" ]; then
   extra=$(printf '%s\n' "$entries" | awk 'NF && !/^(native|control|native\.ext4|control\.ext4)$/')
   [ -z "$extra" ] || refuse "unexpected entries in $S: $(echo $extra)"
   for m in native control; do
-    if echo "$mt" | awk -v t="$S/$m" '$1 == t {f = 1} END {exit !f}'; then
-      umount "$S/$m" || fail "umount $S/$m failed (busy?); nothing deleted yet; run host again" 5
-      echo "unmounted $S/$m"
-      table || fail "findmnt failed after unmounting $S/$m; nothing deleted yet; run host again" 5
-      ! echo "$mt" | awk -v t="$S/$m" '$1 == t {f = 1} END {exit !f}' || fail "$S/$m is still mounted after umount" 5
-    fi
-    if [ -e "$S/$m.ext4" ]; then
-      loops "$S/$m.ext4" || fail "losetup -j $S/$m.ext4 failed after unmount; nothing deleted yet; run host again" 5
-      [ -z "$devs" ] || fail "$S/$m.ext4 is still attached to a loop device: $(echo $devs); nothing deleted yet" 5
-    fi
-    if [ -d "$S/$m" ]; then
-      c=$(ls -A "$S/$m") || fail "ls $S/$m failed; nothing deleted yet" 5
-      [ -z "$c" ] || fail "$S/$m is not empty after unmount: $(echo "$c" | head -5 | tr '\n' ' '); nothing deleted yet" 5
+    if [ -d "$S/$m" ] && ! mounted "$S/$m"; then
+      c=$(ls -A "$S/$m") || refuse "ls $S/$m failed"
+      [ -z "$c" ] || refuse "$S/$m is not mounted but not empty: $(echo "$c" | head -5 | tr '\n' ' ')"
     fi
   done
-  for m in native control; do
-    if [ -e "$S/$m.ext4" ]; then rm -f -- "$S/$m.ext4" || fail "rm $S/$m.ext4 failed" 5; fi
-    if [ -d "$S/$m" ]; then rmdir -- "$S/$m" || fail "rmdir $S/$m failed" 5; fi
-  done
-  rmdir -- "$S" || fail "rmdir $S failed: $(ls -A "$S" | tr '\n' ' ')" 5
-  echo "deleted $S"
 fi
 if [ -e "$O" ] || [ -L "$O" ]; then
   u=$(stat -c %u "$O") || refuse "stat $O failed"
-  table || refuse 'findmnt (mount table) failed'
   [ -d "$O" ] && [ ! -L "$O" ] && [ "$u" = 10001 ] || refuse "$O is not the provisioner's output directory (observed uid $u)"
   o=$(echo "$mt" | awk -v s="$O" '$1 == s || index($1, s"/") == 1')
   [ -z "$o" ] || refuse "mounts at or under $O: $(echo $o)"
-  rm -rf --one-file-system -- "$O" || fail "rm $O failed" 5
-  echo "deleted $O"
 fi
-L=$OUTPUTS/.lock-$OWNER_HEX
-if [ -e "$L" ]; then [ -f "$L" ] && [ ! -L "$L" ] && rm -f -- "$L" && echo "deleted $L" || fail "rm $L failed" 5; fi
+if [ -e "$L" ] || [ -L "$L" ]; then
+  [ -f "$L" ] && [ ! -L "$L" ] || refuse "$L is not a regular file"
+fi
+# Phase 2: changes.
+if [ -e "$S" ]; then
+  for m in native control; do
+    if mounted "$S/$m"; then
+      umount "$S/$m" || partial "umount $S/$m failed (busy?)"
+      changed="$changed unmounted:$S/$m"; echo "unmounted $S/$m"
+      table || partial "findmnt failed after unmounting $S/$m"
+      ! mounted "$S/$m" || partial "$S/$m is still mounted after umount"
+    fi
+    if [ -e "$S/$m.ext4" ]; then
+      loops "$S/$m.ext4" || partial "losetup -j $S/$m.ext4 failed after unmount"
+      [ -z "$devs" ] || partial "$S/$m.ext4 is still attached to a loop device: $(echo $devs)"
+    fi
+    if [ -d "$S/$m" ]; then
+      c=$(ls -A "$S/$m") || partial "ls $S/$m failed after unmount"
+      [ -z "$c" ] || partial "$S/$m is not empty after unmount: $(echo "$c" | head -5 | tr '\n' ' ')"
+    fi
+  done
+  for m in native control; do
+    if [ -e "$S/$m.ext4" ]; then rm -f -- "$S/$m.ext4" || partial "rm $S/$m.ext4 failed"; changed="$changed deleted:$S/$m.ext4"; fi
+    if [ -d "$S/$m" ]; then rmdir -- "$S/$m" || partial "rmdir $S/$m failed"; changed="$changed deleted:$S/$m"; fi
+  done
+  rmdir -- "$S" || partial "rmdir $S failed: $(ls -A "$S" | tr '\n' ' ')"
+  changed="$changed deleted:$S"; echo "deleted $S"
+fi
+if [ -e "$O" ]; then
+  rm -rf --one-file-system -- "$O" || partial "rm $O failed"
+  changed="$changed deleted:$O"; echo "deleted $O"
+fi
+if [ -e "$L" ]; then rm -f -- "$L" || partial "rm $L failed"; changed="$changed deleted:$L"; echo "deleted $L"; fi
 r=$(python3 -I - "$OUTPUTS" "$STORAGE" <<'PY'
 import json, sys
 from pathlib import Path

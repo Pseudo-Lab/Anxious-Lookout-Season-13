@@ -15,6 +15,9 @@ done
 for s in findmnt losetup umount; do  # ahead of busybox in PATH
   printf '#!/bin/sh\nexec python3 %s/mock/host.py %s "$@"\n' $P $s > /usr/local/sbin/$s; chmod 0755 /usr/local/sbin/$s
 done
+# rm passes through, except for the path in MOCK_RM_FAIL (a deletion failing after earlier changes).
+printf '#!/bin/sh\nfor a in "$@"; do [ -n "${MOCK_RM_FAIL:-}" ] && [ "$a" = "$MOCK_RM_FAIL" ] && exit 1; done\nexec /bin/rm "$@"\n' \
+  > /usr/local/sbin/rm; chmod 0755 /usr/local/sbin/rm
 WID=sha256:$(printf '9%.0s' $(seq 64))
 OLDWID=sha256:1c3ce2683832a187ef207abe4daa7989589a996cde8214ce374237fa94ea81e6
 B5ID=sha256:$(printf '7%.0s' $(seq 64))
@@ -224,10 +227,34 @@ printf '%s\n' "$S/native.ext4 /dev/loop1" "$S/control.ext4 /dev/loop2" >> /mock/
 touch $S/unexpected
 t 'host: an unexpected entry refuses' 3 $B/decommission.sh host
 rm $S/unexpected
+# Review round 2: every precheck (output and lock too) runs before the first change.
+echo "$O/submount /dev/loop9 ext4" >> /mock/mounts
+t 'host: a mount under the output refuses before any change' 3 $B/decommission.sh host
+check 'host: output refusal kept storage, mounts and output' \
+  "[ -f $S/native.ext4 ] && [ -d $S ] && [ -d $O ] && grep -q '^$S/native ' /mock/mounts && grep -q '^$S/control ' /mock/mounts"
+sed -i '/submount/d' /mock/mounts
+chown 0:0 $O
+t 'host: an output not owned by the provisioner refuses before any change' 3 $B/decommission.sh host
+check 'host: owner refusal kept storage' "[ -f $S/native.ext4 ] && grep -q '^$S/native ' /mock/mounts"
+chown 10001:10001 $O
+mv $OUT/.lock-$OH /tmp/lock; mkdir $OUT/.lock-$OH
+t 'host: a lock path that is not a file refuses before any change' 3 $B/decommission.sh host
+check 'host: lock refusal kept storage' "[ -f $S/native.ext4 ] && grep -q '^$S/native ' /mock/mounts"
+rmdir $OUT/.lock-$OH; mv /tmp/lock $OUT/.lock-$OH
+rm -f /mock/losetup.calls
+MOCK_LOSETUP_FAIL_FROM=3 t 'host: a failure after the first unmount reports partial state' 5 $B/decommission.sh host
+has 'host: partial names the unmount' "partial: already changed by this run: unmounted:$S/native"
+check 'host: partial run never says nothing changed' "! echo \"\$out\" | grep -q 'nothing changed'"
+rm -f /mock/losetup.calls
+printf '%s\n' "$S/native /dev/loop1 ext4" >> /mock/mounts
+printf '%s\n' "$S/native.ext4 /dev/loop1" >> /mock/loops
 MOCK_UMOUNT_BUSY=$S/control t 'host: a busy mount is rc 5' 5 $B/decommission.sh host
 check 'host: busy mount deleted no file' "[ -f $S/native.ext4 ] && [ -f $S/control.ext4 ] && [ -d $O ]"
 MOCK_LOOP_STAYS=1 t 'host: a loop still attached is rc 5' 5 $B/decommission.sh host
 sed -i '/loop2$/d' /mock/loops
+MOCK_RM_FAIL=$O t 'host: output deletion failing after the storage is gone is rc 5' 5 $B/decommission.sh host
+has 'host: partial lists the deleted storage' "deleted:$S"
+has 'host: partial shows the state' "state: $S absent, $O present"
 t 'host: rerun completes' 0 $B/decommission.sh host
 has 'host: restore inventories match' 'restore inventories: outputs=1 storage=1 only-storage=[] only-outputs=[]'
 check 'host: this owner gone, the other owner kept' \

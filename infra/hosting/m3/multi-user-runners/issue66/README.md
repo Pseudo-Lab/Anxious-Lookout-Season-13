@@ -239,13 +239,21 @@ The postcheck requires:
 - Why: `worker.py restore_inventory` requires the `user-runners/` and `provision-output/` sets to match. If only
   one side were removed, the next boot's restore would refuse for every owner.
 - It prints the delete list first.
-- It refuses (rc 3, nothing deleted) if either of these is true:
-  - this state's loop device is mounted anywhere else (a kubelet bind)
+- **Phase 1, checks before any change.** It refuses (rc 3, nothing changed) if any of these is true:
+  - a lookup fails (`findmnt`, `losetup`, `ls`, `stat`); only a successful empty answer counts as "none"
+  - this state's loop device is mounted anywhere else (a kubelet bind), or the mount at `<state>/<kind>` is not
+    from a loop device of that image
   - `user-runners/<state>` has an unexpected entry
-- Then it:
+  - `provision-output/<owner>` is not the provisioner's (uid 10001) directory, or something is mounted at or
+    under it
+  - the lock path is not a regular file
+- **Phase 2, changes:**
   1. unmounts `native` and `control`
   2. checks that the loop is detached and the mount points are empty
   3. deletes the two `.ext4` images, the directories, `provision-output/<owner>` and its lock file
+- A failure in phase 2 is rc 5. The output lists what this run already changed (`partial: already changed by
+  this run: …`) and whether each path is still present. Restore refuses until both are gone, so fix the cause
+  and run `host` again in the same window.
 - rc 0 only if both are absent **and** restore's two inventories match again (`only-storage=[]
   only-outputs=[]`).
 - **Run again:** safe. It deletes only what remains of the expected entries.
