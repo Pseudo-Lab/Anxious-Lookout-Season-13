@@ -20,7 +20,8 @@ rc: 0 reclaimed and released; 3 precheck refused, nothing ran; 4 reclaim refused
 changed); 5 reclaim failed or its answer is unusable (do not rerun; back checks); 6 accepted but not proved
 released before the deadline (do not rerun; back checks); 7 reclaim refused AFTER opening a stop (code and
 stopOpenedByThisRun printed): no R2 receipt was written, but the stop intent exists and the runner may have
-drained normally (drain_accepted), so the read-only release check runs and its result is printed; never rerun
+drained normally (drain_accepted), so the read-only release check runs for that stop with the normal-path
+receipts (v1 clean drain or v3 unavailable drain) and prints "normal release confirmed=True|False"; never rerun
 reclaim on rc 7 without back's read-only check.
 Fixed messages only: no DSN, token or command error text.
 """
@@ -157,8 +158,14 @@ def reclaim():
     return rc, answer
 
 
-def released(stop_id, deadline):
-    """Read-only, bounded by the wall-clock deadline. Returns (ok, last observation)."""
+R2_RECEIPTS = {'4'}            # an accepted reclaim must end with its own operator receipt
+NORMAL_RECEIPTS = {'1', '3'}   # after a refusal that opened a stop: a clean drain (v1) or an unavailable drain (v3)
+
+
+def released(stop_id, deadline, receipts):
+    """Read-only, bounded by the wall-clock deadline. Released means: Pod b9bbc857 gone, registry idle_stopped
+    without a Pod, and the stop `stop_id` completed with a receipt version in `receipts` and proof
+    {podUid b9bbc857, evidence pod-deleted}. Returns (ok, last observation)."""
     seen = {}
     while True:
         left = deadline - time.monotonic()
@@ -176,7 +183,7 @@ def released(stop_id, deadline):
                 'row': state[0] if state else 'lookup failed'}
         row = state[0] if state else {}
         if pod is None and row.get('phase') == 'idle_stopped' and row.get('pod') is None and row.get('completed') \
-                and row.get('receipt') == '4' and row.get('proofPod') == POD_5804 and row.get('evidence') == 'pod-deleted':
+                and row.get('receipt') in receipts and row.get('proofPod') == POD_5804 and row.get('evidence') == 'pod-deleted':
             return True, seen
         left = deadline - time.monotonic()
         if left <= 0:
@@ -207,10 +214,12 @@ def main(argv):
                 raise Stop(5, 'refusal after opening a stop without stopId: do not rerun; back checks')
         else:
             raise Stop(5, 'reclaim failed (rc %d): do not rerun; back checks read-only' % rc)
-        ok, seen = released(stop_id, time.monotonic() + WAIT)
+        ok, seen = released(stop_id, time.monotonic() + WAIT, NORMAL_RECEIPTS if after_open else R2_RECEIPTS)
         say('release check %s: %s' % (time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), json.dumps(seen, sort_keys=True)))
         if after_open:
-            raise Stop(7, 'released by the normal path: %s; do not rerun reclaim, back checks read-only' % ok)
+            # Not an R2 success: no operator receipt. Report whether the normal path finished that stop.
+            raise Stop(7, 'normal release confirmed=%s (receipt v1/v3, stop completed, Pod deleted); not an R2 '
+                          'reclaim; do not rerun reclaim, back checks read-only' % ok)
         if not ok:
             raise Stop(6, 'accepted but not proved released within %d s: do not rerun; back checks read-only' % WAIT)
     except Stop as stop:

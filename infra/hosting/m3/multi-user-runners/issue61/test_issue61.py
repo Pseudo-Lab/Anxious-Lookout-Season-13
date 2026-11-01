@@ -468,9 +468,21 @@ def main():
                      'observed': {'stopId': 'stop-1', 'stopOpenedByThisRun': True, 'receiptVersion': 1}})},
              release=[{'phase': 'idle_stopped', 'pod': None, 'completed': 'x', 'receipt': '1', 'proofPod': POD,
                        'evidence': 'pod-deleted'}])
-    rc, out, _ = w3('--expected-running', '0', wait=5)
-    check('w3: drain_accepted is rc 7: no R2 receipt, stop opened, read-only release check printed',
-          rc == 7 and 'nothing changed' not in out and 'stopOpenedByThisRun=True' in out and 'release check' in out, out)
+    rc, out, took = w3('--expected-running', '0', wait=20)
+    check('w3: drain_accepted + completed v1 is rc 7 with normal release confirmed=True, without waiting',
+          rc == 7 and 'nothing changed' not in out and 'stopOpenedByThisRun=True' in out
+          and 'normal release confirmed=True' in out and took < 10, '%s took %.1f' % (out, took))
+    drain_refused = {'rc': 3, 'line': json.dumps({'stage': 'reclaim', 'result': 'refused', 'code': 'drain_accepted',
+                     'observed': {'stopId': 'stop-1', 'stopOpenedByThisRun': True, 'receiptVersion': 1}})}
+    w3_state(reclaim=drain_refused, release=[{'phase': 'stopping', 'pod': POD, 'completed': None, 'receipt': '1',
+                                              'proofPod': None, 'evidence': None}], gets=99)
+    rc, out, _ = w3('--expected-running', '0', wait=3)
+    check('w3: drain_accepted + uncompleted v1 is rc 7 with normal release confirmed=False',
+          rc == 7 and 'normal release confirmed=False' in out, out)
+    w3_state(release=[{'phase': 'idle_stopped', 'pod': None, 'completed': 'x', 'receipt': '1', 'proofPod': POD,
+                       'evidence': 'pod-deleted'}])
+    rc, out, _ = w3('--expected-running', '0', wait=3)
+    check('w3: an accepted R2 whose stop completed with a v1 receipt is not an R2 success (rc 6)', rc == 6, out)
     w3_state(reclaim={'rc': 1, 'line': json.dumps({'stage': 'reclaim', 'result': 'failed'})})
     rc, out, _ = w3('--expected-running', '0')
     check('w3: CLI failure is rc 5, do not rerun', rc == 5 and 'do not rerun' in out, out)
