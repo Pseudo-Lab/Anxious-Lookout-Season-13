@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import time
 import uuid
 
 STATE = '/mock/state.json'
@@ -91,6 +92,14 @@ def kubectl(args):
                 if space == ns and kind in kinds:
                     print('%s/%s' % (kind, name))
             return
+        if rest[1] == 'pod' and state.get('slowPodGet'):
+            time.sleep(state['slowPodGet'])
+        gone = state.get('podGetsBeforeGone', {})
+        if rest[2] in gone:
+            gone[rest[2]] -= 1
+            if gone[rest[2]] < 0:
+                state['objects'].pop(okey(rest[1], ns, rest[2]), None)
+            save(state)
         obj = state['objects'].get(okey(rest[1], ns, rest[2]))
         if obj is None:
             if '--ignore-not-found' in rest:
@@ -195,8 +204,22 @@ def kubectl(args):
         print('{"owner": "00000000-0000-4000-8000-000000000048", "stage": "controller", "result": "deleting"}')
         print('Traceback: postgresql://user:SECRET@host/db')
         return
+    if verb == 'exec' and 'deploy/runner-controller' in rest:
+        state['reclaimCalls'] = state.get('reclaimCalls', 0) + 1
+        save(state)
+        print(state['reclaim']['line'])
+        die(state['reclaim']['rc'])
     if verb == 'exec':
         query = sys.stdin.read()
+        tag = re.search(r'/\*w3:(\w+)\*/', query)
+        if tag:
+            seq = state['sql'][tag.group(1)]
+            out = seq.pop(0) if len(seq) > 1 else seq[0]
+            save(state)
+            if out == 'FAIL':
+                die()
+            print(out)
+            return
         state.setdefault('queries', []).append(query)
         save(state)
         if failing('grants') and 'GRANT' in query:
@@ -287,7 +310,10 @@ def main():
             print(state['docker'][args[-1]])
             return
         if args[0] == 'load':
-            state['docker']['anxious-dev-runtime:61-5e73bc4'] = state['archives']['anxious-dev-runtime-61-5e73bc4.tar']['id']
+            archive = state['archives']['anxious-dev-runtime-61-5e73bc4.tar']
+            # containerd image store (the guest): Id = manifest digest; classic store: Id = config ID.
+            state['docker']['anxious-dev-runtime:61-5e73bc4'] = archive['id'] if state.get('dockerStore') == 'classic' \
+                else archive['digest']
             save(state)
             return
         if args[0] == 'run':

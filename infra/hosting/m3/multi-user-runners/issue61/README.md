@@ -20,7 +20,8 @@ The images are built on the host from `5e73bc4` (`--platform linux/amd64`) and m
 | W1 | `w1-import.sh` | user | Imports the three archives into k3s containerd and loads the runtime image into guest Docker for the renderer. Prints the image chain |
 | W2 | `w2-apply.py apply` | user | 061 grants, Namespace, DB Secret, RBAC/pool objects, CNP, api image, controller Deployment |
 | W2 rollback | `w2-apply.py rollback <evidence dir>` | user | Restores every object W2 changed from its backup. Deletes only objects W2 created, by UID; the namespace goes last and only if it is empty |
-| W3, W3b, W4–W7 | (next drafts) | | R2 for …5804, binding image change, measurements, SA rotation, reboot, postcheck |
+| W3 | `w3-reclaim.py --expected-running N` | user | R2 reclaim of …5804. Refuses unless N equals the running count now; bounded read-only release check |
+| W3b, W4–W7 | (next drafts) | | Binding image change, measurements, SA rotation, reboot, postcheck |
 
 ## Files installed next to the scripts
 

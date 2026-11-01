@@ -51,7 +51,7 @@ def setup(*, units=None, waiting=0, mutate=None, fail=()):
     for path in ('/mock', INSTALL, '/root/r4-rollout', '/home/opc/issue61-images'):
         os.makedirs(path, mode=0o700)
     shutil.copy(SRC + '/mock/resources.json', '/mock/resources.json')
-    for name in ('lib.sh', 'w0-lib.sh', 'w1-import.sh'):
+    for name in ('lib.sh', 'w0-lib.sh', 'w1-import.sh', 'w3-reclaim.py'):
         shutil.copy(os.path.join(SRC, name), INSTALL)
     with open(os.path.join(SRC, 'w2-apply.py')) as stream:
         text = stream.read()
@@ -139,7 +139,7 @@ def run(*args):
 def imported(s):
     for name, archive in s['archives'].items():
         s['images'][archive['ref']] = archive
-    s['docker']['anxious-dev-runtime:61-5e73bc4'] = IDS['runtime']
+    s['docker']['anxious-dev-runtime:61-5e73bc4'] = REFS['runtime'].split('@')[1]  # containerd image store
 
 
 def install_fakes():
@@ -169,9 +169,16 @@ def main():
     rc, out = run('sh', INSTALL + '/w1-import.sh')
     check('w1: imports all three and verifies the chain', rc == 0 and out.count('imported ') == 3, out)
     check('w1: chain lines name archive, ref and host id', out.count('chain ') == 3 and 'MISMATCH' not in out, out)
-    check('w1: runtime loaded into guest docker', 'docker runtime id ' + IDS['runtime'] in out, out)
+    check('w1: runtime loaded into guest docker (containerd store: Id = manifest digest)',
+          'docker runtime id ' + REFS['runtime'].split('@')[1] in out, out)
     rc, out = run('sh', INSTALL + '/w1-import.sh')
     check('w1: second run skips', rc == 0 and out.count('skip ') == 3, out)
+    setup(mutate=lambda s: s.__setitem__('dockerStore', 'classic'))
+    rc, out = run('sh', INSTALL + '/w1-import.sh')
+    check('w1: classic Docker store (Id = config ID) also passes', rc == 0 and 'docker runtime id ' + IDS['runtime'] in out, out)
+    setup(mutate=lambda s: s['docker'].__setitem__('anxious-dev-runtime:61-5e73bc4', 'sha256:' + 'd'*64))
+    rc, out = run('sh', INSTALL + '/w1-import.sh')
+    check('w1: a foreign Docker image id triggers the load; the result is accepted only as the manifest', rc == 0 and 'docker loaded runtime' in out, out)
     setup()
     with open('/home/opc/issue61-images/anxious-dev-runner-61-5e73bc4.tar', 'a') as stream:
         stream.write('tampered')
@@ -199,7 +206,9 @@ def main():
                 'runner-00000000000040008000000000005804')]['status'].__setitem__('phase', 'Failed')))),
             ('pool secret differs', dict(mutate=lambda s: (imported(s), s['objects'][okey('Secret', 'm2-hosting',
                 'hosting-runner-pool-v2')]['data'].__setitem__('pool.json', base64.b64encode(b'{"version": 1}').decode())))),
-            ('render refused', dict(mutate=imported, fail=['render']))]:
+            ('render refused', dict(mutate=imported, fail=['render'])),
+            ('docker holds another runtime image', dict(mutate=lambda s: (imported(s), s['docker'].__setitem__(
+                'anxious-dev-runtime:61-5e73bc4', 'sha256:' + 'd'*64))))]:
         setup(**kwargs)
         before = json.dumps(state()['objects'], sort_keys=True)
         rc, out = w2('apply')
@@ -214,6 +223,9 @@ def main():
     s = state()
     ev = evidence(out)
     check('w2: apply succeeds', rc == 0, out)
+    check('w2: the renderer runs by the verified Docker Id, not by tag',
+          any(l.startswith('docker run') and (' ' + REFS['runtime'].split('@')[1] + ' ') in l
+              for l in open('/mock/calls.log').read().splitlines()))
     check('w2: api image is the runtime ref',
           s['objects'][okey('Deployment', 'm2-hosting', 'api')]['spec']['template']['spec']['containers'][0]['image'] == REFS['runtime'])
     check('w2: controller Deployment and namespace exist', okey('Deployment', 'runner-control', 'runner-controller') in s['objects']
@@ -389,6 +401,97 @@ def main():
                       % (INSTALL, INSTALL))
         check('w0 check_imports: %s' % case, want in out and out.strip().endswith(
             'lookups=%d' % (3 if case == 'lookup failed' else 0)), out)
+
+    # W3 -----------------------------------------------------------------------------------------------
+    import time as _time
+    O48, O02, O04 = (f[0] for f in FIXTURES)
+    POD = 'b9bbc857-cd36-4a7b-89b5-1ca7c7d3b61b'
+    NAME = 'runner-' + O04.replace('-', '')
+
+    def w3_state(*, running=0, reg48='idle_stopped', release=None, reclaim=None, gets=1, slow=0, w2_clean=True):
+        def mutate(st):
+            st['objects'][okey('Deployment', 'runner-control', 'runner-controller')] = {'kind': 'Deployment', 'metadata': {
+                'name': 'runner-controller', 'namespace': 'runner-control', 'uid': 'ctrl-uid'}, 'status': {'readyReplicas': 1}}
+            reg = [{'owner': O48, 'phase': reg48, 'generation': 2, 'revision': 4, 'pod': None},
+                   {'owner': O02, 'phase': 'idle_stopped', 'generation': 4, 'revision': 12, 'pod': None},
+                   {'owner': O04, 'phase': 'runner_unreachable', 'generation': 3, 'revision': 10, 'pod': POD}]
+            done = {'phase': 'idle_stopped', 'pod': None, 'completed': '2026-11-01T15:00:00+00:00', 'receipt': '4',
+                    'proofPod': POD, 'evidence': 'pod-deleted', 'boot': 'b', 'drain': '503', 'reason': 'auth_revoked'}
+            st['sql'] = {'registry': ['\n'.join(json.dumps(r) for r in reg)], 'stops': [''],
+                         'running': [json.dumps({'running': running})],
+                         'release': [x if isinstance(x, str) else json.dumps(x) for x in (release or [dict(done, phase='stopping', pod=POD,
+                                                                                    completed=None), done])]}
+            st['reclaim'] = reclaim or {'rc': 0, 'line': json.dumps({'stage': 'reclaim', 'result': 'accepted', 'owner': O04,
+                                                                       'podUid': POD, 'stopId': 'stop-1'})}
+            st['podGetsBeforeGone'] = {NAME: gets}
+            st['slowPodGet'] = slow
+        setup(mutate=mutate)
+        os.makedirs('/root/issue61/evidence/w2-x', mode=0o700)
+        json.dump({'pending': None, 'done': ['x'], 'uncertain': [] if w2_clean else ['y'],
+                   'created': {'Deployment runner-control/runner-controller': 'ctrl-uid'}, 'creationUncertain': []},
+                  open('/root/issue61/evidence/w2-x/changes.json', 'w'))
+
+    def w3(*args, wait=None):
+        env = dict(os.environ, **({'W3_WAIT_SECONDS': str(wait)} if wait else {}))
+        start = _time.monotonic()
+        done = subprocess.run(['python3', '-I', INSTALL + '/w3-reclaim.py'] + list(args), stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, timeout=300, env=env)
+        return done.returncode, done.stdout.decode(), _time.monotonic() - start
+
+    w3_state()
+    rc, out, _ = w3('--expected-running', '0', wait=30)
+    check('w3: happy path reclaims once and proves the release', rc == 0 and state()['reclaimCalls'] == 1
+          and '"proofPod": "%s"' % POD in out, out)
+    for args in ([], ['--expected-running'], ['--expected-running', 'x'], ['--expected-running', '-1'],
+                 ['--expected', '0'], ['--expected-running', '0', 'extra']):
+        w3_state()
+        rc, out, _ = w3(*args)
+        check('w3: bad count input %s refuses before anything runs' % args, rc == 3 and not state().get('reclaimCalls'), out)
+    w3_state(running=1)
+    rc, out, _ = w3('--expected-running', '0')
+    check('w3: running count changed since the go refuses before reclaim, prints both',
+          rc == 3 and not state().get('reclaimCalls') and 'go was for 0' in out and 'new go with 1' in out, out)
+    w3_state(running=1)
+    rc, out, _ = w3('--expected-running', '1', wait=30)
+    check('w3: a go given for the current count proceeds', rc == 0 and state()['reclaimCalls'] == 1, out)
+    w3_state(reg48='runner_unreachable')
+    rc, out, _ = w3('--expected-running', '0')
+    check('w3: …0048 not released refuses before reclaim', rc == 3 and not state().get('reclaimCalls'), out)
+    w3_state(w2_clean=False)
+    rc, out, _ = w3('--expected-running', '0')
+    check('w3: W2 with an uncertain attempt refuses', rc == 3 and not state().get('reclaimCalls'), out)
+    w3_state(reclaim={'rc': 3, 'line': json.dumps({'stage': 'reclaim', 'result': 'refused', 'code': 'runner_available',
+                                                     'observed': {'health': {'available': True}}})})
+    rc, out, _ = w3('--expected-running', '0')
+    check('w3: refusal before a stop is opened is rc 4 "nothing changed"', rc == 4 and 'nothing changed' in out, out)
+    w3_state(reclaim={'rc': 3, 'line': json.dumps({'stage': 'reclaim', 'result': 'refused', 'code': 'drain_accepted',
+                     'observed': {'stopId': 'stop-1', 'stopOpenedByThisRun': True, 'receiptVersion': 1}})},
+             release=[{'phase': 'idle_stopped', 'pod': None, 'completed': 'x', 'receipt': '1', 'proofPod': POD,
+                       'evidence': 'pod-deleted'}])
+    rc, out, _ = w3('--expected-running', '0', wait=5)
+    check('w3: drain_accepted is rc 7: no R2 receipt, stop opened, read-only release check printed',
+          rc == 7 and 'nothing changed' not in out and 'stopOpenedByThisRun=True' in out and 'release check' in out, out)
+    w3_state(reclaim={'rc': 1, 'line': json.dumps({'stage': 'reclaim', 'result': 'failed'})})
+    rc, out, _ = w3('--expected-running', '0')
+    check('w3: CLI failure is rc 5, do not rerun', rc == 5 and 'do not rerun' in out, out)
+    w3_state(reclaim={'rc': 0, 'line': json.dumps({'stage': 'reclaim', 'result': 'accepted', 'owner': O04,
+                                                     'podUid': 'other', 'stopId': 's'})})
+    rc, out, _ = w3('--expected-running', '0')
+    check('w3: accepted for another Pod is rc 5', rc == 5, out)
+    incomplete = {'phase': 'idle_stopped', 'pod': None, 'completed': None, 'receipt': '4', 'proofPod': POD,
+                  'evidence': 'pod-deleted'}
+    w3_state(release=[incomplete])
+    rc, out, took = w3('--expected-running', '0', wait=3)
+    check('w3: an uncompleted stop never passes (rc 6)', rc == 6 and took < 20, '%s took %.1f' % (out, took))
+    w3_state(release=['FAIL'])
+    rc, out, took = w3('--expected-running', '0', wait=3)
+    check('w3: a release lookup that fails is a failed lookup, not a crash (rc 6)', rc == 6 and 'unexpected' not in out, out)
+    w3_state(release=['"not-an-object"'])
+    rc, out, took = w3('--expected-running', '0', wait=3)
+    check('w3: failing release lookups end at the deadline (rc 6)', rc == 6 and took < 20, '%s took %.1f' % (out, took))
+    w3_state(slow=2, gets=99)
+    rc, out, took = w3('--expected-running', '0', wait=4)
+    check('w3: slow lookups are capped by the wall-clock deadline', rc == 6 and took < 15, '%s took %.1f' % (out, took))
 
     print('passed %d, failed %d' % (passed, failed))
     return 1 if failed else 0

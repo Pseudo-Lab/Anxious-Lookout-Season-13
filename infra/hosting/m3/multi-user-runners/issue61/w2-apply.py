@@ -63,6 +63,7 @@ RUNTIME_TAG = 'anxious-dev-runtime:61-5e73bc4'
 RUNTIME_ID = 'sha256:80af8c59f978f7a7d59d02f71985f3d456ce2e8011ed2d534395297188830771'
 MODULE_SHA256 = 'a7d2a7d1c7ab17421cfd6b2e03ad9eab40d4a00df48b72f5011899dcb870ac6c'  # ops/runner_rollout.py @ 5e73bc4
 HERE = os.path.dirname(os.path.abspath(__file__))
+RENDER_IMAGE = None  # The guest Docker Id of the runtime image, set by precheck after it is verified.
 K3S = '/usr/local/bin/k3s'
 VALUES = '/root/r4-rollout/values.json'
 DSN = {'controller-url': '/etc/anxious-lookout/issue16/controller/database-url',
@@ -177,9 +178,15 @@ def precheck():
                   'image lookup').strip()
         if got != image_id:
             raise Stop(3, 'precheck: %s has id %s, want %s' % (ref, got or 'none', image_id))
+    # Guest Docker (containerd image store) reports the manifest digest as Id; the classic store reports the config
+    # ID. Either names exactly the verified image: the manifest is RUNTIME_REF's (checked below against the k3s
+    # import, whose crictl config ID is RUNTIME_ID). The renderer then runs by this verified Id, never by tag.
     got = run(['docker', 'image', 'inspect', '--format', '{{.Id}}', RUNTIME_TAG], 'docker image lookup').strip()
-    if got != RUNTIME_ID:
-        raise Stop(3, 'precheck: docker %s has id %s' % (RUNTIME_TAG, got or 'none'))
+    if got not in {RUNTIME_ID, RUNTIME_REF.split('@', 1)[1]}:
+        raise Stop(3, 'precheck: docker %s has id %s, want %s or %s' % (RUNTIME_TAG, got or 'none',
+                                                                       RUNTIME_REF.split('@', 1)[1], RUNTIME_ID))
+    global RENDER_IMAGE
+    RENDER_IMAGE = got
     rows = [row.split() for row in run([K3S, 'ctr', '-n', 'k8s.io', 'images', 'ls'], 'ctr images ls').splitlines()]
     for ref, tag in ((RUNTIME_REF, 'runtime'), (RUNNER_REF, 'runner'), (EXECUTOR_REF, 'shell-executor')):
         # The digest reference resolves only to the manifest W1 imported under the 61-5e73bc4 tag.
@@ -228,7 +235,7 @@ def render(work, api):
     os.mkdir(parent, 0o700)
     run(['docker', 'run', '--rm', '--pull=never', '--network', 'none', '--read-only', '--cap-drop', 'ALL',
          '--security-opt', 'no-new-privileges', '--user', '0:0', '--tmpfs', '/tmp',
-         '-v', inputs + ':/in:ro,Z', '-v', parent + ':/out-parent:Z', '--entrypoint', 'python', RUNTIME_TAG,
+         '-v', inputs + ':/in:ro,Z', '-v', parent + ':/out-parent:Z', '--entrypoint', 'python', RENDER_IMAGE,
          '-B', '-m', 'ops.runner_rollout', '--values', '/in/values.json', '--deployment', '/in/api.json',
          '--templates', '/in/templates', '--output', '/out-parent/out', '--expected-module-sha256', MODULE_SHA256],
         'render', timeout=120)

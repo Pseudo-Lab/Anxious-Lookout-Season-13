@@ -4,7 +4,8 @@
 # the guest after review cleared this SHA-256. No source transfer, no Pod/Deployment/DB change.
 # Chain printed for #61: archive SHA-256 (checked against archives.sha256 before any import) → guest import
 # reference and digest (ctr) → image ID (crictl inspecti .status.id), which must equal the host image ID.
-# Safe to run again: an image already imported with the expected ID is skipped.
+# Safe to run again: an image already imported with the expected ID is skipped, and so is the docker load when
+# guest Docker already holds the runtime image (its Id is the k3s manifest digest or the config ID).
 # rc: 0 done and verified; 3 precheck refused, nothing imported; 5 an import failed (earlier ones stay
 #     imported, which changes no workload); 8 imported but the chain check failed.
 set -u
@@ -31,8 +32,18 @@ echo "$EXPECTED" | while IFS='|' read -r ref file id; do
   timeout 600 "$K3S" ctr -n k8s.io images import "$ARCHIVES/$file" >/dev/null 2>&1 || { echo "import of $file failed"; exit 5; }
   echo "imported $file"
 done || fail 'stopped at the failed import' 5
+# Guest Docker identity of the runtime image: with the containerd image store (the guest, DEV-VM.md) the Docker
+# Id is the manifest digest k3s imported; with the classic store it is the config ID (= host image ID). Either
+# names exactly the verified image; nothing else is accepted.
+RUNTIME_CONFIG=$(echo "$EXPECTED" | sed -n 1p | cut -d'|' -f3)
+runtime_manifest() { timeout 30 "$K3S" ctr -n k8s.io images ls 2>/dev/null \
+  | awk '$1 == "docker.io/library/anxious-dev-runtime:61-5e73bc4" {print $3}'; }
+docker_ok() {  # $1 = docker Id
+  m=$(runtime_manifest)
+  [ -n "$1" ] && { [ "$1" = "$RUNTIME_CONFIG" ] || { [ -n "$m" ] && [ "$1" = "$m" ]; }; }
+}
 r=$(timeout 30 docker image inspect --format '{{.Id}}' anxious-dev-runtime:61-5e73bc4 2>/dev/null)
-if [ "$r" != "$(echo "$EXPECTED" | sed -n 1p | cut -d'|' -f3)" ]; then
+if ! docker_ok "$r"; then
   timeout 600 docker load -i "$ARCHIVES/anxious-dev-runtime-61-5e73bc4.tar" >/dev/null 2>&1 || fail 'docker load of the runtime image failed' 5
   echo 'docker loaded runtime'
 fi
@@ -48,8 +59,8 @@ done; } > /run/issue61-w1.chain
 cat /run/issue61-w1.chain
 grep -q MISMATCH /run/issue61-w1.chain && bad=chain
 d=$(timeout 30 docker image inspect --format '{{.Id}}' anxious-dev-runtime:61-5e73bc4 2>/dev/null)
-echo "docker runtime id ${d:-missing}"
-[ "$d" = "$(echo "$EXPECTED" | sed -n 1p | cut -d'|' -f3)" ] || bad="$bad docker"
+echo "docker runtime id ${d:-missing} (accepted: k3s manifest $(runtime_manifest) or config $RUNTIME_CONFIG)"
+docker_ok "$d" || bad="$bad docker"
 rm -f /run/issue61-w1.chain
 [ -z "$bad" ] || fail "postcheck failed:$bad" 8
 echo 'result rc=0'
