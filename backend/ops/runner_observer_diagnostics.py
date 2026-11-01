@@ -68,7 +68,7 @@ def diagnose_observer(observer, owner):
                 if obj['metadata'].get('deletionTimestamp'):
                     return 'awaiting_pod_deletion' if stop['receipt'] is not None else 'receipt_unavailable'
                 stage = 'pod_invalid'
-                runtime.pods._pod(obj,runtime.plan)
+                if observer.stopping_pod(runtime,obj,state) != state.pod_uid: return stage
                 stage = 'pod_address_invalid'
                 address = ipaddress.ip_address(obj['status']['podIP'])
                 if address not in runtime.network or address.is_loopback or address.is_link_local: return stage
@@ -101,7 +101,9 @@ def diagnostic_command(args):
         engine = create_engine(secret('OBSERVER_DATABASE_URL'),hide_parameters=True)
         config = json.loads(private_file(Path(args.inputs)))
         require(os.geteuid() == 0 and set(config) == {'pool','host','storageRoot'})
-        observer = Observer(engine,Pool(ReadOnlyEngine(engine),config['pool']),HostTermination(**config['host']),config['storageRoot'])
+        legacy = None if args.legacy_pod_uid is None else (args.owner,args.legacy_pod_uid)
+        observer = Observer(engine,Pool(ReadOnlyEngine(engine),config['pool']),HostTermination(**config['host']),config['storageRoot'],
+                            legacy_pod=legacy)
         code = diagnose_observer(observer,args.owner)
     except Exception:
         pass
@@ -116,6 +118,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--inputs', required=True, help='Private observer inputs')
     parser.add_argument('--owner', type=UUID, required=True)
+    parser.add_argument('--legacy-pod-uid', type=UUID, help='#66: the identity check the observer would use with this option')
     return diagnostic_command(parser.parse_args())
 
 
