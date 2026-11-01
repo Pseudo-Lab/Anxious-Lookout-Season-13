@@ -117,7 +117,7 @@ def setup(*, units=None, waiting=0, mutate=None, fail=()):
             'uid': uid}, 'status': {'phase': phase, 'containerStatuses': [{'name': 'runner', 'state': {runner: {}}}]}}
     state = {'objects': objects, 'images': {}, 'archives': archives, 'docker': {}, 'waiting': waiting,
              'units': units or {}, 'openStops': [],
-             'applyStages': {'0': 'apply-ns', '1': 'apply-rbac', '2': 'apply-cnp', '3': 'apply-deploy'},
+             'applyStages': {'0': 'apply-rbac', '1': 'apply-cnp'},
              'cani': {'create pods runner-control:runner-controller': 'yes'}}
     if mutate:
         mutate(state)
@@ -283,7 +283,7 @@ def main():
     setup(mutate=imported, fail=['set-image'])
     rc, out = w2('apply')
     check('w2: failure at the api image is rc 5 and lists what changed', rc == 5 and 'partial: done: granted 061' in out
-          and 'applied CNP' in out and 'uncertain (may have been applied): set api image' in out
+          and 'updated CNP' in out and 'uncertain (may have been applied): set api image' in out
           and 'rollback: python3 -I' in out, out)
     ev = evidence(out)
     os.unlink('/mock/fail')
@@ -318,15 +318,48 @@ def main():
 
     def foreign(s):
         imported(s)
-        s['foreignAfterNs'] = {'kind': 'ClusterRole', 'metadata': {'name': 'runner-controller'}, 'rules': []}
+        s['foreignBeforeCreate'] = {okey('ClusterRole', None, 'runner-controller'): {
+            'kind': 'ClusterRole', 'metadata': {'name': 'runner-controller'}, 'rules': []}}
     setup(mutate=foreign)
     rc, out = w2('apply')
     s = state()
-    check('w2: a name that appears before its step is never adopted (rc 5, nothing applied over it)',
-          rc == 5 and 'appeared before this run created it' in out
-          and s['objects'][okey('ClusterRole', None, 'runner-controller')]['rules'] == [], out)
+    ev = evidence(out)
+    changes = json.load(open(ev + '/changes.json'))
+    check('w2: a name created by another actor after the last lookup is never modified or adopted (create-only)',
+          rc == 5 and s['objects'][okey('ClusterRole', None, 'runner-controller')]['rules'] == []
+          and 'ClusterRole -/runner-controller' not in changes['created']
+          and 'ClusterRole -/runner-controller' in changes['creationUncertain'], out)
+    rc, out = w2('rollback', ev)
+    s = state()
+    check('w2 rollback: the foreign ClusterRole is reported and never deleted',
+          okey('ClusterRole', None, 'runner-controller') in s['objects'] and 'creation uncertain' in out, out)
 
-    for stage, text in [('grants-lost', 'granted 061'), ('apply-ns-lost', 'applied Namespace runner-control'),
+    setup(mutate=imported, fail=['kill-create-deployment'])
+    rc, out = w2('apply')
+    ev = evidence(out)
+    changes = json.load(open(ev + '/changes.json'))
+    check('w2: an interrupted run leaves its attempt pending in changes.json',
+          rc != 0 and changes['pending'] == {'text': 'created Deployment runner-control/runner-controller',
+                                             'objects': ['Deployment runner-control/runner-controller']}, json.dumps(changes))
+    os.unlink('/mock/fail')
+    before = json.dumps(state()['objects'], sort_keys=True)
+    rc, out = w2('rollback', ev)
+    check('w2 rollback after an interrupted controller create refuses before any change',
+          rc == 3 and 'interrupted attempt treated as uncertain' in out
+          and json.dumps(state()['objects'], sort_keys=True) == before, out)
+
+    setup(mutate=imported, fail=['kill-grants'])
+    rc, out = w2('apply')
+    ev = evidence(out)
+    changes = json.load(open(ev + '/changes.json'))
+    check('w2: interrupted after the GRANT commit: pending, not "nothing"',
+          rc != 0 and changes['pending']['text'].startswith('granted 061') and changes['done'] == [], json.dumps(changes))
+    os.unlink('/mock/fail')
+    rc, out = w2('rollback', ev)
+    check('w2 rollback after an interrupted GRANT reports it and changes nothing else',
+          rc == 0 and 'interrupted attempt treated as uncertain: granted 061' in out, out)
+
+    for stage, text in [('grants-lost', 'granted 061'), ('create-namespace-lost', 'created Namespace runner-control'),
                         ('secret-lost', 'created Secret runner-control/runner-controller-db'),
                         ('set-image-lost', 'set api image')]:
         setup(mutate=imported, fail=[stage])
@@ -336,7 +369,7 @@ def main():
         check('w2: lost answer at %s is reported as uncertain, not as nothing' % stage,
               rc == 5 and any(u.startswith(text) for u in changes['uncertain'])
               and 'uncertain (may have been applied): ' + text in out, out)
-        if stage in {'apply-ns-lost', 'secret-lost'}:
+        if stage in {'create-namespace-lost', 'secret-lost'}:
             os.unlink('/mock/fail')
             rc, out = w2('rollback', ev)
             s = state()

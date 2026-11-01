@@ -23,12 +23,12 @@ apply, in this order (every lookup, the render and every backup finish before th
 After step 7 runner-controller starts its loop: …0048/…5802 take the dead-runner path on their own (back's
 read-only postcheck records it). …5804 is left for W3 (R2).
 
-Ownership: every change is logged as attempted, then done or uncertain (changes.json). The UID of an object
-that was absent before W2 is taken only from the answer of the command that created it, never from a later
-lookup, and never overwritten; a lost answer leaves it "creation uncertain". Before each step, objects W2 is
-about to create must still be absent (a name that appeared meanwhile is never adopted). Writes to objects that
-existed before carry their backup UID, so the API refuses a write to a replaced object (apply, the api image
-patch, rollback's replace and scale).
+Ownership: every attempt is written (fsynced) to changes.json as pending before its command runs, then moved
+to done or uncertain; an interrupted run leaves it pending and rollback treats it as uncertain. Objects that
+were absent before W2 are made one at a time by create-only commands (the API answers AlreadyExists for any
+existing name, so a foreign object is never modified or adopted); their UID comes only from that answer and is
+never overwritten. Writes to objects that existed before carry their backup UID, so the API refuses a write to
+a replaced object (apply, the api image patch, rollback's replace and scale).
 
 rollback (restores what W2 changed; never claims to undo a reclaim):
   first, with nothing changed yet: every pre-existing object must still have its backup UID and a present
@@ -281,14 +281,18 @@ def backup(ev, items):
 
 # Apply ------------------------------------------------------------------------------------------------
 class Changes:
-    """What this run changed, in three states written before and after every attempt (changes.json):
-    done (confirmed), uncertain (the command failed or its answer was lost: the server may have applied it).
+    """What this run changed (changes.json, fsynced before and after every attempt):
+    pending  the attempt in progress, written before its command runs: a run interrupted there (SIGKILL, lost
+             SSH) leaves it, and rollback treats it as uncertain;
+    done     confirmed by the command's answer;
+    uncertain the command failed or its answer was lost: the server may have applied it.
 
-    created holds the UID of each object that was absent before W2, taken only from the server's answer to the
-    command that created it, and never overwritten. An object whose creation answer was lost is "uncertain" and
-    is never adopted by a later lookup; rollback refuses to delete it."""
+    created holds the UID of each object that was absent before W2, taken only from the answer of the
+    create-only command that made it (the API refuses AlreadyExists, so a foreign object is never modified
+    or adopted), and never overwritten. Objects of a failed, lost or interrupted attempt are
+    "creation uncertain": rollback reports them and never deletes them."""
     def __init__(self, ev, record):
-        self.ev, self.done, self.uncertain, self.created, self.unsure = ev, [], [], {}, []
+        self.ev, self.done, self.uncertain, self.created, self.unsure, self.pending = ev, [], [], {}, [], None
         self.absent = {label((e['kind'], e['namespace'], e['name'])) for e in record if e['absent']}
         self.uids = {label((e['kind'], e['namespace'], e['name'])): (e.get('object') or {}).get('metadata', {}).get('uid')
                      or e.get('uid') for e in record if not e['absent']}
@@ -297,25 +301,31 @@ class Changes:
     def save(self):
         path = os.path.join(self.ev, 'changes.json')
         with open(path + '.tmp', 'w') as stream:
-            json.dump({'done': self.done, 'uncertain': self.uncertain, 'created': self.created,
-                       'creationUncertain': self.unsure}, stream, indent=1)
+            json.dump({'pending': self.pending, 'done': self.done, 'uncertain': self.uncertain,
+                       'created': self.created, 'creationUncertain': self.unsure}, stream, indent=1)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(path + '.tmp', path)
+        directory = os.open(self.ev, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
     def step(self, text, objs, action):
-        """Run one change. Objects absent before W2 must still be absent (no adoption of a foreign object)."""
+        """Run one change; `objs` are the objects it creates (absent before W2) or updates."""
         mine = [label(key(o)) for o in objs if label(key(o)) in self.absent]
-        for name in mine:
-            kind, rest = name.split(' ', 1)
-            ns, obj = rest.split('/', 1)
-            if get(kind, None if ns == '-' else ns, obj, 'pre-step lookup', rc=5) is not None:
-                raise Stop(5, '%s appeared before this run created it; not adopted' % name)
+        self.pending = {'text': text, 'objects': mine}
+        self.save()  # Durable before the command: an interruption from here on is visible to rollback.
         try:
             answer = action()
         except Exception:
+            self.pending = None
             self.uncertain.append(text)
             self.unsure.extend(mine)
             self.save()
             raise
+        self.pending = None
         self.done.append(text)
         for name in mine:
             uid = (answer or {}).get(name)
@@ -350,8 +360,19 @@ def answered(out):
 
 
 def apply_objects(objs, stage, uids):
+    """Update pre-existing objects only, each carrying its backup UID (the API refuses a replaced object)."""
+    if any(not uids.get(label(key(o))) for o in objs):
+        raise Stop(5, 'apply would create an object; creation goes through create_object only')
     payload = json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': with_uids(objs, uids)}).encode()
     return answered(kubectl(['apply', '-o', 'json', '-f', '-'], stage, rc=5, stdin=payload, timeout=120))
+
+
+def create_object(obj, stage):
+    """Create-only: the API answers AlreadyExists for any existing name, so nothing foreign is touched."""
+    if obj['metadata'].get('uid'):
+        raise Stop(5, 'create payload must not carry a UID')
+    return answered(kubectl(['create', '-o', 'json', '-f', '-'], stage, rc=5, stdin=json.dumps(obj).encode(),
+                            timeout=120))
 
 
 def db_secret():
@@ -415,21 +436,25 @@ def apply(ev):
         with open(os.path.join(HERE, '061_runner_controller_grants.sql')) as stream:
             grants = 'BEGIN;\n' + stream.read() + '\nCOMMIT;\n'  # One transaction: all three GRANTs or none.
         changes.step('granted 061 (stays on rollback)', [], lambda: sql(grants, 'grants 061', rc=5))
-        changes.step('applied Namespace runner-control', by_kind['Namespace'],
-                     lambda: apply_objects(by_kind['Namespace'], 'namespace', uids))
+        changes.step('created Namespace runner-control', by_kind['Namespace'],
+                     lambda: create_object(by_kind['Namespace'][0], 'namespace'))
         changes.step('created Secret runner-control/runner-controller-db', [
             {'kind': 'Secret', 'metadata': {'namespace': 'runner-control', 'name': 'runner-controller-db'}}], db_secret)
         rest = [o for o in items if o['kind'] not in {'Namespace', 'Deployment'}]
-        changes.step('applied %d RBAC/SA/pool objects' % len(rest), rest, lambda: apply_objects(rest, 'rbac and pool objects', uids))
-        changes.step('applied CNP codex-runner/runner-callback-draft', cnp_items,
+        existing = [o for o in rest if label(key(o)) not in changes.absent]
+        for obj in [o for o in rest if label(key(o)) in changes.absent]:
+            changes.step('created ' + label(key(obj)), [obj], lambda obj=obj: create_object(obj, 'create ' + label(key(obj))))
+        changes.step('updated %d existing RBAC/SA/pool objects (UID preconditions)' % len(existing), existing,
+                     lambda: apply_objects(existing, 'rbac and pool objects', uids))
+        changes.step('updated CNP codex-runner/runner-callback-draft (UID precondition)', cnp_items,
                      lambda: apply_objects(cnp_items, 'cnp', uids))
         changes.step('set api image %s -> %s' % (old_image, RUNTIME_REF), [],
                      lambda: kubectl(['-n', 'm2-hosting', 'patch', 'deployment', 'api', '--type=strategic', '-p',
                                       json.dumps(patch)], 'api image', rc=5))
         kubectl(['-n', 'm2-hosting', 'rollout', 'status', 'deployment/api', '--timeout=180s'], 'api rollout',
                 rc=5, timeout=200)
-        changes.step('applied Deployment runner-control/runner-controller', by_kind['Deployment'],
-                     lambda: apply_objects(by_kind['Deployment'], 'controller deployment', uids))
+        changes.step('created Deployment runner-control/runner-controller', by_kind['Deployment'],
+                     lambda: create_object(by_kind['Deployment'][0], 'controller deployment'))
         kubectl(['-n', 'runner-control', 'rollout', 'status', 'deployment/runner-controller', '--timeout=180s'],
                 'controller rollout', rc=5, timeout=200)
     except Exception as failure:
@@ -502,8 +527,14 @@ def rollback(ev):
         with open(os.path.join(ev, 'changes.json')) as stream:
             changes = json.load(stream)
         created, unsure = changes['created'], set(changes['creationUncertain'])
+        pending = changes.get('pending')
     except Exception:
         raise Stop(3, 'rollback: evidence directory unreadable') from None
+    if pending:
+        # The apply run was interrupted inside this attempt: whatever it touched is uncertain, never adopted.
+        unsure |= set(pending['objects'])
+        say('rollback: interrupted attempt treated as uncertain: %s (%s)' % (pending['text'],
+                                                                           ', '.join(pending['objects']) or 'no object'))
     # Every check before the first change: a replaced object is never overwritten, stopped or deleted.
     problems = []
     for e in record:

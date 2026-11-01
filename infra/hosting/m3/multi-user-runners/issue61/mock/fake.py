@@ -109,8 +109,6 @@ def kubectl(args):
             upsert(state, obj)
             k = okey(obj['kind'], obj['metadata'].get('namespace'), obj['metadata']['name'])
             written.append(state['objects'][k])
-        if stage == 'apply-ns' and state.get('foreignAfterNs'):  # Another actor creates a name W2 will create.
-            upsert(state, state.pop('foreignAfterNs'))
         save(state)
         if failing(stage + '-lost'):
             die()  # Applied on the server, answer lost.
@@ -125,6 +123,24 @@ def kubectl(args):
         assert obj['metadata'].get('uid'), 'replace payload must carry the backup UID'
         upsert(state, obj)
         save(state)
+        return
+    if verb == 'create' and rest[1] != 'secret':
+        assert opt(rest, '-o') == 'json' and opt(rest, '-f') == '-', rest
+        obj = json.load(sys.stdin)
+        k = okey(obj['kind'], obj['metadata'].get('namespace'), obj['metadata']['name'])
+        race = state.get('foreignBeforeCreate', {}).pop(k, None)
+        if race:  # Another actor creates the name after the script's last lookup.
+            upsert(state, race)
+        if k in state['objects'] or obj['metadata'].get('uid'):
+            save(state); die()  # AlreadyExists
+        upsert(state, obj)
+        save(state)
+        if failing('create-' + obj['kind'].lower() + '-lost'):
+            die()
+        if failing('kill-create-' + obj['kind'].lower()):
+            os.kill(os.getppid(), 9)  # The script dies after the server created the object.
+            die()
+        print(json.dumps(state['objects'][k]))
         return
     if verb == 'create':
         assert rest[1:4] == ['secret', 'generic', 'runner-controller-db'], rest
@@ -189,6 +205,9 @@ def kubectl(args):
             state['granted'] = query.count('GRANT')
             save(state)
             if failing('grants-lost'):
+                die()
+            if failing('kill-grants'):
+                os.kill(os.getppid(), 9)
                 die()
         if 'capacity_wait' in query:
             print(state.get('waiting', 0))
