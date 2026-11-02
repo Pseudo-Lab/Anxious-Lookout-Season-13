@@ -22,6 +22,7 @@ The images are built on the host from `5e73bc4` (`--platform linux/amd64`) and m
 | W1b | `w1b-tag.sh` | user, after a W2 rollback | Tags the three `NAME@sha256:DIGEST` references (infra/hosting/README.md) and checks each resolves to its host ID; refuses while the api points at the new digest |
 | W2 | `w2-apply.py apply` | user | 061 grants, Namespace, DB Secret, RBAC/pool objects, CNP, api image, controller Deployment |
 | W2 rollback | `w2-apply.py rollback <evidence dir>` | user | Restores every object W2 changed from its backup. Deletes only objects W2 created, by UID; the namespace goes last and only if it is empty |
+| W2 verify | `w2-verify.py <evidence dir>` | back, after clearance | Nothing. Read-only certification of a finished W2 apply: clean evidence, the eight created UIDs live, backup UIDs, api and controller rolled out, the can-i set, controller outcome lines |
 | W3 | `w3-reclaim.py --expected-running N` | user | R2 reclaim of …5804. Refuses unless N equals the running count now; bounded read-only release check |
 | W3b, W4–W7 | (next drafts) | | Binding image change, measurements, SA rotation, reboot, postcheck |
 
@@ -46,9 +47,25 @@ All of these are copied from the same commit with `git show <sha>:<path>`.
 | 0 | Done and verified |
 | 2 | Placeholders left |
 | 3 | Precheck, render or backup refused; nothing changed |
-| 4 | W0 only: a condition differs from the expected state |
+| 4 | W0 and `w2-verify.py` only: a condition differs from the expected state (nothing changed) |
 | 5 | A change failed. The output lists what this run changed and the rollback command |
 | 8 | Changed, but a postcheck failed |
+
+## W2 run `w2-20261102T151325Z`: rc 8 was a false alarm in the check
+
+The installed `w2-apply.py` for this run (SHA-256 `f0038fa7…`) ended with
+`can-i controller execs pods: yes (want no)` and rc 8. That postcheck asked `kubectl auth can-i create pods/exec`.
+kubectl reads `TYPE/NAME`, so this asked "may it create the Pod named exec?". The controller may create Pods, so
+the answer was yes. Asked as a subresource (`--subresource=exec`, and also attach, portforward and
+ephemeralcontainers), every answer is no, and no binding grants exec. Everything else W2 applied matched, and its
+`changes.json` is clean.
+
+- The fixed postcheck is in the branch's `w2-apply.py` (`CHECKS`, asked with `--subresource`).
+- The mock now models the `TYPE/NAME` meaning, so the old form fails the harness.
+- That run is certified by `w2-verify.py` on its evidence directory, not by its own rc. Read its rc 8 together
+  with the verifier's output.
+- The installed `f0038fa7…` stays as that run's script. Its apply path is unchanged, and so is its rollback,
+  which any rollback of this run uses. Only its postcheck question was wrong.
 
 ## Mock harness (Docker, Python 3.9 as on the guest)
 

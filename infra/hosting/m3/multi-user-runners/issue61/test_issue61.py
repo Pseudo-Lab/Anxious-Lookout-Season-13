@@ -3,11 +3,13 @@
       python3 -I /m3/multi-user-runners/issue61/test_issue61.py
 Stand-ins (mock/fake.py) replace k3s kubectl/ctr/crictl, docker and systemctl. Python 3.9 as on the guest.
 """
+import ast
 import base64
 import copy
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -51,7 +53,7 @@ def setup(*, units=None, waiting=0, mutate=None, fail=()):
     for path in ('/mock', INSTALL, '/root/r4-rollout', '/home/opc/issue61-images'):
         os.makedirs(path, mode=0o700)
     shutil.copy(SRC + '/mock/resources.json', '/mock/resources.json')
-    for name in ('lib.sh', 'w0-lib.sh', 'w1-import.sh', 'w1b-tag.sh', 'w1c-finalize-ns.py', 'w3-reclaim.py'):
+    for name in ('lib.sh', 'w0-lib.sh', 'w1-import.sh', 'w1b-tag.sh', 'w1c-finalize-ns.py', 'w2-verify.py', 'w3-reclaim.py'):
         shutil.copy(os.path.join(SRC, name), INSTALL)
     with open(os.path.join(SRC, 'w2-apply.py')) as stream:
         text = stream.read()
@@ -163,6 +165,18 @@ def evidence(out):
     return line[0].split(': ', 1)[1] if line else None
 
 
+def checks_of(path):
+    """The CHECKS tuple of a gate script, evaluated with only CONTROLLER_SA defined (no import of the script)."""
+    env, checks = {}, None
+    for node in ast.parse(open(path).read()).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            if node.targets[0].id == 'CONTROLLER_SA':
+                env['CONTROLLER_SA'] = ast.literal_eval(node.value)
+            elif node.targets[0].id == 'CHECKS':
+                checks = node.value
+    return eval(compile(ast.Expression(checks), path, 'eval'), {'__builtins__': {}}, env)
+
+
 def main():
     if subprocess.run(['apk', 'add', '-q', 'coreutils'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
         print('apk failed'); return 1
@@ -260,6 +274,83 @@ def main():
           and changes['creationUncertain'] == [] and not changes['uncertain'], json.dumps(changes))
     check('w2: grants sent in one transaction', any(q.startswith('BEGIN;') and q.rstrip().endswith('COMMIT;')
                                                    for q in s.get('queries', [])))
+    check('w2: all ten can-i answers as wanted, subresources asked with --subresource',
+          out.count('can-i ') == 10 and all(l.endswith('yes (want yes)') or l.endswith('no (want no)')
+                                            for l in out.splitlines() if l.startswith('can-i '))
+          and 'can-i controller execs pods (create): no (want no)' in out
+          and any('--subresource=exec' in l for l in open('/mock/calls.log').read().splitlines()), out)
+
+    # w2-verify (read-only certification of a finished apply) ---------------------------------------
+    snapshot = json.dumps(state())
+    def rolled_out(s):
+        for k in (okey('Deployment', 'm2-hosting', 'api'), okey('Deployment', 'runner-control', 'runner-controller')):
+            obj = s['objects'][k]
+            obj['metadata']['generation'] = 13
+            obj['spec']['replicas'] = 1
+            obj['status'] = {'observedGeneration': 13, 'replicas': 1, 'readyReplicas': 1, 'updatedReplicas': 1}
+
+    def verify(path, mutate=None):
+        s = state()
+        if mutate:
+            mutate(s)
+        json.dump(s, open('/mock/state.json', 'w'))
+        before = json.dumps(state()['objects'], sort_keys=True)
+        open('/mock/calls.log', 'w').close()
+        rc, out = run('python3', '-I', INSTALL + '/w2-verify.py', path)
+        calls = open('/mock/calls.log').read().splitlines()
+        writes = [c for c in calls if re.search(r'\b(apply|patch|delete|replace|create -f|scale|exec|rollout|label|annotate)\b',
+                                                 c.split(' auth can-i ')[0])]
+        return rc, out, json.dumps(state()['objects'], sort_keys=True) == before and not writes
+
+    verify_ref = REFS['runtime']
+    with open(INSTALL + '/w2-verify.py') as stream:
+        text = stream.read()
+    with open(INSTALL + '/w2-verify.py', 'w') as stream:  # The mock runtime digest stands in for eb3a18ac….
+        stream.write(re.sub(r"RUNTIME_REF = '[^']+'", "RUNTIME_REF = '%s'" % verify_ref, text, count=1))
+    rc, out, untouched = verify(ev, rolled_out)
+    check('w2-verify: a clean finished apply is certified (rc 0)', rc == 0 and 'W2 certified' in out, out)
+    check('w2-verify: prints all eight created UIDs live vs recorded', out.count(' same') >= 8
+          and sum(l.startswith('created ') and l.endswith(' same') for l in out.splitlines()) == 8, out)
+    check('w2-verify: ten can-i answers, exec asked as a subresource', out.count('can-i ') == 10
+          and 'can-i controller execs pods (get): no (want no)' in out, out)
+    check('w2-verify: changes nothing (no write command, objects unchanged)', untouched, out)
+    rc, out, untouched = verify(ev, lambda s: s['objects'][okey('Role', 'codex-runner', 'runner-controller')]['metadata']
+                                .__setitem__('uid', 'replaced'))
+    check('w2-verify: a created object with another UID is rc 4', rc == 4 and 'created UID Role codex-runner/runner-controller' in out
+          and untouched, out)
+    rc, out, untouched = verify(ev, lambda s: s['objects'][okey('Role', 'codex-runner', 'runner-controller')]['metadata']
+                                .__setitem__('uid', changes['created']['Role codex-runner/runner-controller']))
+    rc, out, untouched = verify(ev, lambda s: s['cani'].__setitem__('create pods/exec runner-control:runner-controller', 'yes'))
+    check('w2-verify: an exec grant is rc 4', rc == 4 and 'can-i controller execs pods (create)' in out.split('mismatch:')[-1], out)
+    rc, out, untouched = verify(ev, lambda s: s['cani'].pop('create pods/exec runner-control:runner-controller'))
+    rc, out, untouched = verify(ev, lambda s: s['objects'][okey('Deployment', 'runner-control', 'runner-controller')]['status']
+                                .__setitem__('readyReplicas', 0))
+    check('w2-verify: controller not Ready is rc 4', rc == 4 and 'controller not rolled out' in out, out)
+    rc, out, untouched = verify(ev, rolled_out)
+    rc, out, untouched = verify(ev, lambda s: s.__setitem__('canIError', True))
+    check('w2-verify: a failed lookup is rc 3, never a pass or a mismatch', rc == 3 and 'lookup failed' in out, out)
+    rc, out, untouched = verify(ev, lambda s: s.pop('canIError'))
+    with open(ev + '/changes.json') as stream:
+        clean_changes = stream.read()
+    dirty = json.loads(clean_changes)
+    dirty['pending'] = {'text': 'created Deployment runner-control/runner-controller', 'objects': []}
+    with open(ev + '/changes.json', 'w') as stream:
+        json.dump(dirty, stream)
+    rc, out, untouched = verify(ev)
+    check('w2-verify: pending evidence is rc 4', rc == 4 and 'pending or uncertain' in out, out)
+    with open(ev + '/changes.json', 'w') as stream:
+        stream.write(clean_changes)
+    open(ev + '/rollback-started.json', 'w').close()
+    rc, out, untouched = verify(ev)
+    check('w2-verify: a started rollback is rc 4', rc == 4 and 'rollback-started.json' in out, out)
+    os.unlink(ev + '/rollback-started.json')
+    rc, out, untouched = verify('/tmp/w2-elsewhere')
+    check('w2-verify: an evidence path outside the evidence directory is rc 3', rc == 3 and 'usage' in out, out)
+    rc, out, untouched = verify(ev)
+    check('w2-verify: certified again after the probes (state restored)', rc == 0, out)
+    with open('/mock/state.json', 'w') as stream:
+        stream.write(snapshot)
+
 
     # W2 rollback after a full apply ----------------------------------------------------------------
     s = state()
@@ -758,6 +849,29 @@ def main():
             ('/apis without groups', {'/apis': {}}, 3)]:
         rc, out = ns_contents(ns_raw(**over))
         check('ns-contents: %s is rc %d' % (name, want), rc == want, out)
+
+    # can-i semantics: the old "pods/exec" form asks about a Pod NAMED exec --------------------------
+    rc, out = run('kubectl', 'auth', 'can-i', 'create', 'pods/exec', '-n', 'codex-runner',
+                  '--as=system:serviceaccount:runner-control:runner-controller')
+    check('mock can-i: "create pods/exec" is "create the Pod named exec" (yes for a Pod creator)', rc == 0 and out.strip() == 'yes', out)
+    rc, out = run('kubectl', 'auth', 'can-i', 'create', 'pods', '--subresource=exec', '-n', 'codex-runner',
+                  '--as=system:serviceaccount:runner-control:runner-controller')
+    check('mock can-i: "create pods --subresource=exec" asks the subresource (no)', rc == 1 and out.strip() == 'no', out)
+    check('w2/w2-verify: the same CHECKS list', checks_of(SRC + '/w2-apply.py') == checks_of(SRC + '/w2-verify.py')
+          and len(checks_of(SRC + '/w2-apply.py')) == 10)
+    old_form = ("('controller execs pods (create)', 'create', 'pods', 'exec',",
+                "('controller execs pods (create)', 'create', 'pods/exec', None,")
+    for guard, want in ((True, 'names an object, not a subresource'), (False, 'can-i controller execs pods (create): yes (want no)')):
+        setup(mutate=imported)
+        with open(INSTALL + '/w2-apply.py') as stream:
+            text = stream.read().replace(*old_form)
+        if not guard:
+            text = text.replace("    if '/' in resource:\n        raise Stop(8,", "    if False:\n        raise Stop(8,")
+        with open(INSTALL + '/w2-apply.py', 'w') as stream:
+            stream.write(text)
+        rc, out = w2('apply')
+        check('w2: the old "pods/exec" form fails (%s)' % ('guard' if guard else 'mock semantics without the guard'),
+              rc == 8 and want in out, out)
 
     print('passed %d, failed %d' % (passed, failed))
     return 1 if failed else 0

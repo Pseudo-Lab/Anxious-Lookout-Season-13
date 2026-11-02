@@ -142,6 +142,9 @@ def kubectl(args):
             if '--ignore-not-found' in rest:
                 return
             die()
+        if opt(rest, '-o') == 'jsonpath={.metadata.uid}':  # w2-verify reads UIDs this way (no Secret data)
+            print(obj['metadata']['uid'], end='')
+            return
         print(json.dumps(obj))
         return
     if verb == 'apply':
@@ -233,8 +236,14 @@ def kubectl(args):
             die()
         return
     if verb == 'auth':
+        if state.get('canIError'):
+            die(2)  # an API error, neither yes nor no
         sa = opt(rest, '--as').split(':', 2)[2]
-        answer = state['cani'].get('%s %s %s' % (rest[2], rest[3], sa), 'no')
+        # As kubectl: VERB TYPE[/NAME]; the part after the slash is an object name (RBAC rules here carry no
+        # resourceNames, so it does not change the answer). A subresource is only --subresource.
+        resource = rest[3].split('/', 1)[0]
+        sub = opt(rest, '--subresource')
+        answer = state['cani'].get('%s %s%s %s' % (rest[2], resource, '/' + sub if sub else '', sa), 'no')
         print(answer)
         die(0 if answer == 'yes' else 1)
     if verb == 'logs':

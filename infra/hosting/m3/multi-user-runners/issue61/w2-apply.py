@@ -408,10 +408,29 @@ def db_secret():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def can_i(verb, resource, ns, sa):
-    out = run([K3S, 'kubectl', 'auth', 'can-i', verb, resource, '-n', ns, '--as=system:serviceaccount:' + sa],
-              'can-i', rc=8, ok=(0, 1)).strip()
-    return out
+CONTROLLER_SA = 'runner-control:runner-controller'
+# (name, verb, resource, subresource, service account, wanted answer). w2-verify.py carries the same list (the
+# harness compares them). A subresource is asked with --subresource: `kubectl auth can-i VERB TYPE/NAME` reads
+# the part after the slash as an object NAME, so "create pods/exec" asks about a Pod named exec (W2 rc 8, #61).
+CHECKS = (
+    ('controller creates pods', 'create', 'pods', None, CONTROLLER_SA, 'yes'),
+    ('host controller creates pods', 'create', 'pods', None, 'codex-runner:runner-pool-controller', 'no'),
+    ('host observer deletes pods', 'delete', 'pods', None, 'codex-runner:runner-pool-observer', 'no'),
+    ('controller execs pods (create)', 'create', 'pods', 'exec', CONTROLLER_SA, 'no'),
+    ('controller execs pods (get)', 'get', 'pods', 'exec', CONTROLLER_SA, 'no'),
+    ('controller attaches pods (create)', 'create', 'pods', 'attach', CONTROLLER_SA, 'no'),
+    ('controller attaches pods (get)', 'get', 'pods', 'attach', CONTROLLER_SA, 'no'),
+    ('controller port-forwards pods (create)', 'create', 'pods', 'portforward', CONTROLLER_SA, 'no'),
+    ('controller port-forwards pods (get)', 'get', 'pods', 'portforward', CONTROLLER_SA, 'no'),
+    ('controller edits ephemeral containers', 'update', 'pods', 'ephemeralcontainers', CONTROLLER_SA, 'no'),
+)
+
+
+def can_i(verb, resource, subresource, ns, sa):
+    if '/' in resource:
+        raise Stop(8, 'postcheck: can-i resource %s names an object, not a subresource' % resource)
+    args = [K3S, 'kubectl', 'auth', 'can-i', verb, resource] + (['--subresource=' + subresource] if subresource else [])
+    return run(args + ['-n', ns, '--as=system:serviceaccount:' + sa], 'can-i', rc=8, ok=(0, 1)).strip()
 
 
 def apply(ev):
@@ -477,12 +496,8 @@ def apply(ev):
         raise Stop(5, 'unexpected error during the changes (no detail printed)') from None
 
     created = changes.created
-    checks = {
-        'controller creates pods': (can_i('create', 'pods', 'codex-runner', 'runner-control:runner-controller'), 'yes'),
-        'host controller creates pods': (can_i('create', 'pods', 'codex-runner', 'codex-runner:runner-pool-controller'), 'no'),
-        'host observer deletes pods': (can_i('delete', 'pods', 'codex-runner', 'codex-runner:runner-pool-observer'), 'no'),
-        'controller execs pods': (can_i('create', 'pods/exec', 'codex-runner', 'runner-control:runner-controller'), 'no'),
-    }
+    checks = {name: (can_i(verb, resource, sub, 'codex-runner', sa), want)
+              for name, verb, resource, sub, sa, want in CHECKS}
     bad = [name for name, (got, want) in checks.items() if got != want]
     for name, (got, want) in checks.items():
         say('can-i %s: %s (want %s)' % (name, got, want))
