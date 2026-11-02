@@ -13,8 +13,11 @@ Checks:
             step created Deployment runner-control/runner-controller; the eight created objects are recorded
   uids      each created object is live with its recorded UID; each object that existed before W2 is live with
             its backup UID (Secrets are read by UID only, never their data)
-  api       image is the 61-5e73bc4 runtime reference; observed = generation; ready = updated = desired
-  controller  Deployment Ready 1/1, observed = generation
+  api       container api on the 61-5e73bc4 runtime reference; desired >= 1; observed = generation;
+            ready = updated = desired
+  controller  the Deployment W2 created (UID), exactly one container `controller` on the runtime reference, no
+            init containers, serviceAccountName runner-controller (the identity the can-i checks impersonate),
+            Ready 1/1, observed = generation
   can-i     the CHECKS list (controller may create Pods; host roles may not; no exec/attach/portforward/
             ephemeralcontainers for the controller)
   log       the controller's JSON outcome lines (shown, not a gate)
@@ -101,6 +104,8 @@ def rollout(label, obj, bad):
         return
     status, spec, meta = obj.get('status') or {}, obj.get('spec') or {}, obj['metadata']
     want = spec.get('replicas', 1)
+    if not isinstance(want, int) or want < 1:
+        bad.append(label + ' desired replicas %r' % want)
     say('%s uid=%s generation=%s observed=%s desired=%s ready=%s updated=%s' % (
         label, meta.get('uid'), meta.get('generation'), status.get('observedGeneration'), want,
         status.get('readyReplicas'), status.get('updatedReplicas')))
@@ -154,15 +159,29 @@ def verify(ev):
 
     api = get('Deployment', 'm2-hosting', 'api')
     rollout('api', api, bad)
-    image = api and api['spec']['template']['spec']['containers'][0]['image']
-    say('api image %s' % image)
+    containers = (api or {}).get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
+    image = next((c.get('image') for c in containers if c.get('name') == 'api'), None)
+    say('api container api image %s' % image)
     if image != RUNTIME_REF:
         bad.append('api image')
     controller = get(*CONTROLLER)
     rollout('controller', controller, bad)
-    if controller is not None and (controller['spec'].get('replicas', 1) != 1
-                                   or controller['metadata']['uid'] != created.get('Deployment runner-control/runner-controller')):
-        bad.append('controller is not the single-replica Deployment W2 created')
+    if controller is not None:
+        pod = controller['spec']['template']['spec']
+        names = [c.get('name') for c in pod.get('containers', [])]
+        image = pod['containers'][0].get('image') if names == ['controller'] else None
+        account = pod.get('serviceAccountName')
+        say('controller containers %s image %s serviceAccountName %s initContainers %d' % (
+            names, image, account, len(pod.get('initContainers') or [])))
+        # The can-i checks impersonate runner-control:runner-controller; they say something about the running
+        # workload only if that is its identity and it runs the verified image.
+        if names != ['controller'] or pod.get('initContainers') or image != RUNTIME_REF:
+            bad.append('controller does not run exactly the controller container on the runtime reference')
+        if account != 'runner-controller':
+            bad.append('controller service account %s' % account)
+        if controller['spec'].get('replicas', 1) != 1 \
+                or controller['metadata']['uid'] != created.get('Deployment runner-control/runner-controller'):
+            bad.append('controller is not the single-replica Deployment W2 created')
 
     for name, verb, resource, sub, sa, want in CHECKS:
         got = can_i(verb, resource, sub, 'codex-runner', sa)

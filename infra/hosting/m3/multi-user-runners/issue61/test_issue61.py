@@ -288,6 +288,9 @@ def main():
             obj['metadata']['generation'] = 13
             obj['spec']['replicas'] = 1
             obj['status'] = {'observedGeneration': 13, 'replicas': 1, 'readyReplicas': 1, 'updatedReplicas': 1}
+        pod = s['objects'][okey('Deployment', 'runner-control', 'runner-controller')]['spec']['template']['spec']
+        pod['containers'][0]['image'] = REFS['runtime']  # the mock render keeps resources.json's placeholder image
+        pod['serviceAccountName'] = 'runner-controller'
 
     def verify(path, mutate=None):
         s = state()
@@ -327,6 +330,48 @@ def main():
                                 .__setitem__('readyReplicas', 0))
     check('w2-verify: controller not Ready is rc 4', rc == 4 and 'controller not rolled out' in out, out)
     rc, out, untouched = verify(ev, rolled_out)
+    ctl = okey('Deployment', 'runner-control', 'runner-controller')
+    api_key = okey('Deployment', 'm2-hosting', 'api')
+
+    def pod_of(s, k=ctl):
+        return s['objects'][k]['spec']['template']['spec']
+
+    identity_cases = (
+        ('an unrelated controller image', lambda s: pod_of(s)['containers'][0].__setitem__('image', 'docker.io/library/other@sha256:' + '9'*64),
+         'controller does not run exactly the controller container'),
+        ('serviceAccountName default', lambda s: pod_of(s).__setitem__('serviceAccountName', 'default'),
+         'controller service account default'),
+        ('no serviceAccountName', lambda s: pod_of(s).pop('serviceAccountName'), 'controller service account None'),
+        ('a second container', lambda s: pod_of(s)['containers'].append({'name': 'sidecar', 'image': REFS['runtime']}),
+         'controller does not run exactly the controller container'),
+        ('a renamed container', lambda s: pod_of(s)['containers'][0].__setitem__('name', 'other'),
+         'controller does not run exactly the controller container'),
+        ('an init container', lambda s: pod_of(s).__setitem__('initContainers', [{'name': 'x', 'image': REFS['runtime']}]),
+         'controller does not run exactly the controller container'),
+        ('controller scaled to 0 with zero status', lambda s: (s['objects'][ctl]['spec'].__setitem__('replicas', 0),
+         s['objects'][ctl].__setitem__('status', {'observedGeneration': 13, 'replicas': 0, 'readyReplicas': 0, 'updatedReplicas': 0})),
+         'controller desired replicas 0'),
+        ('api scaled to 0 with zero status', lambda s: (s['objects'][api_key]['spec'].__setitem__('replicas', 0),
+         s['objects'][api_key].__setitem__('status', {'observedGeneration': 13, 'replicas': 0, 'readyReplicas': 0, 'updatedReplicas': 0})),
+         'api desired replicas 0'),
+    )
+    for name, mutate, want in identity_cases:
+        rc, out, untouched = verify(ev, mutate)
+        check('w2-verify: %s is rc 4' % name, rc == 4 and want in out and untouched, out)
+        rc, out, untouched = verify(ev, rolled_out)
+        if name == 'a second container':
+            pod_fix = lambda s: pod_of(s).__setitem__('containers', pod_of(s)['containers'][:1])
+        elif name == 'a renamed container':
+            pod_fix = lambda s: pod_of(s)['containers'][0].__setitem__('name', 'controller')
+        elif name == 'an init container':
+            pod_fix = lambda s: pod_of(s).pop('initContainers')
+        else:
+            pod_fix = None
+        if pod_fix:
+            rc, out, untouched = verify(ev, pod_fix)
+        check('w2-verify: certified again after %s is undone' % name, rc == 0, out)
+    check('w2-verify: prints the controller identity', 'controller containers [\'controller\'] image ' + REFS['runtime']
+          + ' serviceAccountName runner-controller initContainers 0' in out, out)
     rc, out, untouched = verify(ev, lambda s: s.__setitem__('canIError', True))
     check('w2-verify: a failed lookup is rc 3, never a pass or a mismatch', rc == 3 and 'lookup failed' in out, out)
     rc, out, untouched = verify(ev, lambda s: s.pop('canIError'))
