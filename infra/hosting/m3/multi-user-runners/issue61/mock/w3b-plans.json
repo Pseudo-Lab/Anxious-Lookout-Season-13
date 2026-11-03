@@ -1,0 +1,58 @@
+{
+ "00000000-0000-4000-8000-000000000048": {
+  "callback": "http://api.m2-hosting.svc.cluster.local:8080/api/internal/research/tools",
+  "control": {
+   "name": "control-34823dfb6b504b8eb230191739bdc57d",
+   "uid": "5e020cdb-55e8-44ca-849c-51c98e1ab38c",
+   "volume": "control-34823dfb6b504b8eb230191739bdc57d"
+  },
+  "executor": {
+   "image": "docker.io/library/anxious-dev-shell-executor@sha256:575c18d2cc7be7ada8f8859e853b6f0d6d78d9a8f5167127392db6c98369ce79",
+   "outputBytes": 65536,
+   "wallSeconds": 30
+  },
+  "generation": 1,
+  "image": "docker.io/library/anxious-dev-runner@sha256:31bd3c6ecf2b866ac576b458c6a3c9fe611cacae2b6996830121cd7357984a45",
+  "native": {
+   "name": "native-34823dfb6b504b8eb230191739bdc57d",
+   "uid": "0eb87a29-eb04-4bea-a643-7fad51917573",
+   "volume": "native-34823dfb6b504b8eb230191739bdc57d"
+  },
+  "owner": "00000000-0000-4000-8000-000000000048",
+  "serviceAccount": "runner-workload",
+  "state": "34823dfb-6b50-4b8e-b230-191739bdc57d",
+  "transport": {
+   "name": "transport-34823dfb6b504b8eb230191739bdc57d",
+   "uid": "cb85cca3-137e-48ba-8131-578b5a8948f2"
+  },
+  "version": 2
+ },
+ "00000000-0000-4000-8000-000000005804": {
+  "callback": "http://api.m2-hosting.svc.cluster.local:8080/api/internal/research/tools",
+  "control": {
+   "name": "control-5ff583e9abe14ef8b2774a5afead6b80",
+   "uid": "2a7c0559-c161-4ea6-99c7-103d2e6d51f5",
+   "volume": "control-5ff583e9abe14ef8b2774a5afead6b80"
+  },
+  "executor": {
+   "image": "docker.io/library/anxious-dev-shell-executor@sha256:9c87d626cdf6798db5bc5a562cc68af1b13a36c8f90d3738e19c6553e7cf4d12",
+   "outputBytes": 65536,
+   "wallSeconds": 30
+  },
+  "generation": 1,
+  "image": "docker.io/library/anxious-dev-runner@sha256:90eb212b24598ec852889df1a4e6f9f916ec73f257dcb2cf739e0f9b695d0d3c",
+  "native": {
+   "name": "native-5ff583e9abe14ef8b2774a5afead6b80",
+   "uid": "4b122f91-b409-4d6e-b049-cde699620897",
+   "volume": "native-5ff583e9abe14ef8b2774a5afead6b80"
+  },
+  "owner": "00000000-0000-4000-8000-000000005804",
+  "serviceAccount": "runner-workload",
+  "state": "5ff583e9-abe1-4ef8-b277-4a5afead6b80",
+  "transport": {
+   "name": "transport-5ff583e9abe14ef8b2774a5afead6b80",
+   "uid": "0bab3436-aa03-4d40-afbe-caa8a7a37777"
+  },
+  "version": 2
+ }
+}
