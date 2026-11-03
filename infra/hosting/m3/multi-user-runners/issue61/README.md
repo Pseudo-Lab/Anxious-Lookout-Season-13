@@ -25,7 +25,9 @@ The images are built on the host from `5e73bc4` (`--platform linux/amd64`) and m
 | W2 verify | `w2-verify.py <evidence dir>` | back, after clearance | Nothing. Read-only certification of a finished W2 apply: clean evidence, the eight created UIDs live, backup UIDs, api and controller rolled out, the can-i set, controller outcome lines |
 | W3 | `w3-reclaim.py --expected-running N` | user | R2 reclaim of …5804. Refuses unless N equals the running count now; bounded read-only release check |
 | W3b | `w3b-binding.py` (+ `w3b-expected.json`) | user | Moves the bindings of …0048 and …5804 to the #61 runner/executor digests with `ops.runner_binding_image`, inside a proved write window (see below) |
-| W4–W7 | (next drafts) | | Measurements, SA rotation, reboot, postcheck |
+| W4 entry | `w4-enter.py` | user | One 1-hour session for …5804, one runner POST, the controller-created Pod proved on the #61 images; session revoked |
+| W4 observe | `w4-observe.py <evidence dir> [--wait]` | back | Nothing. Read-only R1 verdict until the deadline (Pod start + 60 min) |
+| W5–W7 | (next drafts) | | SA rotation, reboot, postcheck |
 
 ## Files installed next to the scripts
 
@@ -106,6 +108,42 @@ inputs and the exact report `ops.runner_binding_image report` must print. The dr
 | 80 | A tool container was not proved stopped. Deployments left at 0 if they were scaled; the output says "untouched" when the precheck module-hash container is the stuck one |
 | 130 | Interrupted before any apply; restored |
 
+## W4: R1 on …5804 under the new image
+
+`w4-enter.py` runs once. It refuses unless …5804 is exactly at the W3b fence, no runner Pod and no open stop exist, nothing is pending or waiting, no live session of …5804 exists, and the API origin is `http://192.88.99.1` with no base path.
+
+- **Session:** it creates one `auth.sessions` row for …5804 (1 hour) through psql. The session token and CSRF token live only in the process's memory: no file, no argument, no output.
+- **POST:** it makes one `POST /api/research/codex/runner` through the gateway and never repeats it. Right after the POST it revokes that exact row.
+- **Pod:** it waits at most 300 s for the controller-created Pod. Then it proves the instance and images:
+  - spec images and status `imageID` equal the approved manifest references;
+  - each `containerID` resolves through CRI to this Pod (container labels and sandbox), with `imageRef` equal to the known config ID;
+  - `inspecti(imageID)` gives the same config ID;
+  - the init container exited 0;
+  - `automountServiceAccountToken` is false, and the only token is the `codex-broker`-audience projected token at `runner:/run/codex-broker`.
+- **Context:** it then records an early `/health` of this exact runner, read inside the runner-controller Pod with the controller's own client and printed sanitized, plus the unchanged W0 ledger probe.
+
+`w4-observe.py` is read-only. It declares R1 done only on all of the following:
+- a completed generation-4 stop with a version 3 receipt for this Pod, `unavailable.reason == "auth_revoked"`;
+- a `pod-deleted` proof for this Pod;
+- the registry idle_stopped gen 4 without a Pod;
+- the Pod gone;
+- unchanged conversations.
+
+Any other receipt is "R1 not done". No stop by the deadline is "R1 not done at the deadline", and nothing is extended, retried or reclaimed.
+
+| rc | `w4-enter.py` | `w4-observe.py` |
+| --- | --- | --- |
+| 0 | Entered, Pod proved, session revoked (`r1_state` true or unobserved) | R1 done |
+| 3 | Precheck refused; nothing changed | Evidence or a lookup unreadable |
+| 4 | Session not created; no POST | R1 not done (another receipt or release) |
+| 5 | POST answered an error; session revoked | Pending, or not done at the deadline |
+| 6 | POST outcome unknown; never repeated | |
+| 7 | Pod not proved Running within 300 s; no retry or reclaim | |
+| 8 | Instance, image or token proof failed; Pod left as is | |
+| 9 | Early health is not the R1 state; runner left running | |
+| 70 | rc 0 otherwise, but the session revoke was not proved | |
+| 130 | Interrupted before the POST | |
+
 ## Mock harness (Docker, Python 3.9 as on the guest)
 
 ```sh
@@ -113,6 +151,8 @@ docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" -v "$PWD/backend/db:/db:ro" py
   python3 -I /m3/multi-user-runners/issue61/test_issue61.py
 docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
   python3 -I /m3/multi-user-runners/issue61/test_w3b.py
+docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
+  python3 -I /m3/multi-user-runners/issue61/test_w4.py
 ```
 
 `test_w3b.py` uses `mock/fake_w3b.py`, which emulates the binding tool's guards, report and compare-and-swap,
