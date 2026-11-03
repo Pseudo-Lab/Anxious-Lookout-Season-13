@@ -218,6 +218,11 @@ def tool(state, args, mounts, name):
     print(json.dumps({'owner': config['owner'], 'stage': 'binding-image-' + action, 'result': 'verified'}))
 
 
+def stuck(state, name):
+    """A "stuck-<prefix>" switch keeps containers named issue61-w3b-<prefix>… (stop/rm do not remove them)."""
+    return any(name.startswith('issue61-w3b-' + f[len('stuck-'):]) for f in state.get('fail', []) if f.startswith('stuck-'))
+
+
 def docker(state, args):
     if failing(state, 'docker-fail'):
         die()
@@ -239,7 +244,7 @@ def docker(state, args):
         return
     if args[0] in ('stop', 'rm'):
         name = args[-1]
-        if name in state['containers'] and not failing(state, 'stuck-' + name.split('-')[2] + '-' + name.split('-')[3]):
+        if name in state['containers'] and not stuck(state, name):
             state['containers'].remove(name)
             save(state)
         return
@@ -257,6 +262,8 @@ def docker(state, args):
         try:
             if opt(args, '--entrypoint') == 'sha256sum':
                 assert opt(args, '--network') == 'none'
+                if failing(state, 'modules-slow'):
+                    time.sleep(6)  # longer than the harness's tool timeout: the CLI is killed, the container stays
                 for path in args[args.index(image) + 1:]:
                     print('%s  %s' % (state['modules'].get(path, 'missing'), path))
             else:
@@ -273,8 +280,7 @@ def docker(state, args):
             # --rm: the container goes when its process exits (also on a refusal). A killed CLI never gets here,
             # so its container stays, as with real Docker; a "stuck-<action>-<owner>" switch keeps it as well.
             state = load()
-            stuck = [f for f in state.get('fail', []) if f.startswith('stuck-')]
-            if not any(name.startswith('issue61-w3b-' + f[len('stuck-'):]) for f in stuck):
+            if not stuck(state, name):
                 state['containers'].remove(name)
             save(state)
         return

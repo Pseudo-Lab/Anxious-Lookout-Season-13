@@ -111,12 +111,28 @@ class Interrupted(BaseException):
     """SIGINT/SIGTERM; a BaseException so command wrappers do not turn it into a command failure."""
 
 
+SIGNALLED = []
+
+
 def interrupted(signum, frame):
-    raise Interrupted()
+    """Raise once; a second signal while the first is being handled is ignored, so cleanup always runs."""
+    if not SIGNALLED:
+        SIGNALLED.append(signum)
+        raise Interrupted()
 
 
 def say(text):
-    print(text, flush=True)
+    """Print a line; output can never fail the run. On a closed or broken stdout, later lines go to /dev/null
+    (so neither this call nor the interpreter's final flush raises, and the exit status stays the run's rc)."""
+    try:
+        print(text, flush=True)
+    except Exception:
+        try:
+            null = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(null, sys.stdout.fileno())
+            os.close(null)
+        except Exception:
+            pass
 
 
 def short(owner):
@@ -297,9 +313,15 @@ def precheck(expected):
     image = must([DOCKER, 'image', 'inspect', '--format', '{{.Id}}', TOOL_TAG], 3, 'precheck: tool image lookup failed')
     if image not in TOOL_IDS:
         raise Stop(3, 'precheck: guest Docker %s is %s, not the W1 runtime image' % (TOOL_TAG, image or 'none'))
-    out = must([DOCKER, 'run', '--rm', '--name', 'issue61-w3b-modules-%d' % os.getpid(), '--pull=never', '--network',
-                'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', '0:0',
-                '--entrypoint', 'sha256sum', image] + sorted(MODULES), 3, 'precheck: module hash run failed', 60)
+    name = 'issue61-w3b-modules-%d' % os.getpid()
+    CONTAINERS.append(name)  # tracked like the tool containers: proved gone here and again at the end
+    rc, out = run([DOCKER, 'run', '--rm', '--name', name, '--pull=never', '--network', 'none', '--read-only',
+                   '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', '0:0',
+                   '--entrypoint', 'sha256sum', image] + sorted(MODULES), min(60, TOOL_TIMEOUT))
+    if not proved_gone(name):
+        raise Stop(80, 'precheck: module hash container not proved stopped')
+    if rc != 0:
+        raise Stop(3, 'precheck: module hash run failed')
     seen = {}
     for line in out.splitlines():
         parts = line.split()
@@ -553,36 +575,43 @@ def remove_dsn(path):
     return not os.path.lexists(path)
 
 
-def restore(replicas, dsn):
+def guarded(failed, item, fn, *args, **kwargs):
+    """Run one restore/cleanup item; any exception (output, lookup, bug) is recorded as that item failing and never
+    stops the following items."""
+    try:
+        if fn(*args, **kwargs) is False:
+            failed.append(item)
+    except BaseException:
+        failed.append(item)
+
+
+def restore(replicas):
+    """Every item is attempted, each on its own; returns the failed ones."""
     failed = []
-    for spec in (API, CTRL):
-        if spec not in TOUCHED:
-            continue
-        try:
-            scale(spec, replicas[spec[1]], 70)
-        except Stop:
-            failed.append('scale ' + spec[1])
-    for spec in (API, CTRL):
-        if spec not in TOUCHED:
-            continue
-        ns, name = spec[0], spec[1]
-        if run([K3S, 'kubectl', '-n', ns, 'rollout', 'status', 'deployment/' + name, '--timeout=180s'], 210)[0] != 0:
-            failed.append('rollout ' + name)
-        try:
-            uid, want, ready, _ = deployment(spec, 70)
-            if uid != spec[2] or want != replicas[name] or ready != replicas[name]:
-                failed.append('readiness ' + name)
-        except Stop:
-            failed.append('readiness ' + name)
-    if API in TOUCHED:
+
+    def back(spec):
+        scale(spec, replicas[spec[1]], 70)
+
+    def rollout(spec):
+        return run([K3S, 'kubectl', '-n', spec[0], 'rollout', 'status', 'deployment/' + spec[1], '--timeout=180s'],
+                   210)[0] == 0
+
+    def ready(spec):
+        uid, want, now, _ = deployment(spec, 70)
+        return uid == spec[2] and want == replicas[spec[1]] and now == replicas[spec[1]]
+
+    def health():
         rc, code = run([CURL] + HEALTH, 20)
-        if rc != 0 or code != '200':
-            failed.append('health')
-    if dsn and not remove_dsn(dsn):
-        failed.append('admin DSN still present')
-    say('restore: %s; admin DSN %s' % (', '.join('%s replicas=%d' % (s[1], replicas[s[1]]) for s in (API, CTRL)
-                                                 if s in TOUCHED) or 'nothing was scaled',
-                                       'present' if dsn and os.path.lexists(dsn) else 'absent'))
+        return rc == 0 and code == '200'
+    touched = [spec for spec in (API, CTRL) if spec in TOUCHED]
+    for spec in touched:
+        guarded(failed, 'scale ' + spec[1], back, spec)
+    for spec in touched:
+        guarded(failed, 'rollout ' + spec[1], rollout, spec)
+        guarded(failed, 'readiness ' + spec[1], ready, spec)
+    if API in TOUCHED:
+        guarded(failed, 'health', health)
+    say('restore: %s' % (', '.join('%s replicas=%s' % (s[1], replicas.get(s[1])) for s in touched) or 'nothing was scaled'))
     return failed
 
 
@@ -620,61 +649,102 @@ def main():
     code, message, replicas, dsn, ev, applying = 0, '', {}, None, None, False
     outcome = {}
     try:
-        expected = load_expected()
-        image, replicas, before = precheck(expected)
-        ev = os.path.join(EVIDENCE, 'w3b-' + time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()))
-        os.makedirs(EVIDENCE, mode=0o700, exist_ok=True)
-        private_dir(ev)
-        say('evidence: %s' % ev)
-        record(ev, started=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), expectedSha256=EXPECTED_SHA,
-               toolImage=image, replicas=replicas, before={o: fence_of(before[o]) for o in OWNERS})
-        write_new(os.path.join(ev, 'before-plans.json'), json.dumps({o: before[o]['plan'] for o in OWNERS},
-                                                                   sort_keys=True).encode())
-        window(expected, before)
-        record(ev, window=True)
-        private_dir(os.path.join(ev, 'private'))
-        dsn = os.path.join(ev, 'private', 'admin-dsn')
-        admin_dsn(dsn)
-        reports(image, ev, expected)
-        record(ev, reportsMatched=True)
-        applying = True
-        apply_all(image, ev, expected, outcome)
-    except Stop as stop:
-        code, message = stop.code, stop.message
-    except Interrupted:
-        code, message = (9, 'interrupted during apply') if applying else (130, 'interrupted before any apply')
-    except Exception:
-        code, message = (8, 'unexpected error during apply') if applying else ((3, 'unexpected error') if not TOUCHED
-                                                                               else (4, 'unexpected error'))
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            expected = load_expected()
+            EXPECTED.append(expected)
+            image, replicas, before = precheck(expected)
+            ev = os.path.join(EVIDENCE, 'w3b-' + time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()))
+            os.makedirs(EVIDENCE, mode=0o700, exist_ok=True)
+            private_dir(ev)
+            say('evidence: %s' % ev)
+            record(ev, started=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), expectedSha256=EXPECTED_SHA,
+                   toolImage=image, replicas=replicas, before={o: fence_of(before[o]) for o in OWNERS})
+            write_new(os.path.join(ev, 'before-plans.json'), json.dumps({o: before[o]['plan'] for o in OWNERS},
+                                                                       sort_keys=True).encode())
+            window(expected, before)
+            record(ev, window=True)
+            private_dir(os.path.join(ev, 'private'))
+            dsn = os.path.join(ev, 'private', 'admin-dsn')
+            admin_dsn(dsn)
+            reports(image, ev, expected)
+            record(ev, reportsMatched=True)
+            applying = True
+            apply_all(image, ev, expected, outcome)
+        except Stop as stop:
+            code, message = stop.code, stop.message
+        except Interrupted:
+            code, message = (9, 'interrupted during apply') if applying else (130, 'interrupted before any apply')
+        except Exception:
+            code, message = (8, 'unexpected error during apply') if applying else ((3, 'unexpected error') if not TOUCHED
+                                                                                   else (4, 'unexpected error'))
+    except BaseException:  # the (single) signal arrived while a handler above ran: cleanup still follows
+        if not message:
+            code, message = (9 if applying else 130), 'interrupted'
+        # After the apply phase began, finish() takes the code from the live plan digests anyway.
+    return finish(code, message, replicas, dsn, ev, applying, expected_or_none(), outcome)
+
+
+EXPECTED = []  # set by load_expected's caller; settle needs it, a failed load leaves it empty
+
+
+def expected_or_none():
+    return EXPECTED[0] if EXPECTED else None
+
+
+def finish(code, message, replicas, dsn, ev, applying, expected, outcome):
+    """Cleanup that nothing can skip. Each step is guarded on its own; output and evidence failures are ignored.
+    Order: tool containers proved gone -> (if one is not) writers stay stopped, DSN removed, rc 80 -> settle from the
+    live digests -> restore every touched Deployment -> admin DSN removed and proved absent -> evidence."""
+    failed = []
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        guarded([], 'signal', signal.signal, sig, signal.SIG_IGN)
     if message:
         say('STOPPED (%d): %s' % (code, message))
-    if any(not proved_gone(name) for name in CONTAINERS) or code == 80:
-        removed = remove_dsn(dsn) if dsn else True
-        say('MANUAL RECOVERY NEEDED: a tool container was not proved stopped; %s and %s LEFT AT 0; admin DSN %s; '
-            'tell PM before any further step' % (CTRL[1], API[1], 'removed' if removed else 'STILL PRESENT'))
+    stuck = []
+    for name in CONTAINERS:
+        guarded(stuck, name, proved_gone, name)
+    if stuck or code == 80:
+        removed = []
+        if dsn:
+            guarded(removed, 'dsn', remove_dsn, dsn)
+        held = ('%s and %s LEFT AT 0' % (CTRL[1], API[1])) if TOUCHED else 'Deployments untouched (not scaled)'
+        say('MANUAL RECOVERY NEEDED: a tool container was not proved stopped (%s); %s; admin DSN %s; tell PM before '
+            'any further step' % (', '.join(stuck) or 'see above', held,
+                                  'not created' if not dsn else 'STILL PRESENT' if removed else 'removed'))
         if ev:
-            record(ev, result=80)
+            guarded([], 'record', record, ev, result=80)
         say('result rc=80')
         return 80
-    if applying:
-        code, message = settle(expected, outcome)
+    if applying and expected is not None:
+        try:
+            code, message = settle(expected, outcome)
+        except BaseException:
+            code, message = 8, 'settlement failed: back checks read-only'
         say(message)
-    elif TOUCHED and code != 3:
-        states, _ = plan_state(expected)
-        say('plans: %s (no apply ran)' % ', '.join('…%s %s' % (short(o), states[o]) for o in OWNERS))
-        if any(states[o] != 'old' for o in OWNERS):
+    elif TOUCHED and code != 3 and expected is not None:
+        try:
+            states, _ = plan_state(expected)
+            say('plans: %s (no apply ran)' % ', '.join('…%s %s' % (short(o), states[o]) for o in OWNERS))
+            if any(states[o] != 'old' for o in OWNERS):
+                code = 8
+                say('a plan changed although no apply ran: back checks read-only')
+        except BaseException:
             code = 8
-            say('a plan changed although no apply ran: back checks read-only')
-    if TOUCHED or dsn:
-        failed = restore(replicas, dsn)
-        if failed:
-            say('RESTORE FAILED: %s' % ', '.join(failed))
-            if code == 0:
-                code = 70
+    if TOUCHED:
+        try:
+            failed += restore(replicas)
+        except BaseException:
+            failed.append('restore')
+    if dsn:
+        guarded(failed, 'admin DSN still present', remove_dsn, dsn)
+        say('admin DSN %s' % ('present' if os.path.lexists(dsn) else 'absent'))
+    if failed:
+        say('RESTORE FAILED: %s' % ', '.join(failed))
+        if code == 0:
+            code = 70
     if ev:
-        record(ev, outcome=outcome, result=code, finished=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+        guarded([], 'record', record, ev, outcome=outcome, result=code,
+                finished=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
     say('result rc=%d' % code)
     return code
 

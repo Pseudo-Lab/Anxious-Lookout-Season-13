@@ -112,6 +112,22 @@ def w3b(env=None, signal_after=None):
     return proc.returncode, out.decode()
 
 
+def w3b_closing(marker, env=None):
+    """Run the driver and close its stdout right after the first line containing `marker` (later prints fail with
+    EPIPE): returns (rc, output read so far)."""
+    environ = dict(os.environ, W3B_WAIT_SECONDS='2', W3B_TOOL_TIMEOUT='3')
+    environ.update(env or {})
+    proc = subprocess.Popen(['python3', '-I', INSTALL + '/w3b-binding.py'], stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, env=environ)
+    seen = []
+    for raw in proc.stdout:
+        seen.append(raw.decode())
+        if marker in seen[-1]:
+            break
+    proc.stdout.close()
+    return proc.wait(timeout=300), ''.join(seen)
+
+
 def evidence_dirs():
     root = INSTALL + '/evidence'
     return sorted(d for d in os.listdir(root) if d.startswith('w3b-')) if os.path.isdir(root) else []
@@ -344,6 +360,44 @@ def main():
     st = common('interrupt in the window', rc, out, 130)
     check('interrupt in the window: no tool run, plans old, restore attempted',
           not applied(st) and plans_now(st) == OLD and 'api=1' in st['scaled'], out)
+
+    # Round 1 (review): the module-hash container is tracked and proved gone ---------------------------------
+    setup(fail=['stuck-modules'])
+    rc, out = w3b()
+    st = common('modules: container stuck', rc, out, 80)
+    check('modules: stuck before any change: Deployments untouched (said so), no evidence, nothing scaled',
+          'Deployments untouched (not scaled)' in out and 'LEFT AT 0' not in out and not scaled_any(st)
+          and not evidence_dirs() and 'issue61-w3b-modules-' in out, out)
+    setup(fail=['modules-slow'])
+    rc, out = w3b()
+    st = common('modules: CLI timeout', rc, out, 3)
+    check('modules: timed-out container stopped and proved gone, nothing scaled',
+          not st['containers'] and not scaled_any(st) and 'module hash run failed' in out, out)
+    setup(fail=['modules-slow'])
+    rc, out = w3b(signal_after=('--entrypoint sha256sum', 1))
+    st = common('modules: interrupted during the module run', rc, out, 130)
+    check('modules: interrupted container stopped and proved gone, nothing scaled',
+          not st['containers'] and not scaled_any(st), out)
+
+    # Round 1 (review): output failures never skip restore or DSN removal ------------------------------------
+    setup(fail=['report-fail-0048'])
+    rc, out = w3b_closing('admin DSN written')
+    st = state()
+    check('output closed before the STOPPED diagnostic: rc 5 kept, restored, DSN removed, no container',
+          rc == 5 and restored(st) and not dsn_files() and not st['containers'] and plans_now(st) == OLD,
+          'rc %s %s' % (rc, out))
+    setup()
+    rc, out = w3b_closing('apply …5804')
+    st = state()
+    check('output closed before settlement prints: rc 0, both moved, restored, DSN removed',
+          rc == 0 and plans_now(st) == NEW and restored(st) and not dsn_files() and not st['containers'],
+          'rc %s %s' % (rc, out))
+    check('output closed before settlement: evidence still records the result', run_json()['result'] == 0)
+    setup()
+    rc, out = w3b_closing('evidence:')
+    st = state()
+    check('output closed right after the evidence line: the run completes (rc 0), restored, DSN removed',
+          rc == 0 and plans_now(st) == NEW and restored(st) and not dsn_files(), 'rc %s %s' % (rc, out))
 
     print('passed %d, failed %d' % (passed, failed))
     return 1 if failed else 0
