@@ -103,7 +103,7 @@ inputs and the exact report `ops.runner_binding_image report` must print. The dr
 | 8 | A plan digest is neither old nor approved new (or unreadable), or a fence changed |
 | 9 | Both moved, but an apply was not confirmed by the tool |
 | 70 | rc 0 otherwise, but a restore item failed |
-| 80 | A tool container was not proved stopped; Deployments left at 0 |
+| 80 | A tool container was not proved stopped. Deployments left at 0 if they were scaled; the output says "untouched" when the precheck module-hash container is the stuck one |
 | 130 | Interrupted before any apply; restored |
 
 ## Mock harness (Docker, Python 3.9 as on the guest)
