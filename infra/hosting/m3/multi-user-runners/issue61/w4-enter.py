@@ -12,8 +12,9 @@ the R1 VM gate. Run once by the user as root in the guest:
 2. session: one auth.sessions row for …5804, valid 1 hour, created through psql (stdin). The session token and
    CSRF token exist only in this process's memory: never written to a file, an argument or the output. Printed:
    a non-secret id (the first 16 hex of the row's token hash).
-3. ONE POST /api/research/codex/runner (Host 192.88.99.1 via the gateway 10.0.0.107:80; cookie, x-csrf-token,
-   a fresh Idempotency-Key that is printed). Never repeated: a timeout or a lost answer is reported as unknown.
+3. ONE POST /api/research/codex/runner (Host 192.88.99.1 via the gateway 10.0.0.107:80; Origin
+   http://192.88.99.1 as the route requires; cookie, x-csrf-token, a fresh Idempotency-Key that is printed). Never
+   repeated: a timeout or a lost answer is reported as unknown.
 4. the session row is revoked right after the POST (exact token hash and owner), on every path.
 5. the Pod (at most 300 s after the POST, read-only polling): registry generation 4 on the same state, the Pod
    runner-…5804 with that registry Pod UID and generation label, phase Running, both containers running with
@@ -21,8 +22,9 @@ the R1 VM gate. Run once by the user as root in the guest:
    60-minute deadline is Pod start + 60 min.
 6. identity and image proof (fail closed; never a tag or prefix match): spec images == the approved manifest
    references; status imageID == the same references (this runtime's observed format); each containerID
-   resolved through CRI: imageRef == the known config ID, Pod UID / namespace / container name labels, and its
-   sandbox's Pod UID; `crictl inspecti <imageID>` id == the config ID. automountServiceAccountToken false, no
+   resolved through CRI: `crictl inspect` imageRef == the manifest reference, Pod UID / namespace / container name
+   labels and its sandbox's Pod UID; `crictl ps --id <that id>` lists exactly that container with imageRef == the
+   known config ID in the same sandbox; `crictl inspecti <imageID>` id == the config ID. automountServiceAccountToken false, no
    kube-api-access volume or service-account mount, exactly the broker-audience projected token at
    /run/codex-broker (read-only). Token contents are never read.
 7. context, read-only: an early /health of this exact runner, read inside the runner-controller Pod with the
@@ -350,7 +352,8 @@ def post(token, csrf, key):
     connection = http.client.HTTPConnection(API_HOST, API_PORT, timeout=POST_TIMEOUT)
     try:
         connection.request('POST', PATH, body=b'{}', headers={
-            'Host': HOST_HEADER, 'Cookie': 'anxious_session=' + token, 'x-csrf-token': csrf,
+            # The route requires Origin == settings.origin before the CSRF check (backend/app/user_runners.py).
+            'Host': HOST_HEADER, 'Origin': ORIGIN, 'Cookie': 'anxious_session=' + token, 'x-csrf-token': csrf,
             'Idempotency-Key': key, 'Content-Type': 'application/json', 'Accept': 'application/json'})
         response = connection.getresponse()
         status, raw = response.status, response.read(65536)
@@ -401,7 +404,9 @@ def wait_pod(started):
 
 
 def crictl_json(args):
-    rc, out = run([K3S, 'crictl'] + args + ['-o', 'json'])
+    """crictl <verb> -o json <positional…>: crictl reads every word after the first ID as another ID, so the
+    options come first (observed on the guest)."""
+    rc, out = run([K3S, 'crictl', args[0], '-o', 'json'] + args[1:])
     if rc != 0:
         return None
     try:
@@ -437,18 +442,25 @@ def prove(pod):
         if not match:
             problems.append('%s containerID format %s' % (name, s.get('containerID')))
             continue
-        info = crictl_json(['inspect', match.group(1)])
+        cid = match.group(1)
+        # This runtime (observed 2026-11-03T16:15Z on the api container): `crictl inspect` status.imageRef is the
+        # repo@manifest reference; `crictl ps --id` imageRef is the config ID; both name the same sandbox.
+        info = crictl_json(['inspect', cid])
         cri = (info or {}).get('status') or {}
         cri_labels = cri.get('labels') or {}
-        if cri.get('imageRef') != config:
-            problems.append('%s CRI imageRef %s, want %s' % (name, cri.get('imageRef'), config))
+        if cri.get('imageRef') != ref:
+            problems.append('%s CRI inspect imageRef %s, want %s' % (name, cri.get('imageRef'), ref))
         if (cri_labels.get('io.kubernetes.pod.uid'), cri_labels.get('io.kubernetes.pod.namespace'),
                 cri_labels.get('io.kubernetes.container.name')) != (uid, NS, name):
             problems.append('%s CRI container labels are another instance' % name)
         sandbox = ((info or {}).get('info') or {}).get('sandboxID')
         box = (crictl_json(['inspectp', sandbox]) or {}).get('status') if sandbox else None
-        if ((box or {}).get('metadata') or {}).get('uid') != uid:
+        if not sandbox or ((box or {}).get('metadata') or {}).get('uid') != uid:
             problems.append('%s sandbox is not this Pod' % name)
+        listed = (crictl_json(['ps', '--id', cid]) or {}).get('containers')
+        if (not isinstance(listed, list) or len(listed) != 1 or listed[0].get('id') != cid
+                or listed[0].get('imageRef') != config or listed[0].get('podSandboxId') != sandbox):
+            problems.append('%s CRI ps --id is not exactly this container on config %s in this sandbox' % (name, config))
         rc, image = run([K3S, 'crictl', 'inspecti', '-o', 'go-template', '--template', '{{.status.id}}', s.get('imageID')])
         if rc != 0 or image != config:
             problems.append('%s inspecti(imageID) %s, want %s' % (name, image or 'none', config))
@@ -553,7 +565,7 @@ def main():
                 record(ev, proof={'ok': False, 'problems': problems})
                 raise Stop(8, 'instance/image proof failed: %s; the Pod is left as it is, PM decides' % '; '.join(problems))
             say('proof ok: spec images and status imageIDs are the approved references; each containerID resolves '
-                'through CRI to this Pod (labels and sandbox) with imageRef %s / %s; init prepare-shell exited 0; '
+                'through CRI to this Pod (labels and sandbox) on config %s / %s; init prepare-shell exited 0; '
                 'automount false, only the %s-audience token at runner:/run/codex-broker'
                 % (RUNNER_ID[:19], EXECUTOR_ID[:19], BROKER_AUDIENCE))
             record(ev, proof={'ok': True})

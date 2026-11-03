@@ -96,11 +96,15 @@ def base_state():
         'conv': {'n': 0, 'digest': '-'}, 'sessions': {}, 'fail': [], 'postMode': '202', 'podAfter': 2,
         'podTemplate': pod_template(),
         'images': {RUNNER: RUNNER_ID, EXECUTOR: EXECUTOR_ID},
-        'cri': {CID[n]: {'status': {'imageRef': cfg, 'labels': {'io.kubernetes.pod.uid': POD_UID,
+        # The shapes observed on the guest (2026-11-03T16:15Z): inspect imageRef = repo@manifest reference,
+        # ps --id imageRef = config ID, both in the same sandbox.
+        'cri': {CID[n]: {'status': {'imageRef': ref, 'labels': {'io.kubernetes.pod.uid': POD_UID,
                                                                 'io.kubernetes.pod.namespace': 'codex-runner',
                                                                 'io.kubernetes.container.name': n}},
                          'info': {'sandboxID': SANDBOX}}
-                for n, cfg in (('runner', RUNNER_ID), ('shell-executor', EXECUTOR_ID))},
+                for n, ref in (('runner', RUNNER), ('shell-executor', EXECUTOR))},
+        'ps': {CID[n]: [{'id': CID[n], 'imageRef': cfg, 'podSandboxId': SANDBOX}]
+               for n, cfg in (('runner', RUNNER_ID), ('shell-executor', EXECUTOR_ID))},
         'sandboxes': {SANDBOX: {'status': {'metadata': {'uid': POD_UID, 'name': POD_NAME, 'namespace': 'codex-runner'}}}},
         'health': {'ownerId': OWNER, 'stateId': STATE, 'podUid': POD_UID, 'available': False, 'reason': 'auth_revoked',
                    'verification': 'unverified', 'failure': 'auth_revoked', 'model': 'gpt-6.1-sol'},
@@ -138,10 +142,20 @@ class Api(http.server.BaseHTTPRequestHandler):
             key_ok = True
         except ValueError:
             key_ok = False
-        ok = (self.path == '/api/research/codex/runner' and self.headers.get('host') == '192.88.99.1' and body == b'{}'
-              and row is not None and row['owner'] == OWNER and row['csrf'] == self.headers.get('x-csrf-token') and key_ok)
-        if mode == '403' or not ok:
+        # As backend/app/user_runners.py: a session (401), then Origin == settings.origin, then CSRF (403).
+        if row is None or row['owner'] != OWNER:
+            self.reply(401, {'error': {'code': 'unauthenticated', 'message': 'x'}})
+            return
+        if self.headers.get('origin') != 'http://192.88.99.1':
+            self.reply(403, {'error': {'code': 'origin_not_allowed', 'message': 'x'}})
+            return
+        if row['csrf'] != self.headers.get('x-csrf-token'):
             self.reply(403, {'error': {'code': 'csrf_invalid', 'message': 'x'}})
+            return
+        ok = (self.path == '/api/research/codex/runner' and self.headers.get('host') == '192.88.99.1' and body == b'{}'
+              and key_ok)
+        if mode == '403' or not ok:
+            self.reply(403 if mode == '403' else 422, {'error': {'code': 'forbidden', 'message': 'x'}})
             return
         st['entered'] = True
         st['db'].update(phase='provisioning', generation=4, revision=13)
@@ -243,12 +257,18 @@ def observe(*args, env=None):
     return done.returncode, done.stdout.decode()
 
 
-def released(st, **over):
-    receipt = {'version': 3, 'podUid': POD_UID, 'ownerId': OWNER, 'stateId': STATE, 'generation': 4,
+def released(st, when=None, **over):
+    receipt = {'version': 3, 'podUid': POD_UID, 'ownerId': OWNER, 'stateId': STATE, 'generation': 4, 'stopId': 's4',
                'unavailable': {'reason': 'auth_revoked', 'clean': False}}
     receipt.update(over.pop('receipt', {}))
-    stop = {'stopId': 's4', 'pod': POD_UID, 'completed': '2026-11-04T01:31:00+00:00', 'receipt': receipt,
-            'proof': {'podUid': POD_UID, 'evidence': 'pod-deleted'}}
+    # 2026-11-04T01:31:00Z, inside the entry deadline 02:00:00Z.
+    stop = {'stopId': 's4', 'owner': OWNER, 'stateId': STATE, 'generation': 4, 'pod': POD_UID,
+            'completed': '2026-11-04T01:31:00.20196+00:00', 'completedEpoch': 1793755860.20196, 'receipt': receipt,
+            'proof': {'podUid': POD_UID, 'evidence': 'pod-deleted', 'verifiedAt': '2026-11-04T01:31:00.210210+00:00'}}
+    if when is not None:  # a completion at epoch `when` (for deadlines relative to the real clock)
+        iso = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(when))
+        stop.update(completed=iso + '.5+00:00', completedEpoch=when,
+                    proof={'podUid': POD_UID, 'evidence': 'pod-deleted', 'verifiedAt': iso + '.600000+00:00'})
     stop.update(over.pop('stop', {}))
     st['stopGen4'] = stop
     st['db'].update(phase='idle_stopped', pod=None, revision=15)
@@ -261,6 +281,30 @@ def released(st, **over):
 def main():
     install()
 
+    # The mock API enforces the route's order: no session 401, wrong/missing Origin 403, bad CSRF 403 ----------
+    import http.client as hc
+    setup()
+    st = state()
+    token = 'T' * 43
+    token_hash = hashlib.sha256(('m2-origin-session-v1\0http://192.88.99.1\0' + token).encode()).hexdigest()
+    st['sessions'][token_hash] = {'owner': OWNER, 'csrf': 'C' * 43}
+    put(st)
+    for name, extra, want in (('no Origin', {}, 403), ('another Origin', {'Origin': 'http://evil'}, 403),
+                              ('a bad CSRF', {'Origin': 'http://192.88.99.1', 'x-csrf-token': 'x'}, 403)):
+        c = hc.HTTPConnection('127.0.0.1', PORT, timeout=5)
+        headers = {'Host': '192.88.99.1', 'Cookie': 'anxious_session=' + token, 'x-csrf-token': 'C' * 43,
+                   'Idempotency-Key': str(uuid.uuid4()), 'Content-Type': 'application/json'}
+        headers.update(extra)
+        c.request('POST', '/api/research/codex/runner', body=b'{}', headers=headers)
+        status = c.getresponse().status
+        c.close()
+        check('mock API: %s is refused %d' % (name, want), status == want, str(status))
+    c = hc.HTTPConnection('127.0.0.1', PORT, timeout=5)
+    c.request('POST', '/api/research/codex/runner', body=b'{}', headers={'Host': '192.88.99.1', 'Origin': 'http://192.88.99.1'})
+    status = c.getresponse().status
+    c.close()
+    check('mock API: no session is 401', status == 401, str(status))
+
     # Happy path -----------------------------------------------------------------------------------------
     setup()
     rc, out = enter()
@@ -268,23 +312,34 @@ def main():
     headers = POSTS[0][0] if POSTS else {}
     key = headers.get('Idempotency-Key') or headers.get('idempotency-key')
     check('happy: one POST with Host, cookie, CSRF and a UUID Idempotency-Key, printed', key and key in out, out)
+    check('happy: the POST carries Origin http://192.88.99.1 (the route requires it)',
+          (headers.get('Origin') or headers.get('origin')) == 'http://192.88.99.1', str(headers.get('Origin')))
     check('happy: the session row was revoked (exact hash, owner)', len(st.get('revoked', [])) == 1, out)
     rj = run_json()
     check('happy: evidence has the Pod UID, start, deadline = start + 60 min and r1State true',
-          rj and rj['pod']['uid'] == POD_UID and rj['pod']['deadline'] == '2026-11-04T02:00:00Z'
-          and rj['health']['r1State'] is True and rj['result'] == 0 and rj['session']['revoked'] is True, json.dumps(rj))
+          rj and (rj.get('pod') or {}).get('uid') == POD_UID and (rj.get('pod') or {}).get('deadline') == '2026-11-04T02:00:00Z'
+          and (rj.get('health') or {}).get('r1State') is True and rj.get('result') == 0
+          and (rj.get('session') or {}).get('revoked') is True, json.dumps(rj))
     check('happy: prints the proof, the sanitized health with r1_state=true, the ledger line, conversations unchanged',
           'proof ok' in out and 'r1_state=true' in out and '5804 ledger blocked=auth_revoked' in out
           and 'unchanged' in out, out)
     check('happy: read-only queries are READ ONLY, writes only insert/revoke',
           all(q.startswith('BEGIN READ ONLY;') or re.search(r'/\*w4w:(insert|revoke)\*/', q) for q in st['queries']))
-    check('happy: the health probe reads this Pod only', POD_UID in st['healthProbes'][0])
+    check('happy: the health probe reads this Pod only', POD_UID in (st.get('healthProbes') or [''])[0])
     check('happy: evidence directory is 0700', oct(os.stat(evidence()).st_mode & 0o777) == '0o700')
     rc, out = enter()
     check('rerun refuses at precheck (evidence exists), no POST', rc == 3 and 'never rerun' in out and len(POSTS) == 1, out)
 
-    # Observation on the happy entry ----------------------------------------------------------------------
-    ev = evidence()
+    # Observation (on a well-formed entry record, independent of the entry script's result) -----------------
+    ev = INSTALL + '/evidence/w4-observe-fixture'
+    os.makedirs(ev, mode=0o700, exist_ok=True)
+    json.dump({'result': 0, 'proof': {'ok': True}, 'post': {'idempotencyKey': str(uuid.uuid4()), 'status': 202},
+               'pod': {'uid': POD_UID, 'start': '2026-11-04T01:00:00Z', 'deadline': '2026-11-04T02:00:00Z'},
+               'before': {'conversations': {'n': 0, 'digest': '-'}}, 'session': {'id': 'x', 'revoked': True}},
+              open(os.path.join(ev, 'run.json'), 'w'))
+    st = state(); st['pod'] = pod_template(); st['entered'] = False; st['db'].update(generation=4, revision=14,
+                                                                                     phase='ready', pod=POD_UID)
+    st['conv'] = {'n': 0, 'digest': '-'}; st['fail'] = []; put(st)
     rc, out = observe(ev)
     check('observe: running, no stop yet: pending (rc 5)', rc == 5 and 'pending' in out, out)
     st = state(); released(st); put(st)
@@ -303,28 +358,84 @@ def main():
         check('observe: %s is R1 not done (rc 4)' % name, rc == 4 and 'R1 not done' in out, out)
     st = state(); released(st); st['pod'] = pod_template(); put(st)
     rc, out = observe(ev)
-    check('observe: Pod still there is not done', rc == 4 and 'the Pod still exists' in out, out)
+    check('observe: Pod still there is not done', rc == 4 and '(the W4 Pod)' in out, out)
     st = state(); released(st); st['conv'] = {'n': 1, 'digest': 'x'}; put(st)
     rc, out = observe(ev)
     check('observe: changed conversations are not done', rc == 4 and 'conversations changed' in out, out)
+    st = state(); st['conv'] = {'n': 0, 'digest': '-'}; put(st)
+    for name, over, why in (
+            ('a stop/receipt stopId mismatch', {'receipt': {'stopId': 'other'}}, 'receipt linkage'),
+            ('a receipt for another state', {'receipt': {'stateId': 'other'}}, 'receipt linkage'),
+            ('a receipt for another generation', {'receipt': {'generation': 3}}, 'receipt linkage'),
+            ('a stop row for another state', {'stop': {'stateId': 'other'}}, 'is not this owner/state/Pod'),
+            ('a completion after the deadline', {'stop': {'completed': '2026-11-04T03:00:00+00:00',
+                                                          'completedEpoch': 1793761200.0}}, 'kept as evidence'),
+            ('a proof verified after the deadline', {'stop': {'proof': {
+                'podUid': POD_UID, 'evidence': 'pod-deleted', 'verifiedAt': '2026-11-04T03:00:00.000001+00:00'}}},
+             'not at or before the deadline'),
+            ('a proof time without UTC offset', {'stop': {'proof': {
+                'podUid': POD_UID, 'evidence': 'pod-deleted', 'verifiedAt': '2026-11-04T01:31:00'}}},
+             'not at or before the deadline')):
+        st = state(); released(st, **copy.deepcopy(over)); put(st)
+        rc, out = observe(ev)
+        check('observe: %s is R1 not done (rc 4) for that reason only' % name,
+              rc == 4 and why in out and 'conversations changed' not in out, out)
+    st = state(); released(st); st['pod'] = dict(pod_template(), metadata=dict(pod_template()['metadata'], uid='other-live'))
+    put(st)
+    rc, out = observe(ev)
+    check('observe: a replacement Pod by name is not done and named as a REPLACEMENT',
+          rc == 4 and 'REPLACEMENT, uid other-live' in out, out)
+    st = state(); released(st); st['db']['allOpenStops'] = 1; put(st)
+    rc, out = observe(ev)
+    check('observe: an open stop is not done', rc == 4 and 'open stop' in out, out)
+    st = state(); st['db']['allOpenStops'] = 0; released(st); put(st)
+    good = json.load(open(os.path.join(ev, 'run.json')))
+    for name, change in (('entry proof failed (result 8)', {'result': 8, 'proof': {'ok': False, 'problems': ['x']}}),
+                         ('entry proof missing (result 6)', {'result': 6, 'proof': None}),
+                         ('entry early health not R1 (result 9)', {'result': 9}),
+                         ('entry POST status 403', {'post': dict(good['post'], status=403)}),
+                         ('entry without Idempotency-Key', {'post': dict(good['post'], idempotencyKey=None)}),
+                         ('entry deadline not Pod start + 60 min', {'pod': dict(good['pod'], deadline='2026-11-04T03:00:00Z')})):
+        bad_entry = dict(good, **change)
+        json.dump(bad_entry, open(os.path.join(ev, 'run.json'), 'w'))
+        rc, out = observe(ev)
+        check('observe: %s never certifies, even with a matching stop (rc 6, diagnostic)' % name,
+              rc == 6 and 'DOES NOT certify' in out and 'R1 done' not in out, out)
+    json.dump(good, open(os.path.join(ev, 'run.json'), 'w'))
+    rc, out = observe(ev)
+    check('observe: the restored good entry certifies again (control)', rc == 0 and 'R1 done' in out, out)
     st = state(); st['stopGen4'] = None; st['conv'] = {'n': 0, 'digest': '-'}; put(st)
     rj = json.load(open(os.path.join(ev, 'run.json')))
     rj['pod']['deadline'] = '2026-01-01T00:00:00Z'
+    rj['pod']['start'] = '2025-12-31T23:00:00Z'
     json.dump(rj, open(os.path.join(ev, 'run.json'), 'w'))
     rc, out = observe(ev, '--wait')
     check('observe: --wait past the deadline ends at once: R1 not done at the deadline (rc 5)',
           rc == 5 and 'at the deadline' in out and 'nothing is extended' in out, out)
-    rj['pod']['deadline'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() + 120))
+    soon = int(time.time()) + 120
+    rj['pod']['deadline'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(soon))
+    rj['pod']['start'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(soon - 3600))
     json.dump(rj, open(os.path.join(ev, 'run.json'), 'w'))
     st = state(); st['stopGen4'] = None; put(st)
 
     def later():
         time.sleep(2.5)
-        s = state(); released(s); put(s)
+        s = state(); released(s, when=time.time()); put(s)
     threading.Thread(target=later).start()
     start = time.monotonic()
     rc, out = observe(ev, '--wait')
     check('observe: --wait polls until the release, then R1 done', rc == 0 and time.monotonic() - start < 30, out)
+    soon = int(time.time()) + 4
+    rj['pod']['deadline'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(soon))
+    rj['pod']['start'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(soon - 3600))
+    json.dump(rj, open(os.path.join(ev, 'run.json'), 'w'))
+    st = state(); st['stopGen4'] = None; st['fail'] = ['slow-db']; put(st)
+    start = time.monotonic()
+    rc, out = observe(ev, '--wait')
+    took = time.monotonic() - start
+    check('observe: --wait with slow lookups ends at the deadline, bounded (no extension)',
+          rc == 5 and 'at the deadline' in out and took < 25, '%.1f s %s' % (took, out))
+    st = state(); st['fail'] = []; put(st)
     rc, out = observe('/nonexistent')
     check('observe: unreadable evidence is rc 3', rc == 3, out)
     st = state(); st['fail'] = ['db-fail-state']; put(st)
@@ -396,12 +507,18 @@ def main():
     bad('spec executor image is the old one', lambda s: s['podTemplate']['spec']['containers'][1].update(
         image='docker.io/library/anxious-dev-shell-executor@sha256:' + '5' * 64))
     bad('init container on another image', lambda s: s['podTemplate']['spec']['initContainers'][0].update(image=EXECUTOR))
-    bad('CRI imageRef is another config', lambda s: s['cri'][CID['runner']]['status'].update(imageRef='sha256:' + '0' * 64))
+    bad('CRI inspect imageRef is the config ID, not the manifest reference',
+        lambda s: s['cri'][CID['runner']]['status'].update(imageRef=RUNNER_ID))
+    bad('CRI inspect imageRef is another reference', lambda s: s['cri'][CID['runner']]['status'].update(
+        imageRef=RUNNER.split('@')[0] + '@sha256:' + '0' * 64))
+    bad('CRI ps lists no container for the ID', lambda s: s['ps'].update({CID['runner']: []}))
+    bad('CRI ps lists two containers', lambda s: s['ps'][CID['runner']].append(dict(s['ps'][CID['runner']][0])))
+    bad('CRI ps container in another sandbox', lambda s: s['ps'][CID['runner']][0].update(podSandboxId='d' * 64))
     bad('CRI container belongs to another Pod', lambda s: s['cri'][CID['runner']]['status']['labels'].update(
         {'io.kubernetes.pod.uid': 'other'}))
     bad('sandbox is another Pod', lambda s: s['sandboxes'][SANDBOX]['status']['metadata'].update(uid='other'))
     bad('containerID not containerd', lambda s: status_of(s, 'runner').update(containerID='docker://' + 'a' * 64))
-    bad('executor CRI imageRef is another config', lambda s: s['cri'][CID['shell-executor']]['status'].update(
+    bad('executor CRI ps imageRef is another config', lambda s: s['ps'][CID['shell-executor']][0].update(
         imageRef='sha256:' + '1' * 64))
     bad('a container restarted', lambda s: status_of(s, 'runner').update(restartCount=1))
     bad('init exited 1', lambda s: s['podTemplate']['status']['initContainerStatuses'][0].update(

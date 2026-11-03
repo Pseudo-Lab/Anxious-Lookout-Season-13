@@ -116,18 +116,22 @@ inputs and the exact report `ops.runner_binding_image report` must print. The dr
 - **POST:** it makes one `POST /api/research/codex/runner` through the gateway and never repeats it. Right after the POST it revokes that exact row.
 - **Pod:** it waits at most 300 s for the controller-created Pod. Then it proves the instance and images:
   - spec images and status `imageID` equal the approved manifest references;
-  - each `containerID` resolves through CRI to this Pod (container labels and sandbox), with `imageRef` equal to the known config ID;
+  - each `containerID` resolves through CRI to this Pod (container labels and sandbox). On this runtime `crictl inspect -o json <id>` gives `status.imageRef` = the manifest reference, and `crictl ps -o json --id <id>` lists exactly that container with `imageRef` = the config ID in the same sandbox. crictl options must come before the ID;
+  - the POST carries `Origin: http://192.88.99.1`, which the route requires before the CSRF check;
   - `inspecti(imageID)` gives the same config ID;
   - the init container exited 0;
   - `automountServiceAccountToken` is false, and the only token is the `codex-broker`-audience projected token at `runner:/run/codex-broker`.
 - **Context:** it then records an early `/health` of this exact runner, read inside the runner-controller Pod with the controller's own client and printed sanitized, plus the unchanged W0 ledger probe.
 
-`w4-observe.py` is read-only. It declares R1 done only on all of the following:
-- a completed generation-4 stop with a version 3 receipt for this Pod, `unavailable.reason == "auth_revoked"`;
-- a `pod-deleted` proof for this Pod;
-- the registry idle_stopped gen 4 without a Pod;
-- the Pod gone;
+`w4-observe.py` is read-only. Entry evidence certifies only with entry result 0 (or 70), `proof.ok`, a 200/202 POST with its Idempotency-Key, and a deadline equal to Pod start + 60 min. Otherwise the observation is diagnostic only (rc 6). It declares R1 done only on all of the following:
+- a completed generation-4 stop of this owner, state and Pod, completed at or before the deadline;
+- a version 3 receipt whose owner, state, generation, Pod and stopId are that stop's, with `unavailable.reason == "auth_revoked"`;
+- a `pod-deleted` proof for this Pod, verified at or before the deadline;
+- no open stop, and the registry idle_stopped gen 4 without a Pod;
+- no Pod by name at all (a replacement is named as such);
 - unchanged conversations.
+
+A late completion is printed and kept as evidence, but it is not R1 done.
 
 Any other receipt is "R1 not done". No stop by the deadline is "R1 not done at the deadline", and nothing is extended, retried or reclaimed.
 
@@ -141,6 +145,7 @@ Any other receipt is "R1 not done". No stop by the deadline is "R1 not done at t
 | 7 | Pod not proved Running within 300 s; no retry or reclaim | |
 | 8 | Instance, image or token proof failed; Pod left as is | |
 | 9 | Early health is not the R1 state; runner left running | |
+| 6 (observe) | | Entry evidence does not certify: diagnostic only |
 | 70 | rc 0 otherwise, but the session revoke was not proved | |
 | 130 | Interrupted before the POST | |
 

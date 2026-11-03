@@ -150,6 +150,8 @@ def psql(state, query):
         token_hash = re.search(r"token_hash='([0-9a-f]{64})'", query).group(1)
         print(json.dumps({'n': 1 if token_hash in state['sessions'] else 0}))
     elif tag == 'state':  # w4o
+        if failing(state, 'slow-db'):
+            time.sleep(3)
         print(json.dumps({k: db[k] for k in ('state', 'phase', 'generation', 'revision', 'pod')}
                          | {'stop': state.get('stopGen4'), 'openStops': db['allOpenStops']}))
     else:
@@ -163,17 +165,25 @@ def crictl(state, args):
             die(1)
         print(got)
         return
+    if args[0] in ('inspect', 'inspectp', 'ps'):
+        # As the real crictl: options first; a word after the first ID is read as another ID (NotFound).
+        if args[1:3] != ['-o', 'json'] or '-o' in args[3:]:
+            die(1)
     if args[0] == 'inspect':
-        info = state['cri'].get(args[1])
-        if info is None:
+        info = state['cri'].get(args[3])
+        if info is None or len(args) != 4:
             die(1)
         print(json.dumps(info))
         return
     if args[0] == 'inspectp':
-        box = state['sandboxes'].get(args[1])
-        if box is None:
+        box = state['sandboxes'].get(args[3])
+        if box is None or len(args) != 4:
             die(1)
         print(json.dumps(box))
+        return
+    if args[0] == 'ps':
+        assert args[3] == '--id' and len(args) == 5
+        print(json.dumps({'containers': state['ps'].get(args[4], [])}))
         return
     die(97)
 
