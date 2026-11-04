@@ -353,6 +353,85 @@ conversations. If neither has happened by the deadline: a read-only report, and 
 as a substitute. This does not change the W4 R1 verdict. If enter2 returns rc 10 (still `not_configured`), the runner
 is left running and PM decides.
 
+### W6 attempt 1 outcome (2026-11-04): stopped at step 2, no reboot
+
+- **Step 1** (`w6-enter.py`, enter1) returned rc 0 at 09:54Z.
+  - Gen 5, Pod `c00de0a9…`, health `auth_revoked`.
+  - Bound: step 2 had to start before 10:14:11Z.
+- **Gen 5 was idle-drained before step 2 ran.**
+  - `lastActivity` was 09:54:11Z, so the idle drain was due at 10:24:11Z.
+  - Stop `3b15f417…` was requested at 10:24:36Z.
+  - Its receipt is **v3**, reason `auth_revoked`, `clean=false`.
+  - The `pod-deleted` proof is on B0. The stop completed at 10:24:37Z.
+- **Step 2** (`w6-reboot.py`) started at 10:33:11Z, which was 19 minutes past the bound.
+  - It refused with rc 3: too late, the registry was `idle_stopped`, a gen-5 stop existed, and the Pod was gone.
+  - It wrote no evidence and no intent, and requested no reboot.
+- **Read-only diagnosis at 10:34Z.**
+  - Registry: `idle_stopped`, gen 5, revision 20, no Pod, 0 active, not ambiguous.
+  - …5804 has 5 stops in total. Open stops, entries, admissions, outbox and sessions are all 0.
+  - Conversations: n=0, digest `-`.
+  - The boot is still B0. `w6.lock` is present, and no process holds it.
+- **The W6 reboot gate was not run.** A natural drain on B0 is not the v2 terminal recovery that W6 needs.
+- **Why it failed:** the delay between relaying step 1 and step 2.
+- **The approved attempt-1 scripts cannot resume.** `w6-enter.py` refuses a second enter1, its FENCE1 is pinned to
+  gen 4 rev 16, and its bound has passed.
+- **Attempt-1 files are kept as they ran.** The scripts below stay unchanged; their hashes are the round-3 approval.
+  The record `w6-enter1-20261104T095411Z` and `w6.lock` are never written by attempt 2.
+
+### W6 attempt 2: same gate, new baseline, one command for steps 1 and 2
+
+The scripts are `w6a2-enter.py`, `w6a2-reboot.py` and `w6a2-observe.py`. They are attempt-1's scripts with these
+changes only; every safeguard from c192b52 stays.
+
+- **Baseline (pinned, refused rather than adapted).** enter1 needs the 10:34Z diagnosis exactly:
+  - fence: `idle_stopped`, gen 5, **rev 20**, no Pod, 0 active, not ambiguous;
+  - the gen-5 stop is exactly stop `3b15f417…` for Pod `c00de0a9…`: completed, receipt v3 `auth_revoked` `clean=false`, not terminal;
+  - its `pod-deleted` proof and stop row are on B0 and the recorded Node;
+  - …5804 has 5 stops in total.
+- **Chain.**
+  - enter1: gen 5 → **6**.
+  - reboot: under gen 6. The registry still has 5 stops and no gen-6 stop.
+  - observe: the gen-6 stop is v2 terminal with proof on B1, and is the only new stop (6 in total). The registry is `idle_stopped` gen 6.
+  - enter2: gen 6 → **7**. It re-checks the gen-6 stop and the 6-stop count.
+  - Every stop query names its generation. The harness fake asserts that each query names the expected generation.
+- **Attempt separation.**
+  - Records go in `w6a2-{enter1,reboot,observe,enter2}-<stamp>`, and every record carries `"attempt": "a2"`.
+  - The lock is `/root/issue61/w6a2.lock`.
+  - Each attempt-2 step also needs attempt 1's `w6-*` records to be exactly `w6-enter1-20261104T095411Z`. Anything missing or extra gives rc 3.
+  - enter1 also checks that record's content: result 0, gen 5, Pod `c00de0a9…`.
+  - An attempt-1 script run by mistake refuses (rc 3) before any session, POST or reboot. It writes no record and does not consume attempt 2's permit (tested).
+- **Unchanged:** the 1200 s bound, health classes, three-way Pod lookups, deadlines, conversation checks, the evidence capture, exactly one `systemctl reboot`, no restore bypass, and the rc tables above (with gens 6/7 in place of 5/6).
+
+**Steps (attempt 2).**
+
+| step | command | what changes |
+|---|---|---|
+| 1+2 | **one chained command** (below) | one session row (revoked), one runner POST (gen 5 → 6); then, only if enter returned 0: evidence files and one `systemctl reboot` |
+| 3 | `w6a2-observe.py`, separate command after ssh answers again | nothing (read-only, at most 30 min) |
+| 4 | `w6a2-enter.py` (enter2), separate command | one session row (revoked), one runner POST: gen 6 → 7 |
+| W7 | read-only, separate draft | nothing |
+
+**Steps 1+2, exact command** (PM relays it verbatim; review clears this text together with the hashes):
+
+<!-- w6a2-chain -->
+```
+! ssh -i ~/.ssh/anxious-back-devvm -o IdentitiesOnly=yes -p 22107 opc@127.0.0.1 'printf "%s  %s\n%s  %s\n" 1ab4baf7a48794577fd853aff68f135f1a55423368918d61a32a5076a183ba3a w6a2-enter.py 4c0e570dd71d6baab3cb12b2e566894cf046b0da1ac64c148c38c4d6a07fc096 w6a2-reboot.py | sudo -n sh -c "cd /root/issue61 && sha256sum -c -"; rc=$?; [ "$rc" -eq 0 ] || echo "hash check failed rc=$rc"; [ "$rc" -eq 0 ] && { sudo -n python3 -I /root/issue61/w6a2-enter.py; rc=$?; echo "enter rc=$rc"; [ "$rc" -eq 0 ] && { sudo -n python3 -I /root/issue61/w6a2-reboot.py; rc=$?; echo "reboot rc=$rc"; }; }; echo "remote rc=$rc"; exit "$rc"'
+```
+
+- **Hashes first.** Both script hashes are checked before anything runs. If either fails, nothing runs, and the
+  `sha256sum` rc is the remote rc.
+- **Enter.** `w6a2-enter.py` runs only after both hashes pass. Its rc is printed as `enter rc=N`.
+- **Reboot only after enter rc 0.** Any other enter rc, including 70, 72, 6 or 130 after an interruption, ends the
+  command with that rc as `remote rc`. Nothing is retried.
+- **Reboot.** `w6a2-reboot.py` runs only after enter rc 0. Its rc is printed as `reboot rc=N` and is the remote rc.
+  - Its own precheck and its 1200 s bound still decide; it does not rely on the chain.
+  - When the reboot is requested, the ssh session usually drops before `reboot rc=0` is printed. Then `ssh` exits
+    255. That is the expected end, and it is not evidence either way. Step 3 decides.
+- **Exit code.** The command always ends with `remote rc=<rc>; exit <rc>`. No trailing `echo` can turn a failure
+  into rc 0.
+
+**W7 (attempt 2).** W7 is the same gate as above, applied to **gen 7**: v1 clean drain, or v3 with `unavailable.reason` equal to the gen-7 runner's `health.failure`. It needs the gen-7 `pod-deleted` proof and `idle_stopped` gen 7. The deadline is the gen-7 Pod start + 60 min.
+
 ## Mock harness (Docker, Python 3.9 as on the guest)
 
 ```sh
@@ -368,7 +447,13 @@ docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
   python3 -I /m3/multi-user-runners/issue61/test_w5.py
 docker run --rm --network none --hostname simple -v "$PWD/infra/hosting/m3:/m3:ro" \
   -v "$PWD/backend/ops:/ops:ro" python:3.9-alpine python3 -I /m3/multi-user-runners/issue61/test_w6.py
+docker run --rm --network none --hostname simple -v "$PWD/infra/hosting/m3:/m3:ro" \
+  -v "$PWD/backend/ops:/ops:ro" python:3.9-alpine python3 -I /m3/multi-user-runners/issue61/test_w6a2.py
 ```
+
+`test_w6a2.py` uses `mock/fake_w6a2.py`. It installs attempt 1's approved scripts beside attempt 2's, as on the
+guest. It also creates attempt 1's record, its `w6.lock`, and the gen-5 stop as diagnosed. It runs the README's
+chained command through `sh` with a `sudo -n` stub; the hashes are swapped for those of the mock-pointed copies.
 
 `test_w3b.py` uses `mock/fake_w3b.py`, which emulates the binding tool's guards, report and compare-and-swap,
 and `mock/w3b-plans.json`, the two live plans from the 2026-11-03T14:53:48Z read-only snapshot.
