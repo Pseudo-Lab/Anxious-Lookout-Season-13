@@ -391,7 +391,11 @@ changes only; every safeguard from c192b52 stays.
 - **Chain.**
   - enter1: gen 5 → **6**.
   - reboot: under gen 6. The registry still has 5 stops and no gen-6 stop.
-  - observe: the gen-6 stop is v2 terminal with proof on B1, and is the only new stop (6 in total). The registry is `idle_stopped` gen 6.
+  - observe: the gen-6 stop is v2 terminal with proof on B1, and is the only new stop. The registry is `idle_stopped` gen 6.
+  - observe passes only if the owner's stop total is the integer **6** (5 + 1). This was added in a2 round 1, because before it only more than 6 was refused.
+    - More than 6, fewer than 5, or 5 while a gen-6 stop exists: rc 6 (definitive).
+    - Null, missing, or not an integer: waited on, then rc 5.
+    - 5 with no gen-6 stop yet: waited on.
   - enter2: gen 6 → **7**. It re-checks the gen-6 stop and the 6-stop count.
   - Every stop query names its generation. The harness fake asserts that each query names the expected generation.
 - **Attempt separation.**

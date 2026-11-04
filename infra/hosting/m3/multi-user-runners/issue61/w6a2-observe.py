@@ -19,14 +19,16 @@ G3, all together: the gen-6 stop of …5804 exists once, requested after the int
 exactly {stopId, ownerId, stateId, podUid, generation, version, terminal}, equal to the stop row (owner, state,
 gen 6, the enter1 Pod UID); terminal is a subset of {podPhase, containers, podAbsent}; it is completed with proof
 {podUid, nodeName, nodeUid, bootId, verifiedAt, evidence=pod-deleted} on the recorded Node UID and boot B1, equal
-to the row's node_uid/boot_id; exactly one new stop since the reboot record; registry idle_stopped, gen 6, no Pod,
+to the row's node_uid/boot_id; exactly one new stop since the reboot record (the owner total is the integer 6 = 5 + 1;
+anything else never passes); registry idle_stopped, gen 6, no Pod,
 0 active, not ambiguous; no Pod in codex-runner; no open stop anywhere; conversations unchanged; the recorded
 workloads (controller, api, web, postgres, broker) back at full readiness with the recorded UIDs.
 
 Definitive mismatches stop at once with rc 6: a receipt of another version (v1/v3/v4) or shape, a stop for another
-Pod UID, a stop requested before the intent, a proof on B0 or another Node/boot, more than one new stop, a
+Pod UID, a stop requested before the intent, a proof on B0 or another Node/boot, more than one new stop, fewer stops than
+before the reboot (or a gen-6 stop while the total is still 5), a
 replacement Pod, a registry past gen 6 or on another state. Anything not yet reached (k3s starting, Node NotReady,
-the Pod still listed Running or not yet terminal, the stop not yet written or completed) is waited on until the
+the Pod still listed Running or not yet terminal, the stop not yet written or completed, an unreadable stop count) is waited on until the
 deadline, then rc 5.
 
 No-input evidence (within the observed scope, after the pass): the raw sudo and sshd journal of this boot and the
@@ -532,9 +534,19 @@ def g3(ctx, row, pod_state, pod, list_state, items):
     if reg.get('state') != STATE or (isinstance(reg.get('generation'), int) and reg['generation'] > GEN1):
         definitive.append('registry moved to state %s gen %s' % (reg.get('state'), reg.get('generation')))
     stop = row.get('stop6')
-    before = ctx['stopsBefore']
-    if isinstance(before, int) and isinstance(row.get('stops'), int) and row['stops'] > before + 1:
-        definitive.append('%d new stops since the reboot record' % (row['stops'] - before))
+    # Exactly one new stop: the owner's total must be an integer equal to STOPS0 + 1 for a pass (precheck has
+    # already required the reboot record's count to be STOPS0). Fewer is waited on only while no gen-6 stop exists.
+    stops = row.get('stops')
+    if type(stops) is not int:
+        pending.append('the owner stop count is unreadable (%r)' % (stops,))
+    elif stops > STOPS0 + 1:
+        definitive.append('%d new stops since the reboot record' % (stops - STOPS0))
+    elif stops < STOPS0:
+        definitive.append('the owner has %d stops, fewer than the %d before the reboot' % (stops, STOPS0))
+    elif stops == STOPS0 and stop is not None:
+        definitive.append('a gen-6 stop exists but the owner still has %d stops: an earlier stop is gone' % stops)
+    elif stops == STOPS0:
+        pending.append('no new stop yet (%d stops)' % stops)
     if stop is None:
         pending.append('no gen-6 stop yet')
     else:

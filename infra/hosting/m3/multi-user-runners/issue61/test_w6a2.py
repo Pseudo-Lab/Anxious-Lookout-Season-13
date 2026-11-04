@@ -924,6 +924,22 @@ def test_observe():
     case('a stop requested before the intent', lambda st: None, 6, 'requested before the reboot intent',
          {'stop': {'requestedEpoch': 1000}})
     case('two new stops', lambda st: st['timeline'][0]['db'].update(stops=7), 6, '2 new stops')
+
+    # Round 1 (a2): G3 needs the owner's stop total to be exactly the integer 6 (5 before the reboot + 1).
+    def stops_at(value, steps=(0, 1)):
+        return lambda st: [st['timeline'][i]['db'].update(stops=value) for i in steps]
+    case('the total stays 5 while the gen-6 stop completes (review counterexample: final read only)',
+         stops_at(5, (1,)), 6, 'an earlier stop is gone')
+    case('the total is 5 with the gen-6 stop from its first read', stops_at(5), 6, 'an earlier stop is gone')
+    case('the total drops to 4', stops_at(4), 6, 'fewer than the 5 before the reboot')
+    case('the total drops to 0', stops_at(0), 6, 'fewer than the 5 before the reboot')
+    case('the total is 8', stops_at(8), 6, '3 new stops')
+    case('the total is null', stops_at(None), 5, 'the owner stop count is unreadable (None)')
+    case('the total is missing from the row', stops_at('__absent__'), 5, 'the owner stop count is unreadable (None)')
+    case('the total is the string "6"', stops_at('6'), 5, "the owner stop count is unreadable ('6')")
+    case('the total is the float 6.0', stops_at(6.0), 5, 'the owner stop count is unreadable (6.0)')
+    case('the total is true', stops_at(True), 5, 'the owner stop count is unreadable (True)')
+    case('the total is exactly the integer 6', stops_at(6), 0, 'W6 G2+G3 ok')
     case('a replacement runner Pod', lambda st: st['pod']['metadata'].update(uid=POD7), 6, 'replacement runner Pod')
     case('the registry moved to gen 7', lambda st: st['timeline'][1]['db'].update(generation=7), 6, 'registry moved')
     case('the stop never completes', lambda st: st['timeline'].pop(), 5, 'gen-6 stop not completed yet')

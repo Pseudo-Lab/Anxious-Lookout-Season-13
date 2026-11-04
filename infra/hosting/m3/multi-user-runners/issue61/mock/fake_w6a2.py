@@ -250,8 +250,11 @@ def psql(state, query):
                 state['timeline'].remove(step)
         save(state)
         reg = {k: db[k] for k in ('state', 'phase', 'generation', 'revision', 'pod', 'active', 'ambiguous')}
-        print(json.dumps({'registry': reg, key: stop_of(state, generation), 'stops': db['stops'],
-                          'allOpenStops': db['allOpenStops'], 'conversations': db['conv']}))
+        out = {'registry': reg, key: stop_of(state, generation), 'stops': db['stops'], 'allOpenStops': db['allOpenStops'],
+               'conversations': db['conv']}
+        if db['stops'] == '__absent__':  # the row without the key at all
+            del out['stops']
+        print(json.dumps(out))
     elif tag == 'insert':
         token_hash, owner, csrf = re.search(r"VALUES \('([0-9a-f]{64})','([0-9a-f-]{36})','([A-Za-z0-9_-]+)'", query).groups()
         state['sessions'][token_hash] = {'owner': owner, 'csrf': csrf}
