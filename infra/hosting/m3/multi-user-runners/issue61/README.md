@@ -203,34 +203,52 @@ The stimulus must be stated, and proved available, before the POST. On the dev V
 
 ## W5: controller SA token rotation (read-only)
 
-`sudo -n python3 -I /root/issue61/w5-rotation.py`
+- `sudo -n python3 -I /root/issue61/w5-rotation.py`: the window, at most 75 min.
+- `sudo -n python3 -I /root/issue61/w5-rotation.py --preflight`: one validated claims read, bound by the Pod identity before and after. It writes nothing.
 
 1. **Precheck:**
-   - no earlier `w5-*` evidence;
-   - host `issue16-*` units inactive;
-   - the host 24 h kube-token files under `/etc/anxious-lookout/issue16/` are stat-ed only, and must be older than 24 h or absent;
-   - the `runner-controller` Deployment and Pod are at the recorded UIDs, 1/1, with only the default `kube-api-access` token (3607 s), mounted read-only, and no hostPath.
-2. **Claims:** a fixed reader in the controller container decodes only the JWT payload. It prints the claims `iat, nbf, exp, warnafter, jti, sub, aud, namespace, pod, serviceaccount, node` and the projected volume's `..data` link. It reads every 60 s until the `jti` changes, for at most 75 min.
-3. **Proof:** a fresh process runs the controller's code: `build()`, `observer_pool.bound(…5804)` (PVC GETs), `runtime.namespace()`, `service.pod()`, `NodeEvidence.identity()`. Each request re-reads the token file. The `jti` is read before and after, and both must equal the rotated `jti`.
-4. **Resident controller:** same container, no restart, and no `reconciliation_required` line since the first read.
+   - No earlier `w5-*` evidence exists.
+   - The host `issue16-*` units are inactive.
+   - Two known host token paths under `/etc/anxious-lookout/issue16/` are checked with `lstat` only:
+     - each must be absent, or a **regular file** with mtime older than 24 h;
+     - a symlink or any other file type is refused.
 
-**Limits:**
-- k3s extends projected tokens, so the old token stays valid until the Pod goes. A success shows that the rotated token works, not that the old one is refused.
-- With no runner Pod, the resident loop makes only its watch call. The proof process covers the rest; the resident process uses the same per-request read (`runner_controller_service.py:408-411`, `runner_kube.py:208-214`).
+     These tokens were issued with `--duration=24h` (`rollout/README.md`), but mtime is not the JWT's own expiry.
+   - The `runner-controller` Deployment and Pod are at the recorded UIDs and 1/1. The Pod has only the default `kube-api-access` token (3607 s), mounted read-only, and no hostPath.
+2. **Claims:**
+   - A fixed reader in the controller container decodes only the JWT payload. The guest validates every value before printing or recording it: exact key set, int timestamps, UUID `jti`, the controller's `sub`/namespace/SA/Pod UID, `aud`/node shapes and the `..data` pattern.
+   - Unexpected keys are counted, never named.
+   - The reader runs every 60 s until the `jti` changes.
+   - The window is 75 min on a monotonic clock, and call timeouts are bounded by the time left. A rotation first seen after the window is not accepted, and no proof starts.
+3. **Proof** (after-window grace: it may finish after the window, but only starts for a rotation seen inside it):
+   - A fresh process runs the controller's code: `build()`, `observer_pool.bound(…5804)` (PVC GETs), `runtime.namespace()`, `service.pod()`, `NodeEvidence.identity()`.
+   - Each request re-reads the token file. The `jti` is read before and after, and both must equal the rotated `jti`.
+   - The output is checked against a strict success or failure schema before anything of it is shown:
+     - success requires namespace ok, a Pod UID or null, and a node name;
+     - failure requires a known step and an exception class name.
+4. **Resident identity:** same container ID and restart count, and no `reconciliation_required` since the first read.
+
+**What success means:** the controller's code succeeds with the rotated `jti`, and the resident process stayed the same.
+
+**What it does not show:**
+- The resident watch re-establishing after the rotation: `Wake.watch` swallows errors and logs nothing. This is an explicit unproved limit, also written to `run.json`.
+- Refusal of the old token: k3s extends projected tokens, so the old one stays valid until the Pod goes.
+- Absence of host tokens beyond the two known paths.
 
 | rc | meaning |
 | --- | --- |
 | 0 | rotated and proved |
 | 3 | precheck refused |
-| 4 | a proof call failed, or the resident controller restarted or logged `reconciliation_required` |
-| 5 | not rotated within 75 min |
-| 6 | rotated again during the proof (no retry) |
+| 4 | a proof call failed or its output was not as expected, or the resident controller logged `reconciliation_required` |
+| 5 | not rotated within the window, or first seen after it |
+| 6 | rotated again around the proof (no retry) |
 | 7 | claims unreadable or malformed |
-| 8 | controller Pod changed during the window |
+| 8 | controller Pod or container changed |
+| 9 | everything passed, but `run.json` could not be written (stdout is then the only record) |
 | 70 | unexpected error |
 | 130 | interrupted (SIGINT, SIGTERM or SIGHUP; `run.json` is still written) |
 
-**Evidence:** `/root/issue61/evidence/w5-<stamp>/run.json`, claims and outcomes only.
+**Evidence:** `/root/issue61/evidence/w5-<stamp>/run.json`, with validated claims and outcomes only.
 
 ## Mock harness (Docker, Python 3.9 as on the guest)
 

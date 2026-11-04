@@ -89,7 +89,15 @@ def main():
         write_token(tokens[min(n, len(tokens) - 1)], n)
         if 'reader' in fail:
             sys.exit(1)
+        if n in state.get('slowReads', []):
+            import time
+            time.sleep(state.get('slowSeconds', 3))
         done = subprocess.run(['python3', '-I', '-c', args[11]], stdout=subprocess.PIPE)
+        if 'reader-extra' in fail:  # a reader output with a key outside the allow-list
+            value = json.loads(done.stdout)
+            value['PLANTED_KEY_NAME'] = 'PLANTED_VALUE'
+            print(json.dumps(value))
+            sys.exit(0)
         sys.stdout.buffer.write(done.stdout)
         sys.exit(done.returncode)
     if args[:5] == ['kubectl', '-n', 'runner-control', 'exec', '-i'] and args[6:] == ['-c', 'controller', '--', 'python', '-B', '-']:
@@ -98,6 +106,12 @@ def main():
             sys.exit(96)
         if 'proof' in fail:
             sys.exit(1)
+        if state.get('proofReal'):  # run the real PROOF body against mock/w5proof (the mocked controller module)
+            env = dict(os.environ, PYTHONPATH=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'w5proof'),
+                       **{k: v for k, v in state.get('proofEnv', {}).items()})
+            done = subprocess.run(['python3', '-B', '-'], input=script.encode(), stdout=subprocess.PIPE, env=env)
+            sys.stdout.buffer.write(done.stdout)
+            sys.exit(done.returncode)
         jti = current_jti()
         before, after = state.get('proofJti', [jti, jti])
         out = dict(state['proof'], jtiBefore=before or jti, jtiAfter=after or jti)

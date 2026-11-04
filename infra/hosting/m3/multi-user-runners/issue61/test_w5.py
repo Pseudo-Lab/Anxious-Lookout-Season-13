@@ -71,12 +71,14 @@ def deploy(uid=DEPLOY_UID, ready=1):
 
 
 def setup(tokens=None, pods=None, proof=None, proof_jti=None, logs='', fail=(), units=None, host_age_hours=(240, 240),
-          deploy_obj=None):
+          deploy_obj=None, proof_real=False, proof_env=None, slow_reads=(), host_kind=None):
     shutil.rmtree(EVIDENCE, ignore_errors=True)
     shutil.rmtree('/var/run/secrets', ignore_errors=True)
     os.makedirs('/var/run/secrets/kubernetes.io/serviceaccount')
     for path, age in zip(HOST_TOKENS, host_age_hours):
-        if os.path.lexists(path):
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        elif os.path.lexists(path):
             os.remove(path)
         if age is None:
             continue
@@ -94,15 +96,30 @@ def setup(tokens=None, pods=None, proof=None, proof_jti=None, logs='', fail=(), 
              'logs': logs, 'fail': list(fail), 'units': units or {}}
     if proof_jti is not None:
         state['proofJti'] = proof_jti
+    state.update(proofReal=proof_real, proofEnv=proof_env or {}, slowReads=list(slow_reads))
+    if host_kind == 'symlink':  # an old symlink pointing at a freshly made token
+        fresh = HOST_TOKENS[1] + '.fresh'
+        with open(fresh, 'w') as stream:
+            stream.write('HOSTTOKEN-NEVER-READ')
+        os.remove(HOST_TOKENS[1])
+        os.symlink(fresh, HOST_TOKENS[1])
+        then = time.time() - 240 * 3600
+        os.utime(HOST_TOKENS[1], (then, then), follow_symlinks=False)
+    elif host_kind == 'dir':
+        os.remove(HOST_TOKENS[1])
+        os.makedirs(HOST_TOKENS[1])
+    for stale in ('/mock/w5-proof-calls.log',):
+        if os.path.exists(stale):
+            os.remove(stale)
     with open('/mock/w5.json', 'w') as stream:
         json.dump(state, stream)
     if os.path.exists('/mock/w5-calls.log'):
         os.remove('/mock/w5-calls.log')
 
 
-def run(wait=20):
+def run(wait=20, args=()):
     env = dict(os.environ, W5_WAIT_SECONDS=str(wait), W5_POLL_SECONDS='1')
-    done = subprocess.run(['python3', '-I', INSTALL + '/w5-rotation.py'], stdout=subprocess.PIPE,
+    done = subprocess.run(['python3', '-I', INSTALL + '/w5-rotation.py'] + list(args), stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, timeout=300, env=env)
     return done.returncode, done.stdout.decode()
 
@@ -147,7 +164,8 @@ def main():
     check('happy: rotation reported with both jti', ('jti %s -> %s' % (JTI1, JTI2)) in out, out)
     check('happy: record', r and r['result'] == 0 and len(r['series']) == 3 and r['proof']['result'] == 'ok'
           and r['series'][0]['claims']['jti'] == JTI1 and r['series'][-1]['claims']['jti'] == JTI2
-          and r['resident'] == {'outcomeLines': 0, 'reconciliationRequired': 0}, json.dumps(r))
+          and r['resident'] == {'outcomeLines': 0, 'reconciliationRequired': 0, 'sameContainer': True, 'restarts': 0}
+          and 'resident watch reconnection' in r['limits'], json.dumps(r))
     check('happy: record keys are the claim allow-list only',
           r and set(r['series'][0]['claims']) == {'aud', 'dataLink', 'exp', 'iat', 'jti', 'namespace', 'nbf', 'node',
                                                    'pod', 'serviceaccount', 'sub', 'warnafter'}, json.dumps(r))
@@ -234,7 +252,111 @@ def main():
     check('proof process failed: rc 4', rc == 4 and 'proof process failed' in out, out)
     setup(proof={'result': 'failed', 'failedStep': 'pod', 'error': 'x; rm -rf /'})
     rc, out = run()
-    check('proof error text sanitized', rc == 4 and 'rm -rf' not in out and '(unnamed)' in out, out)
+    check('proof error text refused, not echoed', rc == 4 and 'rm -rf' not in out and 'not as expected' in out, out)
+
+    # Round 2 (review major 1): the proof output is validated in full before anything of it is shown.
+    for name, bad in (('only result ok', {'result': 'ok'}),
+                      ('namespace missing', {'result': 'ok', 'pod': None, 'node': 'devvm'}),
+                      ('pod missing', {'result': 'ok', 'namespace': 'ok', 'node': 'devvm'}),
+                      ('node missing', {'result': 'ok', 'namespace': 'ok', 'pod': None}),
+                      ('planted node value', {'result': 'ok', 'namespace': 'ok', 'pod': None, 'node': 'PLANTED_SECRET'}),
+                      ('planted pod value', {'result': 'ok', 'namespace': 'ok', 'pod': 'PLANTED_SECRET', 'node': 'devvm'}),
+                      ('extra key', {'result': 'ok', 'namespace': 'ok', 'pod': None, 'node': 'devvm', 'PLANTED_KEY': 1}),
+                      ('namespace not ok', {'result': 'ok', 'namespace': 'PLANTED_SECRET', 'pod': None, 'node': 'devvm'}),
+                      ('unknown result', {'result': 'PLANTED_SECRET'}),
+                      ('failed with unknown step', {'result': 'failed', 'failedStep': 'PLANTED_SECRET', 'error': 'E'}),
+                      ('failed plus success keys', {'result': 'failed', 'failedStep': 'pod', 'error': 'E', 'node': 'devvm'})):
+        setup(proof=bad)
+        rc, out = run()
+        r = record()
+        check('proof %s: rc 4, refused, nothing echoed' % name,
+              rc == 4 and 'not as expected' in out and 'PLANTED' not in out and r and 'proof' not in r
+              and 'PLANTED' not in json.dumps(r), out)
+    setup(proof={'result': 'ok', 'namespace': 'ok', 'pod': POD_UID, 'node': 'devvm'})
+    rc, out = run()
+    check('proof with a live Pod UID: rc 0', rc == 0, out)
+
+    # The real PROOF body against the mocked controller module: call order and failure propagation.
+    setup(proof_real=True)
+    rc, out = run()
+    order = open('/mock/w5-proof-calls.log').read().split() if os.path.exists('/mock/w5-proof-calls.log') else []
+    check('real PROOF: rc 0 through the full validation', rc == 0 and '"namespace": "ok"' in out and '"node": "devvm"' in out
+          and '"pod": null' in out, out)
+    check('real PROOF: call order build, bound, namespace, pod, node', order == ['build', 'bound', 'namespace', 'pod', 'node'], str(order))
+    for step in ('build', 'bound', 'namespace', 'pod', 'node'):
+        setup(proof_real=True, proof_env={'W5_FAIL_STEP': step})
+        rc, out = run()
+        order = open('/mock/w5-proof-calls.log').read().split()
+        want = ['build', 'bound', 'namespace', 'pod', 'node']
+        check('real PROOF fails at %s: rc 4 names the step, later steps not called, detail not echoed' % step,
+              rc == 4 and ('failed at %s (PermissionError)' % step) in out and order == want[:want.index(step) + 1]
+              and 'SECRET-DETAIL' not in out, out + str(order))
+    setup(proof_real=True, proof_env={'W5_POD_UID': POD_UID})
+    rc, out = run()
+    check('real PROOF with a Pod present: rc 0, Pod UID recorded', rc == 0 and record()['proof']['pod'] == POD_UID, out)
+    setup(proof_real=True, proof_env={'W5_NODE': 'PLANTED_SECRET'})
+    rc, out = run()
+    check('real PROOF with a planted node name: refused, not echoed', rc == 4 and 'PLANTED' not in out, out)
+
+    # Round 2 (major 2): unexpected key names are counted, never named; the preflight goes through claims().
+    setup(fail=['reader-extra'])
+    rc, out = run()
+    check('unexpected reader key: rc 7, counted not named', rc == 7 and '1 unexpected key' in out
+          and 'PLANTED_KEY_NAME' not in out and 'PLANTED_VALUE' not in out, out)
+    setup()
+    rc, out = run(args=['--preflight'])
+    check('preflight: rc 0, validated claims and age, nothing written',
+          rc == 0 and ('jti %s' % JTI1) in out and 'age 2000 s' in out and 'nothing written' in out
+          and not os.path.exists(EVIDENCE) and SIG not in out, out)
+    check('preflight: exactly one reader exec and Pod lookups around it',
+          [c[4] for c in calls() if c[0] == 'k3s'] == ['get', 'get', 'exec', 'get'], json.dumps(calls()))
+    setup(tokens=[claims(JTI1, now, {'sub': 'PLANTED_SECRET'})])
+    rc, out = run(args=['--preflight'])
+    check('preflight with a planted sub: rc 7, value not printed', rc == 7 and 'PLANTED' not in out, out)
+    setup(fail=['reader-extra'])
+    rc, out = run(args=['--preflight'])
+    check('preflight with an extra key: rc 7, not named', rc == 7 and 'PLANTED' not in out, out)
+    setup(pods=[[pod()], [pod(restarts=1)]])
+    rc, out = run(args=['--preflight'])
+    check('preflight with the Pod changed around the read: rc 8', rc == 8, out)
+    rc, out = run(args=['--bogus'])
+    check('unknown argument: rc 2', rc == 2, out)
+
+    # Round 2 (major 3): host token paths must be regular files.
+    for kind in ('symlink', 'dir'):
+        setup(host_kind=kind)
+        rc, out = run()
+        check('host token path as %s: rc 3, never opened' % kind, rc == 3 and 'not a regular file' in out
+              and 'HOSTTOKEN' not in out, out)
+
+    # Round 2 (major 4): monotonic window; a rotation seen after it is not accepted and no proof starts.
+    now = int(time.time())
+    setup(tokens=[claims(JTI1, now - 100), claims(JTI1, now - 100), claims(JTI1, now - 100), claims(JTI2, now)])
+    rc, out = run(wait=2)
+    check('rotation after the window: rc 5, no proof', rc == 5 and not any('-B' in c for c in calls()), out)
+    setup(tokens=[claims(JTI1, now - 100), claims(JTI2, now)])
+    rc, out = run(wait=1)
+    check("review's case WAIT=1 POLL=1, rotation on the second sample: rc 5, no proof",
+          rc == 5 and not any('-B' in c for c in calls()), out)
+    setup(tokens=[claims(JTI1, now - 100), claims(JTI2, now)], slow_reads=[1])
+    rc, out = run(wait=2)
+    r = record()
+    check('rotation read that returns after the window: rc 5, no proof, marked outside',
+          rc == 5 and 'outside the window' in out and not any('-B' in c for c in calls())
+          and r and r['series'][-1]['insideWindow'] is False, out)
+    setup(tokens=[claims(JTI1, now - 100)])
+    t0 = time.time()
+    rc, out = run(wait=3)
+    check('no rotation: the run ends near WAIT, not a full POLL later', rc == 5 and time.time() - t0 < 12, out)
+
+    # Round 2 (minor): a run.json write failure is rc 9, not 0.
+    weak = open(SRC + '/w5-rotation.py').read().replace("os.path.join(ev, 'run.json')", "os.path.join(ev, 'gone', 'run.json')", 1)
+    with open(INSTALL + '/w5-rotation.py', 'w') as stream:
+        stream.write(weak)
+    setup()
+    rc, out = run()
+    check('evidence write failure after a pass: rc 9', rc == 9 and 'EVIDENCE NOT WRITTEN' in out, out)
+    shutil.copy(SRC + '/w5-rotation.py', INSTALL + '/w5-rotation.py')
 
     # Resident controller.
     setup(logs='{"owner": "o", "stage": "controller", "result": "running"}\n'
@@ -273,7 +395,7 @@ def main():
         check('mutation %s caught' % label, expect(got, out), out)
         shutil.copy(SRC + '/w5-rotation.py', INSTALL + '/w5-rotation.py')
 
-    mutated("if result['jtiBefore'] != current['jti'] or", "if False and (result['jtiBefore'] != current['jti']) or False and",
+    mutated("if checked['jtiBefore'] != rotated or checked['jtiAfter'] != rotated:", "if False:",
             'proof-jti check removed', {'proof_jti': [JTI1, JTI1]}, lambda got, out: got == 0)
     mutated("        if age < 24 * 3600:", "        if False:", 'host-token age gate removed',
             {'host_age_hours': (240, 3)}, lambda got, out: got == 0)
