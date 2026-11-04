@@ -27,7 +27,9 @@ The images are built on the host from `5e73bc4` (`--platform linux/amd64`) and m
 | W3b | `w3b-binding.py` (+ `w3b-expected.json`) | user | Moves the bindings of …0048 and …5804 to the #61 runner/executor digests with `ops.runner_binding_image`, inside a proved write window (see below) |
 | W4 entry | `w4-enter.py` | user | One 1-hour session for …5804, one runner POST, the controller-created Pod proved on the #61 images; session revoked |
 | W4 observe | `w4-observe.py <evidence dir> [--wait]` | back | Nothing. Read-only R1 verdict until the deadline (Pod start + 60 min) |
-| W5–W7 | (next drafts) | | SA rotation, reboot, postcheck |
+| W5 | `w5-rotation.py [--preflight]` | user | Nothing (read-only): controller SA token rotation |
+| W6 | `w6-enter.py`, `w6-reboot.py`, `w6-observe.py` | user (4 commands; step 2 has its own go) | Two runner entries (gen 4→5, 5→6) and one guest reboot; see the W6 section |
+| W7 | (next draft) | back | Nothing: final read-only postcheck |
 
 ## Files installed next to the scripts
 
@@ -250,6 +252,85 @@ The stimulus must be stated, and proved available, before the POST. On the dev V
 
 **Evidence:** `/root/issue61/evidence/w5-<stamp>/run.json`, with validated claims and outcomes only.
 
+## W6: guest reboot with a runner running, recovery with no manual input, re-entry
+
+**Gate (all of G1–G4, tied together by IDs).**
+
+| | what must be shown | tied by |
+|---|---|---|
+| G1 before the reboot | …5804 runner gen 5 on state `5ff583e9…` proved Running on the approved images (identity, image, CRI, token mount, the recorded PVC/PV pair, host loop mounts). Registry `ready` or `runner_unreachable` (ambiguous only with the latter), 0 active. No gen-5 stop, no open stop anywhere, no entry/admission/outbox, 0 running conversations. No login/reclaim process. Restore preconditions hold. The #64 paid window is closed: `shell-full`/`shell-pilot` may still exist as empty namespace objects and must hold no Pod | Pod UID, container IDs, Node UID, boot ID **B0**, controller identity |
+| G2 the reboot | Same Node UID; **B1 ≠ B0** on both `/proc` and the Node API; the `issue16-restore` PASS line in **this** boot's journal (`_BOOT_ID` = B1); restore and storage-root ran this boot with Result=success; Node Ready; every state's loop mount linked to its backing inode | B0 → B1 |
+| G3 recovery, no manual input | One new gen-5 stop requested after the reboot intent; **version 2 terminal receipt** equal to the stop row (owner, state, gen 5, Pod UID, stopId); completed `pod-deleted` proof on the recorded Node and **B1**; registry `idle_stopped` gen 5, no Pod; no open stop; conversations unchanged; workloads back | gen-5 Pod UID → stop → receipt → proof(B1) |
+| G4 re-entry | One POST gives gen 6 on the same state, proved like G1, with the same PVC/PV UIDs, paths and capacities and the post-reboot loop mounts linked to the same backing files. Health polled 5 s × 300 s with the exact owner/state/Pod on every read | gen 5 → 6, record hashes |
+
+**Not shown by W6:** resident watch reconnection after a token rotation (the post-reboot controller container is new);
+provider supply success (`auth_revoked` is the environment's expected failure, cause still a blind spot); production
+restore, backup or reboot; host reboot. "No manual input" is stated within the observed scope only: the v2 receipt,
+the controller's outcome lines, the host units inactive/failed, and this boot's sudo/sshd journal. Absence from those
+logs is not proof of absence; there is no API audit log, so a DELETE by another privileged actor cannot be fully
+excluded.
+
+**Operating boundary (PM, recorded on #61).** The no-login / no-paid-run / no-reclaim rule rests on window ownership:
+the #64 paid window is closed and recovered, the dev VM is held by the #61 window, and only the user runs state
+changes, on PM relay. The scans in `w6-reboot.py` check that the snapshot matches that commitment; they are not the
+guarantee. CUTOVER.md is the production procedure: the dev VM has no backup procedure and W6 adds none. The reboot
+exercises the issue16 bounded restore (`issue16-restore.service` → `worker.py restore` from the pinned provisioner
+image, tag `50ac30b` by naming convention), which passed at the 2026-10-26 boot with the same inventory. The legacy
+same-boot host recovery is not in use on the dev VM. W6 adopts the CUTOVER "before any reboot" evidence rule as its
+evidence standard only.
+
+**Steps.** Each one is a separate user command relayed by PM. On any nonzero rc: no rerun, back checks read-only,
+PM decides.
+
+| step | script | user go | what changes |
+|---|---|---|---|
+| 1 | `w6-enter.py` (enter1) | step 1 go | one 1-hour session row (revoked), one runner POST: gen 4 → 5 |
+| 2 | `w6-reboot.py` | **its own explicit go**, relayed only after step 1 returned rc 0 | evidence files, then one `systemctl reboot` |
+| 3 | `w6-observe.py` | after ssh answers again | nothing (read-only, at most 30 min) |
+| 4 | `w6-enter.py` (enter2) | step 4 go | one session row (revoked), one runner POST: gen 5 → 6 |
+| W7 | (read-only, separate draft) | back | nothing |
+
+**Risk text for step 2 (PM relays this verbatim with the reboot go):**
+
+> Step 2 reboots the dev VM guest once. If the issue16 restore fails at boot, k3s does not start: there is no bypass,
+> and recovery is an operator reconciliation outside W6. If ssh does not come back, recovery is host-side, by the
+> user. The script refuses (no reboot) if its checks or evidence saving fail. `reboot requested` and an ssh
+> `remote rc=255` right after it mean the request was made, not that the reboot succeeded; step 3 proves the new
+> boot.
+
+**Timing.** Step 2 must **start within 20 minutes of step 1's POST**: the bound is min(POST, Pod start) + 1200 s, and
+step 1 prints it as `NEXT … must START before <time>`. After that the script refuses, because the idle drain begins at
+1800 s. Step 1 takes about 2–6 min, including up to 5 min of health polling. In step 2, the k3s journal export (about
+240 MB at the last read) takes up to a few minutes. The reboot takes about 3 min. Step 3 waits at most 30 min. Step 4
+takes about 2–6 min.
+
+**rc.**
+
+| script | rc |
+|---|---|
+| `w6-enter.py` | 0 entered, health usable or `auth_revoked` · 3 precheck refused · 4 session not created · 5 POST error · 6 POST outcome unknown · 7 Pod not proved within 300 s · 8 instance/image/volume/identity proof failed · 9 another concrete failure · 10 still `not_configured` after 300 s · 11 health never observed · 70 session revoke not proved · 130 interrupted before the POST |
+| `w6-reboot.py` | 0 reboot requested · 3 precheck refused · 4 evidence not saved, **no reboot** · 5 final look changed, **no reboot** · 7 `systemctl reboot` failed (not repeated) · 130 interrupted before the final look, **no reboot** |
+| `w6-observe.py` | 0 G2+G3 proved · 3 precheck refused (nothing written; also when the boot is still B0) · 5 not reached in 30 min · 6 definitive mismatch (v1/v3/v4 or malformed receipt, another Pod UID, stop before the intent, proof on B0 or another Node, more than one new stop, replacement Pod, registry past gen 5) · 9 proved but evidence not saved · 130 interrupted |
+
+**Evidence chain.** `/root/issue61/evidence/w6-{enter1,reboot,observe,enter2}-<stamp>/` (root 0700, files 0600, each
+fsynced). Each directory is created before that step's first change, so an attempt is never reused. `w6-observe`
+records the sha256 of the enter1 and reboot `run.json` files. enter2 re-checks those hashes, the current boot (= B1),
+the gen-5 stop in the database (v2, terminal, proof B1), and the exact gen-5 fence that observe recorded. The reboot
+directory also holds the full k3s journal (`k3s-journal.jsonl`; above the 16,000,000-byte tool cap it is recorded as
+over cap, never as empty), a `containerd.log` copy with its source metadata, and the namespace, hostname, B0 and Node
+identities. The observe directory holds the raw sudo/sshd journals and the controller log. Only counts, times and
+digests of those are printed.
+
+**W7 gate (stated before W6 runs).** W7 is read-only. Its deadline is the gen-6 Pod start + 60 min. It accepts exactly
+one of:
+- a **v1** idle receipt: a valid clean drain, if the runner was supplied and became available; or
+- a **v3** receipt whose `unavailable.reason` equals the runner's own `health.failure` (expected: `auth_revoked`).
+
+Either way it needs the gen-6 Pod UID's `pod-deleted` proof, the release (`idle_stopped` gen 6, no Pod), and unchanged
+conversations. If neither has happened by the deadline: a read-only report, and PM decides. Never a DELETE or reclaim
+as a substitute. This does not change the W4 R1 verdict. If enter2 returns rc 10 (still `not_configured`), the runner
+is left running and PM decides.
+
 ## Mock harness (Docker, Python 3.9 as on the guest)
 
 ```sh
@@ -263,6 +344,8 @@ docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
   python3 -I /m3/multi-user-runners/issue61/test_w4b.py
 docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
   python3 -I /m3/multi-user-runners/issue61/test_w5.py
+docker run --rm --network none --hostname simple -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
+  python3 -I /m3/multi-user-runners/issue61/test_w6.py
 ```
 
 `test_w3b.py` uses `mock/fake_w3b.py`, which emulates the binding tool's guards, report and compare-and-swap,
