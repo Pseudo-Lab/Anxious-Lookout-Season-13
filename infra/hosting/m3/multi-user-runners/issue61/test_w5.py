@@ -170,7 +170,7 @@ def main():
           r and set(r['series'][0]['claims']) == {'aud', 'dataLink', 'exp', 'iat', 'jti', 'namespace', 'nbf', 'node',
                                                    'pod', 'serviceaccount', 'sub', 'warnafter'}, json.dumps(r))
     check('happy: dataLink recorded', r and re.fullmatch(r'\.\.2026_11_04_02_\d\d_00\.\d+', r['series'][-1]['claims']['dataLink'] or ''), json.dumps(r))
-    check('happy: host tokens reported with age', '"ageHours": 240.0' in out, out)
+    check('happy: host tokens reported with age (240 h old, rounded to 0.1 h)', re.search(r'"ageHours": 240\.[01]\b', out), out)
     check('happy: evidence file 0600 in a 0700 dir', r is not None and oct(os.stat(os.path.join(EVIDENCE, os.listdir(EVIDENCE)[0])).st_mode & 0o777) == '0o700'
           and oct(os.stat(os.path.join(EVIDENCE, os.listdir(EVIDENCE)[0], 'run.json')).st_mode & 0o777) == '0o600')
     kinds = [c[5] if c[0] == 'k3s' and len(c) > 5 and c[4] == 'get' else c[4] if c[0] == 'k3s' and len(c) > 4 else c[0]
@@ -303,11 +303,27 @@ def main():
     rc, out = run()
     check('unexpected reader key: rc 7, counted not named', rc == 7 and '1 unexpected key' in out
           and 'PLANTED_KEY_NAME' not in out and 'PLANTED_VALUE' not in out, out)
+    def preflight_age(slow):
+        """Age is int(now) - iat with iat = int(setup time) - 2000, so it lies in [2000 + slow - 1, 2000 + elapsed + 1]."""
+        t0 = time.time()
+        setup(slow_reads=[0] if slow else ())
+        rc, out = run(args=['--preflight'])
+        elapsed = time.time() - t0
+        found = re.search(r'age (\d+) s', out)
+        age = int(found.group(1)) if found else None
+        low, high = 2000 + max(0, slow - 1), 2000 + int(elapsed) + 1
+        return rc, out, age, low, high
+
+    rc, out, age, low, high = preflight_age(0)
+    check('preflight: rc 0, validated claims, age within the run bounds, nothing written',
+          rc == 0 and ('jti %s' % JTI1) in out and age is not None and low <= age <= high and 'nothing written' in out
+          and not os.path.exists(EVIDENCE) and SIG not in out, '%s not in [%s, %s]: %s' % (age, low, high, out))
+    rc, out, age, low, high = preflight_age(3)  # the read is held 3 s, so at least two second boundaries pass
+    check('preflight with a 3 s delayed read (second-boundary case): age reflects the delay and stays in bounds',
+          rc == 0 and age is not None and age >= 2002 and low <= age <= high,
+          '%s not in [%s, %s]: %s' % (age, low, high, out))
     setup()
     rc, out = run(args=['--preflight'])
-    check('preflight: rc 0, validated claims and age, nothing written',
-          rc == 0 and ('jti %s' % JTI1) in out and 'age 2000 s' in out and 'nothing written' in out
-          and not os.path.exists(EVIDENCE) and SIG not in out, out)
     check('preflight: exactly one reader exec and Pod lookups around it',
           [c[4] for c in calls() if c[0] == 'k3s'] == ['get', 'get', 'exec', 'get'], json.dumps(calls()))
     setup(tokens=[claims(JTI1, now, {'sub': 'PLANTED_SECRET'})])
