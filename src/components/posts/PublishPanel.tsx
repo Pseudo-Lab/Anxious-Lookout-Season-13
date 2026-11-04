@@ -10,6 +10,7 @@ import { parseBlockDocument } from "@/lib/blocks/document";
 import { useMutation } from "@/lib/research/hooks";
 import { usePagedList } from "@/lib/research/usePagedList";
 import { formatDateTime } from "@/lib/research/format";
+import { wasRepublished } from "@/lib/posts/format";
 import { isReason } from "@/components/research/DocumentEditor";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
@@ -69,7 +70,7 @@ function Preview({ preview }: { preview: PostPublicationPreview }) {
       </div>
       {mode === "diff" && cur ? (
         <div className="space-y-2">
-          <p className="text-xs text-stone-900">현재 공개본({formatDateTime(cur.publishedAt)} 발행)에서 이번 발행으로 바뀌는 내용입니다.</p>
+          <p className="text-xs text-stone-900">현재 공개본({formatDateTime(cur.updatedAt ?? cur.publishedAt)} 발행)에서 이번 발행으로 바뀌는 내용입니다.</p>
           <PostMetaDiff
             before={{
               ...cur,
@@ -176,7 +177,12 @@ export default function PublishPanel({ post, onChanged }: { post: Post; onChange
       <h2 className="font-semibold text-stone-900">발행</h2>
       {pub ? (
         <p className="text-sm text-stone-900">
-          <span className="font-medium text-emerald-700">발행 중</span> · {pubVersion ? `v${pubVersion.number}` : "발행한 버전"} · {formatDateTime(pub.publishedAt)} ·{" "}
+          <span className="font-medium text-emerald-700">발행 중</span> · {pubVersion ? `v${pubVersion.number}` : "발행한 버전"} ·{" "}
+          {/* #80 F5: publication.updatedAt(마지막 발행)은 글의 updatedAt(편집 시각)과 다르다 */}
+          {pub.updatedAt && wasRepublished(pub.publishedAt, pub.updatedAt)
+            ? `최초 발행 ${formatDateTime(pub.publishedAt)} · 다시 발행 ${formatDateTime(pub.updatedAt)}`
+            : formatDateTime(pub.publishedAt)}{" "}
+          ·{" "}
           <Link href={`/posts/${encodeURIComponent(pub.slug)}/`} className="text-indigo-600 hover:text-indigo-800">
             공개 글 보기
           </Link>

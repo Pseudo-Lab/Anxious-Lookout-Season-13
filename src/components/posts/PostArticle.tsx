@@ -1,12 +1,13 @@
 import type { PublicPost } from "@/lib/posts/types";
 import BlockRenderer from "@/components/blocks/BlockRenderer";
-import { formatDate } from "@/lib/posts/format";
+import { formatDate, revisedDate } from "@/lib/posts/format";
 import { SourceLink } from "./MaterialLinks";
 import TagBadge from "./TagBadge";
 
 type ArticleData = Pick<PublicPost, "title" | "description" | "content" | "tags" | "coverImageUrl" | "documents" | "materials"> & {
   author: { name: string };
   publishedAt: string | null;
+  updatedAt?: string;
 };
 
 // 바탕이 된 문서. 공개본이 있는 문서만 링크하고(서버가 준 publicUrl, basePath 포함), 나머지는 제목만 보인다.
@@ -52,18 +53,44 @@ function BasedOnMaterials({ materials }: { materials: ArticleData["materials"] }
   );
 }
 
+/** 글쓴이 · 최초 발행일 · (다른 날 다시 발행했으면) 수정일. 발행 미리보기는 날짜 없이 이름만(#80 F5). */
+export function PostDates({ name, publishedAt, updatedAt }: { name: string; publishedAt: string | null; updatedAt?: string }) {
+  const revised = publishedAt ? revisedDate(publishedAt, updatedAt) : null;
+  const parts = [
+    name ? <span>{name}</span> : null,
+    publishedAt ? (
+      <time dateTime={publishedAt} title="최초 발행일">
+        {formatDate(publishedAt)}
+      </time>
+    ) : null,
+    revised && updatedAt ? (
+      <time dateTime={updatedAt} title="마지막으로 다시 발행한 날">
+        {revised} 수정
+      </time>
+    ) : null,
+  ].filter((p) => p !== null);
+  if (parts.length === 0) return null;
+  return (
+    <span className="text-sm text-stone-500">
+      {parts.map((p, i) => (
+        <span key={i}>
+          {i > 0 && <> &middot; </>}
+          {p}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 /** 발행본(또는 발행 미리보기) 본문. 본문은 블록 renderer(#32)로만 그리고 자체 업로드 이미지만 띄운다. */
 // #44: 표지·요약은 편집 UI가 없어 보이지 않는다(저장된 값은 데이터로 남는다).
 export default function PostArticle({ post }: { post: ArticleData }) {
   return (
-    <article className="mx-auto max-w-3xl">
+    <article className="mx-auto max-w-4xl">
       <header className="mb-8">
         <h1 className="text-3xl font-bold tracking-tight text-stone-900">{post.title}</h1>
         <div className="mt-4 flex flex-wrap items-center gap-3">
-          <span className="text-sm text-stone-500">
-            {post.author.name}
-            {post.publishedAt ? <> &middot; {formatDate(post.publishedAt)}</> : null}
-          </span>
+          <PostDates name={post.author.name} publishedAt={post.publishedAt} updatedAt={post.updatedAt} />
           <div className="flex flex-wrap gap-2">
             {post.tags.map((tag) => (
               <TagBadge key={tag} tag={tag} />

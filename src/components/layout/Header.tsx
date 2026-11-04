@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { API_ENABLED, SITE_NAME } from "@/lib/constants";
 import LoginButton from "@/components/auth/LoginButton";
@@ -10,6 +10,23 @@ import { useAuth } from "@/hooks/useAuth";
 export default function Header() {
   const { user, status } = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const header = useRef<HTMLElement>(null);
+
+  // #80 F1: 헤더는 화면 위에 붙어 있으므로(sticky) 그 아래에 붙어야 하는 것(글쓰기 서식 도구막대 등)이 쓸 수 있게
+  // 지금 헤더 높이를 --site-header-height로 알린다. 모바일 메뉴를 펼치거나 줄바꿈으로 높이가 바뀌면 다시 잰다.
+  useLayoutEffect(() => {
+    const el = header.current;
+    if (!el) return;
+    const root = document.documentElement;
+    const update = () => root.style.setProperty("--site-header-height", `${el.getBoundingClientRect().height}px`);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      root.style.removeProperty("--site-header-height");
+    };
+  }, []);
 
   // 메뉴 노출은 화면 안내용일 뿐이며 실제 권한은 backend가 검증한다.
   // 글 쓰기·관리는 아직 새 API로 대체되지 않아 "준비 중" 안내 화면으로 연결된다.
@@ -25,7 +42,7 @@ export default function Header() {
   ].filter((l) => l.show);
 
   return (
-    <header className="@container sticky top-0 z-50 border-b border-white/30 bg-white/60 backdrop-blur-md">
+    <header ref={header} className="@container sticky top-0 z-50 border-b border-white/30 bg-white/60 backdrop-blur-md">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
         {/* Logo */}
         <Link href="/" className="flex items-center gap-2 text-xl font-bold tracking-tight text-stone-900">

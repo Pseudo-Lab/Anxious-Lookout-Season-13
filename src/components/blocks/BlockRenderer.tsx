@@ -231,7 +231,7 @@ export default function BlockRenderer({ content }: { content: unknown }) {
     );
   }
   return (
-    <div className="prose max-w-none">
+    <div className="prose post-body max-w-none">
       {parsed.doc.blocks.map((b) => (
         <BlockView key={b.id} block={b} />
       ))}

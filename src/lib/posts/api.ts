@@ -36,6 +36,10 @@ const isInt = (v: unknown): v is number => Number.isInteger(v);
 const isStrList = (v: unknown): v is string[] => Array.isArray(v) && v.every(isStr);
 const enc = encodeURIComponent;
 const optStr = (v: unknown) => v === undefined || isStr(v);
+// 계약상 null일 수 있는 글자 값(post-publications.md). 없으면 ""로 읽는다.
+const nullableStr = (v: unknown) => v === null || isStr(v);
+// #80 updatedAt: 없거나 null이면 없는 것으로 본다(발행일만 보인다)
+const optTime = (v: unknown) => v === undefined || v === null || isStr(v);
 
 /** 본문(#32 post-blocks). 없으면 undefined, 있으면 계약 검사·정규화한 문서, 계약과 다르면 null(응답 invalid). */
 function parseContent(v: unknown): BlockDocument | null | undefined {
@@ -63,8 +67,9 @@ function parseDocRef(v: unknown): PublicPostDocument | null {
 }
 
 function parseMaterialRef(v: unknown): PublicPostMaterial | null {
-  if (!isObj(v) || !isId(v.id) || !isStr(v.title) || !isStr(v.sourceUrl)) return null;
-  return { id: v.id, title: v.title, sourceUrl: v.sourceUrl };
+  if (!isObj(v) || !isId(v.id) || !isStr(v.title) || !nullableStr(v.sourceUrl)) return null;
+  // 원본 주소가 없는 자료(계약: string|null)는 제목만 보인다(SourceLink는 빈 주소를 그리지 않는다)
+  return { id: v.id, title: v.title, sourceUrl: isStr(v.sourceUrl) ? v.sourceUrl : "" };
 }
 
 /** 배열의 모든 원소가 해석되면 그 결과, 하나라도 계약과 다르면 null. */
@@ -87,8 +92,9 @@ function parsePublicPost(v: unknown): PublicPost | null {
     (v.coverImageUrl !== null && !isStr(v.coverImageUrl)) ||
     !isObj(v.author) ||
     (v.author.login !== null && !isStr(v.author.login)) ||
-    !isStr(v.author.name) ||
+    !nullableStr(v.author.name) ||
     !isStr(v.publishedAt) ||
+    !optTime(v.updatedAt) ||
     !optStr(v.textProjection)
   ) {
     return null;
@@ -105,7 +111,7 @@ function parsePublicPost(v: unknown): PublicPost | null {
     description: v.description,
     tags: v.tags,
     coverImageUrl: v.coverImageUrl,
-    author: { login: v.author.login, name: v.author.name },
+    author: { login: v.author.login, name: isStr(v.author.name) ? v.author.name : "" },
     publishedAt: v.publishedAt,
     documents,
     materials,
@@ -113,6 +119,7 @@ function parsePublicPost(v: unknown): PublicPost | null {
   // 본문은 BlockRenderer가 그리기 전에 검사한다(모르는 형식이면 그 자리에 오류를 보인다)
   if (v.content !== undefined) post.content = v.content;
   if (isStr(v.textProjection)) post.textProjection = v.textProjection;
+  if (isStr(v.updatedAt)) post.updatedAt = v.updatedAt;
   return post;
 }
 
@@ -194,8 +201,9 @@ function parsePost(v: unknown): Post | null {
   let publication: Post["publication"] = null;
   if (v.publication !== null) {
     const p = v.publication;
-    if (!isObj(p) || !isId(p.id) || !isId(p.versionId) || !isStr(p.publishedAt) || !isStr(p.slug)) return null;
+    if (!isObj(p) || !isId(p.id) || !isId(p.versionId) || !isStr(p.publishedAt) || !optTime(p.updatedAt) || !isStr(p.slug)) return null;
     publication = { id: p.id, versionId: p.versionId, publishedAt: p.publishedAt, slug: p.slug };
+    if (isStr(p.updatedAt)) publication.updatedAt = p.updatedAt;
   }
   return {
     id: v.id,

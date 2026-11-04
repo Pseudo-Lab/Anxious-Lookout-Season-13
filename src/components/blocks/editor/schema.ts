@@ -879,8 +879,11 @@ export function blockExtensions({ placeholder = "", onReject }: SchemaOptions = 
     Code.extend({ excludes: "" }),
     TextStyle,
     TextColor,
+    // #80 F3: 타이핑한 주소는 공백·Enter에서 링크가 된다. Tiptap은 입력한 글자 그대로(link.value)를 isAllowedUri로 검사하므로
+    // http(s)://·mailto: 를 직접 쓴 주소만 링크가 되고, "example.com"·"main.py"처럼 scheme 없는 글자와 자격증명 주소는 그대로 남는다.
+    // 코드 mark·코드 블록·이미지/영상 설명(link 불허 노드) 안에서는 링크를 만들지 않는다.
     Link.extend({ inclusive: false }).configure({
-      autolink: false,
+      autolink: true,
       linkOnPaste: true,
       openOnClick: false,
       protocols: [],

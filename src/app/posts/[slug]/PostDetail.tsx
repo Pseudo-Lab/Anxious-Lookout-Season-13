@@ -27,7 +27,7 @@ function Loaded({ slug }: { slug: string }) {
   if (!result.ok) {
     if (result.failure.kind === "http" && result.failure.status === 404) {
       return (
-        <div className="mx-auto max-w-3xl space-y-3">
+        <div className="mx-auto max-w-4xl space-y-3">
           <Notice tone="info">글을 찾을 수 없습니다. 주소가 잘못되었거나 발행이 취소된 글입니다.</Notice>
           <Link href="/posts/" className="text-sm font-medium text-indigo-600 hover:text-indigo-800">
             전체 글 보기 →
@@ -40,7 +40,7 @@ function Loaded({ slug }: { slug: string }) {
   return (
     <>
       <PostArticle post={result.data} />
-      <p className="mx-auto mt-10 max-w-3xl border-t border-stone-200 pt-8 text-center text-sm text-stone-500">
+      <p className="mx-auto mt-10 max-w-4xl border-t border-stone-200 pt-8 text-center text-sm text-stone-500">
         좋아요와 댓글 기능은 새 서버로 옮기는 중입니다(준비 중).
       </p>
     </>
