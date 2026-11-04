@@ -149,6 +149,48 @@ Any other receipt is "R1 not done". No stop by the deadline is "R1 not done at t
 | 70 | rc 0 otherwise, but the session revoke was not proved | |
 | 130 | Interrupted before the POST | |
 
+## W4 follow-up: `w4-broker-events.py` (read-only, optional diagnosis)
+
+**Context.** The W4 run `w4-20261104T014222Z` ended with entry rc 9 and observer rc 6. After the early health read, the runner reached `failure=auth_revoked`. The idle stop at 02:12:32Z then:
+1. wrote a v3 receipt with reason `auth_revoked`;
+2. deleted the Pod by UID;
+3. released it.
+
+The cause of `auth_revoked` is not established. There are four candidates:
+- ledger rejection;
+- `login_access`;
+- `account/read`;
+- the startup 401 refresh.
+
+This one-shot narrows those candidates. It does not decide them.
+
+**What it reads.** Run `sudo -n python3 -I /root/issue61/w4-broker-events.py`. It reads exactly `/data/broker-events.jsonl` in container `broker` of `codex-broker/codex-broker-0`, and only if the Pod has the fixed UID `1a92b7f7…`.
+- The read is one `kubectl exec … python -I -c <fixed reader>`.
+- The reader opens that path with `O_NOFOLLOW` and caps the read at 4 MiB.
+- The Pod and container identity is checked before and after the read.
+
+**What it outputs.**
+- The raw bytes stay in the process on the guest.
+- Printed entries must have exactly the keys `at, event, kind, ok, before, after`, with valid types and values. `before` and `after` must each be `<inode>:<mtime>` or `-`.
+- Rejected lines are counted by class and never echoed.
+- The output gives:
+  - the sha256 of the raw file;
+  - the entries from 01:12:22Z to 02:42:22Z (at most 100 lines);
+  - the last entry before that window;
+  - the sha256 of the printed lines;
+  - the interpretation limits.
+- Nothing is written, and no broker endpoint is called.
+
+| rc | meaning |
+| --- | --- |
+| 0 | printed |
+| 3 | broker Pod identity or state not as fixed (no exec) |
+| 4 | file absent, a symlink, not a regular file, or too large |
+| 5 | kubectl failed or timed out, or the Pod or container changed during the read |
+| 130 | interrupted |
+
+**Harness.** `test_w4b.py`, with `mock/fake_w4b.py`. The fake's `exec` really runs the fixed reader against `/data`.
+
 ## Mock harness (Docker, Python 3.9 as on the guest)
 
 ```sh
@@ -158,6 +200,8 @@ docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
   python3 -I /m3/multi-user-runners/issue61/test_w3b.py
 docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
   python3 -I /m3/multi-user-runners/issue61/test_w4.py
+docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
+  python3 -I /m3/multi-user-runners/issue61/test_w4b.py
 ```
 
 `test_w3b.py` uses `mock/fake_w3b.py`, which emulates the binding tool's guards, report and compare-and-swap,
