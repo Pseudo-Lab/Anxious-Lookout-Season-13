@@ -366,8 +366,8 @@ docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
   python3 -I /m3/multi-user-runners/issue61/test_w4b.py
 docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
   python3 -I /m3/multi-user-runners/issue61/test_w5.py
-docker run --rm --network none --hostname simple -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
-  python3 -I /m3/multi-user-runners/issue61/test_w6.py
+docker run --rm --network none --hostname simple -v "$PWD/infra/hosting/m3:/m3:ro" \
+  -v "$PWD/backend/ops:/ops:ro" python:3.9-alpine python3 -I /m3/multi-user-runners/issue61/test_w6.py
 ```
 
 `test_w3b.py` uses `mock/fake_w3b.py`, which emulates the binding tool's guards, report and compare-and-swap,

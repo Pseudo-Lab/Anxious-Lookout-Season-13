@@ -41,8 +41,8 @@ successful Pod List of codex-runner holding no Pod at all (same name with any UI
 contradicting reads is waited on, never a pass. A Pod of that name with another UID is a replacement (rc 6).
 
 The v2 receipt's terminal must be one runner_controller_service.terminal_evidence() can produce: exactly
-{podAbsent: true}, or exactly {podPhase, containers} with a terminal phase (Failed/Succeeded) or a terminated runner
-container ({exitCode, reason}). Times are parsed: requested_at >= intent, proof verifiedAt >= requested_at,
+{podAbsent: true}, or exactly {podPhase, containers} with a terminal phase (Failed/Succeeded; containers may then be
+empty, as for a Pod without containerStatuses) or a terminated runner container ({exitCode, reason}). Times are parsed: requested_at >= intent, proof verifiedAt >= requested_at,
 completed_at >= verifiedAt (5 s tolerance each), none in the future.
 
 Deadline: every call timeout and sleep inside the 30-min window is bounded by the monotonic time left (floor 5 s),
@@ -462,7 +462,9 @@ def terminal_ok(terminal):
     if set(terminal) != {'podPhase', 'containers'}:
         return False
     containers = terminal['containers']
-    if not isinstance(containers, dict) or not containers or not set(containers) <= {'runner', 'shell-executor'}:
+    # terminal_evidence() of a Pod without containerStatuses gives {} (e.g. {'status': {'phase': 'Failed'}}): accepted
+    # only with a terminal phase, because then runner_dead below is false.
+    if not isinstance(containers, dict) or not set(containers) <= {'runner', 'shell-executor'}:
         return False
     for value in containers.values():
         if not isinstance(value, dict):

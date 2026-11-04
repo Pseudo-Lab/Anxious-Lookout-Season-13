@@ -1,6 +1,6 @@
 """Mock harness for the #61 W6 scripts (w6-enter.py, w6-reboot.py, w6-observe.py). Docker only, never on a node:
-    docker run --rm --network none --hostname simple -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
-      python3 -I /m3/multi-user-runners/issue61/test_w6.py
+    docker run --rm --network none --hostname simple -v "$PWD/infra/hosting/m3:/m3:ro" \
+      -v "$PWD/backend/ops:/ops:ro" python:3.9-alpine python3 -I /m3/multi-user-runners/issue61/test_w6.py
 
 mock/fake_w6.py stands in for k3s (kubectl/crictl), losetup, systemctl, journalctl and docker. The API POST is
 served here (session row, Origin, CSRF, Idempotency-Key checked as in W4). A sitecustomize answers os.path.ismount
@@ -1103,6 +1103,12 @@ def test_round2():
             ('terminal with a non-integer exit code',
              {'receipt': {'terminal': {'podPhase': 'Running', 'containers': {'runner': {'exitCode': 'x', 'reason': 'r'}}}}},
              6, 'not terminal evidence'),
+            ('terminal Failed with empty containers (a Pod without containerStatuses)',
+             {'receipt': {'terminal': {'podPhase': 'Failed', 'containers': {}}}}, 0, 'G3 at'),
+            ('terminal Succeeded with empty containers', {'receipt': {'terminal': {'podPhase': 'Succeeded', 'containers': {}}}},
+             0, 'G3 at'),
+            ('terminal Running with empty containers', {'receipt': {'terminal': {'podPhase': 'Running', 'containers': {}}}},
+             6, 'not terminal evidence'),
             ('terminal {podAbsent: true} (what the controller writes for a vanished Pod)',
              {'receipt': {'terminal': {'podAbsent': True}}}, 0, 'G3 at'),
             ('terminal Running but the runner container terminated',
@@ -1116,11 +1122,50 @@ def test_round2():
         ocase(name, lambda st: None, want, text, sim=sim)
 
 
+def test_terminal_source():
+    """terminal_ok accepts every terminal the controller's own terminal_evidence() returns for a dead Pod, and
+    rejects what it returns None for (the function is taken from backend/ops by AST, mounted read-only at /ops)."""
+    import ast
+    import importlib.util
+    path = '/ops/runner_controller_service.py'
+    check('terminal source: backend/ops is mounted (the harness command mounts it read-only)', os.path.exists(path))
+    if not os.path.exists(path):
+        return
+    tree = ast.parse(open(path).read())
+    keep = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name == 'terminal_evidence')
+            or (isinstance(n, ast.Assign) and any(getattr(t, 'id', '') == 'TERMINAL_PHASES' for t in n.targets))]
+    space = {}
+    exec(compile(ast.Module(body=keep, type_ignores=[]), path, 'exec'), space)
+    spec = importlib.util.spec_from_file_location('w6observe', INSTALL + '/w6-observe.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    run_t = {'name': 'runner', 'state': {'terminated': {'exitCode': 255, 'reason': 'Unknown'}}}
+    run_r = {'name': 'runner', 'state': {'running': {}}}
+    exe_t = {'name': 'shell-executor', 'state': {'terminated': {'exitCode': 0, 'reason': 'Completed'}}}
+    exe_w = {'name': 'shell-executor', 'state': {'waiting': {'reason': 'x'}}}
+    dead = [None, {'status': {'phase': 'Failed'}}, {'status': {'phase': 'Succeeded'}},
+            {'status': {'phase': 'Failed', 'containerStatuses': [run_t, exe_t]}},
+            {'status': {'phase': 'Running', 'containerStatuses': [run_t, exe_w]}},
+            {'status': {'phase': 'Running', 'containerStatuses': [run_t]}},
+            {'status': {'phase': 'Failed', 'containerStatuses': [run_r, exe_w]}},
+            {'status': {'containerStatuses': [{'name': 'runner', 'state': {'terminated': {'reason': 'Unknown'}}}]}}]
+    alive = [{'status': {'phase': 'Running'}}, {'status': {'phase': 'Running', 'containerStatuses': [run_r, exe_w]}},
+             {'status': {'phase': 'Pending'}}]
+    outputs = [space['terminal_evidence'](p) for p in dead]
+    check('terminal source: every controller terminal for a dead Pod is accepted by the observer',
+          all(o is not None and module.terminal_ok(o) for o in outputs), json.dumps(outputs))
+    check('terminal source: the controller gives None for a live Pod (nothing to accept)',
+          all(space['terminal_evidence'](p) is None for p in alive))
+    check('terminal source: a live-looking shape forged into a receipt is rejected',
+          not module.terminal_ok({'podPhase': 'Running', 'containers': {}})
+          and not module.terminal_ok({'podPhase': 'Running', 'containers': {'runner': {'state': 'running'}}}))
+
+
 def main():
     install_tools()
     fresh()
     for name, fn in (('enter1', test_enter1), ('reboot', test_reboot), ('observe', test_observe), ('enter2', test_enter2),
-                     ('round2', test_round2)):
+                     ('round2', test_round2), ('terminal source', test_terminal_source)):
         try:
             fn()
         except Exception as error:  # a broken fixture is a failure, not a crash of the harness
