@@ -191,6 +191,47 @@ This one-shot narrows those candidates. It does not decide them.
 
 **Harness.** `test_w4b.py`, with `mock/fake_w4b.py`. The fake's `exec` really runs the fixed reader against `/data`.
 
+### Note for the prod rehearsal: the W4 early health read should be a bounded wait
+
+W4 read health once, at T+9 s. That single sample raced the first broker supply. A later entry should instead poll `/health` every 5 s, for at most 300 s from the moment the Pod is proved, until health leaves `not_configured`:
+- `r1_state` is true only when `failure` is exactly the stimulus failure;
+- any other concrete failure → rc 9, with that failure named;
+- still `not_configured` after 300 s → rc 10 ("never supplied within 300 s; runner left running");
+- in every case: no retry, no reclaim.
+
+The stimulus must be stated, and proved available, before the POST. On the dev VM it could not be proved read-only, because that needs the served token's fingerprint. #61 W4 was closed by an explicit user exception, so no re-entry script exists.
+
+## W5: controller SA token rotation (read-only)
+
+`sudo -n python3 -I /root/issue61/w5-rotation.py`
+
+1. **Precheck:**
+   - no earlier `w5-*` evidence;
+   - host `issue16-*` units inactive;
+   - the host 24 h kube-token files under `/etc/anxious-lookout/issue16/` are stat-ed only, and must be older than 24 h or absent;
+   - the `runner-controller` Deployment and Pod are at the recorded UIDs, 1/1, with only the default `kube-api-access` token (3607 s), mounted read-only, and no hostPath.
+2. **Claims:** a fixed reader in the controller container decodes only the JWT payload. It prints the claims `iat, nbf, exp, warnafter, jti, sub, aud, namespace, pod, serviceaccount, node` and the projected volume's `..data` link. It reads every 60 s until the `jti` changes, for at most 75 min.
+3. **Proof:** a fresh process runs the controller's code: `build()`, `observer_pool.bound(…5804)` (PVC GETs), `runtime.namespace()`, `service.pod()`, `NodeEvidence.identity()`. Each request re-reads the token file. The `jti` is read before and after, and both must equal the rotated `jti`.
+4. **Resident controller:** same container, no restart, and no `reconciliation_required` line since the first read.
+
+**Limits:**
+- k3s extends projected tokens, so the old token stays valid until the Pod goes. A success shows that the rotated token works, not that the old one is refused.
+- With no runner Pod, the resident loop makes only its watch call. The proof process covers the rest; the resident process uses the same per-request read (`runner_controller_service.py:408-411`, `runner_kube.py:208-214`).
+
+| rc | meaning |
+| --- | --- |
+| 0 | rotated and proved |
+| 3 | precheck refused |
+| 4 | a proof call failed, or the resident controller restarted or logged `reconciliation_required` |
+| 5 | not rotated within 75 min |
+| 6 | rotated again during the proof (no retry) |
+| 7 | claims unreadable or malformed |
+| 8 | controller Pod changed during the window |
+| 70 | unexpected error |
+| 130 | interrupted (SIGINT, SIGTERM or SIGHUP; `run.json` is still written) |
+
+**Evidence:** `/root/issue61/evidence/w5-<stamp>/run.json`, claims and outcomes only.
+
 ## Mock harness (Docker, Python 3.9 as on the guest)
 
 ```sh
@@ -202,6 +243,8 @@ docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
   python3 -I /m3/multi-user-runners/issue61/test_w4.py
 docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
   python3 -I /m3/multi-user-runners/issue61/test_w4b.py
+docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" python:3.9-alpine \
+  python3 -I /m3/multi-user-runners/issue61/test_w5.py
 ```
 
 `test_w3b.py` uses `mock/fake_w3b.py`, which emulates the binding tool's guards, report and compare-and-swap,
