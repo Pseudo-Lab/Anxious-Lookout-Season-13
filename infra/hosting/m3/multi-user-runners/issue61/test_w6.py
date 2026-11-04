@@ -253,7 +253,7 @@ def build_fs(st):
     open('/mock/mountinfo', 'w').write('\n'.join(lines) + '\n')
     st['loops'] = loops
     MOUNTS.clear()
-    MOUNTS.update({'ismount': ismount, 'statvfs': statvfs, 'fsyncFail': []})
+    MOUNTS.update({'ismount': ismount, 'statvfs': statvfs, 'fsyncFail': [], 'fsyncFailIfContains': []})
     put_mounts()
 
 
@@ -308,6 +308,15 @@ def fsync(fd):
             name = ''
         if any(n in name for n in c['fsyncFail']):
             raise OSError(28, 'No space left on device')
+    if c is not None and c.get('fsyncFailIfContains'):
+        try:
+            name = os.readlink('/proc/self/fd/%d' % fd)
+            with open(name) as s:
+                text = s.read()
+        except (OSError, UnicodeDecodeError):
+            text = ''
+        if any(m in text for m in c['fsyncFailIfContains']):
+            raise OSError(28, 'No space left on device')
     return _fsync(fd)
 os.path.ismount, os.statvfs, os.fsync = ismount, statvfs, fsync
 '''
@@ -334,6 +343,8 @@ class Api(http.server.BaseHTTPRequestHandler):
             self.reply(403, {'error': {'code': 'forbidden'}})
             return
         st['entered'] = True
+        if st.get('convChangeOnPost'):
+            st['db']['conv'] = {'n': 1, 'digest': 'changed'}
         st['db'].update(phase='provisioning', generation=st['db']['generation'] + 1, revision=st['db']['revision'] + 1)
         put(st)
         if mode == 'lost':
@@ -400,7 +411,7 @@ def fresh(mutate=None):
     del POSTS[:]
 
 
-ENV = {'W6_POD_WAIT_SECONDS': '4', 'W6_POST_TIMEOUT': '3', 'W6_HEALTH_WAIT_SECONDS': '2', 'W6_HEALTH_POLL_SECONDS': '0.2',
+ENV = {'W6_POD_WAIT_SECONDS': '20', 'W6_POST_TIMEOUT': '3', 'W6_HEALTH_WAIT_SECONDS': '2', 'W6_HEALTH_POLL_SECONDS': '0.2',
        'W6_OBSERVE_WAIT_SECONDS': '6', 'W6_OBSERVE_POLL_SECONDS': '0.2'}
 
 
@@ -466,7 +477,13 @@ def reboot_ok(after_enter=None):
     return out
 
 
-def simulate_reboot(st, timeline=True, receipt=None, proof=None, stop=None):
+def stamp(epoch, digits=6):
+    """An ISO 8601 timestamp with an explicit offset, as the controller (6 digits) or PostgreSQL (5 here) writes."""
+    frac = ('%.*f' % (digits, epoch % 1))[1:]
+    return time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(epoch)) + frac + '+00:00'
+
+
+def simulate_reboot(st, timeline=True, receipt=None, proof=None, stop=None, completed_over=None):
     """The guest came back: B1, restore PASS in this boot, the gen-5 Pod Failed; the controller then writes the
     stop (v2 terminal), deletes the Pod and completes the proof on B1 after a few observe reads."""
     open('/mock/boot_id', 'w').write(B1 + '\n')
@@ -489,17 +506,19 @@ def simulate_reboot(st, timeline=True, receipt=None, proof=None, stop=None):
     st['db'].update(phase='runner_unreachable', ambiguous=False)
     intent = json.load(open(os.path.join(dirs('reboot')[-1], 'run.json')))['intent']['epoch']
     base = {'stopId': '11111111-2222-4333-8444-555555555555', 'owner': OWNER, 'state': STATE, 'generation': 5, 'pod': POD5,
-            'requestedEpoch': intent + 60, 'nodeName': None, 'nodeUid': None, 'bootId': None, 'receipt': None,
+            'requestedEpoch': intent + 0.1, 'nodeName': None, 'nodeUid': None, 'bootId': None, 'receipt': None,
             'proof': None, 'completed': False, 'completedAt': None}
     base.update(stop or {})
     rec = {'stopId': base['stopId'], 'ownerId': OWNER, 'stateId': STATE, 'podUid': POD5, 'generation': 5, 'version': 2,
            'terminal': {'podPhase': 'Failed', 'containers': {'runner': {'exitCode': 255, 'reason': 'Unknown'}}}}
     rec.update(receipt or {})
     prf = {'podUid': POD5, 'nodeName': 'anxious-lookout', 'nodeUid': NODE_UID, 'bootId': B1,
-           'verifiedAt': '2026-11-04T07:00:00+00:00', 'evidence': 'pod-deleted'}
+           'verifiedAt': stamp(intent + 0.2), 'evidence': 'pod-deleted'}
     prf.update(proof or {})
     opened = dict(base, receipt=rec, nodeName='anxious-lookout', nodeUid=NODE_UID, bootId=B1)
-    done = dict(opened, proof=prf, completed=True, completedAt='2026-11-04T07:00:00+00:00', bootId=prf['bootId'])
+    done = dict(opened, proof=prf, completed=True, completedAt=stamp(intent + 0.3, 5), completedEpoch=intent + 0.3,
+                bootId=prf['bootId'])
+    done.update(completed_over or {})
     st['timeline'] = [{'after': 2, 'db': {'stop5': opened, 'stops': 5, 'allOpenStops': 1, 'phase': 'stopping'}},
                       {'after': 3, 'db': {'stop5': done, 'allOpenStops': 0, 'phase': 'idle_stopped', 'pod': None,
                                           'revision': 21}, 'pod': None}] if timeline else []
@@ -572,7 +591,7 @@ def test_enter1():
     fresh(lambda st: st['fail'].append('health-fail'))
     rc, out = run('w6-enter.py')
     check('enter1 health never observed (probe failures only): rc 11, never success',
-          rc == 11 and 'never observed' in out and rj('enter1')['health']['class'] == 'unobserved', out)
+          rc == 11 and 'not observed inside' in out and rj('enter1')['health']['class'] == 'unobserved', out)
     fresh(lambda st: st['pvc']['native-' + STATE_HEX]['metadata'].update(uid='00000000-0000-4000-8000-0000000000aa'))
     rc, out = run('w6-enter.py')
     check('enter1: a PVC with another UID is refused rc 3 before any POST', rc == 3 and not POSTS and 'PVC/PV' in out, out)
@@ -926,10 +945,182 @@ def test_enter2():
     case('a second observe record', lambda: os.makedirs(EVID + '/w6-observe-20991231T000000Z'), 'exactly one enter1')
 
 
+
+
+def test_round2():
+    import fcntl
+    import signal as sig
+
+    def hold():
+        fd = os.open(INSTALL + '/w6.lock', os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+
+    # Blocker 2: one W6 step at a time; the loser is refused before any side effect ----------------------
+    fresh()
+    fd = hold()
+    rc, out = run('w6-enter.py')
+    os.close(fd)
+    check('lock: enter while another W6 step holds the lock -> rc 3, no evidence, no session, no POST',
+          rc == 3 and 'lock held' in out and not dirs('') and not POSTS and not state().get('queries'), out)
+    fresh(lambda st: st.update(podAfter=3))
+    environ = dict(os.environ, **ENV)
+    procs = [subprocess.Popen(['python3', '-I', INSTALL + '/w6-enter.py'], stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, env=environ) for _ in range(2)]
+    results = [(p.wait(timeout=120), p.stdout.read().decode()) for p in procs]
+    check('lock: two enter1 processes started together -> exactly one POST and one enter1 record; the other rc 3',
+          sorted(r for r, _ in results) == [0, 3] and len(POSTS) == 1 and len(dirs('enter1')) == 1,
+          json.dumps(results))
+    enter1_ok()
+    fd = hold()
+    rc, out = run('w6-reboot.py')
+    os.close(fd)
+    check('lock: reboot while the lock is held -> rc 3, no evidence, no call',
+          rc == 3 and 'lock held' in out and not dirs('reboot') and not state().get('rebootCalls'), out)
+    reboot_ok()
+    edit(simulate_reboot)
+    fd = hold()
+    rc, out = run('w6-observe.py')
+    os.close(fd)
+    check('lock: observe while the lock is held -> rc 3, nothing written', rc == 3 and not dirs('observe'), out)
+
+    # Major 3: conversations ------------------------------------------------------------------------------
+    fresh(lambda st: st.update(convChangeOnPost=True))
+    rc, out = run('w6-enter.py')
+    check('conversations: a changed snapshot after the POST -> rc 12, no NEXT', rc == 12 and 'NEXT' not in out, out)
+    enter1_ok()
+    edit(lambda st: st['db'].update(conv={'n': 1, 'digest': 'x'}))
+    rc, out = run('w6-reboot.py')
+    check('conversations: reboot refuses a snapshot that differs from enter1 before/after -> rc 3, no call',
+          rc == 3 and 'conversation snapshot differs from enter1' in out and not state().get('rebootCalls'), out)
+    observe_ok()
+    edit(lambda st: st['db'].update(conv={'n': 1, 'digest': 'x'}))
+    before = len(POSTS)
+    rc, out = run('w6-enter.py')
+    check('conversations: enter2 refuses a snapshot that differs from the chain -> rc 3, no POST',
+          rc == 3 and 'differs from the one the W6 chain recorded' in out and len(POSTS) == before, out)
+
+    # Major 6: the success verdict must be stored -----------------------------------------------------------
+    def marker(text):
+        MOUNTS['fsyncFailIfContains'] = [text] if text else []
+        put_mounts()
+    fresh()
+    marker('"finished"')
+    rc, out = run('w6-enter.py')
+    marker(None)
+    check('record: enter1 passes but its final record cannot be written -> rc 72, session still revoked',
+          rc == 72 and not state()['sessions'] and len(dirs('enter1')) == 1, out)
+    enter1_ok()
+    marker('"finished"')
+    rc, out = run('w6-reboot.py')
+    marker(None)
+    check('record: reboot requested but the final record cannot be written -> rc 8, exactly one call',
+          rc == 8 and state().get('rebootCalls') == 1, out)
+    enter1_ok()
+    marker('"rebootCall"')
+    rc, out = run('w6-reboot.py')
+    marker(None)
+    check('record: reboot requested but the call result cannot be recorded -> rc 8, exactly one call, not repeated',
+          rc == 8 and state().get('rebootCalls') == 1 and 'NOT repeated' in out, out)
+
+    # Question 7: the #64 conditions again after the export ------------------------------------------------
+    def during_export(action, name, text):
+        enter1_ok()
+        edit(lambda st: st.update(journalSleep=3))
+        proc = subprocess.Popen(['python3', '-I', INSTALL + '/w6-reboot.py'], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, env=dict(os.environ, **ENV))
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not dirs('reboot'):
+            time.sleep(0.05)
+        action()
+        out = proc.communicate(timeout=120)[0].decode()
+        check('final look: %s during the export -> rc 5, NO call' % name,
+              proc.returncode == 5 and text in out and not state().get('rebootCalls'), out)
+
+    def login():
+        os.makedirs('/mock/proc/4343')
+        open('/mock/proc/4343/cmdline', 'wb').write(b'codex\0login\0')
+    during_export(login, 'a codex login process appears', 'codex-login')
+    during_export(lambda: edit(lambda st: st['otherPods'].append(other_pod('shell-pilot', 'p'))),
+                  'a Pod appears in shell-pilot', 'shell-pilot')
+
+    # Major 5: results after the window are not accepted -------------------------------------------------
+    def usable_late(st):
+        st['health'].update(available=True, reason=None, failure=None)
+        st['healthSleep'] = 1.5
+    fresh(usable_late)
+    rc, out = run('w6-enter.py', {'W6_HEALTH_WAIT_SECONDS': '1'})
+    r = rj('enter1')
+    check('deadline: a usable health that returns after the 1 s window is not accepted -> rc 11',
+          rc == 11 and r['health']['counts'].get('late') == 1 and 'NEXT' not in out, out)
+    fresh(lambda st: st.update(podGetSleep=1.5))
+    rc, out = run('w6-enter.py', {'W6_POD_WAIT_SECONDS': '1'})
+    check('deadline: a Pod proved by a read that returned after the 1 s window -> rc 7', rc == 7, out)
+
+    def immediate(st):
+        simulate_reboot(st)
+        for step in st['timeline']:
+            step['after'] = 1
+        st['nodeSleep'] = 2
+    reboot_ok()
+    edit(immediate)
+    rc, out = run('w6-observe.py', {'W6_OBSERVE_WAIT_SECONDS': '1'})
+    check('deadline: observe whose every condition held only after the 1 s window -> rc 5, not 0',
+          rc == 5 and 'returned after the window' in out, out)
+    reboot_ok()
+    edit(immediate)
+    rc, out = run('w6-observe.py', {'W6_OBSERVE_WAIT_SECONDS': '20'})
+    check('deadline: the same with a 20 s window -> rc 0 (boundary)', rc == 0, out)
+
+    # Blocker 1: three-way Pod lookups -------------------------------------------------------------------
+    def ocase(name, fn, want, text, env=None, sim=None):
+        reboot_ok()
+        edit(lambda st: (simulate_reboot(st, **(sim or {})), fn(st)))
+        rc, out = run('w6-observe.py', env)
+        check('observe lookup: %s -> rc %d' % (name, want), rc == want and text in out, out)
+
+    def stale(st, uid=POD5):
+        pod = json.loads(json.dumps(st['pod']))
+        pod['metadata']['uid'] = uid
+        return pod
+    ocase('completed proof, the single GET fails (rc 1, e.g. permission) and a same-name Pod is still listed',
+          lambda st: (st['fail'].append('pod-get-fail'), st.update(listExtra=[stale(st)])), 5, 'GET failed')
+    ocase('the single GET answers invalid JSON', lambda st: st['fail'].append('pod-get-badjson'), 5, 'GET failed')
+    ocase('the single GET times out', lambda st: st.update(podGetSleep=7), 5, 'GET failed',
+          {'W6_OBSERVE_WAIT_SECONDS': '6'})
+    ocase('the Pod list fails', lambda st: st['fail'].append('pods-list-fail'), 5, 'list failed')
+    ocase('the GET says absent but the list still has the same name and UID',
+          lambda st: st.update(listExtra=[stale(st)]), 5, 'GET says absent but the list')
+    ocase('the list has the same name with another UID', lambda st: st.update(listExtra=[stale(st, POD6)]), 6,
+          'in the list')
+
+    # Major 4: terminal content and the time chain ---------------------------------------------------------
+    for name, sim, want, text in (
+            ('terminal {podAbsent: false}', {'receipt': {'terminal': {'podAbsent': False}}}, 6, 'not terminal evidence'),
+            ('terminal of a Running Pod with a running runner',
+             {'receipt': {'terminal': {'podPhase': 'Running', 'containers': {'runner': {'state': 'running'}}}}}, 6,
+             'not terminal evidence'),
+            ('terminal with a non-integer exit code',
+             {'receipt': {'terminal': {'podPhase': 'Running', 'containers': {'runner': {'exitCode': 'x', 'reason': 'r'}}}}},
+             6, 'not terminal evidence'),
+            ('terminal {podAbsent: true} (what the controller writes for a vanished Pod)',
+             {'receipt': {'terminal': {'podAbsent': True}}}, 0, 'G3 at'),
+            ('terminal Running but the runner container terminated',
+             {'receipt': {'terminal': {'podPhase': 'Running', 'containers': {
+                 'runner': {'exitCode': 255, 'reason': 'Unknown'}, 'shell-executor': {'state': 'running'}}}}}, 0, 'G3 at'),
+            ('proof verifiedAt null', {'proof': {'verifiedAt': None}}, 6, 'times are not a valid chain'),
+            ('proof verifiedAt before the stop was requested', {'proof': {'verifiedAt': '2020-01-01T00:00:00+00:00'}}, 6,
+             'times are not a valid chain'),
+            ('completion in the future', {'completed_over': {'completedEpoch': time.time() + 3600}}, 6,
+             'times are not a valid chain')):
+        ocase(name, lambda st: None, want, text, sim=sim)
+
+
 def main():
     install_tools()
     fresh()
-    for name, fn in (('enter1', test_enter1), ('reboot', test_reboot), ('observe', test_observe), ('enter2', test_enter2)):
+    for name, fn in (('enter1', test_enter1), ('reboot', test_reboot), ('observe', test_observe), ('enter2', test_enter2),
+                     ('round2', test_round2)):
         try:
             fn()
         except Exception as error:  # a broken fixture is a failure, not a crash of the harness

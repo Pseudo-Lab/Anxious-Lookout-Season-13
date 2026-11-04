@@ -40,12 +40,21 @@ rc (never rerun; never a second POST; back checks read-only and PM decides):
   9  health settled on a concrete failure other than auth_revoked; the runner is left running; PM decides
   10 health still not_configured after 300 s; the runner is left running; PM decides
   11 health never observed within 300 s (probe failures only); the runner is left running; PM decides
+  12 the conversation snapshot after the entry differs from the one before it; the runner is left running;
+     PM decides (no NEXT is printed)
   70 the main result was 0 but revoking the session row failed (the row expires within the hour)
+  72 entered and proved, but the final record could not be written (the directory still blocks a rerun)
   130 interrupted before the POST: no POST; session revoked
+lock: every W6 step takes the root-only lock /root/issue61/w6.lock (flock, non-blocking) before it reads the
+evidence directory and keeps it until its final record, so two W6 processes can never both pass a precheck; the
+loser gets rc 3 before any session, POST or reboot call.
+deadlines: inside the Pod wait and the health poll every call timeout and sleep is bounded by the monotonic time
+left, and a result that returns after the window is not accepted (Pod -> rc 7; health -> not settled, rc 10/11).
 Evidence: /root/issue61/evidence/w6-enter{1,2}-<UTC stamp>/run.json (root 0700 dir, 0600 file, fsynced). No secret
 is stored. Output is fixed messages, identities, digests and sanitized health only.
 """
 import calendar
+import fcntl
 import hashlib
 import http.client
 import json
@@ -104,6 +113,8 @@ HEALTH_POLL = max(0.2, min(5.0, float(os.environ.get('W6_HEALTH_POLL_SECONDS', 5
 REBOOT_BOUND = 1200
 HEALTH_KEYS = ('ownerId', 'stateId', 'podUid', 'available', 'reason', 'verification', 'failure', 'model')
 UUID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+LOCK = '/root/issue61/w6.lock'
+DEADLINE = []  # the monotonic end of the current gate window, if any
 # Read inside the runner-controller Pod with the controller's own code (read-only: a registry SELECT, the Pod
 # GET, the runner's GET /health). Prints only the sanitized keys. Unchanged from w4-enter.py.
 HEALTH_PROBE = '''
@@ -156,7 +167,31 @@ def say(text):
             pass
 
 
+def bounded(cap):
+    """A call timeout: cap, or inside a gate window at most the time left (floor 5 s; the read is then re-checked)."""
+    if not DEADLINE:
+        return cap
+    return max(5, min(cap, DEADLINE[-1] - time.monotonic() + 1))
+
+
+def take_lock():
+    """The W6 step lock, held by this process until it exits. Refused (rc 3) if another W6 step holds it."""
+    try:
+        fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        raise Stop(3, 'precheck: the W6 lock file is unusable') from None
+    info = os.fstat(fd)
+    if not (info.st_mode & 0o170000 == 0o100000) or info.st_uid != 0 or info.st_mode & 0o077:
+        raise Stop(3, 'precheck: the W6 lock file is not a root-only regular file')
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise Stop(3, 'precheck: another W6 step is running (lock held); nothing done') from None
+    return fd
+
+
 def run(cmd, timeout=60, stdin=None):
+    timeout = bounded(timeout)
     try:
         done = subprocess.run(cmd, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               timeout=max(1, timeout), check=False)
@@ -329,6 +364,9 @@ def read_run(path, what):
     return value, hashlib.sha256(raw).hexdigest()
 
 
+CHAIN_CONV = []
+
+
 def mode_and_fence():
     """('enter1', FENCE1, None) or ('enter2', fence proved by w6-observe, chain)."""
     dirs = w6_dirs()
@@ -368,6 +406,7 @@ def mode_and_fence():
             or live.get('version') != 2 or live.get('terminal') is not True or live.get('bootId') != b1
             or live.get('proofBoot') != b1 or live.get('proofEvidence') != 'pod-deleted'):
         raise Stop(3, 'precheck: the gen-5 stop in the database is not the one w6-observe proved')
+    CHAIN_CONV.append((observe.get('context') or {}).get('conversations'))
     return 'enter2', dict(fence), {'enter1Sha256': enter1_sha, 'rebootSha256': reboot_sha, 'b1': b1,
                                    'stopId': stop['stopId'], 'pod5': pod5, 'observe': os.path.basename(dirs['observe'][0])}
 
@@ -498,6 +537,8 @@ def precheck():
     if problems:
         raise Stop(3, 'precheck: host storage: %s' % '; '.join(problems))
     conv = conversations(3)
+    if CHAIN_CONV and conv != CHAIN_CONV[0]:
+        raise Stop(3, 'precheck: the conversation snapshot differs from the one the W6 chain recorded')
     say('precheck ok (%s): …5804 %s plan %s; no runner Pod, no open stop, nothing pending or waiting; no live '
         'session; origin %s; targets resolve; PVC/PV %s; host mounts %s; conversations n=%s digest=%s'
         % (mode, json.dumps(fence, sort_keys=True), PLAN_SHA[:12], ORIGIN,
@@ -591,6 +632,7 @@ def wait_pod(started, generation):
     """Poll read-only until the Pod is proved Running for the new registry generation, or POD_WAIT has passed."""
     deadline = started + POD_WAIT
     seen = {}
+    DEADLINE.append(deadline)
     while True:
         try:
             state = live(7)
@@ -598,12 +640,19 @@ def wait_pod(started, generation):
         except Stop:
             state, pod = {'lookup': 'failed'}, None
         seen = {'registry': state, 'pod': None if pod is None else pod['metadata'].get('uid')}
+        late = time.monotonic() > deadline
+        if late:
+            say('pod not proved Running within %d s (a read that returned after the window is not accepted): %s'
+                % (POD_WAIT, json.dumps(seen, sort_keys=True, default=str)))
+            raise Stop(7, 'the POST was accepted but the Pod is not proved Running in time; provisioning may continue; '
+                          'no retry, no reclaim; back checks read-only')
         if (pod is not None and state.get('generation') == generation and state.get('state') == STATE
                 and state.get('pod') == pod['metadata']['uid']
                 and (pod['metadata'].get('labels') or {}).get('anxious.io/generation') == str(generation)
                 and (pod.get('status') or {}).get('phase') == 'Running' and not pod['metadata'].get('deletionTimestamp')):
             statuses = {s.get('name'): s for s in (pod.get('status') or {}).get('containerStatuses', [])}
             if all('running' in ((statuses.get(n) or {}).get('state') or {}) for n in CONTAINERS):
+                DEADLINE.pop()
                 return pod, state
         if time.monotonic() >= deadline:
             say('pod not proved Running within %d s: %s' % (POD_WAIT, json.dumps(seen, sort_keys=True, default=str)))
@@ -714,7 +763,7 @@ def health_once(pod_uid):
     """One sanitized /health read through the controller, or None (probe failure)."""
     script = HEALTH_PROBE % (OWNER, pod_uid, HEALTH_KEYS)
     rc, out = run([K3S, 'kubectl', '-n', CTRL[0], 'exec', '-i', 'deploy/' + CTRL[1], '-c', 'controller', '--',
-                   'python', '-B', '-'], 90, script.encode())
+                   'python', '-B', '-'], 90, script.encode())  # bounded by the window inside health_poll
     lines = [l for l in out.splitlines() if l.startswith('{')]
     try:
         value = json.loads(lines[-1]) if lines else None
@@ -745,16 +794,25 @@ def health_poll(pod_uid):
     """Read until usable or a concrete failure, or HEALTH_WAIT has passed. (class, last health, counts)."""
     deadline = time.monotonic() + HEALTH_WAIT
     counts, last = {}, None
+
+    def unsettled():
+        DEADLINE.pop()
+        return ('not_configured' if counts.get('not_configured') or counts.get('pending') else 'unobserved'), last, counts
+    DEADLINE.append(deadline)
     while True:
         health = health_once(pod_uid)
+        if time.monotonic() > deadline:  # returned after the window: not accepted, whatever it says
+            counts['late'] = counts.get('late', 0) + 1
+            return unsettled()
         kind = classify(health, pod_uid)
         counts[kind] = counts.get(kind, 0) + 1
         if health is not None:
             last = health
         if kind in ('identity', 'usable', 'auth_revoked', 'failure'):
+            DEADLINE.pop()
             return kind, health, counts
         if time.monotonic() >= deadline:
-            return ('not_configured' if counts.get('not_configured') or counts.get('pending') else 'unobserved'), last, counts
+            return unsettled()
         time.sleep(min(HEALTH_POLL, max(0.2, deadline - time.monotonic())))
 
 
@@ -766,6 +824,7 @@ def main():
     code, message, ev, posted = 0, '', None, False
     try:
         try:
+            take_lock()
             mode, fence, conv, chain, storage = precheck()
             generation = fence['generation'] + 1
             ev = os.path.join(EVIDENCE, 'w6-%s-%s' % (mode, time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())))
@@ -826,6 +885,8 @@ def main():
             say('conversations n=%s digest=%s (%s)' % (after['n'], after['digest'],
                                                       'unchanged' if after == conv else 'CHANGED'))
             record(ev, after={'conversations': after})
+            if after != conv:
+                raise Stop(12, 'the conversation snapshot changed during the entry; the runner is left running; PM decides')
             if kind == 'identity':
                 raise Stop(8, 'a health read named another owner, state or Pod; the Pod is left as it is, PM decides')
             if kind == 'failure':
@@ -835,10 +896,10 @@ def main():
                 raise Stop(10, 'health still not settled (not_configured) after %d s; the runner is left running; '
                                'PM decides' % HEALTH_WAIT)
             if kind == 'unobserved':
-                raise Stop(11, 'health never observed within %d s (probe failures only); the runner is left running; '
-                               'PM decides' % HEALTH_WAIT)
+                raise Stop(11, 'health not observed inside the %d s window (probe failures, or a read that returned '
+                               'after it); the runner is left running; PM decides' % HEALTH_WAIT)
             if mode == 'enter1':
-                say('NEXT (step 2, separate user go): w6-reboot.py must START before %s (min(POST, Pod start) + %d s); '
+                say('NEXT (step 2): w6-reboot.py must START before %s (min(POST, Pod start) + %d s); '
                     'later it refuses' % (RUN['rebootBy']['at'], REBOOT_BOUND))
             else:
                 say('NEXT: the gen-%d runner is left to the automatic idle drain; W7 (read-only) by Pod start + 60 min '
@@ -895,6 +956,9 @@ def finish(code, message, ev, posted):
                session={'id': SESSION.get('hash', '')[:16], 'revoked': SESSION.get('revoked')})
     except Exception:
         say('evidence write failed at the end (the directory still blocks a rerun)')
+        if code == 0:
+            code = 72
+            say('STOPPED (72): entered and proved, but the final record could not be written; not a pass for step 2')
     say('result rc=%d' % code)
     return code
 

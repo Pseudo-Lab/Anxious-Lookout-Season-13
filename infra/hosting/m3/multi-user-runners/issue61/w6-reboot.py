@@ -1,4 +1,4 @@
-"""#61 dev-VM gate W6, step 2 (the one irreversible step; its own user go): final checks, pre-reboot evidence,
+"""#61 dev-VM gate W6, step 2 (the one irreversible step; relayed with step 1 by the user's decision): final checks, pre-reboot evidence,
 then ONE guest reboot request. Run by the user as root in the guest, straight after step 1 returned rc 0:
 
     python3 -I /root/issue61/w6-reboot.py
@@ -53,9 +53,17 @@ rc (never rerun; back checks read-only and PM decides):
       running and the idle drain stops it at about 1800 s
   5   the final look differs from the precheck (state, Pod, boot or time): NO reboot
   7   `systemctl reboot` returned non-zero or timed out: not repeated; PM decides
+  8   reboot requested (systemctl returned 0), but the call result or the final record could not be written;
+      the request is NOT repeated; w6-observe proves the boot
   130 interrupted before the final look: NO reboot
+lock: the root-only /root/issue61/w6.lock (flock, non-blocking) is taken before the evidence directory is read and
+held until the process ends, so a second W6 process is refused (rc 3) before any evidence, intent or reboot call.
+conversations: the current snapshot must equal enter1's before and after snapshots (a changed baseline is refused).
+final look: also repeats the process scan (login/reclaim) and the Pod/namespace overview (#64 paid namespaces,
+unknown namespaces, other runner Pods) after the evidence export, and the conversation snapshot.
 """
 import calendar
+import fcntl
 import hashlib
 import json
 import os
@@ -135,6 +143,7 @@ FREE_MIN = 2 * GIB
 TOOL_CAP = 16000000
 EXPORT_TIMEOUT = max(5, min(900, int(os.environ.get('W6_EXPORT_TIMEOUT', 900))))  # the harness may only shorten it
 UUID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+LOCK = '/root/issue61/w6.lock'
 
 
 class Stop(Exception):
@@ -166,6 +175,22 @@ def say(text):
             os.close(null)
         except Exception:
             pass
+
+
+def take_lock():
+    """The W6 step lock, held by this process until it exits. Refused (rc 3) if another W6 step holds it."""
+    try:
+        fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        raise Stop(3, 'precheck: the W6 lock file is unusable') from None
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+        raise Stop(3, 'precheck: the W6 lock file is not a root-only regular file')
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise Stop(3, 'precheck: another W6 step is running (lock held); nothing done') from None
+    return fd
 
 
 def run(cmd, timeout=60, stdin=None):
@@ -377,8 +402,11 @@ def pod_problems(pod, pod_uid):
     return problems
 
 
-def pods_overview(pod_uid):
-    items = (kjson(['get', 'pods', '-A'], 3, 'precheck: Pod list failed') or {}).get('items') or []
+def pods_overview(pod_uid, code=3):
+    listed = kjson(['get', 'pods', '-A'], code, 'Pod list failed')
+    items = listed.get('items') if isinstance(listed, dict) else None
+    if not isinstance(items, list):
+        raise Stop(code, 'Pod list unreadable')
     problems, paid = [], {ns: 0 for ns in PAID_NS}
     for p in items:
         ns, uid = p['metadata'].get('namespace'), p['metadata'].get('uid')
@@ -392,7 +420,7 @@ def pods_overview(pod_uid):
     for ns, n in paid.items():
         if n:
             problems.append('%d Pod(s) in %s' % (n, ns))
-    out = kubectl(['get', 'namespace', '-o', 'name'], 3, 'precheck: namespace list failed').split()
+    out = kubectl(['get', 'namespace', '-o', 'name'], code, 'namespace list failed').split()
     present = [ns for ns in PAID_NS if 'namespace/' + ns in out]
     return problems, {'paidNamespacesPresent': present, 'paidNamespacePods': paid, 'pods': len(items)}
 
@@ -648,6 +676,9 @@ def precheck():
         raise Stop(3, 'precheck: the boot changed since enter1')
     row = one('reg', REG, 3)
     problems = registry_problems(row, pod_uid)
+    baseline = [(enter1.get('before') or {}).get('conversations'), (enter1.get('after') or {}).get('conversations')]
+    if baseline[0] != baseline[1] or row.get('conversations') != baseline[0]:
+        problems.append('the conversation snapshot differs from enter1 before/after')
     fence_problems, bound = time_fence(enter1, row.get('dbEpoch') if isinstance(row.get('dbEpoch'), (int, float)) else 0)
     problems += fence_problems
     problems += pod_problems(kjson(['-n', NS, 'get', 'pod', POD_NAME, '--ignore-not-found'], 3,
@@ -762,21 +793,26 @@ def final_look(before, enter1):
     problems += time_fence(enter1, row['dbEpoch'] if isinstance(row.get('dbEpoch'), (int, float)) else 0)[0]
     pod = kjson(['-n', NS, 'get', 'pod', POD_NAME, '--ignore-not-found'], 5, 'final look: Pod lookup failed')
     problems += pod_problems(pod, before['podUid'])
-    for key in ('state', 'generation', 'pod', 'stops'):  # phase may move ready <-> runner_unreachable; both allowed
+    for key in ('state', 'generation', 'pod', 'stops', 'conversations'):  # phase may move ready <-> unreachable
         if row.get(key) != before['registry'].get(key):
             problems.append('registry %s changed' % key)
+    overview_problems, overview = pods_overview(before['podUid'], 5)
+    problems += overview_problems
+    hits = process_scan()
+    problems += ['%d %s process(es)' % (n, k) for k, n in sorted(hits.items()) if n]
     if problems:
         raise Stop(5, 'final look: %s: NO reboot' % '; '.join(problems))
-    return {'at': now(), 'registry': row, 'pod': {'uid': pod['metadata']['uid'], 'containers': {
+    return {'at': now(), 'registry': row, 'overview': overview, 'processes': hits, 'pod': {'uid': pod['metadata']['uid'], 'containers': {
         s.get('name'): s.get('containerID') for s in (pod.get('status') or {}).get('containerStatuses') or []}}}
 
 
 def main():
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, interrupted)
-    code, message, ev, intent = 0, '', None, False
+    code, message, ev, intent, requested = 0, '', None, False, False
     try:
         try:
+            take_lock()
             before, enter1 = precheck()
             ev = os.path.join(EVIDENCE, 'w6-reboot-' + time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()))
             os.mkdir(ev, 0o700)
@@ -808,10 +844,13 @@ def main():
             say('intent recorded (B0 %s, Pod %s); calling systemctl reboot once at %s' % (before['bootId'],
                                                                                      before['podUid'], now()))
             rc, _ = run([SYSTEMCTL, 'reboot'], timeout=30)
+            requested = rc == 0
             try:
                 record(ev, rebootCall={'rc': rc, 'at': now()})
             except OSError:
-                pass
+                if rc == 0:
+                    raise Stop(8, 'reboot requested (systemctl rc 0) but the call result could not be recorded; NOT '
+                                  'repeated; w6-observe proves the boot')
             if rc != 0:
                 raise Stop(7, 'systemctl reboot returned %d: not repeated; PM decides' % rc)
             say('reboot requested (systemctl rc 0); this ssh session will drop. This is the request, not its success: '
@@ -821,7 +860,8 @@ def main():
         except Interrupted:
             code, message = 130, 'interrupted before the final look: NO reboot'
         except Exception:
-            code, message = (7, 'unexpected error after the intent: not repeated; PM decides') if intent else \
+            code, message = ((8, 'reboot requested, then an unexpected error: NOT repeated') if requested else
+                             (7, 'unexpected error after the intent: not repeated; PM decides')) if intent else \
                 (4 if ev else 3, 'unexpected error: NO reboot')
     except BaseException:
         if not message:
@@ -837,6 +877,9 @@ def main():
         record(ev, result=code, finished=now(), message=message)
     except Exception:
         say('evidence write failed at the end (the directory still blocks a rerun)')
+        if code == 0:
+            code = 8
+            say('STOPPED (8): reboot requested, but the final record could not be written; NOT repeated')
     say('result rc=%d' % code)
     return code
 

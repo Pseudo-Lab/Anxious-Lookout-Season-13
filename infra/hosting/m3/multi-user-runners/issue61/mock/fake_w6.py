@@ -93,8 +93,11 @@ def kubectl(state, args):
             out_json({'items': items})
             return
         if ns == 'codex-runner':
+            if failing(state, 'pods-list-fail'):
+                die()
             items = ([state['pod']] if state.get('pod') else []) + [p for p in state.get('otherPods', [])
                                                                    if p['metadata']['namespace'] == 'codex-runner']
+            items += state.get('listExtra', [])
             if opt(rest, '-o') == 'name':
                 print('\n'.join('pod/' + p['metadata']['name'] for p in items))
             else:
@@ -105,8 +108,13 @@ def kubectl(state, args):
             return
         die(97)
     if verb == 'get' and rest[1] == 'pod' and rest[2] == POD_NAME:
+        if state.get('podGetSleep'):
+            time.sleep(state['podGetSleep'])
         if failing(state, 'pod-get-fail'):
             die()
+        if failing(state, 'pod-get-badjson'):
+            print('{not json')
+            return
         maybe_create_pod(state)
         save(state)
         pod = state.get('pod')
@@ -126,6 +134,8 @@ def kubectl(state, args):
     if verb == 'get' and rest[1] == 'node':
         if failing(state, 'node-down'):
             die()
+        if state.get('nodeSleep'):
+            time.sleep(state['nodeSleep'])
         out_json(state['node'])
         return
     if verb == 'get' and rest[1] == 'namespace':
@@ -144,6 +154,8 @@ def kubectl(state, args):
         seq = state.get('healthSeq')
         value = seq.pop(0) if seq else state['health']
         save(state)
+        if state.get('healthSleep'):
+            time.sleep(state['healthSleep'])
         if value == 'fail' or failing(state, 'health-fail'):
             die()
         value = dict(value)

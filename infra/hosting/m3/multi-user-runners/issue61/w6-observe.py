@@ -35,6 +35,22 @@ no API audit log, so a DELETE by another privileged actor cannot be fully exclud
 
 The new controller container after the reboot is not resident token-reconnect evidence (W5 limits stand).
 
+Lookups are three-way: success, explicit absence (a successful GET with --ignore-not-found and no object), or
+failure (rc, timeout, invalid JSON). G3 needs the single Pod GET to succeed with an explicit absence AND a
+successful Pod List of codex-runner holding no Pod at all (same name with any UID included); a failure or two
+contradicting reads is waited on, never a pass. A Pod of that name with another UID is a replacement (rc 6).
+
+The v2 receipt's terminal must be one runner_controller_service.terminal_evidence() can produce: exactly
+{podAbsent: true}, or exactly {podPhase, containers} with a terminal phase (Failed/Succeeded) or a terminated runner
+container ({exitCode, reason}). Times are parsed: requested_at >= intent, proof verifiedAt >= requested_at,
+completed_at >= verifiedAt (5 s tolerance each), none in the future.
+
+Deadline: every call timeout and sleep inside the 30-min window is bounded by the monotonic time left (floor 5 s),
+and a pass whose reads returned after the window is rc 5, not 0. Saving the no-input evidence and the final record
+after a pass is grace, outside the window.
+
+Lock: the root-only /root/issue61/w6.lock is taken before the evidence directory is read and held to the end.
+
 rc (never rerun; back checks read-only and PM decides):
   0   G2 and G3 proved; evidence written (with the enter1/reboot record hashes that enter2 checks)
   3   precheck refused: nothing changed, nothing written
@@ -43,6 +59,8 @@ rc (never rerun; back checks read-only and PM decides):
   9   proved, but writing the final evidence failed
   130 interrupted
 """
+import calendar
+import fcntl
 import hashlib
 import json
 import os
@@ -87,6 +105,9 @@ WAIT = max(1, min(1800, int(os.environ.get('W6_OBSERVE_WAIT_SECONDS', 1800))))  
 POLL = max(0.2, min(10.0, float(os.environ.get('W6_OBSERVE_POLL_SECONDS', 10))))
 INTENT_SKEW = 5
 UUID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+TS_RE = re.compile(r'(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?(Z|[+-]\d\d:\d\d)')
+LOCK = '/root/issue61/w6.lock'
+DEADLINE = []
 LIMITS = ('within the observed scope: the v2 receipt and proof, the controller outcome lines, the host units, and the '
           'sudo/sshd journal of this boot; absence from these logs is not proof of absence (no API audit log, so a '
           'DELETE by another privileged actor cannot be fully excluded); the post-reboot controller container is not '
@@ -124,7 +145,42 @@ def say(text):
             pass
 
 
+def bounded(cap):
+    if not DEADLINE:
+        return cap
+    return max(5, min(cap, DEADLINE[-1] - time.monotonic() + 1))
+
+
+def take_lock():
+    """The W6 step lock, held by this process until it exits. Refused (rc 3) if another W6 step holds it."""
+    try:
+        fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        raise Stop(3, 'precheck: the W6 lock file is unusable') from None
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+        raise Stop(3, 'precheck: the W6 lock file is not a root-only regular file')
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise Stop(3, 'precheck: another W6 step is running (lock held); nothing done') from None
+    return fd
+
+
+def epoch_of(text):
+    """Seconds of an ISO 8601 timestamp with an explicit offset (any fraction length), or None."""
+    match = TS_RE.fullmatch(text) if isinstance(text, str) else None
+    if not match:
+        return None
+    base = calendar.timegm(time.strptime(match.group(1), '%Y-%m-%dT%H:%M:%S'))
+    fraction = float(match.group(2)) if match.group(2) else 0.0
+    zone = match.group(3)
+    offset = 0 if zone == 'Z' else (1 if zone[0] == '+' else -1) * (int(zone[1:3]) * 3600 + int(zone[4:6]) * 60)
+    return base + fraction - offset
+
+
 def run(cmd, timeout=60, stdin=None):
+    timeout = bounded(timeout)
     try:
         done = subprocess.run(cmd, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               timeout=max(1, timeout), check=False)
@@ -135,15 +191,24 @@ def run(cmd, timeout=60, stdin=None):
     return done.returncode, done.stdout.decode('utf-8', 'replace').strip()
 
 
-def kjson(args):
-    """Parsed JSON or None (lookup failed / not found); a starting cluster is not an error here."""
+def kread(args):
+    """('ok', object), ('absent', None) for a successful empty answer (--ignore-not-found), or ('error', None)."""
     rc, out = run([K3S, 'kubectl'] + args + ['-o', 'json'])
-    if rc != 0 or not out:
-        return None
+    if rc != 0:
+        return 'error', None
+    if not out:
+        return 'absent', None
     try:
-        return json.loads(out)
+        value = json.loads(out)
     except ValueError:
-        return None
+        return 'error', None
+    return ('ok', value) if isinstance(value, dict) else ('error', None)
+
+
+def kjson(args):
+    """The object, or None when the lookup did not succeed with one (a starting cluster is waited on)."""
+    state, value = kread(args)
+    return value if state == 'ok' else None
 
 
 def db_row():
@@ -209,7 +274,7 @@ OBS = ("SELECT json_build_object('registry',(SELECT json_build_object('state',r.
        "'stop5',(SELECT json_build_object('stopId',s.stop_id,'owner',s.owner_id,'state',s.state_id,'generation',"
        "s.generation,'pod',s.pod_uid,'requestedEpoch',extract(epoch from s.requested_at),'nodeName',s.node_name,"
        "'nodeUid',s.node_uid,'bootId',s.boot_id,'receipt',s.receipt,'proof',s.proof,'completed',s.completed_at IS NOT NULL,"
-       "'completedAt',s.completed_at) FROM runner_termination.stops s WHERE s.owner_id='%(o)s' AND s.generation=5),"
+       "'completedAt',s.completed_at,'completedEpoch',extract(epoch from s.completed_at)) FROM runner_termination.stops s WHERE s.owner_id='%(o)s' AND s.generation=5),"
        "'stops',(SELECT count(*) FROM runner_termination.stops s WHERE s.owner_id='%(o)s'),"
        "'allOpenStops',(SELECT count(*) FROM runner_termination.stops WHERE completed_at IS NULL),"
        "'conversations',(SELECT json_build_object('n',count(*),'digest',coalesce(md5(string_agg(id::text||':'||state||':'"
@@ -268,7 +333,7 @@ def precheck():
     if (not UUID_RE.fullmatch(str(b0)) or not isinstance(intent.get('epoch'), (int, float)) or intent.get('podUid') != pod5
             or b0 != before.get('bootId') or before.get('podUid') != pod5):
         raise Stop(3, 'precheck: the reboot record has no consistent intent (no reboot was requested by w6-reboot)')
-    if (call is not None and call.get('rc') != 0) or reboot.get('result') not in (None, 0):
+    if (call is not None and call.get('rc') != 0) or reboot.get('result') not in (None, 0, 8):
         raise Stop(3, 'precheck: the reboot record shows a failed reboot call; PM decides')
     b1 = boot_id()
     if b1 == b0:
@@ -388,7 +453,44 @@ def g2(ctx):
     return not pending, pending, facts
 
 
-def pod_summary(pod):
+def terminal_ok(terminal):
+    """True only for a terminal that runner_controller_service.terminal_evidence() can produce."""
+    if not isinstance(terminal, dict):
+        return False
+    if set(terminal) == {'podAbsent'}:
+        return terminal['podAbsent'] is True
+    if set(terminal) != {'podPhase', 'containers'}:
+        return False
+    containers = terminal['containers']
+    if not isinstance(containers, dict) or not containers or not set(containers) <= {'runner', 'shell-executor'}:
+        return False
+    for value in containers.values():
+        if not isinstance(value, dict):
+            return False
+        if set(value) == {'exitCode', 'reason'}:
+            code = value['exitCode']
+            if not (code is None or (type(code) is int)) or not isinstance(value['reason'], str):
+                return False
+        elif set(value) != {'state'} or not isinstance(value['state'], str):
+            return False
+    runner_dead = set(containers.get('runner') or {}) == {'exitCode', 'reason'}
+    return terminal['podPhase'] in ('Failed', 'Succeeded') or runner_dead
+
+
+def times_ok(ctx, stop, proof):
+    """requested >= intent, verifiedAt >= requested, completed >= verifiedAt; none in the future."""
+    requested, completed = stop.get('requestedEpoch'), stop.get('completedEpoch')
+    verified = epoch_of(proof.get('verifiedAt'))
+    if not all(isinstance(v, (int, float)) for v in (requested, completed)) or verified is None:
+        return False
+    skew, now_ = INTENT_SKEW, time.time()
+    return (requested >= ctx['intentEpoch'] - skew and verified >= requested - skew and completed >= verified - skew
+            and max(requested, verified, completed) <= now_ + skew)
+
+
+def pod_summary(pod, state='ok'):
+    if state == 'error':
+        return 'unreadable'
     if pod is None:
         return 'absent'
     status = pod.get('status') or {}
@@ -398,12 +500,16 @@ def pod_summary(pod):
                              ' deleting' if pod['metadata'].get('deletionTimestamp') else '')
 
 
-def g3(ctx, row, pod, runner_pods):
+def g3(ctx, row, pod_state, pod, list_state, items):
     """(done, pending reasons, definitive problems)."""
     pending, definitive = [], []
     pod5, b0, b1 = ctx['pod5'], ctx['b0'], ctx['b1']
-    if pod is not None and pod['metadata'].get('uid') != pod5:
-        definitive.append('a replacement runner Pod %s' % pod['metadata'].get('uid'))
+    if pod_state == 'ok' and (pod.get('metadata') or {}).get('uid') != pod5:
+        definitive.append('a replacement runner Pod %s' % (pod.get('metadata') or {}).get('uid'))
+    for item in items or []:
+        meta = item.get('metadata') or {} if isinstance(item, dict) else {}
+        if meta.get('name') == POD_NAME and meta.get('uid') != pod5:
+            definitive.append('a replacement runner Pod %s in the list' % meta.get('uid'))
     if row is None:
         return False, pending + ['database not readable'], definitive
     reg = row.get('registry') or {}
@@ -428,9 +534,8 @@ def g3(ctx, row, pod, runner_pods):
         elif (set(receipt) != RECEIPT_KEYS or (receipt.get('stopId'), receipt.get('ownerId'), receipt.get('stateId'),
                                                 receipt.get('podUid'), receipt.get('generation'))
               != (stop.get('stopId'), OWNER, STATE, pod5, 5)
-              or not isinstance(receipt.get('terminal'), dict) or not receipt['terminal']
-              or not set(receipt['terminal']) <= {'podPhase', 'containers', 'podAbsent'}):
-            definitive.append('the v2 receipt does not match the stop row')
+              or not terminal_ok(receipt.get('terminal'))):
+            definitive.append('the v2 receipt does not match the stop row or its terminal is not terminal evidence')
         if stop.get('completed') is not True:
             pending.append('gen-5 stop not completed yet')
         else:
@@ -442,15 +547,25 @@ def g3(ctx, row, pod, runner_pods):
                   != (pod5, NODE[0], NODE[1], b1)
                   or (stop.get('nodeName'), stop.get('nodeUid'), stop.get('bootId')) != (NODE[0], NODE[1], b1)):
                 definitive.append('the completed proof is not pod-deleted on the recorded Node and B1')
-    if stop is not None and stop.get('completed') is True and pod is not None and pod['metadata'].get('uid') == pod5:
+            elif not times_ok(ctx, stop, proof):
+                definitive.append('the stop/proof times are not a valid chain after the intent')
+    if stop is not None and stop.get('completed') is True and pod_state == 'ok' and \
+            (pod.get('metadata') or {}).get('uid') == pod5:
         definitive.append('the stop is completed but the gen-5 Pod still exists')
     if (reg.get('phase'), reg.get('generation'), reg.get('pod'), reg.get('active'), reg.get('ambiguous')) != \
             ('idle_stopped', 5, None, 0, False):
         pending.append('registry not released yet (%s)' % reg.get('phase'))
-    if pod is not None:
-        pending.append('runner Pod still listed: %s' % pod_summary(pod))
-    if runner_pods:
-        pending.append('%d Pod(s) in %s' % (runner_pods, NS))
+    if pod_state == 'error':
+        pending.append('runner Pod GET failed (not an absence)')
+    elif pod_state == 'ok':
+        pending.append('runner Pod still there: %s' % pod_summary(pod))
+    if list_state != 'ok' or not isinstance(items, list):
+        pending.append('runner Pod list failed (not an absence)')
+    elif items:
+        pending.append('%d Pod(s) listed in %s' % (len(items), NS))
+        if pod_state == 'absent' and any(((i.get('metadata') or {}).get('name') == POD_NAME) for i in items
+                                         if isinstance(i, dict)):
+            pending.append('the GET says absent but the list still has %s' % POD_NAME)
     if row.get('allOpenStops') != 0:
         pending.append('%s open stop(s)' % row.get('allOpenStops'))
     if row.get('conversations') != ctx['conversations']:
@@ -543,12 +658,14 @@ def main():
     code, message, ev, passed = 0, '', None, False
     try:
         try:
+            take_lock()
             chain, ctx = precheck()
             ev = os.path.join(EVIDENCE, 'w6-observe-' + time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()))
             os.mkdir(ev, 0o700)
             say('evidence: %s' % ev)
             record(ev, started=now(), chain=chain, context=ctx, waitSeconds=WAIT)
             deadline = time.monotonic() + WAIT
+            DEADLINE.append(deadline)
             seen_pod, last, g2_at = [], {}, None
             while True:
                 done2, pending2, facts = g2(ctx)
@@ -561,16 +678,16 @@ def main():
                 # The database first: a completed proof means the Pod was already gone, so a later read of the same
                 # UID is a real inconsistency, not a race between the two reads.
                 row = db_row() if done2 else None
-                pod = kjson(['-n', NS, 'get', 'pod', POD_NAME, '--ignore-not-found']) if done2 else None
-                listed = (kjson(['-n', NS, 'get', 'pods']) or {}).get('items') if done2 else None
-                runner_pods = len([p for p in listed or [] if p['metadata'].get('name') != POD_NAME])
-                summary = pod_summary(pod) if done2 else 'not read'
+                pod_state, pod = kread(['-n', NS, 'get', 'pod', POD_NAME, '--ignore-not-found']) if done2 else ('error', None)
+                list_state, listed = kread(['-n', NS, 'get', 'pods']) if done2 else ('error', None)
+                items = listed.get('items') if list_state == 'ok' else None
+                summary = pod_summary(pod, pod_state) if done2 else 'not read'
                 if done2 and (not seen_pod or seen_pod[-1][1] != summary) and len(seen_pod) < 40:
                     seen_pod.append((now(), summary))
                     say('pod %s at %s' % (summary, seen_pod[-1][0]))
                     record(ev, podSeen=seen_pod)
                 if done2:
-                    done3, pending3, definitive = g3(ctx, row, pod, runner_pods)
+                    done3, pending3, definitive = g3(ctx, row, pod_state, pod, list_state, items)
                     wpending, wseen = workloads()
                 else:
                     done3, pending3, definitive, wpending, wseen = False, [], [], ['G2 first'], {}
@@ -578,12 +695,16 @@ def main():
                 if definitive:
                     record(ev, stopRow=(row or {}).get('stop5'), registry=(row or {}).get('registry'))
                     raise Stop(6, 'definitive mismatch: %s' % '; '.join(definitive))
-                if done2 and done3 and not wpending:
+                late = time.monotonic() > deadline
+                if done2 and done3 and not wpending and not late:
                     break
-                if time.monotonic() >= deadline:
+                if late or time.monotonic() >= deadline:
+                    if done2 and done3 and not wpending:
+                        last = {'late': 'every condition held, but the reads returned after the window'}
                     record(ev, last=last, stopRow=(row or {}).get('stop5'), registry=(row or {}).get('registry'))
                     raise Stop(5, 'not reached within %d s: %s' % (WAIT, json.dumps(last, sort_keys=True)))
                 time.sleep(min(POLL, max(0.2, deadline - time.monotonic())))
+            DEADLINE.clear()  # from here on: grace for the evidence and the final record, not the gate window
             stop = row['stop5']
             reg = row['registry']
             fence = {k: reg.get(k) for k in ('state', 'phase', 'generation', 'revision', 'pod', 'active', 'ambiguous')}

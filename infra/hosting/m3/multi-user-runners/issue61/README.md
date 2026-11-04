@@ -28,7 +28,7 @@ The images are built on the host from `5e73bc4` (`--platform linux/amd64`) and m
 | W4 entry | `w4-enter.py` | user | One 1-hour session for …5804, one runner POST, the controller-created Pod proved on the #61 images; session revoked |
 | W4 observe | `w4-observe.py <evidence dir> [--wait]` | back | Nothing. Read-only R1 verdict until the deadline (Pod start + 60 min) |
 | W5 | `w5-rotation.py [--preflight]` | user | Nothing (read-only): controller SA token rotation |
-| W6 | `w6-enter.py`, `w6-reboot.py`, `w6-observe.py` | user (4 commands; step 2 has its own go) | Two runner entries (gen 4→5, 5→6) and one guest reboot; see the W6 section |
+| W6 | `w6-enter.py`, `w6-reboot.py`, `w6-observe.py` | user (4 commands; steps 1 and 2 relayed together) | Two runner entries (gen 4→5, 5→6) and one guest reboot; see the W6 section |
 | W7 | (next draft) | back | Nothing: final read-only postcheck |
 
 ## Files installed next to the scripts
@@ -284,13 +284,13 @@ PM decides.
 
 | step | script | user go | what changes |
 |---|---|---|---|
-| 1 | `w6-enter.py` (enter1) | step 1 go | one 1-hour session row (revoked), one runner POST: gen 4 → 5 |
-| 2 | `w6-reboot.py` | **its own explicit go**, relayed only after step 1 returned rc 0 | evidence files, then one `systemctl reboot` |
+| 1 | `w6-enter.py` (enter1) | relayed together with step 2 (user decision: the KVM guest may be handled freely) | one 1-hour session row (revoked), one runner POST: gen 4 → 5 |
+| 2 | `w6-reboot.py` | run only after step 1 returned rc 0, before its printed bound | evidence files, then one `systemctl reboot` |
 | 3 | `w6-observe.py` | after ssh answers again | nothing (read-only, at most 30 min) |
 | 4 | `w6-enter.py` (enter2) | step 4 go | one session row (revoked), one runner POST: gen 5 → 6 |
 | W7 | (read-only, separate draft) | back | nothing |
 
-**Risk text for step 2 (PM relays this verbatim with the reboot go):**
+**Risk text for step 2 (PM relays this verbatim with steps 1 and 2):**
 
 > Step 2 reboots the dev VM guest once. If the issue16 restore fails at boot, k3s does not start: there is no bypass,
 > and recovery is an operator reconciliation outside W6. If ssh does not come back, recovery is host-side, by the
@@ -308,9 +308,31 @@ takes about 2–6 min.
 
 | script | rc |
 |---|---|
-| `w6-enter.py` | 0 entered, health usable or `auth_revoked` · 3 precheck refused · 4 session not created · 5 POST error · 6 POST outcome unknown · 7 Pod not proved within 300 s · 8 instance/image/volume/identity proof failed · 9 another concrete failure · 10 still `not_configured` after 300 s · 11 health never observed · 70 session revoke not proved · 130 interrupted before the POST |
-| `w6-reboot.py` | 0 reboot requested · 3 precheck refused · 4 evidence not saved, **no reboot** · 5 final look changed, **no reboot** · 7 `systemctl reboot` failed (not repeated) · 130 interrupted before the final look, **no reboot** |
+| `w6-enter.py` | 0 entered, health usable or `auth_revoked` · 3 precheck refused · 4 session not created · 5 POST error · 6 POST outcome unknown · 7 Pod not proved within 300 s · 8 instance/image/volume/identity proof failed · 9 another concrete failure · 10 still `not_configured` after 300 s · 11 health not observed inside the window (probe failures, or a read that returned after it) · 12 conversation snapshot changed during the entry · 70 session revoke not proved · 72 proved, but the final record not written · 130 interrupted before the POST |
+| `w6-reboot.py` | 0 reboot requested · 3 precheck refused · 4 evidence not saved, **no reboot** · 5 final look changed, **no reboot** · 7 `systemctl reboot` failed (not repeated) · 8 reboot requested, but the call result or the final record not written (not repeated) · 130 interrupted before the final look, **no reboot** |
 | `w6-observe.py` | 0 G2+G3 proved · 3 precheck refused (nothing written; also when the boot is still B0) · 5 not reached in 30 min · 6 definitive mismatch (v1/v3/v4 or malformed receipt, another Pod UID, stop before the intent, proof on B0 or another Node, more than one new stop, replacement Pod, registry past gen 5) · 9 proved but evidence not saved · 130 interrupted |
+
+**One step at a time.** Every W6 script takes the root-only `/root/issue61/w6.lock` (flock, non-blocking) before it
+reads the evidence directory, and holds it to its final record. A second W6 process gets rc 3 before any session,
+POST, evidence, intent or reboot call. The evidence directory, created under the lock, is the step's permit and is
+never reused, whatever the outcome.
+
+**Round 2 semantics (review round 1).**
+- **Conversations.** enter fails with rc 12 if the conversation snapshot after the entry differs from the one
+  before it. The reboot refuses unless the current snapshot equals both enter1 snapshots, before and after.
+  enter2 refuses unless it equals the snapshot the chain recorded.
+- **Final look.** The reboot's final look, after the evidence export, repeats the login/reclaim process scan and
+  the Pod/namespace overview (#64 paid namespaces, unknown namespaces, other runner Pods).
+- **Pod lookups in observe are three-way:** ok, explicit absence, or failure. G3 needs a successful single GET
+  that says absent AND a successful list with no Pod at all.
+- **Terminal and time checks in observe.**
+  - The v2 `terminal` must be content that `terminal_evidence()` can produce.
+  - Times must chain: requested ≥ intent; verifiedAt ≥ requested; completed ≥ verifiedAt; none in the future.
+- **Deadlines.**
+  - In the Pod wait, the health poll and the observe window, call timeouts and sleeps are bounded by the
+    monotonic time left.
+  - A result that returns after the window is not accepted: Pod → rc 7; health → rc 10/11; observe → rc 5.
+  - Saving evidence after a pass is grace, outside the window.
 
 **Evidence chain.** `/root/issue61/evidence/w6-{enter1,reboot,observe,enter2}-<stamp>/` (root 0700, files 0600, each
 fsynced). Each directory is created before that step's first change, so an attempt is never reused. `w6-observe`
