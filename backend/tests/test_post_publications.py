@@ -3,6 +3,7 @@ import json
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, text
@@ -18,6 +19,10 @@ from tests.test_page_chat import callback
 @pytest.fixture(scope='module', autouse=True)
 def public_schema(schema):
     migrate('0007_post_blocks')
+
+
+def moment(value):
+    return datetime.fromisoformat(value.replace('Z', '+00:00'))
 
 
 def preview(client, post):
@@ -48,7 +53,17 @@ def test_public_snapshot_edit_republish_cache_and_withdraw(client, admin):
     changed = commit(client, auth, make_draft(client, auth, current, content='Private revision'), expectedVersion=2)
     assert client.get(url).json()['textProjection'] == 'Text'
     assert preview(client, changed)['currentPublication'] == release
-    assert publish(client, auth, changed)['textProjection'] == 'Private revision'
+    assert release['updatedAt'] == release['publishedAt']
+    republished = publish(client, auth, changed)
+    assert republished['textProjection'] == 'Private revision'
+    # #80: a republish keeps the first publishedAt and stamps its own time as updatedAt.
+    assert republished['publishedAt'] == release['publishedAt']
+    assert moment(republished['updatedAt']) > moment(release['updatedAt'])
+    assert client.get(url).json()['updatedAt'] == republished['updatedAt']
+    listed = client.get('/api/public/posts').json()['items'][0]
+    assert (listed['publishedAt'], listed['updatedAt']) == (release['publishedAt'], republished['updatedAt'])
+    owned = client.get('/api/research/posts/'+post['id']).json()['publication']
+    assert (owned['publishedAt'], owned['updatedAt']) == (release['publishedAt'], republished['updatedAt'])
     assert client.get(url, headers={'If-None-Match': first.headers['etag']}).status_code == 200
     assert client.get('/api/public/posts?tag=one').json()['items'][0]['author']['name'].startswith('fixture-')
     assert 'content' not in client.get('/api/public/posts').json()['items'][0]
@@ -59,6 +74,30 @@ def test_public_snapshot_edit_republish_cache_and_withdraw(client, admin):
     assert client.get(url, headers={'If-None-Match': first.headers['etag']}).status_code == 404
     assert client.get('/api/public/posts').json()['items'] == []
     assert client.get('/api/public/post-tags').json()['items'] == []
+
+
+def test_publish_after_withdraw_starts_a_new_published_at(client, admin):
+    _, auth = identity(client, admin)
+    post = commit(client, auth, make_draft(client, auth))
+    first = publish(client, auth, post)
+    removed = client.request('DELETE', '/api/research/posts/'+post['id']+'/publication', json={'expectedVersion': 2}, headers=headers(auth))
+    assert removed.status_code == 200, removed.text
+    assert preview(client, post)['currentPublication'] is None
+    again = publish(client, auth, post)
+    assert again['id'] != first['id'] and again['publishedAt'] == again['updatedAt']
+    assert moment(again['publishedAt']) > moment(first['publishedAt'])
+
+
+def test_snapshot_without_updated_at_reads_published_at(client, admin):
+    _, auth = identity(client, admin)
+    post = commit(client, auth, make_draft(client, auth))
+    release = publish(client, auth, post)
+    with admin.begin() as db:
+        db.execute(text("UPDATE research.post_publications SET snapshot=snapshot-'updatedAt' WHERE id=:id"), {'id': release['id']})
+    shown = client.get('/api/public/posts/'+post['latestVersion']['slug']).json()
+    assert shown['updatedAt'] == shown['publishedAt'] == release['publishedAt']
+    later = commit(client, auth, make_draft(client, auth, client.get('/api/research/posts/'+post['id']).json(), content='Later'), expectedVersion=2)
+    assert publish(client, auth, later)['publishedAt'] == release['publishedAt']
 
 
 def test_preview_staleness_and_private_reference_body_never_public(client, admin):
