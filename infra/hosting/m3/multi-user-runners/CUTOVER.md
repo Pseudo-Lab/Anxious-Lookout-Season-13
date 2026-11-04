@@ -1,5 +1,10 @@
 # Issue 16 cutover — PM execution after source and operational review
 
+> **#61:** the observer/idle unit and host Pod creation described below are replaced by the
+> in-cluster `runner-controller`. For the current transition (with #63 in the same window,
+> no Pending/Running runner Pod, binding CAS) use [rollout/README.md](rollout/README.md)
+> "In-cluster runner-controller (#61)". Sections below remain the #16/#18 record.
+
 Use [rollout/README.md](rollout/README.md) for the #18 values schema, offline renderer,
 pool API patch, RBAC replacement, quota, worker units and shared-mount/restore setup.
 This supplies the installation artifacts referenced below; it does not execute D4.

@@ -17,6 +17,15 @@ from runner.lifecycle import (State, Phase, Fence, Completion, Refused, require,
                               admitted_request, idle_stop, stopped, fenced)
 
 
+CHANNEL = 'runner_runtime'
+
+
+def notify(db, owner):
+    """Wake the runner controller when this transaction commits (#61). Delivered only on commit;
+    the controller also rescans, so a lost notification only delays work."""
+    db.execute(text('SELECT pg_notify(:channel, :owner)'), {'channel': CHANNEL, 'owner': str(owner)})
+
+
 def atomic(method):
     @wraps(method)
     def run(self, *args, **kwargs):
@@ -126,6 +135,7 @@ class Registry:
         if not replayed:
             self.db.execute(text('''INSERT INTO runner_runtime.entry_receipts VALUES(:owner,:key,:generation,:now)'''),
                             {'owner': owner, 'key': key, 'generation': result.generation, 'now': now})
+        notify(self.db, owner)
         return result, replayed
 
     @atomic

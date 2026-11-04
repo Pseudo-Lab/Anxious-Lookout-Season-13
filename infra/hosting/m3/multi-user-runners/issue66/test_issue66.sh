@@ -1,9 +1,9 @@
 #!/bin/sh
 # Mock harness for the #66 node scripts. Docker only, never on a real node:
-#   docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" -v "$PWD/backend:/backend:ro" alpine:3.20 \
-#     sh /m3/multi-user-runners/issue66/test_issue66.sh
-# Stubs replace kubectl (k3s), docker, systemctl, findmnt, losetup and umount. observer.sh is rendered by the
-# real backend/ops/runner_rollout.py. Credential fixtures hold SECRET markers that must never reach output.
+#   docker run --rm -v "$PWD/infra/hosting/m3:/m3:ro" alpine:3.20 sh /m3/multi-user-runners/issue66/test_issue66.sh
+# Stubs replace kubectl (k3s), docker, systemctl, findmnt, losetup and umount. controller.sh/observer.sh are the
+# real backend/ops/runner_rollout.py output at the #66 merge, kept in mock/*.sh.789faff.
+# Credential fixtures hold SECRET markers that must never reach output.
 set -u
 set -a  # prefix assignments before t must reach the script under test
 apk add -q python3 coreutils findutils grep sed >/dev/null 2>&1 || { echo 'apk failed'; exit 1; }
@@ -35,16 +35,9 @@ B=/root/bin
 W=/root/issue66/decommission
 pass=0; failed=0
 
-render() { # <role>.sh exactly as runner_rollout.render writes it, on image $1 (role $2, default observer)
-  python3 -I - "$1" "${2:-observer}" <<'PY'
-import sys
-sys.path.insert(0, '/backend')
-from ops.runner_rollout import docker, shell_quote
-v = {'criSocket': '/run/k3s/containerd/containerd.sock', 'crictl': '/usr/local/bin/crictl', 'provisionerImageId': sys.argv[1],
-     'maxPods': 3, 'idleSeconds': 1800, 'nativeSizeGiB': 5, 'controlSizeGiB': 1,
-     'allowlist': ['3cb453bf-d870-40dc-b7e1-3a58aa0cbaf2']}
-sys.stdout.write('#!/bin/sh\nset -eu\nexec ' + ' '.join(shell_quote(arg) for arg in docker(v, sys.argv[2])) + '\n')
-PY
+render() { # <role>.sh as runner_rollout.render wrote it at the #66 merge (789faff), on image $1 (role $2, default
+  # observer). Frozen in mock/: #61 replaces the host observer, so the current renderer no longer writes this command.
+  sed "s/sha256:a\{64\}/$1/" "$P/mock/${2:-observer}.sh.789faff"
 }
 
 build() { # $1: legacy (owner stopping, Pod Running) or stopped (idle_stopped, Pod gone)
