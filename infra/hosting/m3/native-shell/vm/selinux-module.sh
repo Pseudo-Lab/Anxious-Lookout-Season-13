@@ -47,9 +47,15 @@ stored_sha() {  # SHA-256 of the stored module: libsemanage keeps the .pp bzip2-
   h=$(python3 -I -c 'import bz2, hashlib, sys; print(hashlib.sha256(bz2.decompress(open(sys.argv[1], "rb").read())).hexdigest())' "$STORE/hll" 2>/dev/null) || return 1
   [ ${#h} = 64 ] || return 1; echo "$h"
 }
+entries_of() {  # `semodule -lfull` lines are "<priority> <name> <kind> [disabled]": the entries named $NAME,
+  # one "<priority>[ disabled]" per line, matched on the name field only (no substring or regex on the line)
+  printf '%s\n' "$1" | awk -v n="$NAME" '$2 == n { print $1 (NF > 3 ? " " $4 : "") }'
+}
 record() {  # $1 label: module list, stored module, loaded policy (hash + sidecar copy)
   l=$(semodule -lfull 2>/dev/null) || { note "$1: semodule -lfull failed"; return 1; }
-  say "$1 modules with $NAME: $(printf '%s\n' "$l" | grep -E "(^| )$NAME( |\$)" || echo none)"
+  [ -n "$l" ] || { note "$1: semodule -lfull printed nothing"; return 1; }
+  en=$(entries_of "$l")
+  say "$1 entries named $NAME: [$(printf '%s' "$en" | tr '\n' ';')]"
   say "$1 module count $(printf '%s\n' "$l" | grep -c .)"
   st=$(stored_sha) || { note "$1: stored module lookup failed"; return 1; }
   say "$1 stored $NAME $st"
@@ -57,7 +63,7 @@ record() {  # $1 label: module list, stored module, loaded policy (hash + sideca
   cat /sys/fs/selinux/policy > "$lp" 2>/dev/null || { note "$1: loaded policy copy"; return 1; }
   h=$(sha256sum "$lp" 2>/dev/null) && h=${h%% *} && [ ${#h} = 64 ] || { note "$1: loaded policy hash"; return 1; }
   say "$1 loaded policy sha256 $h (copy $lp)"
-  eval "${1}_stored=\$st"
+  eval "${1}_stored=\$st; ${1}_entries=\$en"
 }
 note() { say "evidence incomplete: $1"; logfail=1; }
 
@@ -81,7 +87,14 @@ case "$action:$before_stored" in
   remove:"$PP1_SHA"|remove:"$PP2_SHA") ;;
   remove:*) refuse "the installed $NAME is not one of this script's versions (stored $before_stored)";;
 esac
-semodule -lfull 2>/dev/null | grep -E "(^| )$NAME( |\$)" | grep -qv '^400 ' && refuse "$NAME exists at a priority other than 400"
+# The entries from the recorded list (not a second query): install needs none; upgrade and remove need exactly
+# one, at priority 400 and enabled. Anything else (another priority, a disabled copy, several) refuses.
+case "$action:$before_entries" in
+  install:) ;;
+  install:*) refuse "entries named $NAME exist: $before_entries";;
+  upgrade:400|remove:400) ;;
+  *) refuse "entries named $NAME are not exactly one enabled at priority 400: [$before_entries]";;
+esac
 
 changing
 attempted=1
@@ -97,7 +110,7 @@ case "$action" in
   remove) [ "$after_stored" = absent ] && done_change "module $NAME removed";;
 esac
 [ "$s" = 0 ] || finish 5
-case "$action:$after_stored" in
-  install:"$PP1_SHA"|upgrade:"$PP2_SHA"|remove:absent) finish 0;;
-  *) say "after-state does not match: stored $after_stored"; finish 8;;
+case "$action:$after_stored:$after_entries" in
+  install:"$PP1_SHA":400|upgrade:"$PP2_SHA":400|remove:absent:) finish 0;;
+  *) say "after-state does not match: stored $after_stored entries [$after_entries]"; finish 8;;
 esac

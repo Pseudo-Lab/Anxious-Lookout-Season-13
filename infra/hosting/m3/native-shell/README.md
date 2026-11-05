@@ -632,17 +632,22 @@ reproducible: version 1 `68270c77…f6e6`, version 2 `3f4fc25c…beea`. `vm/seli
 **Not allowed: a fresh `/proc` in the sandbox.** When Codex's preflight cannot mount a fresh procfs (`Can't mount
 proc … Operation not permitted` or `Permission denied`), it reruns the sandbox without `/proc`
 (`linux_run_main.rs`). Why it cannot, kept apart:
-- **Measured (local Docker, AppArmor, 2026-11-05):** bubblewrap replaying the preflight gets `Can't mount proc on
-  /newroot/proc: Operation not permitted` (EPERM) and succeeds without `--proc`. The container's `/proc` has
-  paths mounted over it (`/proc/kcore`, `/proc/keys`, `/proc/sys`, … — the runtime's masked paths), and the
-  kernel refuses a new procfs in a user namespace while that is so. No SELinux there: the kernel refuses.
-- **Recorded in V3b (development VM, `container_t`):** the same replay's error text and whether a proc mount AVC
-  appears in the same time window (EACCES with an AVC would mean SELinux refused first).
+- **Measured (local Docker, AppArmor, no SELinux, 2026-11-05):** bubblewrap replaying the preflight gets
+  `Can't mount proc on /newroot/proc: Operation not permitted` (EPERM) and succeeds without `--proc`. The
+  container's `/proc` has paths mounted over it (`/proc/kcore`, `/proc/keys`, `/proc/sys`, … — the runtime's
+  masked paths).
+- **Inference, not shown by the above:** that the kernel refuses a new procfs in a user namespace because of those
+  overmounts. The errno and the overmount list are facts; the specific kernel check is not observed.
+- **To be recorded in V3b (development VM, `container_t`):** the same replay's exit code and error text, the
+  overmount list, and the AVCs in the same time window. An AVC tied to that time would show SELinux refused; an
+  absent AVC does not by itself rule out other refusals.
 - **Prediction, not measured:** that allowing `proc_t:filesystem mount` in SELinux would still leave the sandbox
-  without `/proc` on the node, because the same kernel check applies to the Pod's masked `/proc`. Not tested:
-  opening that rule is outside the user's decision. The
-mask, read and write limits are the same in that run (measured locally and in V3b/V3c). Each command's preflight
-leaves one proc mount denial in the audit log. Owner-visible effect of a sandbox without `/proc` (local
+  without `/proc` on the node. Not tested: opening that rule is outside the user's decision.
+
+In the fallback run (no `/proc`) the masked paths stay unreadable and unwritable and writes stay inside the
+workspace: measured locally (2026-11-05); on the development VM it is a V3b/V3c result, not yet measured. Whether
+the preflight leaves a proc mount AVC per command, and how many, is a V3b result (not yet measured).
+Owner-visible effect of a sandbox without `/proc` (local
 measurement 2026-11-05, the same fallback): `/dev/stderr`, `/dev/stdin`, `/dev/fd/*` and bash process
 substitution fail, and `/proc/self`, `/proc/cpuinfo` and `/proc/meminfo` are absent; `nproc`, Python's
 `subprocess(close_fds=True)`, `multiprocessing` and `os.cpu_count()` work; `ps` and `free` are not in the image.

@@ -40,8 +40,10 @@
 # atomically before the first change. rc: 0 measured, evidence complete, cleaned up (a failed bwrap or thread/start
 # is a result, not an rc); 3 refused, nothing changed; 5 a change failed (what remains is listed); 7 the Pod's
 # deletion or absence is unconfirmed, or a Pod of that name is not this run's (the delete carries the UID as a
-# precondition); 8 the image chain did not match;
-# 9 evidence incomplete after a change; 130 interrupted.
+# precondition); 6 the host observation found the sandboxed process sharing a namespace with the container;
+# 8 the image chain did not match; 9 evidence incomplete after a change (an observation lookup or exec failure
+# included); 130 interrupted. A probe whose sandbox did not start is recorded as "host observation verdict:
+# not-run-sandbox-blocked", not as incomplete: read the AVC, not the rc alone.
 set -u
 umask 077
 here=$(dirname "$0")
@@ -57,9 +59,11 @@ POD=v3-selinux
 POD_JSON="$here/v3-pod.json"
 POD_JSON_SHA=564d176b316604c9ab5d12122b2db74dd5a4bc407d7833d98ddb3a96482c80e2
 PROBE="$here/v3-probe.py"
-PROBE_SHA=f8cd5964022ee8fbc967d7c57bc094ab76a1d02a8a7c6101ef992a85d8cd966d
+PROBE_SHA=5bc7f07540668cb4bceeed2708eb6fcc1e3ed613e9268a7a1c2a5bda1b25ee69
 SECCOMP_FILE=$SECCOMP_DIR/anxious-runner-userns-v1.json
 SECCOMP_SHA=9a6594419eae4089e737c787597d2ed4950fd7e1031e371f490d5b2c935dff78
+PP1_SHA=68270c7727d8fab64bf990d0d6769e412db205a0f386e6f4af6bb2d80175f6e6   # selinux-module.sh version 1
+PP2_SHA=3f4fc25cae5bfdceb86e1026f3ffbc72f1194c1a8e7cb75178e968dd159dbeea   # selinux-module.sh version 2
 READY_S=180        # kubectl wait --timeout; the process gets READY_S + 15
 PROBE_S=300
 CLEANUP_S=150      # whole deletion and absence check, one deadline (each call limited to the time left, +1 s)
@@ -174,9 +178,18 @@ start_evidence "$STAGE"
 RUN=${log##*/$STAGE-}; RUN=${RUN%.txt}
 say "run $RUN"
 # The SELinux module as installed now (read-only): name and priority, and the loaded policy's hash.
-mods=$(semodule -lfull 2>/dev/null | grep -E '(^| )anxious_runner_bwrap( |$)') || mods='none'
-say "selinux module: $mods"
-lp=$(sha256sum /sys/fs/selinux/policy 2>/dev/null) && say "loaded policy sha256 ${lp%% *}" || say 'loaded policy sha256 LOOKUP FAILED'
+# The module this stage needs, installed by selinux-module.sh: exactly one enabled entry at priority 400, and the
+# stored module (hll, bzip2 of the .pp) equal to the stage's pinned .pp. Any lookup failure refuses.
+case "$STAGE" in v3b) MOD_SHA=$PP1_SHA;; v3c) MOD_SHA=$PP2_SHA;; esac
+ml=$(semodule -lfull 2>/dev/null) && [ -n "$ml" ] || refuse 'semodule -lfull'
+men=$(printf '%s\n' "$ml" | awk -v n=anxious_runner_bwrap '$2 == n { print $1 (NF > 3 ? " " $4 : "") }')
+[ "$men" = 400 ] || refuse "module anxious_runner_bwrap entries [$men] are not exactly one enabled at priority 400"
+mst=$(python3 -I -c 'import bz2, hashlib, sys; print(hashlib.sha256(bz2.decompress(open(sys.argv[1], "rb").read())).hexdigest())' \
+  /var/lib/selinux/targeted/active/modules/400/anxious_runner_bwrap/hll 2>/dev/null) && [ ${#mst} = 64 ] || refuse 'stored module lookup'
+[ "$mst" = "$MOD_SHA" ] || refuse "stored module $mst is not the $STAGE version $MOD_SHA"
+say "selinux module anxious_runner_bwrap: priority 400, enabled, stored $mst ($STAGE version)"
+lp=$(sha256sum /sys/fs/selinux/policy 2>/dev/null) && lp=${lp%% *} && [ ${#lp} = 64 ] || refuse 'loaded policy hash'
+say "loaded policy sha256 $lp"
 probefile=$(sidecar probe) || refuse 'sidecar probe'
 avcfile=$(sidecar avc) || refuse 'sidecar avc'
 
@@ -272,11 +285,11 @@ say "pod ready rc $ready"
 podinfo=$(k -n "$NS" get pod "$POD" -o jsonpath='uid={.metadata.uid} phase={.status.phase} imageID={.status.containerStatuses[0].imageID} containerID={.status.containerStatuses[0].containerID} restarts={.status.containerStatuses[0].restartCount}' </dev/null 2>&1) \
   || note_incomplete 'pod status lookup'
 say "pod $podinfo"
-chain=ok
+image_chain=ok
 case "$podinfo" in
   *"imageID=$DIGEST_REF "*) say "chain pod imageID = digest reference $DIGEST_REF";;
   *"imageID=$HOST_ID "*) say "chain pod imageID = host/CRI id $HOST_ID";;
-  *) chain=mismatch; say "chain pod imageID names neither $DIGEST nor $HOST_ID";;
+  *) image_chain=mismatch; say "chain pod imageID names neither $DIGEST nor $HOST_ID";;
 esac
 if [ "$ready" = 0 ]; then
   # Volumes as Kubernetes made them (nothing prepares them): owner, mode, and whether UID 10001 can write.
@@ -310,55 +323,75 @@ $summary
 EOF_SUMMARY
     # Host observation (the sandbox has no /proc of its own when Codex falls back): one sandboxed `sleep 20`
     # started through the same `codex sandbox` path, found by its nonce handshake, the container's cgroup and a
-    # bwrap ancestor. Namespaces are expected to differ from the container's (the claim); the SELinux label is
-    # recorded, not judged (container_t with the same MCS is expected).
-    nonce=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
-    case "$pid" in
-      ''|*[!0-9]*) note_incomplete 'host observation: no container pid';;
-      *)
-        cg=$(sed -n 's/^0:://p' "/proc/$pid/cgroup" 2>/dev/null)
-        kt 60 -n "$NS" exec "$POD" -- env HOME=/state/home CODEX_HOME=/state/codex /usr/local/bin/codex sandbox -P native \
-          -C /state/workspace -- sh -c 'echo "$1" > /state/workspace/v3-obs-ready; exec sleep 20' obs "$nonce" \
-          </dev/null >/dev/null 2>&1 &
-        obs_job=$!
-        obs_deadline=$(( $(date +%s) + 30 )); r=
-        while [ "$(date +%s)" -lt "$obs_deadline" ]; do
-          r=$(kt 10 -n "$NS" exec "$POD" -- cat /state/workspace/v3-obs-ready </dev/null 2>/dev/null)
-          [ "$r" = "$nonce" ] && break
-          sleep 1
-        done
-        if [ "$r" != "$nonce" ]; then
-          note_incomplete 'host observation: the sandboxed sleep did not report ready within 30 s'
-        else
-          found=; found_chain=
-          for sp in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do
-            [ "$(cat "/proc/$sp/comm" 2>/dev/null)" = sleep ] || continue
-            [ "$(tr '\0' ' ' < "/proc/$sp/cmdline" 2>/dev/null)" = 'sleep 20 ' ] || continue
-            a=$sp; chain=
-            while [ -n "$a" ] && [ "$a" != 1 ] && [ "$a" != "$pid" ]; do
-              chain="$chain $(cat "/proc/$a/comm" 2>/dev/null)"; a=$(awk '{print $4}' "/proc/$a/stat" 2>/dev/null)
-            done
-            case "$chain" in *bwrap*) found="$found $sp"; found_chain=$chain;; esac
+    # bwrap ancestor. Gate: its user, pid, mnt and net namespaces differ from the container's (SAME = verdict FAIL,
+    # rc 6). Recorded, not judged: its SELinux label (container_t with the same MCS is expected) and start time.
+    # Verdicts: pass, FAIL, incomplete (a lookup or the exec failed: rc 9), not-run-sandbox-blocked (the probe's
+    # sandbox did not start, an expected block under a missing rule: the AVC is the result, not a collection fault).
+    obs=pass
+    if ! printf '%s\n' "$pout" | grep -qx 'sandbox_rc 0'; then
+      obs=not-run-sandbox-blocked
+    else
+      nonce=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+      case "$pid" in
+        ''|*[!0-9]*) note_incomplete 'host observation: no container pid'; obs=incomplete;;
+        *)
+          cg=$(sed -n 's/^0:://p' "/proc/$pid/cgroup" 2>/dev/null)
+          [ -n "$cg" ] || { note_incomplete 'host observation: container cgroup'; obs=incomplete; }
+          kt 60 -n "$NS" exec "$POD" -- env HOME=/state/home CODEX_HOME=/state/codex /usr/local/bin/codex sandbox -P native \
+            -C /state/workspace -- sh -c 'echo "$1" > /state/workspace/v3-obs-ready; exec sleep 20' obs "$nonce" \
+            </dev/null >/dev/null 2>&1 &
+          obs_job=$!
+          obs_deadline=$(( $(date +%s) + 30 )); r=
+          while [ "$(date +%s)" -lt "$obs_deadline" ]; do
+            r=$(kt 10 -n "$NS" exec "$POD" -- cat /state/workspace/v3-obs-ready </dev/null 2>/dev/null)
+            [ "$r" = "$nonce" ] && break
+            sleep 1
           done
-          count=$(echo $found | wc -w)
-          if [ "$count" != 1 ]; then
-            note_incomplete "host observation: $count matching sandboxed sleep processes (want 1):$found"
-          else
-            sp=$(echo $found)
-            for n in user pid mnt net; do
-              a=$(readlink "/proc/$pid/ns/$n" 2>/dev/null); b=$(readlink "/proc/$sp/ns/$n" 2>/dev/null)
-              if [ -n "$a" ] && [ -n "$b" ]; then
-                [ "$a" != "$b" ] && v=differs || v=SAME
-              else
-                v=UNKNOWN; note_incomplete "host observation: ns $n lookup"
-              fi
-              say "host observation ns $n container=$a sandbox=$b $v"
+          if [ "$r" != "$nonce" ]; then
+            note_incomplete 'host observation: the sandboxed sleep did not report ready within 30 s'; obs=incomplete
+          elif [ "$obs" = pass ]; then
+            found=; found_anc=
+            for sp in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do
+              [ "$(cat "/proc/$sp/comm" 2>/dev/null)" = sleep ] || continue
+              [ "$(tr '\0' ' ' < "/proc/$sp/cmdline" 2>/dev/null)" = 'sleep 20 ' ] || continue
+              a=$sp; anc=
+              while [ -n "$a" ] && [ "$a" != 1 ] && [ "$a" != "$pid" ]; do
+                anc="$anc $(cat "/proc/$a/comm" 2>/dev/null)"; a=$(awk '{print $4}' "/proc/$a/stat" 2>/dev/null)
+              done
+              case "$anc" in *bwrap*) found="$found $sp"; found_anc=$anc;; esac
             done
-            say "host observation sandbox pid $sp label $(tr -d '\0' < "/proc/$sp/attr/current" 2>/dev/null) start $(awk '{print $22}' "/proc/$sp/stat" 2>/dev/null) ancestry$found_chain"
+            count=$(echo $found | wc -w)
+            if [ "$count" != 1 ]; then
+              note_incomplete "host observation: $count matching sandboxed sleep processes (want 1):$found"; obs=incomplete
+            else
+              sp=$(echo $found); same=
+              for n in user pid mnt net; do
+                a=$(readlink "/proc/$pid/ns/$n" 2>/dev/null); b=$(readlink "/proc/$sp/ns/$n" 2>/dev/null)
+                if [ -z "$a" ] || [ -z "$b" ]; then
+                  v=UNKNOWN; note_incomplete "host observation: ns $n lookup"; obs=incomplete
+                elif [ "$a" = "$b" ]; then
+                  v=SAME; same="$same $n"
+                else
+                  v=differs
+                fi
+                say "host observation ns $n container=$a sandbox=$b $v"
+              done
+              lab=$(tr -d '\0' < "/proc/$sp/attr/current" 2>/dev/null) && [ -n "$lab" ] \
+                || { note_incomplete 'host observation: sandbox label'; obs=incomplete; }
+              st0=$(awk '{print $22}' "/proc/$sp/stat" 2>/dev/null) && [ -n "$st0" ] \
+                || { note_incomplete 'host observation: sandbox start time'; obs=incomplete; }
+              say "host observation sandbox pid $sp label ${lab:-?} start ${st0:-?} ancestry$found_anc"
+              [ -z "$same" ] || { say "host observation: namespaces shared with the container:$same"; obs=FAIL; }
+            fi
           fi
-        fi
-        wait "$obs_job" 2>/dev/null; say "host observation: sandbox exec rc $?";;
-    esac
+          wait "$obs_job" 2>/dev/null; erc=$?
+          say "host observation: sandbox exec rc $erc"
+          if [ "$erc" != 0 ] && [ "$obs" = pass ]; then
+            note_incomplete "host observation: sandbox exec rc $erc"; obs=incomplete
+          fi;;
+      esac
+    fi
+    say "host observation verdict: $obs"
   fi
 else
   desc=$(kt 30 -n "$NS" describe pod "$POD" </dev/null 2>&1); s=$?
@@ -385,5 +418,6 @@ for t in AVC USER_AVC; do
 done
 ah=$(sha256sum "$avcfile" 2>/dev/null) && ah=${ah%% *} && [ ${#ah} = 64 ] || note_incomplete 'avc sidecar hash'
 say "avc sidecar sha256 ${ah:-?}"
-[ "$chain" = ok ] || end_run 8
+[ "$image_chain" = ok ] || end_run 8
+[ "${obs:-not-run}" = FAIL ] && end_run 6
 end_run 0

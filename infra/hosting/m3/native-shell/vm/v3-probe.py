@@ -161,10 +161,10 @@ for path in (os.path.join(home, 'v3-mask-write'), '/control/v3-mask-write'):
 line('t', 'functions_done %.3f' % time.time())
 
 # 2c. Why the sandbox has no /proc: Codex's preflight is silent, so replay it with bubblewrap directly (same
-# namespaces, a minimal root, `--proc /proc`), once with and once without `--proc`. bwrap's own error text tells
-# a kernel refusal (EPERM, "Operation not permitted": a new procfs in a user namespace is refused while the
-# container's /proc has paths mounted over it) from an SELinux one (EACCES, "Permission denied", with an AVC in the
-# same time window). The container's /proc overmounts are listed. Nothing here opens a rule.
+# namespaces, a minimal root, `--proc /proc`), once with and once without `--proc`. Recorded as facts: bwrap's
+# exit code and error text (errno), the container's /proc overmounts, and (by the script) the AVCs in the same
+# time window. Which kernel or policy check refused is an inference from those, not shown by them: an absent AVC
+# does not rule out other refusals. Nothing here opens a rule.
 BWRAP = ['bwrap', '--unshare-user', '--unshare-pid', '--unshare-ipc', '--unshare-net', '--tmpfs', '/', '--dev', '/dev',
          '--ro-bind', '/usr', '/usr', '--ro-bind', '/bin', '/bin', '--ro-bind', '/lib', '/lib', '--ro-bind', '/lib64', '/lib64']
 line('t', 'proc_replay_start %.3f' % time.time())

@@ -13,7 +13,7 @@ out=${1:?output dir}
 mkdir -p "$out/v1" "$out/v2"
 cp "$here/anxious_runner_bwrap-1.te" "$out/v1/anxious_runner_bwrap.te"
 cp "$here/anxious_runner_bwrap-2.te" "$out/v2/anxious_runner_bwrap.te"
-docker run --rm --network host -v "$out:/m" oraclelinux:9 sh -c '
+docker run --rm --network host -v "$out:/m" oraclelinux:9 sh -ec '
   dnf -q -y install checkpolicy policycoreutils >/dev/null 2>&1
   rpm -q checkpolicy libsepol policycoreutils
   for v in v1 v2; do
