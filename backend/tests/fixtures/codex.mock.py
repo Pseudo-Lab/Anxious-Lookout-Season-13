@@ -17,12 +17,15 @@ observed = json.loads(trace.read_text()) if trace.exists() else []
 
 # #68: what pinned Codex reports for the image's /etc/codex files (runner/native_policy.py checks it).
 ROOT = path.parent.parent
+# Kept equal to it by config_tests/test_codex_fixture_policy.py.
 PROFILE = {':minimal': 'read', ':workspace_roots': {'.': 'write'}, '/control': 'deny', '/run/codex-broker': 'deny',
-           str(ROOT / 'codex'): 'deny', str(ROOT / 'home'): 'deny'}
-SYSTEM = {'default_permissions': 'native', 'approvals_reviewer': 'user',
+           str(ROOT / 'home'): 'deny'}
+SYSTEM = {'default_permissions': 'native', 'approvals_reviewer': 'user', 'agents': {'enabled': False},
+          'shell_environment_policy': {'set': {'HOME': '/usr/local/share/anxious-shell-home'}},
           'permissions': {'native': {'filesystem': PROFILE}}}
 REQUIREMENTS = {'allowedApprovalPolicies': ['untrusted'], 'allowedApprovalsReviewers': ['user'],
-                'featureRequirements': {'unified_exec': False}}
+                'featureRequirements': {'unified_exec': False, 'multi_agent_v2': False, 'view_image': False,
+                                        'goals': False}}
 THREAD_POLICY = {'approvalPolicy': 'untrusted', 'approvalsReviewer': 'user', 'activePermissionProfile': {'id': 'native'},
                  'sandbox': {'type': 'workspaceWrite', 'writableRoots': [], 'networkAccess': False}}
 
