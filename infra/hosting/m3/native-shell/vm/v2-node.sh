@@ -58,10 +58,10 @@ b_done() {
   is_file_as "$NEW_SYSCTL" "$SETTING_SHA" 'root:root 644' && ! present "$OLD_SYSCTL" && [ "$(live)" = 1 ] || return 1
   src=$(last_source) && [ "$src" = "$NEW_SYSCTL: $SETTING" ]
 }
-record_all() {  # every watched path; non-zero if any lookup failed
-  ok=0
-  for f in $WATCHED; do record_state "$f" || ok=1; done
-  return $ok
+record_all() {  # every watched path; non-zero if any lookup failed (own variable: sh has no locals)
+  rec_failed=0
+  for f in $WATCHED; do record_state "$f" || rec_failed=1; done
+  return $rec_failed
 }
 
 restore_a() {
@@ -89,16 +89,16 @@ fail_step() {  # $1 a|b, $2 reason
 on_signal() {
   trap '' INT TERM  # a second signal must not interrupt the restore
   say "interrupted in phase $phase"
-  ok=0
+  sig_failed=0  # set once, never reset: a failed restore stays failed whatever is recorded afterwards
   case "$phase" in
-    a) restore_a || ok=1;;
-    b) restore_b || ok=1;;
+    a) restore_a || sig_failed=1;;
+    b) restore_b || sig_failed=1;;
   esac
   [ "$(live)" = 1 ] || sysctl -w kernel.yama.ptrace_scope=1 >/dev/null 2>&1
   say "ptrace_scope $(live) after interrupt"
-  [ "$(live)" = 1 ] || ok=1
-  record_all || ok=1
-  [ "$ok" = 0 ] && finish 130
+  [ "$(live)" = 1 ] || sig_failed=1
+  record_all || sig_failed=1
+  [ "$sig_failed" = 0 ] && finish 130
   say 'interrupt restore NOT VERIFIED'
   finish 6
 }
