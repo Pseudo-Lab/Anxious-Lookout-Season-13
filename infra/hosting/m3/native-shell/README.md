@@ -644,17 +644,23 @@ no `container_engine_t`, `spc_t` or `container_userns_t`; no proc mount; no `don
 - With nothing else changed (same scripts, Pod and image by hash), the `.codex` remount no longer fails. Both
   standalone sandbox runs exit 0 and `thread/start` succeeds with `runtimeWorkspaceRoots ["/state/workspace"]` and
   `workspaceWrite`, `writableRoots []`, no network. The workspace marker is written.
-- Inside the sandbox (`container_t:s0:c419,c978`, UID 10001, CapEff 0, NoNewPrivs 1, seccomp filter):
+- The container process the probe runs in (read before any sandbox, outside it): `container_t:s0:c419,c978`,
+  UID 10001, CapEff 0, NoNewPrivs 1, seccomp filter. The same values are seen from the node.
+- Inside the sandbox (behaviour of commands run there; the inner UID is 10001):
   - Reads and listings of `/state/codex` (state, sessions, log, sqlite), `/state/home` and `/control` are
     denied, including through symlinks from the workspace. No credential lines are visible.
   - `HOME` and the login home are `/usr/local/share/anxious-shell-home`, bash startup files are none, and writing
     `.bashrc`, `.bash_profile` and `.profile` there is denied.
   - Writes to the masks `/state/home` and `/control` are denied, and afterwards no file exists on the host side.
-- Host observation (a sandboxed `sleep`, seen from the node): the sandbox's user, pid, mount and network
-  namespaces all differ from the container's. Its label is the container's `container_t` category pair, and its
-  ancestry is `sleep` ← `codex-linux-sandbox` ← `bwrap` ← `codex-linux-sandbox` ← `codex` ← `containerd-shim`.
-- No denial other than the proc mount (below): 9 AVCs, all `bwrap` `proc_t` `filesystem mount`, and 0 USER_AVCs.
-  No third rule is indicated.
+- Host observation (a separate sandboxed `sleep`, seen from the node): the sandbox's user, pid, mount and network
+  namespace inodes all differ from the container's. Its label is the container's `container_t` category pair, and
+  its ancestry is `sleep` ← `codex-linux-sandbox` ← `bwrap` ← `codex-linux-sandbox` ← `codex` ← `containerd-shim`.
+- The 9 AVCs collected (0 USER_AVCs) were all the `bwrap` `proc_t` `filesystem mount` denial below. This probe
+  saw no failure that points to a further rule. That is not proof that nothing else was denied: the `dontaudit`
+  rules stay, so a denial can happen without an AVC.
+- Not covered by V3c: the Pod used `emptyDir` volumes, not the real PV and broker paths. No model turn ran, and
+  concurrency, memory access and the operational load (V8) were not tested. Namespace inodes differing does not
+  stand in for those checks.
 
 `selinux/build.sh <out>` builds both with checkpolicy/libsepol 3.6 (Oracle Linux 9, as the nodes). The build is
 reproducible: version 1 `68270c77…f6e6`, version 2 `3f4fc25c…beea`. `vm/selinux-module.sh` pins these.
@@ -670,8 +676,8 @@ proc … Operation not permitted` or `Permission denied`), it reruns the sandbox
   overmounts. The errno and the overmount list are facts; the specific kernel check is not observed.
 - **Measured in V3b (development VM, `container_t`, 2026-11-05):** the same replay gets `Can't mount proc on
   /newroot/proc: Permission denied` (EACCES, not EPERM) and succeeds without `--proc`. An AVC from the same time
-  window matches it (`bwrap`, `proc_t`, `filesystem mount`). On the node, SELinux refuses the proc mount before any
-  kernel check is reached. The container's `/proc` overmounts there are `/proc/acpi`, `bus`, `fs`, `interrupts`,
+  window matches it (`bwrap`, `proc_t`, `filesystem mount`, syscall `mount` exit -13). So SELinux refuses the proc
+  mount on the node; in what order this falls relative to other kernel checks is not shown. The container's `/proc` overmounts there are `/proc/acpi`, `bus`, `fs`, `interrupts`,
   `irq`, `kcore`, `keys`, `scsi`, `sys`, `sysrq-trigger` and `timer_list`.
 - **Prediction, not measured:** that allowing `proc_t:filesystem mount` in SELinux would still leave the sandbox
   without `/proc` on the node. Not tested: opening that rule is outside the user's decision.
@@ -680,16 +686,20 @@ In the fallback run (no `/proc`) the masked paths stay unreadable and unwritable
 workspace: measured locally (2026-11-05) and on the development VM in V3c (2026-11-05, `container_t`, version
 2). V3b's `mask_after … absent` lines show nothing, because no inner command ran there.
 **Proc mount AVCs (operational effect), measured:** every AVC in V3b (7) and V3c (9) is the same `bwrap`
-`proc_t` `filesystem mount` denial, exit -13. In V3c each of the 9 comes from a different `bwrap` process, and
-their times fall one in each sandbox launch of the run:
-- standalone run 1
-- standalone run 2
-- the direct `--proc` replay
-- 5 in the `thread/start` window
-- the host-observation `sleep`
+`proc_t` `filesystem mount` denial, exit -13. In V3c the 9 come from 9 different `bwrap` pids, and their times
+fall into the run's sandbox launches as follows:
 
-The node therefore logs one AVC each time Codex starts a sandbox. The policy will not hide it: adding
-`dontaudit` is outside the user's decision. V8 records the count per turn for this section and the PR body.
+| Time window | AVCs | pid(s) | How they are matched |
+| --- | --- | --- | --- |
+| standalone run 1 | 1 | 1167445 | time and Codex-form command line |
+| standalone run 2 | 1 | 1167490 | time and Codex-form command line |
+| direct `--proc` replay | 1 | 1167573 | time and replay-form command line |
+| `thread/start` window | 5 | 1167676, 1167681, 1167688, 1167707, 1167717 | time only; which request made each launch is not recorded |
+| host-observation `sleep` | 1 | 1167820 | after the probe ended, near the observed sandbox pid 1167824; that it is this run's preflight is an inference |
+
+This run gives one AVC per launch where the match is direct. It is not shown for every kind of sandbox launch,
+and how many a turn produces is not measured. V8 records the count per turn for this section and the PR body. The
+policy will not hide them: adding `dontaudit` is outside the user's decision.
 Owner-visible effect of a sandbox without `/proc` (measured locally 2026-11-05 and the same on the development VM
 in V3c): `/dev/stderr`, `/dev/stdin`, `/dev/fd/*` and bash process substitution fail, and `/proc/self`,
 `/proc/cpuinfo` and `/proc/meminfo` are absent; `nproc`, Python's `subprocess(close_fds=True)`, `multiprocessing`
