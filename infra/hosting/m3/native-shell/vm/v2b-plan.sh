@@ -5,7 +5,7 @@
 # 1. Refuse without kernel BTF (/sys/kernel/btf/vmlinux): a kernel change or reboot is out of scope; report.
 # 2. Snapshot the installed packages (rpm -qa raw, then sorted; each step's status checked).
 # 3. `dnf --assumeno install bpftrace`: only new installs may appear (no upgrade, downgrade, removal, reinstall,
-#    kernel* package); bpftrace must be in the plan.
+#    kernel*, selinux-policy*, container-selinux or k3s* package); bpftrace must be in the plan.
 # 4. Download exactly the planned NEVRAs into $STAGE (new directory), then check: one file per planned NEVRA and
 #    nothing else, `rpm -K` digests and signatures OK, and `rpm -ivh --test` (the exact transaction against the
 #    current rpmdb, no resolution) succeeds.
@@ -56,8 +56,10 @@ awk '/^[A-Z][A-Za-z ]*:$/{sec=$0; next} /^Transaction Summary/{exit}
 [ -s "$rows" ] || refuse 'the plan lists no package'
 outside=$(grep -Ev '^(Installing|Installing dependencies|Installing weak dependencies):\|' "$rows")
 [ -z "$outside" ] || { say "out of scope (changes existing packages): $(echo "$outside" | tr '\n' ' ')"; finish 4; }
-kern=$(cut -d'|' -f2 "$rows" | grep -E '^kernel')
-[ -z "$kern" ] || { say "out of scope (kernel packages): $(echo "$kern" | tr '\n' ' ')"; finish 4; }
+# PM scope (2026-11-05): kernel, SELinux policy and container packages are reported before any install (V0 recorded
+# selinux-policy and container-selinux as the V3 baseline; they must not move).
+kern=$(cut -d'|' -f2 "$rows" | grep -E '^(kernel|selinux-policy|container-selinux|k3s)')
+[ -z "$kern" ] || { say "out of scope (kernel, SELinux policy or container packages): $(echo "$kern" | tr '\n' ' ')"; finish 4; }
 cut -d'|' -f2 "$rows" | grep -qx bpftrace || refuse 'bpftrace is not in the plan'
 # Planned NEVRAs in rpm's form NAME-EPOCH:VERSION-RELEASE.ARCH (dnf omits epoch 0).
 planned=$(awk -F'|' '{v=$4; if (index(v, ":") == 0) v="0:" v; print $2"-"v"."$3}' "$rows" | sort -u)
