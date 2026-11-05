@@ -73,20 +73,22 @@ collect_state() {  # $1 pre|post: raw sidecars, then one derived state file; pri
   au=$(raw "$p-auditctl" auditctl -s) || return 1
   po=$(raw "$p-policy-packages" rpm -q selinux-policy container-selinux) || return 1
   en=$(raw "$p-getenforce" getenforce) || return 1
+  containerd=$(awk '/^Server:/{s=1} s && /Version:/{print $2; exit}' "$cv") && [ -n "$containerd" ] || return 1
+  se_h=$(sha256sum "$se") || return 1; se_h=${se_h%% *}; [ ${#se_h} = 64 ] || return 1
+  mo_h=$(sha256sum "$mo") || return 1; mo_h=${mo_h%% *}; [ ${#mo_h} = 64 ] || return 1
+  mo_n=$(wc -l < "$mo") || return 1; [ "$mo_n" -gt 0 ] 2>/dev/null || return 1
+  k3s_line=$(head -1 "$kv") && [ -n "$k3s_line" ] || return 1
+  policy=$(tr '\n' ' ' < "$po") && [ -n "$policy" ] || return 1
+  enforce=$(cat "$en") && [ -n "$enforce" ] || return 1
+  audit=
+  for field in enabled backlog_limit failure; do
+    line=$(grep -E "^$field " "$au") && [ -n "$line" ] || return 1
+    audit="$audit$line "
+  done
   st=$(sidecar "$p-state") || return 1
-  containerd=$(awk '/^Server:/{s=1} s && /Version:/{print $2; exit}' "$cv")
-  [ -n "$containerd" ] || return 1
-  grep -q '^enabled ' "$au" || return 1
-  {
-    printf 'kernel %s\n' "$(uname -r)"
-    printf 'policy packages %s\n' "$(tr '\n' ' ' < "$po")"
-    printf 'selinux %s\n' "$(cat "$en")"
-    printf 'sestatus %s\n' "$(sha256sum "$se" | cut -d' ' -f1)"
-    printf 'loaded modules %s (%s)\n' "$(sha256sum "$mo" | cut -d' ' -f1)" "$(wc -l < "$mo")"
-    printf 'k3s %s\n' "$(head -1 "$kv")"
-    printf 'containerd %s\n' "$containerd"
-    printf 'audit %s\n' "$(grep -E '^(enabled|backlog_limit|failure) ' "$au" | tr '\n' ' ')"
-  } > "$st" || return 1
+  printf 'kernel %s\npolicy packages %s\nselinux %s\nsestatus %s\nloaded modules %s (%s)\nk3s %s\ncontainerd %s\naudit %s\n' \
+    "$(uname -r)" "$policy" "$enforce" "$se_h" "$mo_h" "$mo_n" "$k3s_line" "$containerd" "$audit" > "$st" || return 1
+  [ "$(wc -l < "$st")" = 8 ] || return 1
   printf '%s\n' "$st"
 }
 avc_count() {  # $1 type: prints the count since the install window start; non-zero on an ausearch error
@@ -131,26 +133,46 @@ nevras=$(echo "$nevras" | sed '/^$/d' | sort)
 say "manifest ok: $(echo "$nevras" | wc -l) files, digests, NEVRAs and signatures match"
 
 # Exclusive window (read only): automatic package jobs, package manager processes, the rpm DB lock.
-now=$(date +%s) || refuse 'clock'
-for u in $AUTO_UNITS; do
-  a=$(systemctl is-active "$u" 2>/dev/null); e=$(systemctl is-enabled "$u" 2>/dev/null)
-  next=; extra=
-  case "$u" in *.timer)
-    next=$(systemctl show -P NextElapseUSecRealtime "$u" 2>/dev/null) || refuse "systemctl show $u"
-    extra=" randomized_delay=$(systemctl show -P RandomizedDelayUSec "$u" 2>/dev/null) persistent=$(systemctl show -P Persistent "$u" 2>/dev/null)";;
-  esac
-  say "unit $u active=${a:-unknown} enabled=${e:-unknown} next=${next:-none}$extra"
-  case "$u" in *.service) case "$a" in active|activating|reloading) refuse "$u is $a";; esac;; esac
-  if [ -n "$next" ] && [ "$next" != n/a ]; then
-    due=$(date -d "$next" +%s 2>/dev/null) || refuse "cannot read the next run of $u"
-    [ $((due - now)) -gt "$WINDOW_S" ] || refuse "$u is due at $next, within the install window; check again after it"
-  fi
-done
-# Other known automation: cron entries that run a package manager.
-cron=$(grep -lsE '(^|[^a-z])(dnf|yum|rpm)([^a-z]|$)' /etc/crontab /etc/cron.d/* /etc/cron.daily/* /etc/cron.hourly/* \
-  /etc/cron.weekly/* /etc/cron.monthly/* /var/spool/cron/* 2>/dev/null)
-[ -z "$cron" ] || refuse "cron entries run a package manager: $(echo "$cron" | tr '\n' ' ')"
-say 'cron: no package manager entries'
+check_auto() {  # $1 label; refuses on a running job, a job due within WINDOW_S, or any lookup it cannot read
+  label=$1  # kept: the cron loop below reuses the positional parameters
+  now=$(date +%s) || refuse 'clock'
+  for u in $AUTO_UNITS; do
+    load=$(systemctl show -P LoadState "$u" 2>/dev/null) && [ -n "$load" ] || refuse "$label: cannot read the load state of $u"
+    if [ "$load" = not-found ]; then say "$label unit $u not installed"; continue; fi
+    act=$(systemctl show -P ActiveState "$u" 2>/dev/null) && [ -n "$act" ] || refuse "$label: cannot read the active state of $u"
+    file=$(systemctl show -P UnitFileState "$u" 2>/dev/null) || refuse "$label: cannot read the unit file state of $u"
+    case "$u" in
+      *.service)
+        say "$label unit $u load=$load active=$act file=${file:-none}"
+        case "$act" in inactive|failed) ;; *) refuse "$label: $u is $act";; esac;;
+      *.timer)
+        if [ "$act" != active ]; then
+          case "$act" in inactive|failed) say "$label unit $u load=$load active=$act file=${file:-none} (not armed)"; continue;;
+                         *) refuse "$label: $u is $act";; esac
+        fi
+        next=$(systemctl show -P NextElapseUSecRealtime "$u" 2>/dev/null) || refuse "$label: cannot read the next run of $u"
+        delay=$(systemctl show -P RandomizedDelayUSec "$u" 2>/dev/null) && [ -n "$delay" ] || refuse "$label: cannot read the randomized delay of $u"
+        persist=$(systemctl show -P Persistent "$u" 2>/dev/null) && [ -n "$persist" ] || refuse "$label: cannot read Persistent of $u"
+        case "$next" in ''|n/a) refuse "$label: $u is armed but its next run is unknown";; esac
+        due=$(date -d "$next" +%s 2>/dev/null) || refuse "$label: cannot parse the next run of $u ($next)"
+        say "$label unit $u load=$load active=$act file=${file:-none} next=$next randomized_delay=$delay persistent=$persist"
+        [ $((due - now)) -gt "$WINDOW_S" ] || refuse "$label: $u is due at $next, within the install window; check again after it";;
+    esac
+  done
+  # Other known automation: cron entries that run a package manager. Only existing files are read; a read error refuses.
+  for c in /etc/crontab /etc/cron.d /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly /var/spool/cron; do
+    [ -e "$c" ] || continue
+    if [ -d "$c" ]; then set -- "$c"/*; else set -- "$c"; fi
+    for f in "$@"; do
+      [ -e "$f" ] || continue
+      [ -f "$f" ] || refuse "$label: cron entry $f is not a regular file"
+      grep -qE '(^|[^a-z])(dnf|yum|rpm)([^a-z]|$)' "$f"; g=$?
+      case "$g" in 0) refuse "cron entry $f runs a package manager";; 1) ;; *) refuse "cannot read cron entry $f";; esac
+    done
+  done
+  say "$label cron: no package manager entries"
+}
+check_auto start
 pkg_busy; s=$?; [ "$s" = 1 ] || refuse "package manager process check: $( [ "$s" = 0 ] && echo running || echo 'lookup failed')"
 dbpath=$(rpm --eval '%_dbpath' 2>/dev/null) && [ -d "$dbpath" ] || refuse 'rpm DB path'
 lock="$dbpath/.rpm.lock"
@@ -180,7 +202,8 @@ for t in AVC USER_AVC; do c=$(avc_count "$t") || refuse "ausearch does not accep
 say "install window starts $avc_date $avc_time (ausearch -ts form, checked)"
 t=$(rpm -ivh --test $files 2>&1) || refuse "rpm -ivh --test: $(echo "$t" | tail -3 | tr '\n' ' ')"
 say 'rpm -ivh --test: ok'
-# Right before the install: still idle, lock free, and still the baseline.
+# Right before the install: no job due within the whole window from now, still idle, lock free, still the baseline.
+check_auto 'before rpm'
 pkg_busy; s=$?; [ "$s" = 1 ] || refuse 'a package manager process started (or the lookup failed) before the install'
 [ ! -e "$lock" ] || flock -n -s "$lock" true 2>/dev/null || refuse 'the rpm DB lock is held before the install'
 again=$(snapshot rpm-before-again) || refuse 'rpm snapshot right before the install'
