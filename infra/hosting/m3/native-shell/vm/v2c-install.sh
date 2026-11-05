@@ -150,12 +150,23 @@ check_auto() {  # $1 label; refuses on a running job, a job due within WINDOW_S,
           case "$act" in inactive|failed) say "$label unit $u load=$load active=$act file=${file:-none} (not armed)"; continue;;
                          *) refuse "$label: $u is $act";; esac
         fi
-        next=$(systemctl show -P NextElapseUSecRealtime "$u" 2>/dev/null) || refuse "$label: cannot read the next run of $u"
+        # The next elapse as systemd computed it (calendar and monotonic timers alike, randomized delay included):
+        # list-timers JSON "next" in microseconds since the epoch. NextElapseUSecRealtime is empty for monotonic
+        # timers such as dnf-makecache (OnBootSec/OnUnitInactiveSec), so it is recorded but not used.
+        lt=$(systemctl list-timers --all -o json "$u" 2>/dev/null) || refuse "$label: cannot list the timer $u"
+        nextus=$(printf '%s' "$lt" | python3 -I -c '
+import json, sys
+rows = [r for r in json.load(sys.stdin) if r.get("unit") == sys.argv[1]]
+value = rows[0].get("next") if len(rows) == 1 else None
+print(value if isinstance(value, int) and value > 0 else "")' "$u" 2>/dev/null) || refuse "$label: cannot parse the timer list for $u"
+        [ -n "$nextus" ] || refuse "$label: $u is armed but its next run is unknown"
+        due=$((nextus / 1000000))
+        real=$(systemctl show -P NextElapseUSecRealtime "$u" 2>/dev/null) || refuse "$label: cannot read NextElapseUSecRealtime of $u"
+        mono=$(systemctl show -P NextElapseUSecMonotonic "$u" 2>/dev/null) || refuse "$label: cannot read NextElapseUSecMonotonic of $u"
         delay=$(systemctl show -P RandomizedDelayUSec "$u" 2>/dev/null) && [ -n "$delay" ] || refuse "$label: cannot read the randomized delay of $u"
         persist=$(systemctl show -P Persistent "$u" 2>/dev/null) && [ -n "$persist" ] || refuse "$label: cannot read Persistent of $u"
-        case "$next" in ''|n/a) refuse "$label: $u is armed but its next run is unknown";; esac
-        due=$(date -d "$next" +%s 2>/dev/null) || refuse "$label: cannot parse the next run of $u ($next)"
-        say "$label unit $u load=$load active=$act file=${file:-none} next=$next randomized_delay=$delay persistent=$persist"
+        next=$(date -u -d "@$due" +%Y-%m-%dT%H:%M:%SZ) || refuse "$label: cannot format the next run of $u"
+        say "$label unit $u load=$load active=$act file=${file:-none} next=$next (in $((due - now)) s; realtime=${real:-empty} monotonic=${mono:-empty}) randomized_delay=$delay persistent=$persist"
         [ $((due - now)) -gt "$WINDOW_S" ] || refuse "$label: $u is due at $next, within the install window; check again after it";;
     esac
   done
