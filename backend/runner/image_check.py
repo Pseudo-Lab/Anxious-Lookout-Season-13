@@ -3,14 +3,20 @@
 The Dockerfile `runner` stage runs `python -m runner.image_check` after `USER 10001:10001`, so every
 build (development and production) fails if the image could not run the native shell runner. Unit tests
 cannot see this: a file mode, owner or missing package only exists in the built image (#68 V1 found
-`/etc/codex` at mode 644). Offline; reads files and runs `bwrap --version` only.
+`/etc/codex` at mode 644), and only the real Codex can say whether it accepts the config (#68 V3 found
+`approval_policy = "untrusted"` refused). Offline (the Dockerfile runs it with --network=none): reads files,
+runs `bwrap --version`, and starts the pinned `codex app-server` with a throwaway home for two config reads.
 """
 import hashlib
+import json
 import os
+import queue
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
+import threading
 
 from app.codex_policy import CodexFailure
 from . import native_policy
@@ -19,6 +25,55 @@ from .install_codex import pinned
 RUNNER_IDENTITY = (10001, 10001)
 BINARIES = (('/usr/local/bin/codex', 'codex_sha256'), ('/usr/local/bin/codex-code-mode-host', 'host_sha256'))
 SANDBOX_LINK = '/usr/local/bin/codex-linux-sandbox'
+
+
+def codex_accepts_config():
+    """The image's pinned Codex itself loads /etc/codex: start `codex app-server` offline (no login, no model,
+    a throwaway CODEX_HOME), read configRequirements/read and config/read, and apply the runner's own checks.
+    Returns a problem name or None. The process is always stopped before returning."""
+    home = tempfile.mkdtemp(prefix='image-check-')
+    codex_home = os.path.join(home, 'codex')
+    os.mkdir(codex_home, 0o700)
+    env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8', 'HOME': home, 'CODEX_HOME': codex_home}
+    try:
+        process = subprocess.Popen(['/usr/local/bin/codex', 'app-server', '--listen', 'stdio://',
+                                    '-c', 'cli_auth_credentials_store="ephemeral"'],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   text=True, env=env, cwd=home)
+    except OSError:
+        return 'codex app-server start'
+    lines = queue.Queue()
+    threading.Thread(target=lambda: [lines.put(line) for line in process.stdout] and None, daemon=True).start()
+
+    def rpc(identity, method, params):
+        process.stdin.write(json.dumps({'id': identity, 'method': method, 'params': params}) + '\n')
+        process.stdin.flush()
+        while True:
+            message = json.loads(lines.get(timeout=30))
+            if message.get('id') == identity and 'method' not in message:
+                if 'error' in message:
+                    raise RuntimeError(method)
+                return message['result']
+
+    try:
+        rpc(1, 'initialize', {'clientInfo': {'name': 'image_check', 'version': '1'}, 'capabilities': {'experimentalApi': True}})
+        process.stdin.write(json.dumps({'method': 'initialized'}) + '\n')
+        process.stdin.flush()
+        native_policy.check_requirements(rpc(2, 'configRequirements/read', {}))
+        native_policy.check_config(rpc(3, 'config/read', {'includeLayers': True, 'cwd': home}), native_policy.STATE_ROOT)
+        return None
+    except CodexFailure:
+        return 'codex config checks'
+    except (queue.Empty, ValueError, RuntimeError, OSError, KeyError):
+        return 'codex refused or did not answer the config reads'
+    finally:
+        try:
+            process.stdin.close()
+            process.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            process.kill()
+            process.wait(timeout=10)
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def problems():
@@ -60,6 +115,10 @@ def problems():
         found.append('git present')  # Codex would run it outside the sandbox in the cwd (native-shell README 7).
     if not os.access('/app/runner/app.py', os.R_OK):
         found.append('/app readable')
+    if not found:  # Only with the pinned binary and both policy files in place.
+        codex = codex_accepts_config()
+        if codex:
+            found.append(codex)
     return found
 
 

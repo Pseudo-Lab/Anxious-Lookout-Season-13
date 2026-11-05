@@ -54,8 +54,13 @@ def filesystem(root):
 
 
 def system_config(root):
-    """The whole system layer (`/etc/codex/config.toml`): nothing more, nothing less."""
-    return {'default_permissions': PROFILE, 'approval_policy': 'untrusted', 'approvals_reviewer': 'user',
+    """The whole system layer (`/etc/codex/config.toml`): nothing more, nothing less.
+
+    No `approval_policy`: Codex 0.160.1 refuses `untrusted` in any config file ("no longer supported") and the
+    app-server does not start. `untrusted` comes from the thread/start and thread/resume override, the untrusted
+    project, and the managed requirements (`allowed_approval_policies`); check_thread confirms it per thread.
+    """
+    return {'default_permissions': PROFILE, 'approvals_reviewer': 'user',
             'permissions': {PROFILE: {'filesystem': filesystem(root)}}}
 
 
@@ -128,6 +133,9 @@ def check_config(result, root):
         require(isinstance(layer, dict) and isinstance(layer.get('name'), dict) and isinstance(layer.get('config'), dict),
                 'config.layer_malformed')
         kind, disabled = layer['name'].get('type'), layer.get('disabledReason')
+        # Checked before the disabled-layer skip: Codex 0.160.1 refuses this key in any config file, and no layer of
+        # ours sets it. Present anywhere, even in a disabled project layer, means a policy file was written.
+        require('approval_policy' not in layer['config'], 'config.approval_policy_in_a_layer')
         if kind == 'project':
             require(isinstance(disabled, str) and disabled, 'config.project_layer_enabled')  # Untrusted: never applies.
         if disabled is not None:

@@ -19,7 +19,7 @@ observed = json.loads(trace.read_text()) if trace.exists() else []
 ROOT = path.parent.parent
 PROFILE = {':minimal': 'read', ':workspace_roots': {'.': 'write'}, '/control': 'deny', '/run/codex-broker': 'deny',
            str(ROOT / 'codex'): 'deny', str(ROOT / 'home'): 'deny'}
-SYSTEM = {'default_permissions': 'native', 'approval_policy': 'untrusted', 'approvals_reviewer': 'user',
+SYSTEM = {'default_permissions': 'native', 'approvals_reviewer': 'user',
           'permissions': {'native': {'filesystem': PROFILE}}}
 REQUIREMENTS = {'allowedApprovalPolicies': ['untrusted'], 'allowedApprovalsReviewers': ['user'],
                 'featureRequirements': {'unified_exec': False}}

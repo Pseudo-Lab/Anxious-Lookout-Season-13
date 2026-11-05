@@ -263,7 +263,7 @@ The policy lives in the image, the expected values in runner code
 
 | File in the image | Repository | Holds |
 | --- | --- | --- |
-| `/etc/codex/config.toml` (system layer) | `backend/runner/codex-etc/config.toml` | permission profile `native`: `:minimal` read, workspace write, deny `/control`, `/run/codex-broker`, `/state/codex`, `/state/home`; `approval_policy = "untrusted"`, `approvals_reviewer = "user"`, `default_permissions = "native"` |
+| `/etc/codex/config.toml` (system layer) | `backend/runner/codex-etc/config.toml` | permission profile `native`: `:minimal` read, workspace write, deny `/control`, `/run/codex-broker`, `/state/codex`, `/state/home`; `approvals_reviewer = "user"`, `default_permissions = "native"`. No `approval_policy`: 0.160.1 refuses `untrusted` in any config file and the app-server does not start |
 | `/etc/codex/requirements.toml` (managed) | `backend/runner/codex-etc/requirements.toml` | `allowed_approval_policies = ["untrusted"]`, `allowed_approvals_reviewers = ["user"]`, `[features] unified_exec = false`, `deny_read` (second layer only) |
 
 **Why these settings are load-bearing** (Codex 0.160.1 source, `rust-v0.160.1` `d27764b`):
@@ -335,7 +335,11 @@ new source, then on the VM:
 - `thread/start.permissions` and `activePermissionProfile` (experimental in 0.160.1);
 - project layers are still disabled for an untrusted cwd;
 - the workspace-root `.codex` is still protected while missing, and `.git` once present;
-- what Codex runs outside the sandbox in the cwd (git metadata), if git is in the image.
+- what Codex runs outside the sandbox in the cwd (git metadata), if git is in the image;
+- **`untrusted` is still supported.** 0.160.1 refuses `approval_policy = "untrusted"` in a config file ("retired",
+  `UnsupportedUntrustedApprovalPolicyError`); the runner reaches it only through the thread/start and thread/resume
+  override, the untrusted project and the managed `allowed_approval_policies`. Before moving the pin, check first
+  that the override still exists and still yields `untrusted` in the thread response.
 
 ## 6. A `.codex` in the workspace blocks the runner
 
@@ -417,13 +421,15 @@ or the configuration for it.
   bubblewrap 0.8.0 has no `--argv0`, so Codex reaches its Linux sandbox helper through this name.
   The link is part of the image evidence chain.
 - `/etc/codex/config.toml` and `requirements.toml` (section 4).
-- **Build gate.** The `runner` stage ends with `RUN python -m runner.image_check` as UID 10001, so every
+- **Build gate.** The `runner` stage ends with `RUN --network=none python -m runner.image_check` as UID 10001, so every
   build, production included, fails unless the image as built passes these checks:
   - pinned Codex binaries;
   - bubblewrap and the sandbox link;
   - `/etc/codex` root 0755 and both policy files (`native_policy.check_files`);
   - no git;
-  - `/app` readable.
+  - `/app` readable;
+  - the pinned Codex accepts the image's config: an offline `codex app-server` (throwaway home, no login)
+    answers configRequirements/read and config/read, and both pass the runner's own checks.
 
   Unit tests cannot see file modes in the built image. The #68 V1 check found `/etc/codex` at 644 this way.
 - Pod manifest change: the Runner Pod manifest gate applies (section 3).

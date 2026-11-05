@@ -2,7 +2,6 @@
 # start unless this file, and the effective config Codex reports, equal runner/native_policy.py
 # system_config('/state') exactly. Change both together.
 default_permissions = "native"
-approval_policy = "untrusted"
 approvals_reviewer = "user"
 
 [permissions.native.filesystem]

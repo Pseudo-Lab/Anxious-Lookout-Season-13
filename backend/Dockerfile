@@ -49,8 +49,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap \
 RUN install -d -o root -g root -m 0755 /etc/codex
 COPY --chown=0:0 --chmod=644 backend/runner/codex-etc/config.toml backend/runner/codex-etc/requirements.toml /etc/codex/
 USER 10001:10001
-# #68 build gate: the image as built, as the runner user (pins, bubblewrap, link, /etc/codex, no git).
-RUN python -m runner.image_check
+# #68 build gate: the image as built, as the runner user (pins, bubblewrap, link, /etc/codex, no git), and the
+# pinned Codex itself loading /etc/codex (an offline app-server answering two config reads).
+RUN --network=none python -m runner.image_check
 CMD ["uvicorn", "runner.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log", "--no-proxy-headers"]
 
 # Isolated tests of the actual pinned bundle plus existing offline protocol cases.

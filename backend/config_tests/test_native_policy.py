@@ -114,7 +114,7 @@ def good_config():
             'layers': [{'name': {'type': 'system', 'file': '/etc/codex/config.toml'}, 'version': '1', 'config': deepcopy(system)},
                        {'name': {'type': 'user', 'file': '/state/codex/config.toml'}, 'version': '1', 'config': {}},
                        {'name': {'type': 'project', 'dotCodexFolder': '/state/workspace/.codex'}, 'version': '1',
-                        'config': {'approval_policy': 'never'}, 'disabledReason': 'untrusted project'},
+                        'config': {'sandbox_mode': 'danger-full-access'}, 'disabledReason': 'untrusted project'},
                        {'name': {'type': 'sessionFlags'}, 'version': '1', 'config': {'features': {'shell_tool': True}}}]}
 
 
@@ -125,7 +125,8 @@ def test_config_applied():
 @pytest.mark.parametrize('damage', ['deny-removed', 'deny-added', 'workspace-wider', 'effective-overridden', 'user-layer',
                                     'session-layer', 'project-enabled', 'project-no-reason', 'system-missing',
                                     'system-twice', 'system-other-file', 'sandbox-mode', 'approval-never',
-                                    'layers-missing', 'layer-malformed', 'not-dict'])
+                                    'layers-missing', 'layer-malformed', 'not-dict', 'approval-in-disabled-layer',
+                                    'approval-in-system-layer'])
 def test_config_not_applied_refuses(damage):
     value = good_config()
     config, layers = value['config'], value['layers']
@@ -146,6 +147,8 @@ def test_config_not_applied_refuses(damage):
     if damage == 'layers-missing': del value['layers']
     if damage == 'layer-malformed': layers[1] = {'name': 'user'}
     if damage == 'not-dict': value = []
+    if damage == 'approval-in-disabled-layer': layers[2]['config'] = {'approval_policy': 'untrusted'}
+    if damage == 'approval-in-system-layer': layers[0]['config']['approval_policy'] = 'untrusted'
     with pytest.raises(CodexFailure):
         policy.check_config(value, ROOT)
 
