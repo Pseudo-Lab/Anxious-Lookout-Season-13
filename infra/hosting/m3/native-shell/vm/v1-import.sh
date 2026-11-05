@@ -18,11 +18,11 @@ set -u
 umask 077
 here=$(dirname "$0")
 . "$here/lib.sh"
-SOURCE=82e27284ccd0c4190971b2910f08ddf465a2e1ee
+SOURCE=755f65cff7184800ae7de5c30d309bf1fa3f8b0a
 # reference|archive|host image ID (docker image inspect on the build host; v1-host-build.sh images.txt).
-EXPECTED='docker.io/library/anxious-dev-runtime:68-82e2728|anxious-dev-runtime-68-82e2728.tar|sha256:ae60691d846b217d766dbd625f50cf60e854852f617dadfcc89f8e4605de0fe3
-docker.io/library/anxious-dev-runner:68-82e2728|anxious-dev-runner-68-82e2728.tar|sha256:63f9e82e8ecf54e23fb942502b2148ac7819ff5704dc006702fa47b927c12ea5
-docker.io/library/anxious-dev-provisioner:68-82e2728|anxious-dev-provisioner-68-82e2728.tar|sha256:6da44e4477fa694ff2ae2427204f156413f7ddc7105c5cdf29ff847dacbbfac9'
+EXPECTED='docker.io/library/anxious-dev-runtime:68-755f65c|anxious-dev-runtime-68-755f65c.tar|sha256:f109458721e92ee6ffe98ec59f304a1d1b44bcfe59af35201c8d984155c466ea
+docker.io/library/anxious-dev-runner:68-755f65c|anxious-dev-runner-68-755f65c.tar|sha256:50de1819a6c4dd68113dbe42e91595e5bcc7f658dc69d92ba34a6018f2071e1e
+docker.io/library/anxious-dev-provisioner:68-755f65c|anxious-dev-provisioner-68-755f65c.tar|sha256:a46d31493a2ab59fddbaae2a84f69247868a38b9cbb57da644644fa31109408c'
 MANIFEST="$here/v1-archives.sha256"
 
 log=; imported=0; logfail=0
@@ -78,6 +78,7 @@ for step in $plan; do
   action=${step%%:*}; line=${step#*:}
   ref=${line%%|*}; rest=${line#*|}; file=${rest%%|*}
   if [ "$action" = skip ]; then say "skip $ref (already imported with the expected ID)"; continue; fi
+  [ "$logfail" = 0 ] || { say 'evidence write failed before an import'; [ "$imported" = 1 ] && finish 9; finish 3; }
   imported=1
   timeout 600 "$K3S" ctr -n k8s.io images import "$IMAGES/$file" >/dev/null 2>&1 || { say "import of $file failed"; finish 5; }
   say "imported $file"
