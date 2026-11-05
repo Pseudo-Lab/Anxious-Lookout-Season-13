@@ -11,8 +11,10 @@
 #
 # Differences from the runner Pod (measurement only): /state and /control are emptyDir volumes, not PVCs. Kubernetes
 # creates an emptyDir directory root-owned with mode 0777; the runner's PVCs are prepared 10001-owned. Nothing
-# prepares or chowns them here: their owner and mode are recorded, and the probe runs only if UID 10001 can write
-# all three mounts. The Pod also carries the annotation anxious.io/run=<this run>, added when it is created (the
+# prepares or chowns them here: their owner, mode and SELinux label are recorded, and the probe runs only if UID
+# 10001 can write all three mounts. A skipped probe is "V3 not complete" (the script still exits 0). A 0777
+# emptyDir is not shown equivalent to a 0700 local PV: DAC may stop an access before SELinux sees it, so V3 is
+# the result under these measurement conditions; the real runner Pod is measured again after V7a. The Pod also carries the annotation anxious.io/run=<this run>, added when it is created (the
 # file on disk is hashed without it), so cleanup deletes only this run's Pod.
 #
 # Changes, in order, each recorded:
@@ -28,7 +30,8 @@
 # Evidence: $EVIDENCE/v3-<UTC>.txt plus sidecars .probe (probe output) and .avc (ausearch output), created
 # atomically before the first change. rc: 0 measured, evidence complete, cleaned up (a failed bwrap or thread/start
 # is a result, not an rc); 3 refused, nothing changed; 5 a change failed (what remains is listed); 7 the Pod's
-# deletion or absence is unconfirmed, or a Pod of that name is not this run's; 8 the image chain did not match;
+# deletion or absence is unconfirmed, or a Pod of that name is not this run's (the delete carries the UID as a
+# precondition); 8 the image chain did not match;
 # 9 evidence incomplete after a change; 130 interrupted.
 set -u
 umask 077
@@ -50,15 +53,19 @@ SECCOMP_FILE=$SECCOMP_DIR/anxious-runner-userns-v1.json
 SECCOMP_SHA=9a6594419eae4089e737c787597d2ed4950fd7e1031e371f490d5b2c935dff78
 READY_S=180        # kubectl wait --timeout; the process gets READY_S + 15
 PROBE_S=300
-CLEANUP_S=150      # whole deletion and absence check, one deadline
+CLEANUP_S=150      # whole deletion and absence check, one deadline (each call limited to the time left, +1 s)
 PSA_VERSION=v1.36
 
 pod_attempted=0; pod_uid=; incomplete_parts=
+tag_attempted=0; ns_attempted=0; np_attempted=0; tag_recorded=0; ns_recorded=0; np_recorded=0
 note_incomplete() { incomplete_parts="$incomplete_parts [$1]"; say "evidence incomplete: $1"; }
 kt() { s=$1; shift; timeout "$s" "$K3S" kubectl "$@"; }   # an explicit outer limit for long kubectl calls
+left() {  # seconds left before the cleanup deadline, capped at $1, at least 1 (timeout 0 would mean no limit)
+  r=$(( deadline - $(date +%s) )); [ "$r" -gt "$1" ] && r=$1; [ "$r" -lt 1 ] && r=1; echo "$r"
+}
 
-pod_state() {  # prints "absent", "ours <uid>", "other <uid>" or "unknown"
-  out=$(k -n "$NS" get pod "$POD" -o jsonpath='{.metadata.uid} {.metadata.annotations.anxious\.io/run}' </dev/null 2>&1); s=$?
+pod_state() {  # $1 limit in seconds (default 30); prints "absent", "ours <uid>", "other <uid>" or "unknown"
+  out=$(kt "${1:-30}" -n "$NS" get pod "$POD" -o jsonpath='{.metadata.uid} {.metadata.annotations.anxious\.io/run}' </dev/null 2>&1); s=$?
   if [ "$s" != 0 ]; then
     case "$out" in *NotFound*|*'not found'*) echo absent;; *) echo unknown;; esac; return 0
   fi
@@ -67,23 +74,30 @@ pod_state() {  # prints "absent", "ours <uid>", "other <uid>" or "unknown"
 }
 cleanup_pod() {  # rc 0: no Pod of this run remains; 7: not confirmed or not ours
   [ "$pod_attempted" = 1 ] || return 0
-  deadline=$(( $(date +%s) + CLEANUP_S ))
-  st=$(pod_state); say "cleanup: pod $NS/$POD $st"
+  deadline=$(( $(date +%s) + CLEANUP_S ))   # every call below is limited to the time left
+  st=$(pod_state "$(left 30)"); say "cleanup: pod $NS/$POD $st"
   case "$st" in
     absent) pod_attempted=0; return 0;;
     other*|unknown) say "cleanup: not deleting a Pod that is not confirmed this run's"; return 7;;
   esac
   uid=${st#ours }
-  # Ownership was checked just above (annotation and UID); delete by name, then follow until absent.
-  kt 60 -n "$NS" delete pod "$POD" --wait=false --grace-period=10 </dev/null >/dev/null 2>&1 \
-    || say 'cleanup: delete request failed; following the Pod anyway'
+  # The delete itself carries the UID precondition: if the Pod of that name is no longer this UID, the API
+  # answers Conflict and deletes nothing (checked by server dry-run on the guest, 2026-11-05).
+  dout=$(printf '{"kind":"DeleteOptions","apiVersion":"v1","gracePeriodSeconds":10,"preconditions":{"uid":"%s"}}\n' "$uid" \
+    | kt "$(left 60)" delete --raw "/api/v1/namespaces/$NS/pods/$POD" -f - 2>&1); s=$?
+  case "$s:$dout" in
+    0:*) say "cleanup: delete accepted (uid precondition $uid)";;
+    *Conflict*) say "cleanup: delete refused, the Pod of that name is not uid $uid; not touched"; return 7;;
+    *NotFound*|*'not found'*) say 'cleanup: already gone at delete';;
+    *) say "cleanup: delete request rc $s; following the Pod anyway";;
+  esac
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    st=$(pod_state)
+    st=$(pod_state "$(left 30)")
     case "$st" in
       absent) say "cleanup: pod $NS/$POD gone"; done_change "pod $NS/$POD (uid $uid) deleted, absence confirmed"; pod_attempted=0; return 0;;
       other*) say "cleanup: a different Pod of that name appeared ($st); not touched"; return 7;;
     esac
-    sleep 5
+    [ "$(date +%s)" -lt "$deadline" ] && sleep "$(left 5)"
   done
   say "cleanup: pod $NS/$POD not confirmed gone within ${CLEANUP_S}s (last: $st)"
   return 7
@@ -94,7 +108,24 @@ end_run() {  # $1 rc wanted; cleanup first, then the most serious of cleanup, ch
   if [ "$want" = 0 ] && [ -n "$incomplete_parts" ]; then want=9; fi
   finish "$want"
 }
-on_signal() { trap '' INT TERM; say 'interrupted'; cleanup_pod || finish 7; finish 130; }
+partial_changes() {  # after a signal: every change that was attempted, looked up again (kept, never undone)
+  if [ "$tag_attempted" = 1 ] && [ "$tag_recorded" = 0 ]; then
+    d_id=$(image_id "$DIGEST_REF" </dev/null)
+    if [ -n "$d_id" ]; then done_change "image reference $DIGEST_REF present after interrupt (id $d_id)"
+    else say "interrupt: image reference $DIGEST_REF absent or unconfirmed"; fi
+  fi
+  if [ "$ns_attempted" = 1 ] && [ "$ns_recorded" = 0 ]; then
+    o=$(k get ns "$NS" -o name </dev/null 2>&1); s=$?
+    if [ "$s" = 0 ]; then done_change "namespace $NS present after interrupt (kept)"
+    else case "$o" in *NotFound*|*'not found'*) say "interrupt: namespace $NS absent";; *) note_incomplete "namespace $NS state unconfirmed after interrupt";; esac; fi
+  fi
+  if [ "$np_attempted" = 1 ] && [ "$np_recorded" = 0 ]; then
+    o=$(k -n "$NS" get networkpolicy deny-all -o name </dev/null 2>&1); s=$?
+    if [ "$s" = 0 ]; then done_change "NetworkPolicy $NS/deny-all present after interrupt (kept)"
+    else case "$o" in *NotFound*|*'not found'*) say "interrupt: NetworkPolicy $NS/deny-all absent";; *) note_incomplete "NetworkPolicy state unconfirmed after interrupt";; esac; fi
+  fi
+}
+on_signal() { trap '' INT TERM; say 'interrupted'; partial_changes; cleanup_pod || finish 7; finish 130; }
 trap on_signal INT TERM
 
 ns_ok() {  # the measurement namespace as required: labels, exactly one NetworkPolicy deny-all, no Cilium policy
@@ -179,9 +210,10 @@ printf '%s\n' "$podobj" | python3 -I -c 'import json, sys; json.load(sys.stdin)'
 # --- 1. digest reference ---
 if [ "$need_tag" = 1 ]; then
   changing
+  tag_attempted=1
   timeout 60 "$K3S" ctr -n k8s.io images tag "$TAG_REF" "$DIGEST_REF" </dev/null >/dev/null 2>&1; s=$?
   d_id=$(image_id "$DIGEST_REF" </dev/null)
-  [ -n "$d_id" ] && done_change "image reference $DIGEST_REF tagged (id $d_id)"
+  [ -n "$d_id" ] && { done_change "image reference $DIGEST_REF tagged (id $d_id)"; tag_recorded=1; }
   [ "$s" = 0 ] || { say "tag rc $s"; finish 5; }
   [ "$d_id" = "$HOST_ID" ] || { say "digest reference id ${d_id:-none} != host id"; finish 8; }
   say "digest reference resolves to the host id"
@@ -190,17 +222,19 @@ fi
 # --- 2. measurement namespace, then its NetworkPolicy (each verified) ---
 if [ "$need_ns" = 1 ]; then
   changing
+  ns_attempted=1   # set before the request: a signal from here on looks the object up again
   printf '%s\n' "{\"apiVersion\":\"v1\",\"kind\":\"Namespace\",\"metadata\":{\"name\":\"$NS\",\"labels\":{
   \"anxious.io/purpose\":\"native68-measure\",
   \"pod-security.kubernetes.io/enforce\":\"restricted\",\"pod-security.kubernetes.io/enforce-version\":\"$PSA_VERSION\",
   \"pod-security.kubernetes.io/audit\":\"restricted\",\"pod-security.kubernetes.io/audit-version\":\"$PSA_VERSION\",
   \"pod-security.kubernetes.io/warn\":\"restricted\",\"pod-security.kubernetes.io/warn-version\":\"$PSA_VERSION\"}}}" \
     | k create -f - >/dev/null 2>&1; s=$?
-  k get ns "$NS" -o name </dev/null >/dev/null 2>&1 && done_change "namespace $NS created (kept)"
+  k get ns "$NS" -o name </dev/null >/dev/null 2>&1 && { done_change "namespace $NS created (kept)"; ns_recorded=1; }
   [ "$s" = 0 ] || { say "namespace create rc $s"; finish 5; }
+  np_attempted=1
   printf '%s\n' "{\"apiVersion\":\"networking.k8s.io/v1\",\"kind\":\"NetworkPolicy\",\"metadata\":{\"name\":\"deny-all\",\"namespace\":\"$NS\"},
   \"spec\":{\"podSelector\":{},\"policyTypes\":[\"Ingress\",\"Egress\"]}}" | k create -f - >/dev/null 2>&1; s=$?
-  k -n "$NS" get networkpolicy deny-all -o name </dev/null >/dev/null 2>&1 && done_change "NetworkPolicy $NS/deny-all created (kept)"
+  k -n "$NS" get networkpolicy deny-all -o name </dev/null >/dev/null 2>&1 && { done_change "NetworkPolicy $NS/deny-all created (kept)"; np_recorded=1; }
   [ "$s" = 0 ] || { say "NetworkPolicy create rc $s"; finish 5; }
   ns_ok || { say 'the created namespace does not check out'; finish 5; }
 fi
@@ -214,7 +248,8 @@ pod_attempted=1
 printf '%s\n' "$podobj" | kt 45 create -f - >/dev/null 2>&1; s=$?
 st=$(pod_state)
 case "$st" in
-  ours*) pod_uid=${st#ours }; done_change "pod $NS/$POD created (uid $pod_uid, run $RUN)";;
+  ours*) pod_uid=${st#ours }; done_change "pod $NS/$POD created (uid $pod_uid, run $RUN)"
+         [ "$s" = 0 ] || { say "pod create rc $s although the Pod exists: not measured"; end_run 5; };;
   *) say "pod create rc $s, pod $st"; end_run 5;;
 esac
 kt $((READY_S + 15)) -n "$NS" wait --for=condition=Ready "pod/$POD" --timeout="${READY_S}s" </dev/null >/dev/null 2>&1; ready=$?
@@ -232,7 +267,8 @@ if [ "$ready" = 0 ]; then
   # Volumes as Kubernetes made them (nothing prepares them): owner, mode, and whether UID 10001 can write.
   vols=$(kt 30 -n "$NS" exec "$POD" -- sh -c 'for d in /state /control /tmp; do
     if t=$(mktemp -p "$d" .v3w.XXXXXX 2>/dev/null); then rm -f "$t"; w=writable; else w=NOT-writable; fi
-    echo "$d $(stat -c "%u:%g %a" "$d") $w"; done' </dev/null 2>&1) || note_incomplete 'volume lookup'
+    echo "$d $(stat -c "%u:%g %a %C" "$d" 2>/dev/null || echo "? ? LABEL-UNCONFIRMED") $w"; done' </dev/null 2>&1) || note_incomplete 'volume lookup'
+  printf '%s\n' "$vols" | grep -q 'LABEL-UNCONFIRMED' && note_incomplete 'volume owner/mode/label lookup'
   while IFS= read -r l; do [ -n "$l" ] && say "volume $l"; done <<EOF_VOLS
 $vols
 EOF_VOLS
@@ -246,7 +282,7 @@ EOF_VOLS
        say "host view: pid $pid label ${label:-?}"; say "host view: ${stat_l:-?}";;
   esac
   if [ "$(printf '%s\n' "$vols" | grep -c ' writable$')" != 3 ]; then
-    say 'probe not run: a measurement volume is not writable by UID 10001 (result, see volume lines)'
+    say 'probe not run: a measurement volume is not writable by UID 10001 (see volume lines): V3 NOT COMPLETE'
   else
     pout=$(kt "$PROBE_S" -n "$NS" exec -i "$POD" -- python -I - < "$PROBE" 2>&1); prc=$?
     say "probe rc $prc"
@@ -259,7 +295,13 @@ $summary
 EOF_SUMMARY
   fi
 else
-  events=$(k -n "$NS" describe pod "$POD" </dev/null 2>&1 | sed -n '/^Events:/,$p' | head -20) || note_incomplete 'pod events'
+  desc=$(kt 30 -n "$NS" describe pod "$POD" </dev/null 2>&1); s=$?
+  [ "$s" = 0 ] || note_incomplete "pod describe rc $s"
+  events=$(printf '%s\n' "$desc" | sed -n '/^Events:/,$p' | head -20)
+  [ "$s" = 0 ] || events=$(printf '%s\n' "$desc" | head -5)
+  conds=$(kt 30 -n "$NS" get pod "$POD" -o jsonpath='{range .status.conditions[*]}{.type}={.status}({.reason}) {end}| waiting={.status.containerStatuses[0].state.waiting.reason}:{.status.containerStatuses[0].state.waiting.message}' </dev/null 2>&1) \
+    || note_incomplete 'pod conditions lookup'
+  say "pod conditions $conds"
   while IFS= read -r l; do [ -n "$l" ] && say "event $l"; done <<EOF_EVENTS
 $events
 EOF_EVENTS
