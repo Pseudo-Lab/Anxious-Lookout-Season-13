@@ -18,6 +18,7 @@ import json
 import os
 import queue
 import secrets
+import stat
 import subprocess
 import sys
 import threading
@@ -169,16 +170,25 @@ try:
             line('thread_start_check', 'REFUSED')
 
     # 4. With app-server alive, CODEX_HOME/tmp/arg0 exists: what Codex makes readable to the sandbox there.
+    # Every entry, at both levels, with its kind from lstat (a link is never followed).
     arg0 = native_policy.codex_runtime_root(root)
+
+    def kind(path):
+        mode = os.lstat(path).st_mode
+        if stat.S_ISLNK(mode):
+            return 'link->%s mode=%o' % (os.readlink(path), mode)
+        return '%s mode=%o' % ('dir' if stat.S_ISDIR(mode) else 'file' if stat.S_ISREG(mode) else 'other', mode)
     try:
-        for entry in sorted(os.listdir(arg0)):
+        entries = sorted(os.listdir(arg0))
+        line('arg0_entries', len(entries))
+        for entry in entries:
             path = os.path.join(arg0, entry)
-            line('arg0_entry', '%s mode=%o dir=%s' % (entry, os.lstat(path).st_mode, os.path.isdir(path)))
-            if os.path.isdir(path) and not os.path.islink(path):
-                for leaf in sorted(os.listdir(path)):
-                    target = os.path.join(path, leaf)
-                    kind = 'link->' + os.readlink(target) if os.path.islink(target) else 'file'
-                    line('arg0_leaf', '%s/%s %s mode=%o' % (entry, leaf, kind, os.lstat(target).st_mode))
+            line('arg0_entry', '%s %s' % (entry, kind(path)))
+            if stat.S_ISDIR(os.lstat(path).st_mode):
+                leaves = sorted(os.listdir(path))
+                line('arg0_leaves', '%s %s' % (entry, ','.join(leaves)))
+                for leaf in leaves:
+                    line('arg0_leaf', '%s/%s %s' % (entry, leaf, kind(os.path.join(path, leaf))))
     except OSError as error:
         line('arg0_entry', 'ERROR %s' % type(error).__name__)
 except (queue.Empty, ValueError, OSError) as error:

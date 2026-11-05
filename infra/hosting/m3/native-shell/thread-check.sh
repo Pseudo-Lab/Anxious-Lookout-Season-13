@@ -15,6 +15,7 @@ image=${1:?runner image}
 apparmor=${2:-codex-local-userns}
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
+rc=0
 out=$(docker run --rm -i --network none --read-only \
   --tmpfs /state:uid=10001,gid=10001,mode=0700 \
   --tmpfs /control:uid=10001,gid=10001,mode=0700 \
@@ -22,11 +23,14 @@ out=$(docker run --rm -i --network none --read-only \
   --cap-drop ALL --security-opt no-new-privileges \
   --security-opt "apparmor=$apparmor" \
   --security-opt "seccomp=$here/seccomp-runner-userns-v1.json" \
-  --entrypoint python "$image" -I - < "$here/vm/v3-probe.py" 2>&1) || true
+  --entrypoint python "$image" -I - < "$here/vm/v3-probe.py" 2>&1) || rc=$?
 printf '%s\n' "$out"
+printf 'probe_rc %s\n' "$rc"
 
 fail() { printf 'verdict fail %s\n' "$1"; exit 1; }
 has() { grep -Fxq -- "$1" <<<"$out" || fail "$1"; }
+# docker run and the probe: any non-zero exit fails, whatever the output says.
+[ "$rc" = 0 ] || fail "probe exit $rc"
 
 for want in 'uid 10001:10001' 'capeff 0000000000000000' 'no_new_privs 1' 'seccomp 2' \
             'sandbox_rc 0' 'sandbox inner_uid 10001:10001' 'sandbox inner_write ok' 'workspace_marker present' \
@@ -45,9 +49,19 @@ has 'link_codex_home created'
 for dir in /state/codex /state/codex/sessions /state/home /control; do
   has "sandbox list_denied $dir"
 done
-# CODEX_HOME/tmp/arg0 holds only Codex's own links to the pinned binary and its lock file.
-grep -q '^arg0_leaf ' <<<"$out" || fail 'no arg0 entries'
-! grep '^arg0_leaf ' <<<"$out" | grep -Ev '^arg0_leaf codex-arg0[A-Za-z0-9]+/(\.lock file mode=100644|(apply_patch|applypatch|codex-execve-wrapper|codex-linux-sandbox) link->/usr/local/bin/codex mode=120777)$' \
-  || fail 'unexpected arg0 entry'
+# CODEX_HOME/tmp/arg0 holds exactly one directory per running app-server (one here), named codex-arg0<id>,
+# mode 0755, and each holds exactly the lock file and Codex's four links to the pinned binary. Anything else at
+# either level (another file, link, empty or extra directory, other mode or link target) fails.
+has 'arg0_entries 1'
+entry=$(grep '^arg0_entry ' <<<"$out" || true)  # set -e: no match must reach fail, not end the script
+[ "$(grep -c '' <<<"$entry")" = 1 ] || fail 'arg0 entry count'
+grep -Eqx 'arg0_entry codex-arg0[A-Za-z0-9]+ dir mode=40755' <<<"$entry" || fail "arg0 entry: $entry"
+name=$(cut -d' ' -f2 <<<"$entry")
+has "arg0_leaves $name .lock,apply_patch,applypatch,codex-execve-wrapper,codex-linux-sandbox"
+[ "$(grep -c '^arg0_leaf ' <<<"$out")" = 5 ] || fail 'arg0 leaf count'
+has "arg0_leaf $name/.lock file mode=100644"
+for link in apply_patch applypatch codex-execve-wrapper codex-linux-sandbox; do
+  has "arg0_leaf $name/$link link->/usr/local/bin/codex mode=120777"
+done
 ! grep -q 'ERROR' <<<"$out" || fail 'an ERROR line'
 printf 'verdict pass\n'
