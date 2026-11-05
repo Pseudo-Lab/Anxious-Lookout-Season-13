@@ -28,7 +28,7 @@ def v2(v1):
 
 def test_v2_executor_is_ignored_and_renders_the_same_pod_as_v1(v1, v2):
     old, new = decode(v2), decode(v1)
-    assert old.executor is None and new.executor is None
+    assert old == new and not hasattr(old, 'executor')
     manifest = old.manifest('codex-runner')
     assert manifest == new.manifest('codex-runner')
     spec = manifest['spec']
@@ -55,3 +55,10 @@ def test_v2_shape_stays_strict(v2, damage):
     if damage == 'executor-without-version': del v2['version']
     with pytest.raises(Refused):
         decode(v2)
+
+
+def test_binding_image_tool_has_no_executor_opt_in_or_executor_image_swap():
+    # #68: a plan never gains a shell executor, and a stored v2 executor is never rewritten.
+    import inspect
+    from ops.runner_binding_image import upgrade
+    assert set(inspect.signature(upgrade).parameters) == {'db', 'fence', 'expected_plan_digest', 'new_image', 'apply'}

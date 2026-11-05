@@ -27,6 +27,8 @@ from .binding import canonical_uuid, require_binding
 from .access import AccessAuth, SupplySocket
 from .service_access import ServiceAccessAuth
 from .broker_client import BrokerClient, BrokerPull
+from . import native_policy as policy
+from .native_policy import Decision
 from app.page_scope import Scope, POLICIES, tool_allowed, turn_prompt, shell_allowed
 
 
@@ -131,9 +133,9 @@ class Native:
                             raise CodexFailure("policy_refused")
             except OSError:
                 raise CodexFailure("policy_refused") from None
+            # The image's Codex policy files, pinned in code next to the binary digests (#68).
+            policy.check_files(str(root))
         self.root, self.model, self.callback_url = root, model, callback_url
-        self.shell_enabled = os.getenv('SHELL_EXECUTOR_ENABLED', 'false') == 'true'
-        self.shell_broker = None
         self.lock, self.messages, self.next_id = threading.Lock(), queue.Queue(), 1
         self.state_lock = threading.RLock()
         self.completed = {}
@@ -145,13 +147,14 @@ class Native:
             raise CodexFailure("policy_refused")  # Legacy unsafe projections need private reconciliation, never automatic trust.
         self.closing, self.closed = False, False
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # Executor-writable .codex/AGENTS/config must never be loaded by the
-        # trusted native process. Shell cwd remains the separate workspace.
-        home, codex_home, work = root / "home", root / "codex", root / ("native-work" if self.shell_enabled else "workspace")
+        # #68: the sandboxed native shell writes the workspace, its cwd. Codex must never read
+        # model-written policy: a project `.codex` stays an untrusted (disabled) layer, checked
+        # through config/read, and CODEX_HOME config/rules or any `.codex` refuse (check_local).
+        home, codex_home, work = root / "home", root / "codex", root / "workspace"
         for path in (home, codex_home, work):
             path.mkdir(exist_ok=True, mode=0o700)
-        if any((path / "config.toml").exists() for path in (codex_home, work / ".codex")):
-            raise CodexFailure("policy_refused")
+        self.codex_home, self.work = codex_home, work
+        self.check_local()
         if not auth and (codex_home / "auth.json").exists():
             raise CodexFailure("policy_refused")
         if auth:
@@ -165,13 +168,12 @@ class Native:
         if (root / "model-block.json").exists() or (auth and auth.state().get("modelBlocked")):
             self.blocked_reason = "model_unavailable"
         environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(home), "CODEX_HOME": str(codex_home)}
-        self.work = work
         command = [binary, "app-server", "--listen", "stdio://",
                     "-c", 'cli_auth_credentials_store="file"' if auth and not self.external else 'cli_auth_credentials_store="ephemeral"',
-                    "-c", 'model="gpt-6.1-sol"', "-c", "features.shell_tool=false",
+                    "-c", 'model="gpt-6.1-sol"', "-c", "features.shell_tool=true",
                     "-c", 'model_provider="openai"',
                     "-c", "features.multi_agent=false", "-c", "features.multi_agent_v2=false",
-                    "-c", "features.unbounded_connection_retries=false", "-c", "features.unified_exec=false",
+                    "-c", "features.unbounded_connection_retries=false",
                     "-c", "features.apps=false", "-c", "features.plugins=false", "-c", "features.remote_plugin=false",
                     "-c", "features.hooks=false", "-c", "features.code_mode_host=true" if not self.fixture else "features.code_mode_host=false",
                     "-c", "features.daemon_auto_start=false",
@@ -192,20 +194,11 @@ class Native:
                             'analytics.enabled=false', 'otel.exporter="none"',
                             'otel.trace_exporter="none"', 'otel.metrics_exporter="none"'):
                 command += ['-c', setting]
+        # Unified exec (and with it write_stdin) is pinned off by the managed requirements only:
+        # 0.160.1 ignores a user `features.unified_exec=false` (#68).
+        command += ['-c', f'projects."{work}".trust_level="untrusted"']
         self.command, self.environment = command, environment
-        if self.shell_enabled:
-            from .shell_broker import ShellBroker
-            wall = int(os.environ.get('SHELL_WALL_SECONDS', '30'))
-            if not 1 <= wall <= 300:
-                raise CodexFailure('policy_refused')
-            self.shell_broker = ShellBroker(root / 'shell-broker.sock', self.authorize_shell,
-                lambda value: self.auth.sanitize(value) if self.auth else value, wall=wall)
-            command += ['-c', 'mcp_servers.shell.command="/usr/local/bin/python"',
-                        '-c', 'mcp_servers.shell.args=["-I","/app/runner/shell_bridge.py"]',
-                        '-c', 'mcp_servers.shell.enabled_tools=["shell"]',
-                        '-c', 'mcp_servers.shell.tools.shell.approval_mode="approve"',
-                        '-c', 'mcp_servers.shell.tool_timeout_sec=325',
-                        '-c', 'mcp_servers.shell.enabled=false']
+        self.thread_policy = {"approvalPolicy": "untrusted", "approvalsReviewer": "user", "permissions": policy.PROFILE}
         self.thread_web_modes = {}
         try:
             self.launch_process()
@@ -228,6 +221,7 @@ class Native:
         try:
             self.rpc("initialize", {"clientInfo": {"name": "anxious_research", "version": "1"}, "capabilities": {"experimentalApi": True}})
             self.send({"method": "initialized"})
+            self.check_policy()  # Before any credential reaches this process.
             if self.external:
                 self.login_access()
             if self.auth:
@@ -240,6 +234,51 @@ class Native:
             raise
         except Exception:
             raise RuntimeError("Native initialization or authentication is unavailable") from None
+
+    def check_local(self):
+        # Model-writable places Codex could read as policy are never present (#68).
+        if (os.path.lexists(self.codex_home / "config.toml") or os.path.lexists(self.codex_home / "rules")
+                or any(os.path.lexists(path / ".codex") for path in (self.work, *self.work.parents))):
+            raise CodexFailure("policy_refused")
+
+    def check_policy(self):
+        """What this app-server process reports applied (#68). Every launch and every turn."""
+        self.check_local()
+        try:
+            policy.check_requirements(self.rpc("configRequirements/read", {}))
+            policy.check_config(self.rpc("config/read", {"includeLayers": True, "cwd": str(self.work)}), str(self.root))
+        except CodexFailure:
+            raise CodexFailure("policy_refused") from None
+
+    def reply_server(self, message, turn):
+        if message.get("method") == "item/tool/call":
+            self.reply_tool(message, turn)
+        else:
+            self.reply_approval(message, turn)
+
+    def reply_approval(self, message, turn):
+        """Approve one pending command or file change after the shell permission check, or decline.
+
+        The answer goes to this request's id only, and an item is decided once: a duplicate,
+        a late request for a finished turn or anything not in the allow lists is declined.
+        """
+        decision = Decision.DECLINE
+        try:
+            params = message.get("params")
+            if message.get("method") == "item/commandExecution/requestApproval":
+                eligible = policy.command_eligible(params, turn, str(self.work))
+                arguments = {"command": params["command"], "cwd": params["cwd"]} if eligible else None
+            else:
+                eligible = policy.file_change_eligible(params, turn)
+                arguments = {}
+            if isinstance(params, dict) and turn is not None and isinstance(params.get("itemId"), str):
+                turn.setdefault("approvalItems", set()).add(params["itemId"])
+            if (eligible and (turn["thread"], turn["turnId"]) not in self.completed
+                    and self.authorize_shell(turn, arguments)):
+                decision = Decision.ACCEPT
+        except Exception:
+            decision = Decision.DECLINE
+        self.send(policy.answer(message["id"], decision))
 
     def authorize_shell(self, turn, arguments):
         try:
@@ -494,15 +533,17 @@ class Native:
                 self.auth.block('auth_revoked')
                 self.blocked_reason = 'auth_revoked'
                 raise CodexFailure('auth_revoked')
-            if method == "item/tool/call" and turn:
-                if not turn.get("turnId") and params.get("threadId") == turn["thread"]:
+            if method in {"item/tool/call", "item/commandExecution/requestApproval", "item/fileChange/requestApproval"} and turn:
+                if not turn.get("turnId") and isinstance(params, dict) and params.get("threadId") == turn["thread"]:
                     pending = turn.setdefault("pendingTools", [])
                     if len(pending) < 32:
                         pending.append(message)  # Wait for correlated turn/start response; never borrow a token early.
                     else:
-                        self.reply_tool(message, None)
+                        self.reply_server(message, None)
                 else:
-                    self.reply_tool(message, turn)
+                    self.reply_server(message, turn)
+            elif method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
+                self.reply_approval(message, None)  # Outside a turn: declined.
             else:
                 # No hidden shell/file permission grants or host credential refresh.
                 self.send({"id": message["id"], "error": {"code": -32601, "message": "Interactive capability is unavailable"}})
@@ -636,26 +677,23 @@ class Native:
             self.check_binding()
             kind = (body.scope or {}).get("page", {}).get("kind")
             web_mode = "live" if kind in POLICIES and kind not in {"public_document", "public_post"} else "disabled"
-            if self.shell_enabled or (entry["thread"] in self.thread_web_modes and self.thread_web_modes[entry["thread"]] != web_mode):
+            if entry["thread"] in self.thread_web_modes and self.thread_web_modes[entry["thread"]] != web_mode:
                 self.reset_thread_tools()
             config = {"web_search": web_mode}
-            turn = {"thread": entry["thread"], "turnId": None, "pendingTools": [],
+            self.check_policy()  # Again per turn: nothing the last turn wrote may change the policy.
+            turn = {"thread": entry["thread"], "turnId": None, "pendingTools": [], "approvalItems": set(),
                     "session": session, "request": entry["request"], "token": body.toolToken, "scope": body.scope, "timing": timing}
-            if self.shell_broker:
-                lease = self.shell_broker.activate(turn)
-                config.update({'mcp_servers.shell.enabled': shell_allowed(body.scope),
-                    'mcp_servers.shell.env.SHELL_BROKER_SOCKET': str(self.shell_broker.path),
-                    'mcp_servers.shell.env.SHELL_BRIDGE_LEASE': lease})
             if entry["thread"]:
                 result = self.rpc("thread/resume", {"threadId": entry["thread"], "model": self.model,
-                                  "cwd": str(self.work), "approvalPolicy": "never", "sandbox": "read-only", "config": config})
+                                  "cwd": str(self.work), **self.thread_policy, "config": config})
                 if result.get("thread", {}).get("id") != entry["thread"]:
                     raise CodexFailure("policy_refused")
             else:
                 result = self.rpc("thread/start", {"model": self.model, "cwd": str(self.work),
-                                  "approvalPolicy": "never", "sandbox": "read-only", "config": config, "dynamicTools": body.tools,
+                                  **self.thread_policy, "config": config, "dynamicTools": body.tools,
                                   "historyMode": "legacy", "ephemeral": False})
             self.ensure_model(result, required=True)
+            policy.check_thread(result, self.work)  # Applied to this thread, start and resume alike.
             timing["threadMs"] = (time.monotonic() - acquired_at) * 1000
             entry["thread"] = result["thread"]["id"]
             self.thread_web_modes[entry["thread"]] = web_mode
@@ -678,7 +716,7 @@ class Native:
                 raise CodexFailure("policy_refused")
             turn["turnId"] = turn_id
             for message in turn.pop("pendingTools"):
-                self.reply_tool(message, turn)
+                self.reply_server(message, turn)
             entry["turn_id"] = turn_id
             self.save()
             key = (entry["thread"], turn_id)
@@ -721,8 +759,6 @@ class Native:
                 except Exception:
                     pass
         finally:
-            if self.shell_broker:
-                self.shell_broker.revoke()
             try:
                 with self.state_lock:
                     try:
@@ -811,8 +847,6 @@ class Native:
                     except (BrokenPipeError, OSError):
                         pass
             self.closed = True
-            if self.shell_broker:
-                self.shell_broker.close()
         return self.clean_shutdown
 
 

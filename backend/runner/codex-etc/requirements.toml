@@ -1,0 +1,15 @@
+# #68: installed as /etc/codex/requirements.toml (root 0644) in the runner image: managed
+# requirements, above every user, project and session setting. The runner refuses to start unless
+# this file equals runner/native_policy.py requirements('/state') and configRequirements/read
+# reports it applied.
+allowed_approval_policies = ["untrusted"]
+allowed_approvals_reviewers = ["user"]
+
+# 0.160.1 forces unified exec on unless managed requirements pin it. Off: exec_command is one-shot
+# and write_stdin is not registered.
+[features]
+unified_exec = false
+
+# Second layer only. The profile's deny entries (config.toml) are the first.
+[permissions.filesystem]
+deny_read = ["/control", "/run/codex-broker", "/state/codex", "/state/home"]

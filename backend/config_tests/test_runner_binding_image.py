@@ -81,22 +81,6 @@ def test_api_role_cannot_use_maintenance_write(admin,stopped_binding):
 EXECUTOR = {'image': 'registry.invalid/executor@sha256:'+'c'*64, 'wallSeconds': 30, 'outputBytes': 65536}
 
 
-def test_executor_opt_in_is_refused_and_plan_kept(admin, stopped_binding):
-    # #68: a v1 binding never gains a shell executor; the native shell replaces it.
-    fence, value = stopped_binding
-    before = preservation_snapshot(admin)
-    for apply in (False, True):
-        with pytest.raises(Refused):
-            with admin.begin() as db:
-                upgrade(db, fence, plan_digest(value), NEW_IMAGE, executor=EXECUTOR, apply=apply)
-    with admin.begin() as db:
-        assert db.execute(text('SELECT plan FROM runner_bindings.bindings')).scalar_one() == value
-    assert preservation_snapshot(admin) == before
-
-
-NEW_EXECUTOR_IMAGE = 'registry.invalid/executor@sha256:'+'d'*64
-
-
 @pytest.fixture
 def stopped_v2_binding(admin, owner, t0):
     state, stop, proof = drained(admin, owner, t0)
@@ -108,30 +92,22 @@ def stopped_v2_binding(admin, owner, t0):
     return Fence.of(read(admin, owner)), value
 
 
-def test_v2_executor_image_swaps_both_digests_and_keeps_limits(admin, stopped_v2_binding):
-    # #59: an existing v2 binding needs the runner and executor images of one release.
+def test_v2_runner_image_swap_keeps_executor_for_rollback(admin, stopped_v2_binding):
+    # #68 window: the runner image moves to the native shell release; the ignored v2 executor
+    # stays byte-for-byte so the previous release can render its sidecar again after a rollback.
     fence, value = stopped_v2_binding
     before = preservation_snapshot(admin)
     with admin.begin() as db:
         resources = db.execute(text('SELECT * FROM runner_bindings.resources')).all()
-        report = upgrade(db, fence, plan_digest(value), NEW_IMAGE, executor_image=NEW_EXECUTOR_IMAGE)
-        assert (report['oldExecutorImage'], report['newExecutorImage']) == (EXECUTOR['image'], NEW_EXECUTOR_IMAGE)
+        report = upgrade(db, fence, plan_digest(value), NEW_IMAGE)
+        assert set(report) == {'owner', 'state', 'generation', 'revision', 'oldImage', 'newImage',
+                               'oldPlanSha256', 'newPlanSha256'}
         assert db.execute(text('SELECT plan FROM runner_bindings.bindings')).scalar_one() == value
-        assert upgrade(db, fence, plan_digest(value), NEW_IMAGE, executor_image=NEW_EXECUTOR_IMAGE, apply=True) == report
+        assert upgrade(db, fence, plan_digest(value), NEW_IMAGE, apply=True) == report
         updated = db.execute(text('SELECT plan FROM runner_bindings.bindings')).scalar_one()
-        assert updated == {**value, 'image': NEW_IMAGE, 'executor': {**EXECUTOR, 'image': NEW_EXECUTOR_IMAGE}}
+        assert updated == {**value, 'image': NEW_IMAGE} and updated['executor'] == EXECUTOR
         assert db.execute(text('SELECT * FROM runner_bindings.resources')).all() == resources
     assert preservation_snapshot(admin) == before
     with pytest.raises(Refused):
         with admin.begin() as db:
-            upgrade(db, fence, plan_digest(value), NEW_IMAGE, executor_image=NEW_EXECUTOR_IMAGE, apply=True)
-
-
-@pytest.mark.parametrize('case', ['v1', 'mutable', 'with-opt-in'])
-def test_executor_image_swap_refuses_v1_mutable_or_mixed(admin, request, case):
-    fence, value = request.getfixturevalue('stopped_binding' if case == 'v1' else 'stopped_v2_binding')
-    image = 'mutable:latest' if case == 'mutable' else NEW_EXECUTOR_IMAGE
-    executor = EXECUTOR if case == 'with-opt-in' else None
-    with pytest.raises(Refused):
-        with admin.begin() as db:
-            upgrade(db, fence, plan_digest(value), NEW_IMAGE, executor=executor, executor_image=image, apply=True)
+            upgrade(db, fence, plan_digest(value), NEW_IMAGE, apply=True)

@@ -1,5 +1,11 @@
 # Issue 14 Bash boundary investigation (2026-10-16)
 
+> **Since #68** the runner takes alternative 3 below: native shell in the Codex bubblewrap sandbox,
+> every command and file change approved per request by the runner (`runner/native_policy.py`).
+> The #23 shell executor and ShellBroker are deleted. Procedures, the startup self-check and the
+> Codex version recheck list are in `infra/hosting/m3/native-shell/README.md`. The rest of this file
+> is the 2026-10-16 investigation record; its enforcement gaps are what the #68 VM stage measures.
+
 Bash remains disabled. The user/PM decision on 2026-10-16 excludes Bash from #14
 and moves executor isolation, resource bounds and image rebuilds to
 [issue #23](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/23).

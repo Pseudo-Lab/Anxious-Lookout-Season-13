@@ -1,0 +1,16 @@
+# #68: installed as /etc/codex/config.toml (root 0644) in the runner image. The runner refuses to
+# start unless this file, and the effective config Codex reports, equal runner/native_policy.py
+# system_config('/state') exactly. Change both together.
+default_permissions = "native"
+approval_policy = "untrusted"
+approvals_reviewer = "user"
+
+[permissions.native.filesystem]
+":minimal" = "read"
+"/control" = "deny"
+"/run/codex-broker" = "deny"
+"/state/codex" = "deny"
+"/state/home" = "deny"
+
+[permissions.native.filesystem.":workspace_roots"]
+"." = "write"

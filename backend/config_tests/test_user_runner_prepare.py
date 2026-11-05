@@ -70,7 +70,7 @@ def test_new_owner_plan_is_v1_without_executor(prepared):
     config = json.loads((output/'runtime.json').read_text())
     assert 'version' not in config['plan'] and 'executor' not in config['plan']
     plan = plan_from(config['plan'])
-    assert plan.executor is None
+    assert not hasattr(plan, 'executor')
     assert [c['name'] for c in plan.manifest('isolated')['spec']['containers']] == ['runner']
 
 

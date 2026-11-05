@@ -52,18 +52,6 @@ class Reference:
 
 
 @dataclass(frozen=True)
-class ExecutorPlan:
-    image: str
-    wall_seconds: int = 30
-    output_bytes: int = 65536
-
-    def __post_init__(self):
-        require(isinstance(self.image, str) and re.fullmatch(r'[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}', self.image))
-        require(type(self.wall_seconds) is int and 1 <= self.wall_seconds <= 300)
-        require(type(self.output_bytes) is int and 1024 <= self.output_bytes <= 1048576)
-
-
-@dataclass(frozen=True)
 class Plan:
     identity: Identity
     image: str
@@ -72,7 +60,6 @@ class Plan:
     transport: Reference
     callback: str
     service_account: str
-    executor: ExecutorPlan | None = None
 
     def __post_init__(self):
         require(isinstance(self.identity, Identity))
@@ -88,7 +75,6 @@ class Plan:
         require((parsed.scheme == 'https' or internal) and parsed.hostname and not parsed.username and not parsed.password
                 and not parsed.query and not parsed.fragment)
         name(self.service_account)
-        require(self.executor is None or isinstance(self.executor, ExecutorPlan))
 
     def manifest(self, namespace):
         identity = self.identity
@@ -131,39 +117,7 @@ class Plan:
                                      {'name': 'broker-token', 'projected': {'defaultMode': 292, 'sources': [
                                          {'serviceAccountToken': {'audience': BROKER_AUDIENCE, 'expirationSeconds': 600, 'path': 'token'}}]}},
                                      {'name': 'tmp', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '64Mi'}}]}}
-        if self.executor is not None:
-            self._executor_manifest(manifest)
         return manifest
-
-    def _executor_manifest(self, manifest):
-        executor = self.executor
-        spec = manifest['spec']
-        spec['shareProcessNamespace'] = False
-        # The native PVC root remains private. Only these pre-created directories
-        # are mounted into the executor via fixed subPath binds.
-        security = {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
-                    'capabilities': {'drop': ['ALL']}}
-        spec['initContainers'] = [{'name': 'prepare-shell', 'image': self.image, 'imagePullPolicy': 'IfNotPresent',
-            'command': ['python', '-I', '/app/runner/prepare_shell.py'], 'securityContext': security,
-            'resources': {'requests': {'cpu': '10m', 'memory': '32Mi'}, 'limits': {'cpu': '100m', 'memory': '64Mi'}},
-            'volumeMounts': [{'name': 'native', 'mountPath': '/state'}]}]
-        runner = spec['containers'][0]
-        runner['env'] += [{'name': 'SHELL_EXECUTOR_ENABLED', 'value': 'true'},
-                          {'name': 'SHELL_WALL_SECONDS', 'value': str(executor.wall_seconds)},
-                          {'name': 'SHELL_OUTPUT_BYTES', 'value': str(executor.output_bytes)}]
-        runner['volumeMounts'].append({'name': 'native', 'mountPath': '/run/shell-executor', 'subPath': 'shell-ipc'})
-        spec['containers'].append({'name': 'shell-executor', 'image': executor.image, 'imagePullPolicy': 'IfNotPresent',
-            'command': ['python', '-I', '/opt/executor/server.py'],
-            'securityContext': {**security, 'runAsUser': 20002, 'runAsGroup': 10001, 'runAsNonRoot': True},
-            'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '1', 'memory': '512Mi'}},
-            'env': [{'name': 'SHELL_WALL_SECONDS', 'value': str(executor.wall_seconds)},
-                    {'name': 'SHELL_OUTPUT_BYTES', 'value': str(executor.output_bytes)}],
-            'volumeMounts': [{'name': 'native', 'mountPath': '/state/workspace', 'subPath': 'workspace'},
-                             {'name': 'native', 'mountPath': '/run/shell-executor', 'subPath': 'shell-ipc'},
-                             {'name': 'shell-tmp', 'mountPath': '/tmp'}]})
-        # Disk-backed: a Memory medium would count the scratch pages against the 512Mi limit.
-        spec['volumes'].append({'name': 'shell-tmp', 'emptyDir': {'sizeLimit': '256Mi'}})
-
 
 class KubePods:
     def __init__(self, endpoint, namespace, bearer, ca_file, plans, *, timeout=2.0, deadline=10.0, _transport=None):

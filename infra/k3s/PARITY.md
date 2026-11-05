@@ -21,6 +21,7 @@ Issue [#54](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/54). 
 | --- | --- | --- | --- | --- |
 | CPU architecture | aarch64 | x86_64 | May differ: the one intended platform difference | #48 |
 | Codex version | 0.160.1 | 0.160.1 | Must match | `backend/runner/install_codex.py` |
+| Codex native shell policy (#68) | runner image `/etc/codex/config.toml` + `requirements.toml`, checked at every app-server launch and turn | same image files | Must match. The native shell's no-unsandboxed-retry guarantee rests on the profile's deny entries and the 0.160.1 pin; `unified_exec` (so `write_stdin`) is off only through the managed requirements (the former `-c features.unified_exec=false` had no effect in 0.160.1). A Codex pin change rechecks `infra/hosting/m3/native-shell/README.md` section 5 first | #68 |
 | Codex binary pins | `PINS["arm64"]` (codex `fbbaec80…`, host `fbccde22…`) | `PINS["amd64"]` (codex `f34a4d23…`, host `b33e8a52…`), selected by BuildKit `TARGETARCH`, fail-closed | May differ: follows the architecture, and each set is fixed in source | #48 21518bf, R3 |
 | Runner / API / web image source and build arguments | same source SHA, production arguments, `linux/arm64` | same source SHA, production arguments, `linux/amd64` | Must match (source and arguments); the platform follows the architecture row | DEV-VM.md "k3s and Cilium" |
 | Distribution | Oracle Linux Server 9.7 | Oracle Linux Server 9.7 (minimal) | Must match | #48 R4 |

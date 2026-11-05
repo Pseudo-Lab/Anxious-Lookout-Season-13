@@ -38,6 +38,9 @@ ARG TARGETARCH
 RUN python /app/runner/install_codex.py \
     && mkdir -p /state \
     && chown 10001:10001 /state
+# #68: Codex system config (the `native` permission profile) and managed requirements. Root-owned
+# and read-only for the runner; runner/native_policy.py refuses to start unless both equal it.
+COPY --chown=0:0 --chmod=644 backend/runner/codex-etc/config.toml backend/runner/codex-etc/requirements.toml /etc/codex/
 USER 10001:10001
 CMD ["uvicorn", "runner.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log", "--no-proxy-headers"]
 
@@ -45,6 +48,7 @@ CMD ["uvicorn", "runner.app:create_app", "--factory", "--host", "0.0.0.0", "--po
 FROM test AS runner-test
 COPY --from=runner --chmod=755 /usr/local/bin/codex /usr/local/bin/codex
 COPY --from=runner --chmod=755 /usr/local/bin/codex-code-mode-host /usr/local/bin/codex-code-mode-host
+COPY --from=runner /etc/codex /etc/codex
 
 # Separate trusted host preparation image. Never used for the API deployment.
 FROM runtime AS provisioner
@@ -52,11 +56,3 @@ USER root
 RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs util-linux \
     && rm -rf /var/lib/apt/lists/*
 ENTRYPOINT ["python", "-B", "-m", "ops.runner_provision_worker"]
-
-# Untrusted commands run here, never alongside runner auth/control volumes.
-FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS shell-executor
-RUN apt-get update && apt-get install -y --no-install-recommends bash coreutils curl jq ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-COPY backend/executor/server.py /opt/executor/server.py
-USER 20002:10001
-ENTRYPOINT ["python", "-I", "/opt/executor/server.py"]

@@ -12,10 +12,12 @@ Nothing here runs from a render, a test or an agent session on production.
 | 1 | `kernel.yama.ptrace_scope=1` | user (read-only node for agents) | any time, independent of the #68 window |
 | 2 | Seccomp profile `seccomp-runner-userns-v1.json` | PM after review | before the #68 window |
 | 3 | Controller inputs without `executor`, binding runner images | PM after review | the #68 window |
+| 4 | Runner approval path and startup self-check (reference) | nobody: runner code | every app-server launch and turn |
+| 5 | Codex version: what to recheck | back, review | before any Codex pin change |
 
 Still to come with the Pod specification commit (#68 order 4): the SELinux policy for `container_t`, the
-single resource limit, the `codex-linux-sandbox` link in the image and the read-restricting permission
-profile. They will be added here as sections 4 to 7.
+single resource limit and the `codex-linux-sandbox` link in the image. They will be added here as
+sections 6 to 8.
 
 ## 1. `kernel.yama.ptrace_scope=1` (user, production node)
 
@@ -252,3 +254,83 @@ Same precondition: no Pending/Running runner Pod, entry frozen, every mutator st
 
 If #68 shares a window with #61/#63, roll back in reverse order: #68 first, then #63 and #61 by their
 own procedures.
+
+## 4. Approval path and startup self-check (runner, reference)
+
+The policy lives in the image, the expected values in runner code
+(`backend/runner/native_policy.py`). Nothing is read from the workspace or a user setting.
+
+| File in the image | Repository | Holds |
+| --- | --- | --- |
+| `/etc/codex/config.toml` (system layer) | `backend/runner/codex-etc/config.toml` | permission profile `native`: `:minimal` read, workspace write, deny `/control`, `/run/codex-broker`, `/state/codex`, `/state/home`; `approval_policy = "untrusted"`, `approvals_reviewer = "user"`, `default_permissions = "native"` |
+| `/etc/codex/requirements.toml` (managed) | `backend/runner/codex-etc/requirements.toml` | `allowed_approval_policies = ["untrusted"]`, `allowed_approvals_reviewers = ["user"]`, `[features] unified_exec = false`, `deny_read` (second layer only) |
+
+**Why these settings are load-bearing** (Codex 0.160.1 source, `rust-v0.160.1` `d27764b`):
+
+- **Deny entries.** Under `untrusted`, a sandbox-denied command is retried without the sandbox, and
+  without a second approval because the first one already passed (`core/src/tools/orchestrator.rs`,
+  `should_bypass_approval`). Codex skips that retry only when the filesystem policy has a deny entry
+  (`unsandboxed_execution_allowed`). The same check turns a model's `require_escalated` into an ordinary
+  sandboxed run. The runner never sees the retry. Only the profile's deny entries stop it.
+- **`unified_exec` pinned off in requirements.** 0.160.1 turns unified exec back on unless managed
+  requirements pin it (`core/src/config/managed_features.rs`). The runner's former
+  `-c features.unified_exec=false` had no effect; it never mattered before #68 because the shell tool was
+  off. With it pinned off, `exec_command` is one-shot and `write_stdin` is not registered.
+- **`allowed_approvals_reviewers = ["user"]`.** Otherwise an `auto_review` subagent could approve in the
+  runner's place.
+- **`proposedExecpolicyAmendment`** comes with almost every approval request: Codex derives it from the
+  command. It is applied only through a rule-adding decision, and the runner has none.
+
+**Startup self-check.** On every app-server launch (first start, tool reset, restart) and again
+before every turn, the runner refuses (`policy_refused`, nothing runs) unless all of these hold:
+
+1. The Codex and code-mode host binaries match the pinned SHA-256 (`install_codex.PINS`). This is
+   what ties the checked inputs to the 0.160.1 behaviour above.
+2. Both `/etc/codex` files are regular, root-owned, not writable by the runner, and equal to
+   `native_policy.system_config('/state')` / `requirements('/state')`.
+3. `CODEX_HOME/config.toml`, `CODEX_HOME/rules` and any `.codex` from the workspace up do not exist.
+4. `configRequirements/read` reports the requirements applied (policies, reviewer, `unified_exec`).
+5. `config/read` (cwd = workspace, with layers) reports:
+   - the effective profile and policy keys exactly as in the system layer;
+   - exactly one enabled system layer, `/etc/codex/config.toml`;
+   - no other enabled layer setting a policy key (`permissions`, `default_permissions`,
+     `approval_policy`, `approvals_reviewer`, `sandbox_mode`, `sandbox_workspace_write`);
+   - every project layer disabled.
+6. Every `thread/start` and `thread/resume` response reports `approvalPolicy: untrusted`,
+   `approvalsReviewer: user`, `activePermissionProfile.id: native` and the workspace as `cwd`.
+
+Not readable through the API: the compiled filesystem policy and the requirements `deny_read`. The
+VM stage judges those by behaviour: the sandbox boundary of the first and every later execution, and
+start refusal for damaged or missing configuration.
+
+**Approval answers.** Only `accept` or `decline`, built from a two-value enum. No runner source names a
+session-wide, rule-adding or network-amending decision; a unit test enforces this.
+
+| Request | Declined without asking the API | Otherwise |
+| --- | --- | --- |
+| `item/commandExecution/requestApproval` | any unknown field; `kind` other than `command` (`writeStdin` included); `approvalId`, `additionalPermissions`, `networkApprovalContext` or `proposedNetworkPolicyAmendments` present; cwd outside the workspace; not the pending thread/turn; an item already decided; a finished turn | `runner_shell_authorize` with the request's command and cwd, before execution |
+| `item/fileChange/requestApproval` | any unknown field; `grantRoot` present; not the pending thread/turn; an item already decided; a finished turn | `runner_shell_authorize`, before the patch is applied |
+| any other server request (`item/permissions/requestApproval`, user input, elicitation) | always: JSON-RPC error, no grant | - |
+
+Requests that arrive before the `turn/start` response wait (at most 32) and are decided once the turn
+id is known. A request outside a turn is declined.
+
+**Re-verification triggers.** The VM evidence holds for one combination: runner image digest
+(Codex binaries and both `/etc/codex` files included), seccomp profile, SELinux module, bubblewrap
+package and Pod manifest. A change to any of them is re-verified on the VM before it reaches production.
+
+## 5. Codex version: what to recheck
+
+Moving the Codex pin (`backend/runner/install_codex.py`) needs all of these rechecked against the
+new source, then on the VM:
+
+- `unsandboxed_execution_allowed` still depends on a deny entry, and the orchestrator still skips the
+  unsandboxed retry under that condition;
+- `require_escalated` is still lowered to a sandboxed run when deny entries exist;
+- unified exec can still be pinned off only by managed requirements, and `write_stdin` is absent then;
+- `allowed_approvals_reviewers` still exists and `user` still means the client;
+- the approval request fields and decision names (the runner's allow lists in `native_policy.py`);
+- the `configRequirements/read`, `config/read` and thread response fields the self-check reads;
+- `thread/start.permissions` and `activePermissionProfile` (experimental in 0.160.1);
+- project layers are still disabled for an untrusted cwd.
+
