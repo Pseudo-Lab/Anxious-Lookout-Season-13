@@ -629,8 +629,18 @@ no `container_engine_t`, `spc_t` or `container_userns_t`; no proc mount; no `don
 `selinux/build.sh <out>` builds both with checkpolicy/libsepol 3.6 (Oracle Linux 9, as the nodes). The build is
 reproducible: version 1 `68270c77…f6e6`, version 2 `3f4fc25c…beea`. `vm/selinux-module.sh` pins these.
 
-**Not allowed: a fresh `/proc` in the sandbox.** Without `proc_t:filesystem mount`, Codex's preflight sees
-`Can't mount proc … Permission denied` and reruns the sandbox without `/proc` (`linux_run_main.rs`). The
+**Not allowed: a fresh `/proc` in the sandbox.** When Codex's preflight cannot mount a fresh procfs (`Can't mount
+proc … Operation not permitted` or `Permission denied`), it reruns the sandbox without `/proc`
+(`linux_run_main.rs`). Why it cannot, kept apart:
+- **Measured (local Docker, AppArmor, 2026-11-05):** bubblewrap replaying the preflight gets `Can't mount proc on
+  /newroot/proc: Operation not permitted` (EPERM) and succeeds without `--proc`. The container's `/proc` has
+  paths mounted over it (`/proc/kcore`, `/proc/keys`, `/proc/sys`, … — the runtime's masked paths), and the
+  kernel refuses a new procfs in a user namespace while that is so. No SELinux there: the kernel refuses.
+- **Recorded in V3b (development VM, `container_t`):** the same replay's error text and whether a proc mount AVC
+  appears in the same time window (EACCES with an AVC would mean SELinux refused first).
+- **Prediction, not measured:** that allowing `proc_t:filesystem mount` in SELinux would still leave the sandbox
+  without `/proc` on the node, because the same kernel check applies to the Pod's masked `/proc`. Not tested:
+  opening that rule is outside the user's decision. The
 mask, read and write limits are the same in that run (measured locally and in V3b/V3c). Each command's preflight
 leaves one proc mount denial in the audit log. Owner-visible effect of a sandbox without `/proc` (local
 measurement 2026-11-05, the same fallback): `/dev/stderr`, `/dev/stdin`, `/dev/fd/*` and bash process
