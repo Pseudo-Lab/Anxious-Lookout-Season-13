@@ -34,6 +34,9 @@ has() { grep -Fxq -- "$1" <<<"$out" || fail "$1"; }
 
 for want in 'uid 10001:10001' 'capeff 0000000000000000' 'no_new_privs 1' 'seccomp 2' \
             'sandbox_rc 0' 'sandbox inner_uid 10001:10001' 'sandbox inner_write ok' 'workspace_marker present' \
+            'sandbox inner_home /usr/local/share/anxious-shell-home' 'sandbox bash_startup []' \
+            'sandbox login_home /usr/local/share/anxious-shell-home' 'sandbox home_write denied .bash_profile' \
+            'sandbox home_write denied .bashrc' 'sandbox home_write denied .profile' \
             'sandbox token_lines 0' 'requirements check ok' 'config check ok' 'thread_start_check ok' \
             'app_server_exit 0' 'probe done'; do
   has "$want"

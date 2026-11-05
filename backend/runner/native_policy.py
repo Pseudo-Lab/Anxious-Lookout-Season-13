@@ -33,7 +33,9 @@ STATE_ROOT = '/state'  # The image's /etc/codex/config.toml names paths under th
 # Keys that change who approves, how commands are sandboxed or which profile applies. Only the
 # image's system layer may set them; any other enabled layer that does refuses the start.
 POLICY_KEYS = frozenset({'permissions', 'default_permissions', 'approval_policy', 'approvals_reviewer',
-                         'sandbox_mode', 'sandbox_workspace_write'})
+                         'sandbox_mode', 'sandbox_workspace_write', 'agents', 'shell_environment_policy'})
+# HOME for sandboxed commands (image: empty, root-owned, 0555). See codex-etc/config.toml.
+SHELL_HOME = '/usr/local/share/anxious-shell-home'
 
 
 class Decision(enum.Enum):
@@ -79,13 +81,15 @@ def system_config(root):
     project, and the managed requirements (`allowed_approval_policies`); check_thread confirms it per thread.
     """
     return {'default_permissions': PROFILE, 'approvals_reviewer': 'user',
+            'agents': {'enabled': False},
+            'shell_environment_policy': {'set': {'HOME': SHELL_HOME}},
             'permissions': {PROFILE: {'filesystem': filesystem(root)}}}
 
 
 def requirements(root):
     """The whole managed requirements file (`/etc/codex/requirements.toml`)."""
     return {'allowed_approval_policies': ['untrusted'], 'allowed_approvals_reviewers': ['user'],
-            'features': {'unified_exec': False},
+            'features': {'unified_exec': False, 'multi_agent_v2': False, 'view_image': False, 'goals': False},
             'permissions': {'filesystem': {'deny_read': list(deny_paths(root))}}}
 
 
@@ -136,6 +140,9 @@ def check_requirements(result):
     features = requirements.get('featureRequirements')
     # 0.160.1 forces unified exec on unless managed requirements pin it; off means no write_stdin.
     require(isinstance(features, dict) and features.get('unified_exec') is False, 'requirements.unified_exec')
+    # Sub-agents: with multi_agent_v2 on, Codex ignores [agents] enabled = false (config.toml).
+    require(features.get('multi_agent_v2') is False, 'requirements.multi_agent_v2')
+    require(features.get('view_image') is False and features.get('goals') is False, 'requirements.tools_off')
 
 
 def without_nulls(value):

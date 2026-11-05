@@ -113,6 +113,13 @@ def problems():
             found.append('sandbox link')
     except OSError:
         found.append('sandbox link')
+    try:  # HOME for sandboxed commands: empty, root-owned, not writable (no start-up file can be placed there)
+        info = os.lstat(native_policy.SHELL_HOME)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o555
+                or os.listdir(native_policy.SHELL_HOME)):
+            found.append('shell home')
+    except OSError:
+        found.append('shell home')
     try:
         info = os.lstat('/etc/codex')
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o755:

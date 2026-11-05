@@ -4,6 +4,17 @@
 default_permissions = "native"
 approvals_reviewer = "user"
 
+# No sub-agents: with [agents] enabled (the default) 0.160.1 offers the `collaboration` tools (spawn_agent, ...)
+# even with features.multi_agent and multi_agent_v2 off.
+[agents]
+enabled = false
+
+# HOME for sandboxed commands: an empty root-owned 0555 directory in the image. app-server keeps HOME=/state/home
+# (denied in the sandbox, so a shell looking for start-up files there printed "Permission denied" on every
+# command). Not in the workspace: a start-up file the model could write would run, unseen, before every command.
+[shell_environment_policy.set]
+HOME = "/usr/local/share/anxious-shell-home"
+
 [permissions.native.filesystem]
 ":minimal" = "read"
 "/control" = "deny"

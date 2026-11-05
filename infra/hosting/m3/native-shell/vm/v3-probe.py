@@ -87,6 +87,11 @@ READS = [MARKERS[name] for name in ('codex_marker', 'codex_rollout', 'codex_log'
 READS += [LINKS['link_rollout'][1], os.path.join(LINKS['link_codex_home'][1], 'probe-marker.txt')]
 INNER = r"""
 echo "inner_uid $(id -u):$(id -g)"
+echo "inner_home $HOME"
+echo "login_home $(bash -lc 'echo "$HOME"' 2>/dev/null)"
+echo "bash_startup [$( (bash -lc true; bash -c true) 2>&1 | tr '\n' ' ')]"
+for f in .bash_profile .bashrc .profile; do
+  if touch "$HOME/$f" 2>/dev/null; then echo "home_write ok $f"; else echo "home_write denied $f"; fi; done
 echo marker > /state/workspace/v3-write && echo "inner_write ok"
 for f in "$@"; do if cat -- "$f" >/dev/null 2>&1; then echo "read_ok $f"; else echo "read_denied $f"; fi; done
 for d in /state/codex /state/codex/sessions /state/home /control; do

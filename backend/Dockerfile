@@ -38,11 +38,14 @@ ARG TARGETARCH
 RUN python /app/runner/install_codex.py \
     && mkdir -p /state \
     && chown 10001:10001 /state
-# #68: Codex's workspace-write sandbox. Debian bookworm's bubblewrap 0.8.0 has no --argv0, so Codex
-# reaches its Linux sandbox helper through this name, visible inside the restricted read scope.
+# #68: Codex's workspace-write sandbox. Debian bookworm's bubblewrap 0.8.0 has no --argv0, so outside
+# app-server (no CODEX_HOME/tmp/arg0, e.g. `codex sandbox` in thread-check.sh) Codex finds its Linux sandbox
+# helper by this name on PATH; without it that path fails with "execvp codex-linux-sandbox" (measured
+# 2026-11-05). The empty directory is HOME for sandboxed commands (codex-etc/config.toml).
 RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap \
     && rm -rf /var/lib/apt/lists/* \
-    && ln -s codex /usr/local/bin/codex-linux-sandbox
+    && ln -s codex /usr/local/bin/codex-linux-sandbox \
+    && install -d -o root -g root -m 0555 /usr/local/share/anxious-shell-home
 # #68: Codex system config (the `native` permission profile) and managed requirements. Root-owned
 # and read-only for the runner; runner/native_policy.py refuses to start unless both equal it.
 # The directory first: COPY --chmod would also give a directory it creates mode 644 (not searchable).

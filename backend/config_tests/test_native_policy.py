@@ -38,7 +38,19 @@ def test_profile_has_the_load_bearing_deny_entries():
     assert denied == {'/control', '/run/codex-broker', '/state/home'}
     assert table[':minimal'] == 'read' and table[':workspace_roots'] == {'.': 'write'}
     assert policy.requirements(ROOT)['permissions']['filesystem']['deny_read'] == list(policy.deny_paths(ROOT))
-    assert policy.requirements(ROOT)['features'] == {'unified_exec': False}
+    assert policy.requirements(ROOT)['features'] == {'unified_exec': False, 'multi_agent_v2': False,
+                                                     'view_image': False, 'goals': False}
+
+
+def test_no_sub_agents_and_a_separate_empty_home_for_commands():
+    system = policy.system_config(ROOT)
+    assert system['agents'] == {'enabled': False}
+    assert system['shell_environment_policy'] == {'set': {'HOME': policy.SHELL_HOME}}
+    assert {'agents', 'shell_environment_policy'} <= policy.POLICY_KEYS
+    # Not runner state, not the workspace (the model could plant a start-up file there), not denied.
+    home = PurePosixPath(policy.SHELL_HOME)
+    assert not home.is_relative_to(PurePosixPath(ROOT)) and not home.is_relative_to(PurePosixPath('/control'))
+    assert not any(home.is_relative_to(PurePosixPath(path)) for path in policy.deny_paths(ROOT))
 
 
 def test_no_deny_entry_covers_the_codex_runtime_root():
@@ -113,7 +125,9 @@ def test_check_files_refuses_damaged_or_writable(files, damage):
 
 def good_requirements():
     return {'requirements': {'allowedApprovalPolicies': ['untrusted'], 'allowedApprovalsReviewers': ['user'],
-                             'featureRequirements': {'unified_exec': False}, 'allowedSandboxModes': None}}
+                             'featureRequirements': {'unified_exec': False, 'multi_agent_v2': False,
+                                                     'view_image': False, 'goals': False},
+                             'allowedSandboxModes': None}}
 
 
 def test_requirements_applied():
@@ -121,7 +135,8 @@ def test_requirements_applied():
 
 
 @pytest.mark.parametrize('damage', ['none', 'no-requirements', 'policy-never', 'policy-extra', 'reviewer-auto',
-                                    'reviewer-missing', 'unified-on', 'unified-missing', 'features-missing'])
+                                    'reviewer-missing', 'unified-on', 'unified-missing', 'features-missing',
+                                    'multi-agent-v2-on', 'multi-agent-v2-missing', 'view-image-on', 'goals-missing'])
 def test_requirements_not_applied_refuses(damage):
     value = good_requirements()
     requirements = value['requirements']
@@ -134,6 +149,10 @@ def test_requirements_not_applied_refuses(damage):
     if damage == 'unified-on': requirements['featureRequirements']['unified_exec'] = True
     if damage == 'unified-missing': requirements['featureRequirements'] = {}
     if damage == 'features-missing': del requirements['featureRequirements']
+    if damage == 'multi-agent-v2-on': requirements['featureRequirements']['multi_agent_v2'] = True
+    if damage == 'multi-agent-v2-missing': del requirements['featureRequirements']['multi_agent_v2']
+    if damage == 'view-image-on': requirements['featureRequirements']['view_image'] = True
+    if damage == 'goals-missing': del requirements['featureRequirements']['goals']
     with pytest.raises(CodexFailure):
         policy.check_requirements(value)
 
@@ -145,6 +164,12 @@ def effective(system):
     native.update(description=None, extends=None, network=None, workspace_roots=None)
     native['filesystem']['glob_scan_max_depth'] = None
     value.update(approval_policy=None, sandbox_mode=None, sandbox_workspace_write=None)
+    # The 68-8548f13 form with these two set: every other field null.
+    value['agents'].update(default_subagent_model=None, default_subagent_reasoning_effort=None,
+                           interrupt_message=None, job_max_runtime_seconds=None,
+                           max_concurrent_threads_per_session=None, max_depth=None)
+    value['shell_environment_policy'].update(exclude=None, experimental_use_profile=None, filters=None,
+                                             ignore_default_excludes=None, include_only=None, inherit=None)
     return value
 
 
@@ -167,7 +192,9 @@ def test_config_applied():
                                     'system-twice', 'system-other-file', 'sandbox-mode', 'approval-never',
                                     'layers-missing', 'layer-malformed', 'not-dict', 'approval-in-disabled-layer',
                                     'approval-in-system-layer', 'effective-network-set', 'effective-approval-set',
-                                    'codex-home-read', 'state-read', 'root-read', 'extends-set'])
+                                    'codex-home-read', 'state-read', 'root-read', 'extends-set',
+                                    'agents-on', 'agents-in-session', 'home-elsewhere', 'home-in-user-layer',
+                                    'env-inherit-set'])
 def test_config_not_applied_refuses(damage):
     value = good_config()
     config, layers = value['config'], value['layers']
@@ -196,6 +223,11 @@ def test_config_not_applied_refuses(damage):
     if damage == 'state-read': profile['/state'] = 'read'
     if damage == 'root-read': profile[':root'] = 'read'
     if damage == 'extends-set': config['permissions']['native']['extends'] = ':workspace'
+    if damage == 'agents-on': config['agents']['enabled'] = True
+    if damage == 'agents-in-session': layers[3]['config']['agents'] = {'enabled': True}
+    if damage == 'home-elsewhere': config['shell_environment_policy']['set'] = {'HOME': '/state/workspace'}
+    if damage == 'home-in-user-layer': layers[1]['config'] = {'shell_environment_policy': {'set': {'HOME': '/state/home'}}}
+    if damage == 'env-inherit-set': config['shell_environment_policy']['inherit'] = 'all'
     with pytest.raises(CodexFailure):
         policy.check_config(value, ROOT)
 

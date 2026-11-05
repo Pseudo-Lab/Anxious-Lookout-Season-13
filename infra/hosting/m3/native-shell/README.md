@@ -282,8 +282,8 @@ The policy lives in the image, the expected values in runner code
 
 | File in the image | Repository | Holds |
 | --- | --- | --- |
-| `/etc/codex/config.toml` (system layer) | `backend/runner/codex-etc/config.toml` | permission profile `native`: `:minimal` read, workspace write, deny `/control`, `/run/codex-broker`, `/state/home` (not `/state/codex`: see "CODEX_HOME" below); `approvals_reviewer = "user"`, `default_permissions = "native"`. No `approval_policy`: 0.160.1 refuses `untrusted` in any config file and the app-server does not start |
-| `/etc/codex/requirements.toml` (managed) | `backend/runner/codex-etc/requirements.toml` | `allowed_approval_policies = ["untrusted"]`, `allowed_approvals_reviewers = ["user"]`, `[features] unified_exec = false`, `deny_read` (second layer only) |
+| `/etc/codex/config.toml` (system layer) | `backend/runner/codex-etc/config.toml` | permission profile `native`: `:minimal` read, workspace write, deny `/control`, `/run/codex-broker`, `/state/home` (not `/state/codex`: see "CODEX_HOME" below); `approvals_reviewer = "user"`, `default_permissions = "native"`; `[agents] enabled = false`; `[shell_environment_policy.set] HOME = "/usr/local/share/anxious-shell-home"`. No `approval_policy`: 0.160.1 refuses `untrusted` in any config file and the app-server does not start |
+| `/etc/codex/requirements.toml` (managed) | `backend/runner/codex-etc/requirements.toml` | `allowed_approval_policies = ["untrusted"]`, `allowed_approvals_reviewers = ["user"]`, `[features] unified_exec = false`, `multi_agent_v2 = false`, `deny_read` (second layer only) |
 
 **Why these settings are load-bearing** (Codex 0.160.1 source, `rust-v0.160.1` `d27764b`):
 
@@ -315,6 +315,68 @@ The policy lives in the image, the expected values in runner code
   runner's place.
 - **`proposedExecpolicyAmendment`** comes with almost every approval request: Codex derives it from the
   command. It is applied only through a rule-adding decision, and the runner has none.
+- **No sub-agents: `[agents] enabled = false` and `multi_agent_v2` pinned off.** With the runner's
+  `features.multi_agent=false` and `features.multi_agent_v2=false` alone, 0.160.1 still offered the
+  `collaboration` tools (`spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `list_agents`,
+  `interrupt_agent`): when no config override applies, the version comes from the model's metadata
+  (`Config::multi_agent_version_for_model`, `core/src/config/mod.rs:1606`). The override is
+  `multi_agent_v2` on → v2, else `agents.enabled = false` → disabled (`:1586`), and it wins on every path:
+  new threads (`thread_manager.rs:1754`), each turn and resumed threads (`session/mod.rs:4249`). Disabled
+  means the handlers are never registered (`tools/spec_plan.rs:1298`, `collab_tools_enabled`), and the
+  registry answers a call to an unregistered name with an "unsupported call" error
+  (`tools/registry.rs:554`). Hiding a tool is not enough: the registry dispatches by name, not by
+  exposure, which is why a direct call to the nested-only `exec_command` was executed (local diagnostic,
+  2026-11-05). `multi_agent_v2` is pinned in requirements because it would take precedence over
+  `agents.enabled`.
+- **HOME for sandboxed commands.** app-server keeps `HOME=/state/home`, which is denied in the sandbox.
+  bash then printed `/state/home/.bashrc: Permission denied` (or `.bash_profile` for `bash -l`) before
+  every command, into the owner's conversation and the model input. `shell_environment_policy.set.HOME`
+  gives commands an empty, root-owned, 0555 directory in the image (build gate: owner, mode, empty, not a
+  link). Not the workspace: a start-up file the model wrote there would run, unseen and unapproved, before
+  every later command. Owner-visible effect: `~` is not writable inside commands (`pip install --user`,
+  `git config --global` and similar fail); before this change it was not even readable.
+  `thread-check.sh` checks the final HOME of `sh` and of `bash -l` and that no start-up file can be created.
+
+**Tools the model is offered** (0.160.1, runner configuration; read from the first model request's
+`additional_tools` input item, local diagnostic 2026-11-05). This list is part of the #68 boundary.
+
+| Namespace | Tool | Reaches |
+| --- | --- | --- |
+| `functions` | `exec` (custom, code mode: JavaScript) | nested tools below, through the same tool registry and handlers as a direct call |
+| `functions` | `wait` | a running `exec` cell |
+| `functions` | `request_user_input`, `request_user_input_async` | a client request the runner always refuses (table below) |
+| `clock` | `sleep` | time only |
+| nested in `exec` | `exec_command` | the shell: approval request, then bubblewrap (`native` profile) |
+| nested in `exec` | `apply_patch` | file changes: approval request, then the sandboxed filesystem |
+| nested in `exec` | `clock__curr_time` | time only |
+
+Not offered and not registered: the `collaboration` namespace (above); `write_stdin` (unified exec
+pinned off); web search (`web_search = "disabled"`); `view_image` and `create_goal` / `get_goal` /
+`update_goal` (requirements pin `view_image = false`, `goals = false`: the handler and the goals
+extension exist only when the feature is on, `core/src/tools/spec_plan.rs` ViewImageHandler,
+`app-server/src/extensions.rs:85`). On `68-8548f13` both were still offered (nested in `exec`).
+`view_image` read through the sandboxed filesystem with the turn profile (`view_image.rs:159–177`); goals
+can start automatic continuation turns.
+
+**Code mode (`exec`)**, 0.160.1 source:
+- The JavaScript runs in a separate `codex-code-mode-host` process (pinned binary). app-server starts it
+  with no arguments (stdio protocol), its own cwd and environment minus a few token variables
+  (`code-mode/src/remote_session/connection.rs:157–199`). The process runs as UID 10001 like app-server.
+  It is **not** in bubblewrap.
+- Inside it, the script is a bare V8 isolate. `console`, `Atomics`, `SharedArrayBuffer` and
+  `WebAssembly` are deleted. Only `tools`, `ALL_TOOLS`, `setTimeout`/`clearTimeout`, `text`/`image`/`audio`/
+  `generatedImage`, `store`/`load` (memory), `notify`, `yield_control` and `exit` are added
+  (`code-mode-runtime/src/runtime/globals.rs:14–48`). Every static or dynamic import throws
+  (`runtime/module_loader.rs:225`). There is no file, network, process or environment API.
+- Every `tools.<name>(...)` call goes back to core as a nested call with its own
+  `call_id = exec-<uuid>` (`core/src/tools/code_mode/delegate.rs:323`). From there it takes the same
+  dispatch as a direct call (`tools/parallel.rs` → `router` → `registry`), so a nested `exec_command`
+  gets its own approval request and the bubblewrap sandbox. `Promise.all` runs nested calls in
+  parallel; each one still asks separately.
+- Limits: no V8 heap or CPU limit in this source. A runaway script is bounded by the Pod's limits and
+  ends with the turn. The isolation then rests on V8's own boundary. Breaking out of the isolate would
+  give the host's privileges (UID 10001, no sandbox), the same as app-server.
+- Since `1949f45` (#7, 2026-10-10) the runner has started app-server with `features.code_mode_host=true`.
 
 **Startup self-check.** On every app-server launch (first start, tool reset, restart) and again
 before every turn, the runner refuses (`policy_refused`, nothing runs) unless all of these hold:
@@ -376,6 +438,13 @@ new source, then on the VM:
 - project layers are still disabled for an untrusted cwd;
 - the workspace-root `.codex` is still protected while missing, and `.git` once present;
 - what Codex runs outside the sandbox in the cwd (git metadata), if git is in the image;
+- **the tools the model is offered** (section 4 table): read them from a model request's `additional_tools`
+  input item, nested tools from the `exec` description. Every new tool needs its access path stated
+  (sandboxed or not, approval or not) before the pin moves;
+- the multi-agent version order (`multi_agent_v2` → `agents.enabled` → model metadata) and that disabled
+  still means "handlers not registered";
+- that `shell_environment_policy.set` still reaches commands and that bash's start-up files still come from
+  `HOME`;
 - **`untrusted` is still supported.** 0.160.1 refuses `approval_policy = "untrusted"` in a config file ("retired",
   `UnsupportedUntrustedApprovalPolicyError`); the runner reaches it only through the thread/start and thread/resume
   override, the untrusted project and the managed `allowed_approval_policies`. Before moving the pin, check first
@@ -458,8 +527,12 @@ or the configuration for it.
   the #59 runner (500m / 768Mi) plus executor (1 / 512Mi) limits. The VM stage measures the
   native shell under load and sets the final value; PARITY records the difference from #59.
 - Image: Debian bookworm `bubblewrap` (0.8.0) and `/usr/local/bin/codex-linux-sandbox -> codex`.
-  bubblewrap 0.8.0 has no `--argv0`, so Codex reaches its Linux sandbox helper through this name.
-  The link is part of the image evidence chain.
+  bubblewrap 0.8.0 has no `--argv0`. Inside app-server, Codex runs its sandbox helper from
+  `CODEX_HOME/tmp/arg0`. Outside it (`codex sandbox`, used by `thread-check.sh` and the V3 probe) Codex finds
+  the helper by this name on PATH. Without the link that path fails with
+  `bwrap: execvp codex-linux-sandbox: No such file or directory` (measured 2026-11-05 on `68-8548f13`
+  with the link removed; `thread/start` still worked). The link is part of the image evidence chain.
+- `/usr/local/share/anxious-shell-home`: empty, root, 0555; HOME for sandboxed commands (section 4).
 - `/etc/codex/config.toml` and `requirements.toml` (section 4).
 - **Build gate.** The `runner` stage ends with `RUN --network=none python -m runner.image_check` as UID 10001, so every
   build, production included, fails unless the image as built passes these checks:
