@@ -13,7 +13,7 @@ from sqlalchemy import text
 
 from .codex_policy import MODEL, REASONS
 from .runner_controller import Controller, Identity
-from .runner_kube import KubePods, Plan, Reference, ExecutorPlan
+from .runner_kube import KubePods, Plan, Reference
 from .runner_registry import Registry
 from .runner_limits import load_limits, RunnerLimits
 from .runner_schema import validate
@@ -26,13 +26,13 @@ def clock():
 
 
 def plan_from(value):
+    # #68: a stored v2 plan's `executor` is read (runner_bindings.decode keeps its strict shape)
+    # but ignored. Every Pod is the native shell runner; the shell-executor sidecar is never rendered.
     return Plan(Identity(UUID(value['owner']), UUID(value['state']), value['generation']), value['image'],
                 Reference(value['native']['name'], UUID(value['native']['uid']), value['native']['volume']),
                 Reference(value['control']['name'], UUID(value['control']['uid']), value['control']['volume']),
                 Reference(value['transport']['name'], UUID(value['transport']['uid'])),
-                value['callback'], value['serviceAccount'],
-                ExecutorPlan(value['executor']['image'], value['executor']['wallSeconds'], value['executor']['outputBytes'])
-                if value.get('version') == 2 else None)
+                value['callback'], value['serviceAccount'])
 
 
 class Runtime:
