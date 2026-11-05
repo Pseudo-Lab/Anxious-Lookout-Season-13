@@ -4,6 +4,7 @@
 #
 #   selinux-module.sh install 1     version 1 (devpts mount), only when no module of that name is installed
 #   selinux-module.sh upgrade 2     version 2 (adds tmpfs remount), only over this script's version 1
+#   selinux-module.sh downgrade 1   back to version 1, only over this script's version 2 (when V3c does not pass)
 #   selinux-module.sh remove        remove the module (rollback), only when it is one of this script's versions
 #
 # The module files are anxious_runner_bwrap-<v>.pp next to this script, built by native-shell/selinux/build.sh
@@ -27,8 +28,8 @@ STORE=/var/lib/selinux/targeted/active/modules/400/$NAME
 
 action=${1:-}; version=${2:-}
 case "$action:$version" in
-  install:1|upgrade:2|remove:) ;;
-  *) echo 'usage: selinux-module.sh install 1 | upgrade 2 | remove'; exit 2;;
+  install:1|upgrade:2|downgrade:1|remove:) ;;
+  *) echo 'usage: selinux-module.sh install 1 | upgrade 2 | downgrade 1 | remove'; exit 2;;
 esac
 attempted=0
 on_signal() {
@@ -73,6 +74,7 @@ say "policy $(rpm -q selinux-policy-targeted container-selinux libsepol policyco
 case "$action" in
   install) pp="$here/$NAME-1.pp"; want=$PP1_SHA;;
   upgrade) pp="$here/$NAME-2.pp"; want=$PP2_SHA;;
+  downgrade) pp="$here/$NAME-1.pp"; want=$PP1_SHA;;
   remove) pp=; want=;;
 esac
 if [ -n "$pp" ]; then
@@ -84,6 +86,8 @@ case "$action:$before_stored" in
   install:*) refuse "a module named $NAME is already installed (stored $before_stored); not replacing it";;
   upgrade:"$PP1_SHA") ;;
   upgrade:*) refuse "the installed $NAME is not this script's version 1 (stored $before_stored)";;
+  downgrade:"$PP2_SHA") ;;
+  downgrade:*) refuse "the installed $NAME is not this script's version 2 (stored $before_stored)";;
   remove:"$PP1_SHA"|remove:"$PP2_SHA") ;;
   remove:*) refuse "the installed $NAME is not one of this script's versions (stored $before_stored)";;
 esac
@@ -92,14 +96,14 @@ esac
 case "$action:$before_entries" in
   install:) ;;
   install:*) refuse "entries named $NAME exist: $before_entries";;
-  upgrade:400|remove:400) ;;
+  upgrade:400|downgrade:400|remove:400) ;;
   *) refuse "entries named $NAME are not exactly one enabled at priority 400: [$before_entries]";;
 esac
 
 changing
 attempted=1
 case "$action" in
-  install|upgrade) out=$(semodule -X 400 -i "$pp" 2>&1); s=$?;;
+  install|upgrade|downgrade) out=$(semodule -X 400 -i "$pp" 2>&1); s=$?;;
   remove) out=$(semodule -X 400 -r "$NAME" 2>&1); s=$?;;
 esac
 say "semodule rc $s $(printf '%s' "$out" | head -3 | tr '\n' ' ')"
@@ -107,10 +111,11 @@ record after || { say 'after-state lookup incomplete'; finish 9; }
 case "$action" in
   install) [ "$after_stored" = "$PP1_SHA" ] && done_change "module $NAME version 1 installed (priority 400)";;
   upgrade) [ "$after_stored" = "$PP2_SHA" ] && done_change "module $NAME upgraded to version 2 (priority 400)";;
+  downgrade) [ "$after_stored" = "$PP1_SHA" ] && done_change "module $NAME back to version 1 (priority 400)";;
   remove) [ "$after_stored" = absent ] && done_change "module $NAME removed";;
 esac
 [ "$s" = 0 ] || finish 5
 case "$action:$after_stored:$after_entries" in
-  install:"$PP1_SHA":400|upgrade:"$PP2_SHA":400|remove:absent:) finish 0;;
+  install:"$PP1_SHA":400|upgrade:"$PP2_SHA":400|downgrade:"$PP1_SHA":400|remove:absent:) finish 0;;
   *) say "after-state does not match: stored $after_stored entries [$after_entries]"; finish 8;;
 esac
