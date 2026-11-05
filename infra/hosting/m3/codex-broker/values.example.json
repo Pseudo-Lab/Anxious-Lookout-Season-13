@@ -1,0 +1,6 @@
+{
+  "image": "registry.invalid/replace-with-reviewed-runner@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "accountId": "REPLACE_WITH_REVIEWED_PROVIDER_ACCOUNT",
+  "storageClass": "openebs-lvm-ext4",
+  "accessMode": "ReadWriteOncePod"
+}

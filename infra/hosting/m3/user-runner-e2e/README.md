@@ -190,6 +190,10 @@ the operator's existing client.
 
 ## Credential supply and one response
 
+> Historical (#16). `user_runner_supply.sh` and the runner `access.sock` path for user
+> runners were removed by #60; user runners now pull from codex-broker
+> ([../codex-broker/README.md](../codex-broker/README.md)).
+
 Use `backend/ops/user_runner_supply.sh` on the operator host. The script runs the
 exporter in Docker and pipes directly to the existing runner-local same-UID supply
 socket via verified kubectl exec (no TTY, no file containing exported access token,

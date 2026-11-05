@@ -33,7 +33,10 @@ export interface PublicPost {
   coverImageUrl: string | null;
   // 이관된 MDX 글은 login이 null이고 원 작성자 이름만 있다
   author: { login: string | null; name: string };
+  // #80(api-contracts/post-publications.md): publishedAt은 지금 공개 중인 발행의 최초 발행 시각(재발행해도 이어진다),
+  // updatedAt은 이 발행본을 만든 시각(마지막 (재)발행). back은 늘 보내지만 없을 수 있는 값으로 읽는다.
   publishedAt: string;
+  updatedAt?: string;
   documents: PublicPostDocument[];
   materials: PublicPostMaterial[];
 }
@@ -82,7 +85,9 @@ export interface PostVersion extends PostMeta {
 export interface PostPublicationRef {
   id: string;
   versionId: string;
+  // #80: 최초 발행 시각 / 마지막 (재)발행 시각. 글 자체의 updatedAt(Post.updatedAt, 편집 시각)과 다르다.
   publishedAt: string;
+  updatedAt?: string;
   slug: string;
 }
 

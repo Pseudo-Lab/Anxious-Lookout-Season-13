@@ -35,7 +35,7 @@ SELECT owner_id, generation, pod_uid, node_uid, boot_id FROM runner_termination.
 If any prerequisite fails, stop: keep the timers stopped (or stopped again), change nothing, and request a separate reviewed recovery in an issue. This applies in particular to an open stop anchored to a previous boot. Never edit an existing stop row, set the input back to an old boot to match it, delete a runner Pod, or edit the registry.
 
 If all of them hold and the input `boot_id` differs from the current boot, run steps 1, 2 and 5 of the [#66 runbook](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/66#issuecomment-6408328794):
-1. stop the three issue16 timers and services;
+1. stop the issue16 timers and services: controller and observer, plus supply until #72 E3 removes it;
 2. replace only the input's `host.boot_id` (and `bootId` in `/private-rollout/values.json`), keeping a `.pre66`-style backup;
 3. restart the timers.
 

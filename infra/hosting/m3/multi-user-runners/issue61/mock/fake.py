@@ -1,0 +1,404 @@
+"""Stand-in for k3s (kubectl/ctr/crictl), docker and systemctl in the #61 W1/W2 harness. State: /mock/state.json.
+
+Only the commands the gate scripts use are implemented; anything else fails loudly (rc 97) so a script can never
+silently depend on an unmocked call. /mock/fail holds stage names to fail (one per line), e.g. "set-image".
+"""
+import json
+import os
+import re
+import sys
+import time
+import uuid
+
+STATE = '/mock/state.json'
+LOG = '/mock/calls.log'
+SINGULAR = {'pods': 'pod', 'pod': 'pod', 'namespace': 'namespace', 'namespaces': 'namespace', 'node': 'node',
+            'deployment': 'deployment', 'deployments.apps': 'deployment', 'secret': 'secret', 'secrets': 'secret',
+            'serviceaccount': 'serviceaccount', 'serviceaccounts': 'serviceaccount', 'role': 'role',
+            'rolebinding': 'rolebinding', 'clusterrole': 'clusterrole', 'clusterrolebinding': 'clusterrolebinding',
+            'resourcequota': 'resourcequota', 'ciliumnetworkpolicy': 'ciliumnetworkpolicy',
+            'configmaps': 'configmap', 'configmap': 'configmap', 'replicasets.apps': 'replicaset'}
+CLUSTER = {'namespace', 'node', 'clusterrole', 'clusterrolebinding'}
+
+
+def load():
+    with open(STATE) as stream:
+        return json.load(stream)
+
+
+def save(state):
+    with open(STATE, 'w') as stream:
+        json.dump(state, stream)
+
+
+def failing(stage):
+    try:
+        with open('/mock/fail') as stream:
+            return stage in stream.read().split()
+    except FileNotFoundError:
+        return False
+
+
+def die(rc=1):
+    sys.exit(rc)
+
+
+def okey(kind, ns, name):
+    kind = SINGULAR.get(kind.lower(), kind.lower())
+    return '%s|%s|%s' % (kind, '' if kind in CLUSTER else (ns or 'default'), name)
+
+
+def opt(args, flag):
+    if flag in args:
+        return args[args.index(flag)+1]
+    for arg in args:
+        if arg.startswith(flag+'='):
+            return arg.split('=', 1)[1]
+    return None
+
+
+def upsert(state, obj):
+    """Create or update; a payload UID is a precondition (the API refuses a write to a replaced object)."""
+    k = okey(obj['kind'], obj['metadata'].get('namespace'), obj['metadata']['name'])
+    old = state['objects'].get(k)
+    want = obj['metadata'].get('uid')
+    if want and (old is None or old['metadata']['uid'] != want):
+        die()
+    obj = json.loads(json.dumps(obj))
+    obj['metadata']['uid'] = old['metadata']['uid'] if old else str(uuid.uuid4())
+    if obj['kind'] == 'Secret' and 'stringData' in obj:
+        obj['data'] = {key: '<set>' for key in obj.pop('stringData')}
+    state['objects'][k] = obj
+    if obj['kind'] == 'Namespace' and not old:
+        for kind, name in (('ServiceAccount', 'default'), ('ConfigMap', 'kube-root-ca.crt')):
+            state['objects'][okey(kind, obj['metadata']['name'], name)] = {
+                'kind': kind, 'metadata': {'name': name, 'namespace': obj['metadata']['name'], 'uid': str(uuid.uuid4())}}
+
+
+def kubectl(args):
+    state = load()
+    ns = opt(args, '-n')
+    verb = args[0] if args[0] != '-n' else args[2]
+    rest = [a for i, a in enumerate(args) if not (a == '-n' or (i > 0 and args[i-1] == '-n'))]
+    verb = rest[0]
+    if verb in ('get', 'exec') and state.get('failAllGets'):
+        die()
+    if verb == 'get' and rest[1] == '--raw':
+        doc = state.get('raw', {}).get(rest[2])
+        if doc is None:
+            die()
+        print(json.dumps(doc))
+        return
+    if verb == 'replace' and rest[1] == '--raw':
+        state.setdefault('finalizeCalls', []).append(rest[2])
+        with open(opt(rest, '-f')) as stream:
+            body = json.load(stream)
+        k = okey('namespace', None, body['metadata']['name'])
+        live = state['objects'].get(k)
+        if state.get('rvChanged') and live:
+            live['metadata']['resourceVersion'] = str(int(live['metadata']['resourceVersion']) + 1)
+        if live is None or live['metadata']['uid'] != body['metadata'].get('uid') or \
+                live['metadata'].get('resourceVersion') != body['metadata'].get('resourceVersion') or body['spec']['finalizers']:
+            save(state); die()  # 409 Conflict / precondition failed
+        if not state.get('finalizeKeeps'):
+            del state['objects'][k]
+        if state.get('failNsGetAfterFinalize'):
+            state['failNsGet'] = True
+        save(state)
+        print(json.dumps(body))
+        return
+    if verb == 'get' and state.get('failNsGet') and rest[1:3] == ['namespace', 'runner-control']:
+        die()
+    if verb == 'get':
+        if '-l' in rest:
+            print('\n'.join('pod/'+p for p in state.get('controllerPods', [])))
+            return
+        if rest[1].count(',') or (ns and rest[1] != 'node' and '-o' in rest and opt(rest, '-o') == 'name'):
+            kinds = [SINGULAR.get(k, k) for k in rest[1].split(',')]
+            for k, obj in sorted(state['objects'].items()):
+                kind, space, name = k.split('|')
+                if space == ns and kind in kinds:
+                    print('%s/%s' % (kind, name))
+            return
+        if state.get('failNsGetAfterDelete') and rest[1:3] == ['Namespace', 'runner-control'] \
+                and 'namespace||runner-control' in state.get('deleted', []):
+            die()
+        if rest[1] == 'pod' and state.get('slowPodGet'):
+            time.sleep(state['slowPodGet'])
+        gone = state.get('podGetsBeforeGone', {})
+        if rest[2] in gone:
+            gone[rest[2]] -= 1
+            if gone[rest[2]] < 0:
+                state['objects'].pop(okey(rest[1], ns, rest[2]), None)
+            save(state)
+        obj = state['objects'].get(okey(rest[1], ns, rest[2]))
+        if (opt(rest, '-o') or '').startswith('jsonpath=') and rest[1:3] == ['deployment', 'api']:
+            # The one jsonpath the gate uses: the api container image.
+            if obj is None:
+                die()
+            print([c for c in obj['spec']['template']['spec']['containers'] if c['name'] == 'api'][0]['image'])
+            return
+        if obj is None:
+            if '--ignore-not-found' in rest:
+                return
+            die()
+        if opt(rest, '-o') == 'jsonpath={.metadata.uid}':  # w2-verify reads UIDs this way (no Secret data)
+            print(obj['metadata']['uid'], end='')
+            return
+        print(json.dumps(obj))
+        return
+    if verb == 'apply':
+        stage = state.get('applyStages', {}).get(str(state.get('applies', 0)), 'apply')
+        state['applies'] = state.get('applies', 0) + 1
+        if failing(stage):
+            save(state); die()
+        doc = json.load(sys.stdin)
+        written = []
+        for obj in (doc['items'] if doc.get('kind') == 'List' else [doc]):
+            upsert(state, obj)
+            k = okey(obj['kind'], obj['metadata'].get('namespace'), obj['metadata']['name'])
+            written.append(state['objects'][k])
+        save(state)
+        if failing(stage + '-lost'):
+            die()  # Applied on the server, answer lost.
+        print(json.dumps({'kind': 'List', 'items': written}))
+        return
+    if verb == 'replace':
+        if failing('replace'):
+            die()
+        obj = json.load(sys.stdin)
+        for field in ('resourceVersion', 'managedFields'):
+            assert field not in obj['metadata'], 'replace payload kept ' + field
+        assert obj['metadata'].get('uid'), 'replace payload must carry the backup UID'
+        upsert(state, obj)
+        save(state)
+        return
+    if verb == 'create' and rest[1] != 'secret':
+        assert opt(rest, '-o') == 'json' and opt(rest, '-f') == '-', rest
+        obj = json.load(sys.stdin)
+        k = okey(obj['kind'], obj['metadata'].get('namespace'), obj['metadata']['name'])
+        race = state.get('foreignBeforeCreate', {}).pop(k, None)
+        if race:  # Another actor creates the name after the script's last lookup.
+            upsert(state, race)
+        if k in state['objects'] or obj['metadata'].get('uid'):
+            save(state); die()  # AlreadyExists
+        upsert(state, obj)
+        save(state)
+        if failing('create-' + obj['kind'].lower() + '-lost'):
+            die()
+        if failing('kill-create-' + obj['kind'].lower()):
+            os.kill(os.getppid(), 9)  # The script dies after the server created the object.
+            die()
+        print(json.dumps(state['objects'][k]))
+        return
+    if verb == 'create':
+        assert rest[1:4] == ['secret', 'generic', 'runner-controller-db'], rest
+        if failing('secret'):
+            die()
+        data = {}
+        assert opt(rest, '-o') == 'json', rest
+        for arg in [a for a in rest[4:] if a.startswith('--from-file=')]:
+            name, path = arg.split('=', 1)[1].split('=', 1)
+            with open(path) as stream:
+                value = stream.read()
+            data[name] = '<set>'
+            state.setdefault('dsnHosts', {})[name] = re.sub(r'^.*@', '', value).split('/')[0]
+            state.setdefault('dsnTemp', []).append(path)
+        obj = {'kind': 'Secret', 'metadata': {'name': 'runner-controller-db', 'namespace': ns, 'uid': str(uuid.uuid4())},
+               'data': data}
+        state['objects'][okey('secret', ns, 'runner-controller-db')] = obj
+        save(state)
+        if failing('secret-lost'):
+            die()
+        print(json.dumps(obj))
+        return
+    if verb == 'patch':
+        patch = json.loads(opt(rest, '-p'))
+        obj = state['objects'].get(okey(rest[1], ns, rest[2]))
+        if obj is None or patch['metadata']['uid'] != obj['metadata']['uid']:
+            die()
+        if rest[2] == 'api':
+            if failing('set-image'):
+                die()
+            obj['spec']['template']['spec']['containers'][0]['image'] = \
+                patch['spec']['template']['spec']['containers'][0]['image']
+            save(state)
+            if failing('set-image-lost'):
+                die()
+        else:
+            obj.setdefault('spec', {})['replicas'] = patch['spec']['replicas']
+            state['scaled'] = True
+            state['controllerPods'] = []
+            save(state)
+        return
+    if verb == 'rollout':
+        if failing('rollout-' + rest[2].split('/')[1]):
+            die()
+        return
+    if verb == 'auth':
+        if state.get('canIError'):
+            die(2)  # an API error, neither yes nor no
+        sa = opt(rest, '--as').split(':', 2)[2]
+        # As kubectl: VERB TYPE[/NAME]; the part after the slash is an object name (RBAC rules here carry no
+        # resourceNames, so it does not change the answer). A subresource is only --subresource.
+        resource = rest[3].split('/', 1)[0]
+        sub = opt(rest, '--subresource')
+        answer = state['cani'].get('%s %s%s %s' % (rest[2], resource, '/' + sub if sub else '', sa), 'no')
+        print(answer)
+        die(0 if answer == 'yes' else 1)
+    if verb == 'logs':
+        print('{"owner": "00000000-0000-4000-8000-000000000048", "stage": "controller", "result": "deleting"}')
+        print('Traceback: postgresql://user:SECRET@host/db')
+        return
+    if verb == 'exec' and 'deploy/runner-controller' in rest:
+        state['reclaimCalls'] = state.get('reclaimCalls', 0) + 1
+        save(state)
+        print(state['reclaim']['line'])
+        die(state['reclaim']['rc'])
+    if verb == 'exec':
+        query = sys.stdin.read()
+        tag = re.search(r'/\*w3:(\w+)\*/', query)
+        if tag:
+            seq = state['sql'][tag.group(1)]
+            out = seq.pop(0) if len(seq) > 1 else seq[0]
+            save(state)
+            if out == 'FAIL':
+                die()
+            print(out)
+            return
+        state.setdefault('queries', []).append(query)
+        save(state)
+        if failing('grants') and 'GRANT' in query:
+            die()
+        if 'GRANT' in query:
+            state['granted'] = query.count('GRANT')
+            save(state)
+            if failing('grants-lost'):
+                die()
+            if failing('kill-grants'):
+                os.kill(os.getppid(), 9)
+                die()
+        if 'capacity_wait' in query:
+            print(state.get('waiting', 0))
+        elif 'runner_termination.stops' in query:
+            print('\n'.join(state.get('openStops', [])))
+        return
+    if verb == 'scale':
+        die(97)  # Scaling by name is not allowed: only the UID-preconditioned patch.
+    if verb == 'wait':
+        return
+    if verb == 'api-resources':
+        print('pods\nserviceaccounts\nsecrets\nconfigmaps\ndeployments.apps\nreplicasets.apps\nevents')
+        return
+    if verb == 'delete':
+        path = rest[2]
+        with open(opt(rest, '-f')) as stream:
+            options = json.load(stream)
+        parts = path.strip('/').split('/')
+        name = parts[-1]
+        space = parts[parts.index('namespaces')+1] if 'namespaces' in parts and parts[-2] != 'namespaces' else None
+        kind = {'namespaces': 'namespace', 'serviceaccounts': 'serviceaccount', 'secrets': 'secret',
+                'deployments': 'deployment', 'roles': 'role', 'rolebindings': 'rolebinding',
+                'clusterroles': 'clusterrole', 'clusterrolebindings': 'clusterrolebinding',
+                'resourcequotas': 'resourcequota'}[parts[-2]]
+        k = okey(kind, space, name)
+        obj = state['objects'].get(k)
+        if obj is None:
+            die()
+        if obj['metadata']['uid'] != options['preconditions']['uid']:
+            die()
+        if kind == 'namespace' and state.get('nsTerminating'):
+            # Accepted, but finalization waits (as on the dev VM): same UID, Terminating, content removed.
+            for other in [o for o in state['objects'] if o.split('|')[1] == name]:
+                del state['objects'][other]
+            obj['metadata']['deletionTimestamp'] = '2026-11-01T15:57:11Z'
+            obj['status'] = {'phase': 'Terminating', 'conditions': [
+                {'type': 'NamespaceDeletionDiscoveryFailure', 'status': 'True'}]}
+            state.setdefault('deleted', []).append(k)
+            save(state)
+            return
+        del state['objects'][k]
+        if kind == 'namespace':
+            for other in [o for o in state['objects'] if o.split('|')[1] == name]:
+                del state['objects'][other]
+        state.setdefault('deleted', []).append(k)
+        save(state)
+        return
+    die(97)
+
+
+def main():
+    tool, args = os.path.basename(sys.argv[1]), sys.argv[2:]
+    with open(LOG, 'a') as stream:
+        stream.write(tool + ' ' + ' '.join(args) + '\n')
+    state = load()
+    if tool == 'kubectl':
+        return kubectl(args)
+    if tool == 'k3s':
+        if args[0] == 'kubectl':
+            return kubectl(args[1:])
+        if args[0] == 'ctr':
+            if args[3:5] == ['images', 'import']:
+                if failing('import'):
+                    die()
+                name = os.path.basename(args[5])
+                state['images'][state['archives'][name]['ref']] = state['archives'][name]
+                save(state)
+                return
+            if args[3:5] == ['images', 'tag']:
+                if failing('tag'):
+                    die()
+                src, dst = args[5], args[6]
+                if src not in state['images'] or dst in state['images']:
+                    die()
+                state['images'][dst] = dict(state['images'][src], ref=dst)
+                save(state)
+                return
+            if args[3:5] == ['images', 'ls']:
+                if failing('ctr-ls'):
+                    die()
+                if '-q' in args:
+                    print('\n'.join(state['images']))
+                else:
+                    print('REF TYPE DIGEST SIZE PLATFORMS LABELS')
+                    for ref, image in state['images'].items():
+                        print('%s application/vnd.oci.image.manifest.v1+json %s 1 linux/amd64 -' % (ref, image['digest']))
+                return
+        if args[0] == 'crictl' and args[1] == 'inspecti':
+            image = state['images'].get(args[-1])
+            if image is None:
+                die()
+            print(image['id'])
+            return
+    if tool == 'docker':
+        if args[:2] == ['image', 'inspect']:
+            if args[-1] not in state['docker']:
+                die()
+            print(state['docker'][args[-1]])
+            return
+        if args[0] == 'load':
+            archive = state['archives']['anxious-dev-runtime-61-5e73bc4.tar']
+            # containerd image store (the guest): Id = manifest digest; classic store: Id = config ID.
+            state['docker']['anxious-dev-runtime:61-5e73bc4'] = archive['id'] if state.get('dockerStore') == 'classic' \
+                else archive['digest']
+            save(state)
+            return
+        if args[0] == 'run':
+            if failing('render'):
+                die()
+            mounts = [args[i+1] for i, a in enumerate(args) if a == '-v']
+            parent = [m.split(':')[0] for m in mounts if ':/out-parent' in m][0]
+            os.mkdir(os.path.join(parent, 'out'))
+            with open('/mock/resources.json') as source, open(os.path.join(parent, 'out', 'resources.json'), 'w') as out:
+                out.write(source.read())
+            return
+    if tool == 'systemctl':
+        unit = args[-1]
+        load_state, active = state['units'].get(unit, 'loaded inactive').split()
+        print('LoadState=%s\nActiveState=%s' % (load_state, active))
+        return
+    die(97)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,5 +1,10 @@
 # Issue 16 cutover — PM execution after source and operational review
 
+> **#61:** the observer/idle unit and host Pod creation described below are replaced by the
+> in-cluster `runner-controller`. For the current transition (with #63 in the same window,
+> no Pending/Running runner Pod, binding CAS) use [rollout/README.md](rollout/README.md)
+> "In-cluster runner-controller (#61)". Sections below remain the #16/#18 record.
+
 Use [rollout/README.md](rollout/README.md) for the #18 values schema, offline renderer,
 pool API patch, RBAC replacement, quota, worker units and shared-mount/restore setup.
 This supplies the installation artifacts referenced below; it does not execute D4.
@@ -11,7 +16,8 @@ acceptance and human merge are distinct decisions. Record failures as failures a
 stop at the affected gate. Never reset runtime UID/phase/ledger or recreate retained
 storage to make a step pass. Use the linked documents for exact tool inputs:
 [provisioning](PROVISIONING.md), [termination/recovery](TERMINATION.md),
-[host supply](HOST-SUPPLY.md).
+[host supply](HOST-SUPPLY.md) (retired by #60: operator access now comes from
+[codex-broker](../codex-broker/README.md); supply steps below are historical).
 
 ## 테스트 수준 경로 — D4, 이번 cutover의 기준
 

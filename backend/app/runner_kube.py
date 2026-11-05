@@ -23,9 +23,13 @@ from . import runner_http_budget as budget
 from runner.lifecycle import require, Refused
 
 LABEL = 'anxious.io/'
-# Both containers exit on SIGTERM within a second when idle (#59). The bound is the
-# runner's worst native shutdown: app-server EOF 5s, terminate 5s, kill 5s.
+# Measured (#59 review): DELETE to Pod gone 3.6s idle, 4.0s with a running shell command; both
+# containers exit 0. 20s covers the app-server stop escalation (EOF, terminate, kill: 5s each);
+# it is not an upper bound of every close path (Native worker join alone allows 20s).
 GRACE_SECONDS = 20
+# #60: runner pulls operator access with a short-lived token bound to its Pod.
+BROKER_URL = 'http://codex-broker.codex-broker.svc:8080'
+BROKER_AUDIENCE = 'codex-broker'
 
 
 def name(value):
@@ -95,7 +99,8 @@ class Plan:
                'CODEX_MODEL': 'gpt-6.1-sol',
                'CODEX_AUTH_MODE': 'access-service', 'CODEX_EXECUTION_SCOPE': 'operator-access-service',
                'CODEX_ACCESS_CONTROL_DIR': '/control', 'CODEX_OPERATOR_ACCOUNT_FILE': '/control/operator-account',
-               'RESEARCH_TOOL_CALLBACK_URL': self.callback}
+               'RESEARCH_TOOL_CALLBACK_URL': self.callback, 'BROKER_URL': BROKER_URL,
+               'BROKER_TOKEN_FILE': '/run/codex-broker/token'}
         manifest = {'apiVersion': 'v1', 'kind': 'Pod',
                 'metadata': {'name': identity.name, 'namespace': namespace, 'labels': labels},
                 'spec': {'serviceAccountName': self.service_account, 'automountServiceAccountToken': False,
@@ -118,9 +123,13 @@ class Plan:
                             'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
                                                 'capabilities': {'drop': ['ALL']}},
                             'volumeMounts': [{'name': 'native', 'mountPath': '/state'}, {'name': 'control', 'mountPath': '/control'},
+                                             {'name': 'broker-token', 'mountPath': '/run/codex-broker', 'readOnly': True},
                                              {'name': 'tmp', 'mountPath': '/tmp'}]}],
                          'volumes': [{'name': 'native', 'persistentVolumeClaim': {'claimName': self.native.name}},
                                      {'name': 'control', 'persistentVolumeClaim': {'claimName': self.control.name}},
+                                     # automountServiceAccountToken stays false; only this audience-bound token.
+                                     {'name': 'broker-token', 'projected': {'defaultMode': 292, 'sources': [
+                                         {'serviceAccountToken': {'audience': BROKER_AUDIENCE, 'expirationSeconds': 600, 'path': 'token'}}]}},
                                      {'name': 'tmp', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '64Mi'}}]}}
         if self.executor is not None:
             self._executor_manifest(manifest)

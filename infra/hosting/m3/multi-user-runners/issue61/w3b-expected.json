@@ -1,0 +1,59 @@
+{
+  "00000000-0000-4000-8000-000000000048": {
+    "changedTopLevelKeys": [
+      "executor",
+      "image"
+    ],
+    "executorFieldsChanged": [
+      "image"
+    ],
+    "expectedToolReport": {
+      "generation": 1,
+      "newExecutorImage": "docker.io/library/anxious-dev-shell-executor@sha256:9c87d626cdf6798db5bc5a562cc68af1b13a36c8f90d3738e19c6553e7cf4d12",
+      "newImage": "docker.io/library/anxious-dev-runner@sha256:067c77de5d6b3673ece9b243f7753a9184a007cd44ab0ea1c93dc3044458a5e4",
+      "newPlanSha256": "75f6336aa81a874f512e2388c7b8c3060ad274900668e938a00174523f938228",
+      "oldExecutorImage": "docker.io/library/anxious-dev-shell-executor@sha256:575c18d2cc7be7ada8f8859e853b6f0d6d78d9a8f5167127392db6c98369ce79",
+      "oldImage": "docker.io/library/anxious-dev-runner@sha256:31bd3c6ecf2b866ac576b458c6a3c9fe611cacae2b6996830121cd7357984a45",
+      "oldPlanSha256": "a4198ff0e7258f0feddbf31a7495479be024aa6942133bcc3deb8b7fe4fde9d0",
+      "owner": "00000000-0000-4000-8000-000000000048",
+      "revision": 4,
+      "state": "34823dfb-6b50-4b8e-b230-191739bdc57d"
+    },
+    "inputs": {
+      "executorImage": "docker.io/library/anxious-dev-shell-executor@sha256:9c87d626cdf6798db5bc5a562cc68af1b13a36c8f90d3738e19c6553e7cf4d12",
+      "generation": 1,
+      "newImage": "docker.io/library/anxious-dev-runner@sha256:067c77de5d6b3673ece9b243f7753a9184a007cd44ab0ea1c93dc3044458a5e4",
+      "oldPlanSha256": "a4198ff0e7258f0feddbf31a7495479be024aa6942133bcc3deb8b7fe4fde9d0",
+      "owner": "00000000-0000-4000-8000-000000000048",
+      "revision": 4,
+      "state": "34823dfb-6b50-4b8e-b230-191739bdc57d"
+    }
+  },
+  "00000000-0000-4000-8000-000000005804": {
+    "changedTopLevelKeys": [
+      "image"
+    ],
+    "executorFieldsChanged": [],
+    "expectedToolReport": {
+      "generation": 3,
+      "newExecutorImage": "docker.io/library/anxious-dev-shell-executor@sha256:9c87d626cdf6798db5bc5a562cc68af1b13a36c8f90d3738e19c6553e7cf4d12",
+      "newImage": "docker.io/library/anxious-dev-runner@sha256:067c77de5d6b3673ece9b243f7753a9184a007cd44ab0ea1c93dc3044458a5e4",
+      "newPlanSha256": "86c691bae85544e319f0528d69fc3c878d59b919c065099b0adb6e9c92a6a481",
+      "oldExecutorImage": "docker.io/library/anxious-dev-shell-executor@sha256:9c87d626cdf6798db5bc5a562cc68af1b13a36c8f90d3738e19c6553e7cf4d12",
+      "oldImage": "docker.io/library/anxious-dev-runner@sha256:90eb212b24598ec852889df1a4e6f9f916ec73f257dcb2cf739e0f9b695d0d3c",
+      "oldPlanSha256": "fa2a904767c21a2f28c0d44acba09987b63082c3449ffc4ca3c076cf11160ffe",
+      "owner": "00000000-0000-4000-8000-000000005804",
+      "revision": 12,
+      "state": "5ff583e9-abe1-4ef8-b277-4a5afead6b80"
+    },
+    "inputs": {
+      "executorImage": "docker.io/library/anxious-dev-shell-executor@sha256:9c87d626cdf6798db5bc5a562cc68af1b13a36c8f90d3738e19c6553e7cf4d12",
+      "generation": 3,
+      "newImage": "docker.io/library/anxious-dev-runner@sha256:067c77de5d6b3673ece9b243f7753a9184a007cd44ab0ea1c93dc3044458a5e4",
+      "oldPlanSha256": "fa2a904767c21a2f28c0d44acba09987b63082c3449ffc4ca3c076cf11160ffe",
+      "owner": "00000000-0000-4000-8000-000000005804",
+      "revision": 12,
+      "state": "5ff583e9-abe1-4ef8-b277-4a5afead6b80"
+    }
+  }
+}
