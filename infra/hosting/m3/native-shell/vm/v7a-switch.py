@@ -37,8 +37,8 @@ run, in this order:
       runner-pool-input init container, controller) -> the #68 runtime digest reference, and
       CODEX_USER_RUNNER_ALLOWLIST -> the canary owner only (both allowlists, README section 3 step 5);
    c4 api to 1: rollout, the Pod runs the #68 runtime (spec image and imageID), /api/health 200;
-   c5 before the controller starts: every owner still idle_stopped, no pending work, fences unchanged, no
-      runner Pod;
+   c5 before the controller starts: every owner still idle_stopped, no pending work, all five fences equal to
+      the window start, no runner Pod (any difference: rc 8, the controller is not started);
    c6 runner-controller to 1: rollout, the Pod runs the #68 runtime; then OBSERVE seconds of observation: no
       runner Pod appears and no fence changes.
 6. postcheck (rc 0): the final state printed: images, allowlists, inputs.json, plans, fences, no runner Pod.
@@ -1093,7 +1093,9 @@ def main(argv):
             if not health():
                 raise Stop(6, 'c4: /api/health is not 200')
             no_runner_pods(8, 'c5')
-            check_owners(expected, 8, 'c5', 'new')
+            c5 = check_owners(expected, 8, 'c5', 'new')
+            if any(fence_of(c5[o]) != RUN['before'][o] for o in OWNERS):
+                raise Stop(8, 'c5: a fence differs from the window start')
             start(CTRL, manifests(new_images(CTRL)), 6, 'c6')
             observe(expected, before)
             final(expected)
