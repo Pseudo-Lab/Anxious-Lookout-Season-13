@@ -18,7 +18,7 @@ echo "$sha" | grep -Eqx '[0-9a-f]{40}' || { echo 'refuse: not a full commit sha'
 short=$(echo "$sha" | cut -c1-7)
 tag="68-$short"
 built=$(date -u -d "@$(git show -s --format=%ct "$sha")" +%Y-%m-%dT%H:%M:%SZ)  # commit time, UTC (write_release)
-mkdir -m 0700 "$out" "$out/context"
+mkdir -m 0700 "$out" "$out/context" || { echo "refuse: cannot create $out"; exit 3; }
 # The build context keeps the repository's ordinary modes (umask 022): COPY carries file modes into the image,
 # and the runner (UID 10001) must read /app. Only the output directory itself stays private.
 ( umask 022; git archive "$sha" | tar -x -C "$out/context" ) || { echo 'git archive failed'; exit 3; }
@@ -30,9 +30,11 @@ for target in runtime runner provisioner; do
     --build-arg "APP_GIT_SHA=$sha" --build-arg "APP_BUILT_AT=$built" -t "$ref" "$out/context" >/dev/null \
     || { echo "build $target failed"; exit 5; }
   docker save -o "$out/anxious-dev-$target-$tag.tar" "$ref" || { echo "save $target failed"; exit 5; }
-  echo "docker.io/library/$ref|anxious-dev-$target-$tag.tar|$(docker image inspect -f '{{.Id}}' "$ref")" >> "$out/images.txt"
+  id=$(docker image inspect -f '{{.Id}}' "$ref") && [ -n "$id" ] || { echo "inspect $target failed"; exit 5; }
+  echo "docker.io/library/$ref|anxious-dev-$target-$tag.tar|$id" >> "$out/images.txt" || { echo 'images.txt write failed'; exit 5; }
 done
-( cd "$out" && sha256sum anxious-dev-*-"$tag".tar > archives.sha256 )
+( cd "$out" && sha256sum anxious-dev-*-"$tag".tar > archives.sha256 ) || { echo 'archives.sha256 write failed'; exit 5; }
+[ "$(wc -l < "$out/images.txt")" = 3 ] && [ "$(wc -l < "$out/archives.sha256")" = 3 ] || { echo 'chain outputs incomplete'; exit 5; }
 rm -rf "$out/context"
 cat "$out/images.txt" "$out/archives.sha256"
 
