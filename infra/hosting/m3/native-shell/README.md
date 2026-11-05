@@ -179,6 +179,25 @@ Until #63 the controller input is `/etc/anxious-lookout/issue16/controller/input
 `issue16-controller`. If #63 replaces that path first, the same rule applies to its replacement: it
 carries no `executor`.
 
+**Structure seen on the development VM (2026-11-05, read-only).** Two paths, with different jobs:
+- Runner Pods are rendered and reconciled by the in-cluster `runner-control/runner-controller` (runtime image,
+  `ops.runner_controller_service`). It reads no `inputs.json`: it renders each Pod from the binding's stored plan.
+  Swapping the runtime image therefore changes the Pods of **every** owner at their next start. That is why the
+  window keeps entry frozen until every binding is swapped.
+- `inputs.json` is read only when a **new** owner is prepared, by the host `issue16-controller` service (the
+  provisioner image's `worker.py controller`). On the development VM that unit and its timer, like the other
+  `issue16-*` units, are installed but **disabled**.
+- Entry is gated by the API's `CODEX_USER_RUNNER_ALLOWLIST` (`app/user_runners.py`). The controller starts
+  Pods for the runner requests it finds in the database. Narrowing the API allowlist alone does not stop a request
+  that was already made.
+- Each binding has its own runner and executor images (two different pairs on the development VM, neither equal
+  to `inputs.json`). The rollback record keeps them per binding.
+
+Before the production window, the user checks the same points read-only, because "every mutator stopped" names
+different things if production differs: whether the host `issue16-*` units and timers are enabled; the
+`runner-controller` replicas and image; the API and controller allowlists; pending runner requests in the
+database; and the runner and executor image of every binding.
+
 ### Order
 
 Run it after #61 and #63, or inside their window. Either way it is the same window procedure: one freeze,
