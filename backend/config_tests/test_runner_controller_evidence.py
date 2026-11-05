@@ -14,9 +14,11 @@ from runner.lifecycle import Refused
 NOW = datetime(2026, 10, 26, tzinfo=timezone.utc)
 
 
-def pod(phase='Running', runner=None, executor=None):
+def pod(phase='Running', runner=None, sidecar=None):
+    # #68: a runner Pod has one container. `sidecar` is a pre-#68 Pod still present (for example
+    # Failed after a node reboot) with its shell-executor container.
     statuses = []
-    for name, state in (('runner', runner), ('shell-executor', executor)):
+    for name, state in (('runner', runner), ('shell-executor', sidecar)):
         if state is not None:
             statuses.append({'name': name, 'state': state})
     return {'status': {'phase': phase, 'containerStatuses': statuses}}
@@ -24,24 +26,31 @@ def pod(phase='Running', runner=None, executor=None):
 
 RUNNING = {'running': {'startedAt': '2026-10-26T00:00:00Z'}}
 EXITED = {'terminated': {'exitCode': 0, 'reason': 'Completed'}}
+UNKNOWN = {'terminated': {'exitCode': 255, 'reason': 'Unknown'}}
 
 
 def test_live_runner_is_not_terminal():
-    assert terminal_evidence(pod(runner=RUNNING, executor=RUNNING)) is None
+    assert terminal_evidence(pod(runner=RUNNING)) is None
     assert terminal_evidence(pod('Pending')) is None
 
 
-def test_reboot_failed_pod_is_terminal_with_container_states():
-    # The #58 A reboot case: phase Failed, runner Completed, executor exit 255.
-    evidence = terminal_evidence(pod('Failed', runner=EXITED, executor={'terminated': {'exitCode': 255, 'reason': 'Unknown'}}))
+def test_reboot_failed_pod_is_terminal_with_container_state():
+    # The #58 A reboot case on the native single-container Pod.
+    assert terminal_evidence(pod('Failed', runner=UNKNOWN)) == {
+        'podPhase': 'Failed', 'containers': {'runner': {'exitCode': 255, 'reason': 'Unknown'}}}
+
+
+def test_runner_exit_in_running_pod_is_terminal():
+    evidence = terminal_evidence(pod('Running', runner=EXITED))
+    assert evidence == {'podPhase': 'Running', 'containers': {'runner': {'exitCode': 0, 'reason': 'Completed'}}}
+
+
+def test_pre_68_sidecar_pod_left_failed_is_still_terminal():
+    # A Failed Pod from the previous release may outlive the #68 window; it is still recorded and released.
+    evidence = terminal_evidence(pod('Failed', runner=EXITED, sidecar=UNKNOWN))
     assert evidence == {'podPhase': 'Failed', 'containers': {'runner': {'exitCode': 0, 'reason': 'Completed'},
                                                              'shell-executor': {'exitCode': 255, 'reason': 'Unknown'}}}
-
-
-def test_runner_exit_with_live_executor_is_terminal():
-    # The #59 probe case: Pod still Running, runner container terminated, executor alive.
-    evidence = terminal_evidence(pod('Running', runner=EXITED, executor=RUNNING))
-    assert evidence['podPhase'] == 'Running' and evidence['containers']['shell-executor'] == {'state': 'running'}
+    assert terminal_evidence(pod('Running', runner=EXITED, sidecar=RUNNING))['containers']['shell-executor'] == {'state': 'running'}
 
 
 def test_absent_pod_is_terminal():

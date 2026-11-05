@@ -263,8 +263,13 @@ def test_pod_resources_transport_reference_and_grace(plan):
     assert [container['name'] for container in spec['containers']] == ['runner'] and 'initContainers' not in spec
     runner = spec['containers'][0]
     assert spec['terminationGracePeriodSeconds'] == GRACE_SECONDS == 20
-    assert runner['resources'] == {'requests': {'cpu': '100m', 'memory': '192Mi'},
-                                   'limits': {'cpu': '500m', 'memory': '768Mi'}}
+    # #68: one provisional limit, the #59 runner (500m/768Mi) plus executor (1/512Mi).
+    assert runner['resources'] == {'requests': {'cpu': '200m', 'memory': '320Mi'},
+                                   'limits': {'cpu': '1500m', 'memory': '1280Mi'}}
+    assert spec['securityContext']['seccompProfile'] == {'type': 'Localhost',
+                                                         'localhostProfile': 'profiles/anxious-runner-userns-v1.json'}
+    assert runner['securityContext'] == {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
+                                         'capabilities': {'drop': ['ALL']}}
     assert [entry for entry in runner['env'] if entry['name'].startswith('RUNNER_TOKEN')] == [
         {'name': 'RUNNER_TOKEN', 'valueFrom': {'secretKeyRef': {'name': plan.transport.name, 'key': 'token'}}}]
     assert not [volume for volume in spec['volumes'] if 'secret' in volume or volume['name'] == 'transport']

@@ -51,6 +51,10 @@ class Reference:
             name(self.volume)
 
 
+SECCOMP_PROFILE = 'profiles/anxious-runner-userns-v1.json'
+RESOURCES = {'requests': {'cpu': '200m', 'memory': '320Mi'}, 'limits': {'cpu': '1500m', 'memory': '1280Mi'}}
+
+
 @dataclass(frozen=True)
 class Plan:
     identity: Identity
@@ -93,8 +97,10 @@ class Plan:
                          'restartPolicy': 'Never', 'terminationGracePeriodSeconds': GRACE_SECONDS,
                          'hostNetwork': False, 'hostPID': False, 'hostIPC': False,
                          'enableServiceLinks': False, 'dnsPolicy': 'ClusterFirst',
+                         # #68: the node profile lets bubblewrap create its user, mount and PID
+                         # namespaces without CAP_SYS_ADMIN (infra/hosting/m3/native-shell section 2).
                          'securityContext': {'runAsUser': 10001, 'runAsGroup': 10001, 'runAsNonRoot': True,
-                                             'seccompProfile': {'type': 'RuntimeDefault'}},
+                                             'seccompProfile': {'type': 'Localhost', 'localhostProfile': SECCOMP_PROFILE}},
                          'containers': [{'name': 'runner', 'image': self.image, 'imagePullPolicy': 'IfNotPresent',
                             'command': ['uvicorn', 'runner.app:create_app', '--factory', '--host', '0.0.0.0', '--port', '8080',
                                         '--workers', '1', '--no-access-log', '--no-proxy-headers'],
@@ -105,7 +111,9 @@ class Plan:
                                 [{'name': 'RUNNER_TOKEN', 'valueFrom': {'secretKeyRef': {'name': self.transport.name, 'key': 'token'}}},
                                  {'name': 'RUNNER_POD_UID', 'valueFrom': {'fieldRef': {'apiVersion': 'v1', 'fieldPath': 'metadata.uid'}}}],
                             'ports': [{'name': 'runner', 'containerPort': 8080, 'protocol': 'TCP'}],
-                            'resources': {'requests': {'cpu': '100m', 'memory': '192Mi'}, 'limits': {'cpu': '500m', 'memory': '768Mi'}},
+                            # #68: one limit for runner, app-server and sandboxed commands. Provisional:
+                            # the #59 runner + executor sum, until the VM measurement sets it (PARITY).
+                            'resources': {'requests': RESOURCES['requests'], 'limits': RESOURCES['limits']},
                             'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
                                                 'capabilities': {'drop': ['ALL']}},
                             'volumeMounts': [{'name': 'native', 'mountPath': '/state'}, {'name': 'control', 'mountPath': '/control'},

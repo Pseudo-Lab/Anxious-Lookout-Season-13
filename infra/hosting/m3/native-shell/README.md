@@ -14,10 +14,11 @@ Nothing here runs from a render, a test or an agent session on production.
 | 3 | Controller inputs without `executor`, binding runner images | PM after review | the #68 window |
 | 4 | Runner approval path and startup self-check (reference) | nobody: runner code | every app-server launch and turn |
 | 5 | Codex version: what to recheck | back, review | before any Codex pin change |
+| 6 | A `.codex` in the workspace blocks the runner: availability and recovery | operator, with the owner | when it happens |
+| 7 | Runner Pod and image (#68 order 4) | reference | the #68 window |
 
-Still to come with the Pod specification commit (#68 order 4): the SELinux policy for `container_t`, the
-single resource limit and the `codex-linux-sandbox` link in the image. They will be added here as
-sections 6 to 8.
+Still to come: the SELinux policy for `container_t` (#68 requirement 3). It needs the VM's AVC
+denials under `container_t` first and will be section 8.
 
 ## 1. `kernel.yama.ptrace_scope=1` (user, production node)
 
@@ -333,4 +334,72 @@ new source, then on the VM:
 - the `configRequirements/read`, `config/read` and thread response fields the self-check reads;
 - `thread/start.permissions` and `activePermissionProfile` (experimental in 0.160.1);
 - project layers are still disabled for an untrusted cwd.
+
+## 6. A `.codex` in the workspace blocks the runner
+
+**Availability constraint (accepted, user decision pending).** If `/state/workspace/.codex`, a `.codex`
+above it, `CODEX_HOME/config.toml` or `CODEX_HOME/rules` exists, the runner refuses to start Codex and
+refuses every turn (`policy_refused`, section 4 check 3). It does not matter how the file got there.
+The owner then cannot chat or run commands until an operator resolves it. This is deliberate
+fail-closed behaviour: the approval policy is never relaxed to get past it, and the runner never
+removes or renames the file itself. Auto-removal is refused because the file could be recreated
+between the check and the run, an already loaded config could survive, and the owner's data would be lost.
+
+**What usually prevents it (Codex 0.160.1 source, VM evidence still required).** For a writable root
+that is also the cwd, Codex adds read-only carve-outs for `.git`, `.agents`, `.codex` and `.aws`, and
+protects `.codex` even while it is missing (`protect_missing_dot_codex`, `protocol/src/permissions.rs`).
+The cwd is the workspace, so a sandboxed command or `apply_patch` should not be able to create or
+write `/state/workspace/.codex`. The VM stage checks that the protection holds for:
+
+- a `.codex` that already exists (made before the run);
+- renaming a directory into `.codex`;
+- symlinks and path aliases (`.codex -> elsewhere`, `sub/../.codex`);
+- `git clone <url> .` and archive extraction into the workspace root;
+- a file change (`apply_patch`) that creates `.codex/config.toml`.
+
+Each must fail inside the sandbox and must not be retried outside it (section 4). The cost of this
+protection: work that needs a `.codex` or `.git` at the workspace root fails. A repository with
+a `.codex` cloned into the workspace root fails; cloning it into a subdirectory works.
+`/state/workspace/<repo>/.codex` is not a policy source: Codex reads `.codex` from the cwd upwards
+only, and the runner checks the same places.
+
+**What the owner sees.** The generic refusal: "정책에 따라 Codex 사용이 거부되었습니다." (status banner) and
+"정책에 따라 이 요청이 거부되었습니다." (turn). Neither the owner nor the operator can tell a workspace
+`.codex` from a broken deployment configuration from this text, and the runner logs no cause. A
+cause code without file contents (for example `workspace_policy_file`) would need an API contract and
+front change, so it waits for that decision.
+
+**Recovery (operator, current method, not yet rehearsed on the VM).** Never relax the approval policy
+or the configuration for it.
+
+1. Ask the owner whether the `.codex` is theirs and whether to keep it. Do not open its files without
+   that consent.
+2. The blocked runner Pod stays up until runner-controller stops it as idle (`idleSeconds`). While it
+   exists, a cluster admin renames the directory in place, so nothing is deleted:
+   ```sh
+   pod=$(kubectl -n codex-runner get pods -l anxious.io/owner=<owner-uuid> -o name)
+   kubectl -n codex-runner exec "$pod" -c runner -- \
+     sh -c 'test -e /state/workspace/.codex && mv -T /state/workspace/.codex /state/workspace/codex-dir-kept-$(date -u +%Y%m%dT%H%M%SZ)'
+   ```
+   Use the same `mv` for `CODEX_HOME/config.toml` or `rules` (`/state/codex/...`) only after
+   confirming what wrote them; those are not owner files, so report them to back first.
+3. Let the runner stop and release normally. Never delete the Pod by hand. The next entry starts a
+   new Pod, and the startup check runs again from the beginning.
+4. If the Pod is already gone, the next entry recreates it and it blocks again; repeat step 2 on that Pod.
+
+## 7. Runner Pod and image (#68 order 4)
+
+- One container, `runner`, for the runner, app-server and sandboxed commands. No init container and no
+  shell-executor sidecar; a stored v2 plan's `executor` is ignored.
+- Pod `seccompProfile`: `Localhost`, `profiles/anxious-runner-userns-v1.json` (section 2).
+- Container: UID/GID 10001, `allowPrivilegeEscalation: false`, read-only root filesystem, all
+  capabilities dropped (unchanged). bubblewrap runs in a user namespace without any capability.
+- Resources (provisional, `runner_kube.RESOURCES`): requests 200m CPU / 320Mi, limits 1500m / 1280Mi,
+  the #59 runner (500m / 768Mi) plus executor (1 / 512Mi) limits. The VM stage measures the
+  native shell under load and sets the final value; PARITY records the difference from #59.
+- Image: Debian bookworm `bubblewrap` (0.8.0) and `/usr/local/bin/codex-linux-sandbox -> codex`.
+  bubblewrap 0.8.0 has no `--argv0`, so Codex reaches its Linux sandbox helper through this name.
+  The link is part of the image evidence chain.
+- `/etc/codex/config.toml` and `requirements.toml` (section 4).
+- Pod manifest change: the Runner Pod manifest gate applies (section 3).
 
