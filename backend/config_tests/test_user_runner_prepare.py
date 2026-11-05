@@ -49,21 +49,29 @@ def prepared(admin, owner, tmp_path, monkeypatch, request):
         'api': 'https://kube.invalid', 'kubeTokenFile': str(token), 'caFile': None}
     output = tmp_path/'output'
     if getattr(request, 'param', False):
+        # #68: a shell-executor input is refused before any Kube object, storage or binding.
         value['executor'] = {'image': 'registry.invalid/executor@sha256:'+'c'*64,
                              'wallSeconds': 30, 'outputBytes': 65536}
+        with pytest.raises(Refused):
+            tool.prepare(value, output)
+        return value, output, created
     tool.prepare(value, output)
     return value, output, created
 
 
 @pytest.mark.parametrize('prepared', [True], indirect=True)
-def test_new_owner_v2_is_explicit_and_preserves_private_resource_split(prepared):
+def test_new_owner_executor_input_is_refused_before_any_mutation(prepared):
+    value, output, objects = prepared
+    assert objects == [] and not output.exists()
+
+
+def test_new_owner_plan_is_v1_without_executor(prepared):
     value, output, objects = prepared
     config = json.loads((output/'runtime.json').read_text())
-    assert config['plan']['version'] == 2 and config['plan']['executor'] == value['executor']
+    assert 'version' not in config['plan'] and 'executor' not in config['plan']
     plan = plan_from(config['plan'])
-    assert plan.executor.wall_seconds == 30
-    assert len(plan.manifest('isolated')['spec']['containers']) == 2
-    assert len(objects) == 5
+    assert plan.executor is None
+    assert [c['name'] for c in plan.manifest('isolated')['spec']['containers']] == ['runner']
 
 
 def test_one_command_binds_real_owner_and_new_storage_without_pod_or_policy(admin, owner, prepared):

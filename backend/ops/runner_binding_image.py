@@ -1,8 +1,9 @@
 """Explicit admin-only image CAS for a proved-stopped immutable binding.
 
 All API/controllers/workers must be stopped by the operator first. This changes
-only plan.image, the executor image of a v2 plan, or explicitly opts v1 into v2
-executor configuration; no runtime/resource/history reset, adoption or live Pod patch.
+only plan.image or the executor image of an existing v2 plan; no runtime/resource/history
+reset, adoption or live Pod patch. #68 removed the v1 -> v2 executor opt-in: new runners
+use the native shell, so a plan never gains an executor.
 """
 import hashlib
 import json
@@ -46,22 +47,16 @@ def upgrade(db, fence, expected_plan_digest, new_image, *, apply=False, executor
     old_plan = decode(old)
     require(old_plan.identity.owner == state.owner and old_plan.identity.state_id == state.state_id)
     updated = {**old,'image':new_image}
-    if executor is not None:
-        # Explicit opt-in only. Retain every durable identity/reference and the
-        # original thread files; never downgrade or silently replace a v2 plan.
-        require('version' not in old and 'executor' not in old)
-        updated.update(version=2, executor=executor)
+    require(executor is None)  # #68: no v1 -> v2 executor opt-in.
     if executor_image is not None:
         # v2 only: replace the executor image digest, keep its limits (#59).
-        require(executor is None and old.get('version') == 2 and type(old.get('executor')) is dict)
+        require(old.get('version') == 2 and type(old.get('executor')) is dict)
         updated['executor'] = {**old['executor'], 'image': executor_image}
     decode(updated)  # Same strict immutable digest/image and identity contract.
     require(updated != old)
     report = {'owner':str(state.owner),'state':str(state.state_id),'generation':state.generation,
               'revision':state.revision,'oldImage':old['image'],'newImage':new_image,
               'oldPlanSha256':plan_digest(old),'newPlanSha256':plan_digest(updated)}
-    if executor is not None:
-        report.update(newPlanVersion=2, executor=executor)
     if executor_image is not None:
         report.update(oldExecutorImage=old['executor']['image'], newExecutorImage=executor_image)
     if apply:
@@ -88,20 +83,18 @@ def main():
         require(os.geteuid() == 0)
         config = read_private(Path(args.inputs))
         fields = {'owner','state','generation','revision','oldPlanSha256','newImage'}
-        require(set(config) in (fields, fields | {'executor'}, fields | {'executorImage'}))
-        if 'executor' in config:
-            require(type(config['executor']) is dict)
+        require(set(config) in (fields, fields | {'executorImage'}))  # #68: no `executor` opt-in.
         fence = Fence(UUID(config['owner']),UUID(config['state']),config['generation'],config['revision'],None)
         report = Path(args.report)
         approved = read_private(report) if args.action == 'apply' else None
         if args.action == 'report': require(not report.exists() and not report.is_symlink())
         engine = create_engine(secret('ADMIN_DATABASE_URL'),hide_parameters=True)
         with engine.begin() as db:
-            result = upgrade(db,fence,config['oldPlanSha256'],config['newImage'],executor=config.get('executor'),
+            result = upgrade(db,fence,config['oldPlanSha256'],config['newImage'],
                              executor_image=config.get('executorImage'))
             if args.action == 'apply':
                 require(result == approved)
-                upgrade(db,fence,config['oldPlanSha256'],config['newImage'],apply=True,executor=config.get('executor'),
+                upgrade(db,fence,config['oldPlanSha256'],config['newImage'],apply=True,
                         executor_image=config.get('executorImage'))
             else: write_private(report,result)
         print(json.dumps({'owner':str(fence.owner),'stage':'binding-image-'+args.action,'result':'verified'}))
