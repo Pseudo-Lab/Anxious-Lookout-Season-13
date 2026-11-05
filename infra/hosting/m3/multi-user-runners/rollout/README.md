@@ -147,6 +147,8 @@ running conversation with `codex_runner_lost`, deletes it and releases the owner
 owners' bindings, and `Bindings.publish` refuses a different plan for an existing owner.
 Since #68 rollout values have no `executor` key (refused, not ignored), so the controller's
 `inputs.json` carries none and new owners get v1 plans without a shell executor.
+The #68 window order (input change, release, per-binding runner image swap) and its rollback are in
+`../../native-shell/README.md` section 3.
 The #59 manifest no longer provides `RUNNER_TOKEN_FILE`, so a runner image older than
 #59 cannot start under it: move every existing binding to the reviewed images in the
 same window, after the API and worker images run the new code and before the next

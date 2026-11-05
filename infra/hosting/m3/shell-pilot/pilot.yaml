@@ -1,7 +1,7 @@
 # #64 shell-surface pilot on the development VM only. Never apply to production.
 # Images are the development VM's local images (imagePullPolicy Never); the B agent image is the
 # runner image plus bubblewrap (agent-b.Dockerfile). The seccomp profile is installed on the node at
-# /var/lib/kubelet/seccomp/profiles/shell-pilot-userns.json (seccomp-userns.json in this directory).
+# /var/lib/kubelet/seccomp/profiles/shell-pilot-userns.json (since #68: ../native-shell/seccomp-runner-userns-v1.json, same bytes).
 # Namespace shell-full for the full run: the pilot's shell-pilot namespace object stays Terminating on the
 # development VM (metrics.k8s.io discovery failure) and is not force-finalized.
 apiVersion: v1

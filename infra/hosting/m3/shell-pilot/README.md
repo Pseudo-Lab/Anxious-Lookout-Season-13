@@ -11,7 +11,7 @@ usage is not counted). The harness refuses to start past it and interrupts a tur
 | | A (current) | B (middle option) |
 | --- | --- | --- |
 | Tools | MCP `shell` bridge → ShellBroker → shell-executor sidecar; native shell and unified_exec off | native shell, `apply_patch`, unified_exec |
-| Sandbox | `read-only` | `workspace-write` (bubblewrap, seccomp profile `seccomp-userns.json`) |
+| Sandbox | `read-only` | `workspace-write` (bubblewrap, seccomp profile `seccomp-userns.json`, now `../native-shell/seccomp-runner-userns-v1.json`) |
 | Limits | 30 s wall, 64 KiB output per command (executor) | Codex defaults |
 | cwd | empty native-work directory; commands run in `/state/workspace` | the workspace |
 | Image | `anxious-dev-runner:50ac30b` + `anxious-dev-shell-executor:50ac30b` | `agent-b.Dockerfile` (runner image + bubblewrap) |
@@ -28,13 +28,13 @@ The same model, Codex 0.160.1, prompts and fixtures are used in both. Fixtures u
 - `campaign.sh`: the full-run driver (gate before each slot, JWT-shape check after it, `STOP` file); `test_campaign.py` runs it against a fake ssh.
 - `pilot.yaml`: namespace `shell-full` (the pilot's `shell-pilot` object stays Terminating on the VM), PVC `pilot-login`, Pods `pilot-login`, `pilot-a` and `pilot-b` (B on SELinux
   `spc_t`: `container_t` denies bubblewrap's devpts mount, measured; production would need a dedicated policy).
-- `seccomp-userns.json`: the Docker v27.5.1 default profile plus `clone`, `unshare`, `mount`, `umount2`, `pivot_root` allowed without CAP_SYS_ADMIN (bubblewrap's user, mount and PID namespaces).
+- `seccomp-userns.json` (moved by #68 to `../native-shell/seccomp-runner-userns-v1.json`, same bytes): the Docker v27.5.1 default profile plus `clone`, `unshare`, `mount`, `umount2`, `pivot_root` allowed without CAP_SYS_ADMIN (bubblewrap's user, mount and PID namespaces).
 - `agent-b.Dockerfile`: the B image.
 
 ## Development VM preparation (back)
 
 1. `kernel.yama.ptrace_scope=1` in the guest (`/etc/sysctl.d/90-shell-pilot-yama.conf`, applied with `sysctl --system`). Record it in PARITY as "May differ" (development VM only).
-2. Install `seccomp-userns.json` as `/var/lib/kubelet/seccomp/profiles/shell-pilot-userns.json` (root, 0644).
+2. Install `seccomp-userns.json` (now `../native-shell/seccomp-runner-userns-v1.json`) as `/var/lib/kubelet/seccomp/profiles/shell-pilot-userns.json` (root, 0644).
 3. Build the B image in the guest Docker, then import it into containerd `k8s.io`. Pin `pilot-b` to the imported digest.
 4. `kubectl -n shell-full create configmap pilot-src --from-file=harness.py --from-file=pilot_tasks.py`, then apply `pilot.yaml`.
 5. `selfcheck` for A and B. These steps make no model call and use no credentials.
