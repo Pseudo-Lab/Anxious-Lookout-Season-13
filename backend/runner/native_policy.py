@@ -66,9 +66,21 @@ def requirements(root):
             'permissions': {'filesystem': {'deny_read': list(deny_paths(root))}}}
 
 
-def require(condition):
+def refuse(check):
+    """Refuse with `policy_refused` and log which check failed: a fixed check name only.
+
+    Never file contents, tokens, paths or other user data: operators read this line to tell
+    a workspace `.codex` from a broken deployment (native-shell/README.md section 6).
+    """
+    import json
+    import logging
+    logging.getLogger('uvicorn.error').warning('runner_policy_check %s', json.dumps({'result': 'refused', 'check': check}))
+    raise CodexFailure('policy_refused')
+
+
+def require(condition, check):
     if not condition:
-        raise CodexFailure('policy_refused')
+        refuse(check)
 
 
 def check_files(root, files=((SYSTEM_CONFIG, system_config), (REQUIREMENTS, requirements))):
@@ -80,56 +92,62 @@ def check_files(root, files=((SYSTEM_CONFIG, system_config), (REQUIREMENTS, requ
     import stat
     import tomllib
     for path, expected in files:
+        name = 'file.' + ('requirements' if expected is requirements else 'config')
         try:
             info = os.lstat(path)
             with open(path, 'rb') as file:
                 value = tomllib.load(file)
         except (OSError, ValueError):
-            raise CodexFailure('policy_refused') from None
+            refuse(name + '.unreadable')
         require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022
-                and not os.access(path, os.W_OK) and value == expected(root))
+                and not os.access(path, os.W_OK), name + '.ownership')
+        require(value == expected(root), name + '.content')
 
 
 def check_requirements(result):
     """configRequirements/read: the image's managed requirements were loaded and parsed."""
     requirements = result.get('requirements') if isinstance(result, dict) else None
-    require(isinstance(requirements, dict))
-    require(requirements.get('allowedApprovalPolicies') == ['untrusted'])
-    require(requirements.get('allowedApprovalsReviewers') == ['user'])
+    require(isinstance(requirements, dict), 'requirements.missing')
+    require(requirements.get('allowedApprovalPolicies') == ['untrusted'], 'requirements.approval_policies')
+    require(requirements.get('allowedApprovalsReviewers') == ['user'], 'requirements.approvals_reviewers')
     features = requirements.get('featureRequirements')
     # 0.160.1 forces unified exec on unless managed requirements pin it; off means no write_stdin.
-    require(isinstance(features, dict) and features.get('unified_exec') is False)
+    require(isinstance(features, dict) and features.get('unified_exec') is False, 'requirements.unified_exec')
 
 
 def check_config(result, root):
     """config/read (cwd = workspace, layers): the profile applies as written, from the system layer only."""
-    require(isinstance(result, dict) and isinstance(result.get('config'), dict) and isinstance(result.get('layers'), list))
+    require(isinstance(result, dict) and isinstance(result.get('config'), dict) and isinstance(result.get('layers'), list),
+            'config.malformed')
     expected = system_config(root)
     config = result['config']
     for key in POLICY_KEYS:
-        require(config.get(key) == expected.get(key))
+        require(config.get(key) == expected.get(key), 'config.effective.' + key)
     systems = []
     for layer in result['layers']:
-        require(isinstance(layer, dict) and isinstance(layer.get('name'), dict) and isinstance(layer.get('config'), dict))
+        require(isinstance(layer, dict) and isinstance(layer.get('name'), dict) and isinstance(layer.get('config'), dict),
+                'config.layer_malformed')
         kind, disabled = layer['name'].get('type'), layer.get('disabledReason')
         if kind == 'project':
-            require(isinstance(disabled, str) and disabled)  # Untrusted: model-written .codex never applies.
+            require(isinstance(disabled, str) and disabled, 'config.project_layer_enabled')  # Untrusted: never applies.
         if disabled is not None:
             continue
         if kind == 'system':
             systems.append(layer)
         else:
-            require(not POLICY_KEYS & set(layer['config']))
-    require(len(systems) == 1 and systems[0]['name'].get('file') == SYSTEM_CONFIG
-            and systems[0]['config'] == expected)
+            require(not POLICY_KEYS & set(layer['config']), 'config.policy_outside_system_layer')
+    require(len(systems) == 1 and systems[0]['name'].get('file') == SYSTEM_CONFIG, 'config.system_layer')
+    require(systems[0]['config'] == expected, 'config.system_layer_content')
 
 
 def check_thread(result, work):
     """thread/start and thread/resume responses: this thread runs under the profile and policy."""
-    require(isinstance(result, dict))
+    require(isinstance(result, dict), 'thread.malformed')
     profile = result.get('activePermissionProfile')
-    require(result.get('approvalPolicy') == 'untrusted' and result.get('approvalsReviewer') == 'user'
-            and isinstance(profile, dict) and profile.get('id') == PROFILE and result.get('cwd') == str(work))
+    require(result.get('approvalPolicy') == 'untrusted', 'thread.approval_policy')
+    require(result.get('approvalsReviewer') == 'user', 'thread.approvals_reviewer')
+    require(isinstance(profile, dict) and profile.get('id') == PROFILE, 'thread.permission_profile')
+    require(result.get('cwd') == str(work), 'thread.cwd')
 
 
 COMMAND_FIELDS = frozenset({'kind', 'threadId', 'turnId', 'itemId', 'startedAtMs', 'approvalId', 'environmentId',

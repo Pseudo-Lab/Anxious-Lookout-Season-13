@@ -125,14 +125,15 @@ class Native:
             try:
                 pin = pinned()
             except RuntimeError:
-                raise CodexFailure("policy_refused") from None
-            try:
-                for path, digest in ((binary, pin["codex_sha256"]), ("/usr/local/bin/codex-code-mode-host", pin["host_sha256"])):
+                policy.refuse("binary.platform")
+            for path, digest, check in ((binary, pin["codex_sha256"], "binary.codex"),
+                                        ("/usr/local/bin/codex-code-mode-host", pin["host_sha256"], "binary.code_mode_host")):
+                try:
                     with open(path, "rb") as executable:
-                        if hashlib.file_digest(executable, "sha256").hexdigest() != digest or not os.access(path, os.X_OK):
-                            raise CodexFailure("policy_refused")
-            except OSError:
-                raise CodexFailure("policy_refused") from None
+                        matches = hashlib.file_digest(executable, "sha256").hexdigest() == digest and os.access(path, os.X_OK)
+                except OSError:
+                    matches = False
+                policy.require(matches, check)
             # The image's Codex policy files, pinned in code next to the binary digests (#68).
             policy.check_files(str(root))
         self.root, self.model, self.callback_url = root, model, callback_url
@@ -237,18 +238,22 @@ class Native:
 
     def check_local(self):
         # Model-writable places Codex could read as policy are never present (#68).
-        if (os.path.lexists(self.codex_home / "config.toml") or os.path.lexists(self.codex_home / "rules")
-                or any(os.path.lexists(path / ".codex") for path in (self.work, *self.work.parents))):
-            raise CodexFailure("policy_refused")
+        policy.require(not os.path.lexists(self.codex_home / "config.toml"), "local.codex_home_config")
+        policy.require(not os.path.lexists(self.codex_home / "rules"), "local.codex_home_rules")
+        policy.require(not os.path.lexists(self.work / ".codex"), "local.workspace_dot_codex")
+        policy.require(not any(os.path.lexists(path / ".codex") for path in self.work.parents), "local.parent_dot_codex")
 
     def check_policy(self):
         """What this app-server process reports applied (#68). Every launch and every turn."""
         self.check_local()
-        try:
-            policy.check_requirements(self.rpc("configRequirements/read", {}))
-            policy.check_config(self.rpc("config/read", {"includeLayers": True, "cwd": str(self.work)}), str(self.root))
-        except CodexFailure:
-            raise CodexFailure("policy_refused") from None
+        for method, params, check in (("configRequirements/read", {}, policy.check_requirements),
+                                      ("config/read", {"includeLayers": True, "cwd": str(self.work)},
+                                       lambda result: policy.check_config(result, str(self.root)))):
+            try:
+                result = self.rpc(method, params)
+            except CodexFailure:
+                policy.refuse("rpc." + method)
+            check(result)
 
     def reply_server(self, message, turn):
         if message.get("method") == "item/tool/call":

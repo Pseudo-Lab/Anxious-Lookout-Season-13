@@ -379,3 +379,25 @@ def test_launch_check_reads_applied_policy_and_maps_failures(local, monkeypatch)
     with pytest.raises(CodexFailure) as refused:
         local.check_policy()
     assert refused.value.reason == 'policy_refused'
+
+
+# --- operators can tell which check refused (names only) ------------------------------------
+
+def test_refusal_logs_the_check_name_only(native, turn, caplog):
+    import logging
+    secret = 'MARKER-' + 'x' * 30
+    with caplog.at_level(logging.WARNING, logger='uvicorn.error'):
+        with pytest.raises(CodexFailure):
+            policy.check_thread({**good_thread(), 'approvalPolicy': secret}, Path(WORK))
+    lines = [record.getMessage() for record in caplog.records]
+    assert lines == ['runner_policy_check {"result": "refused", "check": "thread.approval_policy"}']
+    assert secret not in caplog.text
+
+
+def test_local_refusals_name_the_place(local, caplog):
+    import logging
+    (local.work / '.codex').mkdir()
+    with caplog.at_level(logging.WARNING, logger='uvicorn.error'):
+        with pytest.raises(CodexFailure):
+            local.check_local()
+    assert '"check": "local.workspace_dot_codex"' in caplog.text and str(local.work) not in caplog.text

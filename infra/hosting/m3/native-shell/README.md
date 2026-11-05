@@ -333,7 +333,9 @@ new source, then on the VM:
 - the approval request fields and decision names (the runner's allow lists in `native_policy.py`);
 - the `configRequirements/read`, `config/read` and thread response fields the self-check reads;
 - `thread/start.permissions` and `activePermissionProfile` (experimental in 0.160.1);
-- project layers are still disabled for an untrusted cwd.
+- project layers are still disabled for an untrusted cwd;
+- the workspace-root `.codex` is still protected while missing, and `.git` once present;
+- what Codex runs outside the sandbox in the cwd (git metadata), if git is in the image.
 
 ## 6. A `.codex` in the workspace blocks the runner
 
@@ -369,6 +371,20 @@ only, and the runner checks the same places.
 cause code without file contents (for example `workspace_policy_file`) would need an API contract and
 front change, so it waits for that decision.
 
+**What the operator sees.** The runner logs one line per refusal with a fixed check name, never file
+contents, tokens, paths or user data:
+
+```sh
+kubectl -n codex-runner logs <runner-pod> -c runner | grep runner_policy_check
+# runner_policy_check {"result": "refused", "check": "local.workspace_dot_codex"}
+```
+
+| Check name | Means | Who fixes it |
+| --- | --- | --- |
+| `local.workspace_dot_codex`, `local.parent_dot_codex` | a `.codex` in or above the workspace | operator with the owner (below) |
+| `local.codex_home_config`, `local.codex_home_rules` | a user config or rules file in CODEX_HOME | report to back first |
+| `binary.*`, `file.*`, `requirements.*`, `config.*`, `rpc.*`, `thread.*` | the image, its `/etc/codex` files or what Codex reports applied | deployment: back and review, never the owner |
+
 **Recovery (operator, current method, not yet rehearsed on the VM).** Never relax the approval policy
 or the configuration for it.
 
@@ -402,4 +418,15 @@ or the configuration for it.
   The link is part of the image evidence chain.
 - `/etc/codex/config.toml` and `requirements.toml` (section 4).
 - Pod manifest change: the Runner Pod manifest gate applies (section 3).
+- **Difference from the issue design.** The #68 issue body sketches control UID 10001 and agent UID
+  10002 in separate places. This branch keeps one `runner` container with UID 10001, and the sandbox
+  (bubblewrap user, mount and PID namespaces, restricted read profile) is the boundary. Whether to split
+  the containers is decided after the VM evidence (PM agreement 2026-11-05; the exposure comparison
+  is on the issue).
+- **No git in the image** (the former executor image had none either, and the #64 pilot tasks did not
+  use git). If git is added later, review first:
+  - a workspace-root `.git` is read-only in the sandbox once it exists, so commits to a root
+    repository fail (subdirectory repositories are unaffected);
+  - Codex also runs git in the cwd **outside the sandbox** for turn metadata. It disables
+    `core.fsmonitor` and hooks there, but other repository-configured programs need review.
 
