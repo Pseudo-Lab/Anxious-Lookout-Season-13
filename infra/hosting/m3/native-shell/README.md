@@ -358,6 +358,14 @@ extension exist only when the feature is on, `core/src/tools/spec_plan.rs` ViewI
 `view_image` read through the sandboxed filesystem with the turn profile (`view_image.rs:159–177`); goals
 can start automatic continuation turns.
 
+**Owner-visible effects of this tool set** (also for the PR description):
+- **From #68 the model cannot look at images in the workspace** (`view_image` off). Before #68 it most likely
+  could: `main` runs the same 0.160.1 without disabling it, and the feature defaults to on. That is from source
+  and arguments; the pre-#68 tool list was not measured. The user decides whether to keep it off
+  (to turn it back on: the requirements line, `native_policy.requirements`, the tests and this table).
+- No sub-agents and no goals (automatic continuation turns).
+- `~` is not writable inside commands (HOME above).
+
 **Code mode (`exec`)**, 0.160.1 source:
 - The JavaScript runs in a separate `codex-code-mode-host` process (pinned binary). app-server starts it
   with no arguments (stdio protocol), its own cwd and environment minus a few token variables
