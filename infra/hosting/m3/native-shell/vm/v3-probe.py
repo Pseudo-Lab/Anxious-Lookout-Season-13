@@ -160,6 +160,29 @@ for path in (os.path.join(home, 'v3-mask-write'), '/control/v3-mask-write'):
     line('mask_after', '%s %s' % (path, 'PRESENT' if os.path.exists(path) else 'absent'))
 line('t', 'functions_done %.3f' % time.time())
 
+# 2c. Why the sandbox has no /proc: Codex's preflight is silent, so replay it with bubblewrap directly (same
+# namespaces, a minimal root, `--proc /proc`), once with and once without `--proc`. bwrap's own error text tells
+# a kernel refusal (EPERM, "Operation not permitted": a new procfs in a user namespace is refused while the
+# container's /proc has paths mounted over it) from an SELinux one (EACCES, "Permission denied", with an AVC in the
+# same time window). The container's /proc overmounts are listed. Nothing here opens a rule.
+BWRAP = ['bwrap', '--unshare-user', '--unshare-pid', '--unshare-ipc', '--unshare-net', '--tmpfs', '/', '--dev', '/dev',
+         '--ro-bind', '/usr', '/usr', '--ro-bind', '/bin', '/bin', '--ro-bind', '/lib', '/lib', '--ro-bind', '/lib64', '/lib64']
+line('t', 'proc_replay_start %.3f' % time.time())
+for label, extra in (('with_proc', ['--proc', '/proc']), ('without_proc', [])):
+    try:
+        result = subprocess.run(BWRAP + extra + ['/bin/true'], env=env, cwd=work, capture_output=True, text=True,
+                                timeout=30, stdin=subprocess.DEVNULL)
+        line('proc_replay', '%s rc=%s stderr=%s' % (label, result.returncode, result.stderr.strip().replace('\n', ' | ')[:300]))
+    except (OSError, subprocess.TimeoutExpired) as error:
+        line('proc_replay', '%s ERROR %s' % (label, type(error).__name__))
+line('t', 'proc_replay_done %.3f' % time.time())
+try:
+    with open('/proc/self/mountinfo') as file:
+        over = sorted({l.split()[4] for l in file if l.split()[4].startswith('/proc/')})
+    line('proc_overmounts', ' '.join(over) if over else 'none')
+except OSError as error:
+    line('proc_overmounts', 'ERROR %s' % type(error).__name__)
+
 # 3. The runner's app-server start, config reads and thread/start.
 from runner.app import native_command  # noqa: E402
 from runner import native_policy  # noqa: E402

@@ -57,7 +57,7 @@ POD=v3-selinux
 POD_JSON="$here/v3-pod.json"
 POD_JSON_SHA=564d176b316604c9ab5d12122b2db74dd5a4bc407d7833d98ddb3a96482c80e2
 PROBE="$here/v3-probe.py"
-PROBE_SHA=3adac14f0779e4cd70a4f06d9954ab248411145374452c3bf339c76b4a7c38d4
+PROBE_SHA=f8cd5964022ee8fbc967d7c57bc094ab76a1d02a8a7c6101ef992a85d8cd966d
 SECCOMP_FILE=$SECCOMP_DIR/anxious-runner-userns-v1.json
 SECCOMP_SHA=9a6594419eae4089e737c787597d2ed4950fd7e1031e371f490d5b2c935dff78
 READY_S=180        # kubectl wait --timeout; the process gets READY_S + 15
@@ -304,7 +304,7 @@ EOF_VOLS
     printf '%s\n' "$pout" > "$probefile" || note_incomplete 'probe sidecar write'
     ph=$(sha256sum "$probefile" 2>/dev/null) && ph=${ph%% *} && [ ${#ph} = 64 ] || note_incomplete 'probe sidecar hash'
     say "probe sidecar $(printf '%s\n' "$pout" | wc -l) lines sha256 ${ph:-?}"
-    summary=$(printf '%s\n' "$pout" | grep -E '^(selinux_label|capeff|no_new_privs|seccomp|sandbox_rc|sandbox_stderr|sandbox read_ok|sandbox inner_home|sandbox bash_startup|workspace_marker|t|functions_rc|sandbox2|sandbox2_stderr|mask_after|requirements|config|thread_start|thread_start_check|arg0_entries|app_server|app_server_exit|probe) ' | head -80)
+    summary=$(printf '%s\n' "$pout" | grep -E '^(selinux_label|capeff|no_new_privs|seccomp|sandbox_rc|sandbox_stderr|sandbox read_ok|sandbox inner_home|sandbox bash_startup|workspace_marker|t|functions_rc|sandbox2|sandbox2_stderr|mask_after|proc_replay|proc_overmounts|requirements|config|thread_start|thread_start_check|arg0_entries|app_server|app_server_exit|probe) ' | head -80)
     while IFS= read -r l; do [ -n "$l" ] && say "probe $l"; done <<EOF_SUMMARY
 $summary
 EOF_SUMMARY
