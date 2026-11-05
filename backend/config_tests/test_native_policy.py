@@ -108,9 +108,19 @@ def test_requirements_not_applied_refuses(damage):
         policy.check_requirements(value)
 
 
+def effective(system):
+    # The form 0.160.1 really returns (diagnostic image of 5d006aa): unset fields as null, approval_policy null.
+    value = deepcopy(system)
+    native = value['permissions']['native']
+    native.update(description=None, extends=None, network=None, workspace_roots=None)
+    native['filesystem']['glob_scan_max_depth'] = None
+    value.update(approval_policy=None, sandbox_mode=None, sandbox_workspace_write=None)
+    return value
+
+
 def good_config():
     system = policy.system_config(ROOT)
-    return {'config': {**deepcopy(system), 'model': 'gpt-6.1-sol', 'features': {'shell_tool': True}}, 'origins': {},
+    return {'config': {**effective(system), 'model': 'gpt-6.1-sol', 'features': {'shell_tool': True}}, 'origins': {},
             'layers': [{'name': {'type': 'system', 'file': '/etc/codex/config.toml'}, 'version': '1', 'config': deepcopy(system)},
                        {'name': {'type': 'user', 'file': '/state/codex/config.toml'}, 'version': '1', 'config': {}},
                        {'name': {'type': 'project', 'dotCodexFolder': '/state/workspace/.codex'}, 'version': '1',
@@ -126,7 +136,7 @@ def test_config_applied():
                                     'session-layer', 'project-enabled', 'project-no-reason', 'system-missing',
                                     'system-twice', 'system-other-file', 'sandbox-mode', 'approval-never',
                                     'layers-missing', 'layer-malformed', 'not-dict', 'approval-in-disabled-layer',
-                                    'approval-in-system-layer'])
+                                    'approval-in-system-layer', 'effective-network-set', 'effective-approval-set'])
 def test_config_not_applied_refuses(damage):
     value = good_config()
     config, layers = value['config'], value['layers']
@@ -149,6 +159,8 @@ def test_config_not_applied_refuses(damage):
     if damage == 'not-dict': value = []
     if damage == 'approval-in-disabled-layer': layers[2]['config'] = {'approval_policy': 'untrusted'}
     if damage == 'approval-in-system-layer': layers[0]['config']['approval_policy'] = 'untrusted'
+    if damage == 'effective-network-set': profile_parent = config['permissions']['native']; profile_parent['network'] = {'enabled': True}
+    if damage == 'effective-approval-set': config['approval_policy'] = 'untrusted'
     with pytest.raises(CodexFailure):
         policy.check_config(value, ROOT)
 
@@ -369,9 +381,8 @@ def test_launch_check_reads_applied_policy_and_maps_failures(local, monkeypatch)
         calls.append((method, params))
         if method == 'config/read':
             value = good_config()
-            value['config']['permissions']['native']['filesystem'] = policy.filesystem(str(local.root))
             value['layers'][0]['config'] = policy.system_config(str(local.root))
-            for key in policy.POLICY_KEYS: value['config'][key] = policy.system_config(str(local.root)).get(key)
+            value['config'].update(effective(policy.system_config(str(local.root))))
             return answers['config/read'] or value
         if isinstance(answers[method], Exception): raise answers[method]
         return answers[method]

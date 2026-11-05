@@ -100,6 +100,41 @@ def volume_lease(root):
             fcntl.flock(lease, fcntl.LOCK_UN)
 
 
+def native_command(binary, home, codex_home, work, *, file_auth, external, fixture):
+    """The app-server command line and environment the runner starts (also used by the #68 VM checks)."""
+    environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(home), "CODEX_HOME": str(codex_home)}
+    command = [binary, "app-server", "--listen", "stdio://",
+                "-c", 'cli_auth_credentials_store="file"' if file_auth else 'cli_auth_credentials_store="ephemeral"',
+                "-c", 'model="gpt-6.1-sol"', "-c", "features.shell_tool=true",
+                "-c", 'model_provider="openai"',
+                "-c", "features.multi_agent=false", "-c", "features.multi_agent_v2=false",
+                "-c", "features.unbounded_connection_retries=false",
+                "-c", "features.apps=false", "-c", "features.plugins=false", "-c", "features.remote_plugin=false",
+                "-c", "features.hooks=false", "-c", "features.code_mode_host=true" if not fixture else "features.code_mode_host=false",
+                "-c", "features.daemon_auto_start=false",
+                "-c", "features.browser_use=false", "-c", "features.computer_use=false",
+                "-c", "features.image_generation=false", "-c", 'web_search="disabled"',
+                "-c", 'forced_login_method="chatgpt"']
+    if external:
+        # Same authenticated Codex endpoint, named provider solely to disable retries.
+        # The pinned built-in provider cannot be overridden. No API key route.
+        for setting in ('model_provider="access_only_openai"',
+                        'model_providers.access_only_openai.name="OpenAI"',
+                        'model_providers.access_only_openai.base_url="https://chatgpt.com/backend-api/codex"',
+                        'model_providers.access_only_openai.wire_api="responses"',
+                        'model_providers.access_only_openai.requires_openai_auth=true',
+                        'model_providers.access_only_openai.supports_websockets=false',
+                        'model_providers.access_only_openai.request_max_retries=0',
+                        'model_providers.access_only_openai.stream_max_retries=0',
+                        'analytics.enabled=false', 'otel.exporter="none"',
+                        'otel.trace_exporter="none"', 'otel.metrics_exporter="none"'):
+            command += ['-c', setting]
+    # Unified exec (and with it write_stdin) is pinned off by the managed requirements only:
+    # 0.160.1 ignores a user `features.unified_exec=false` (#68).
+    command += ['-c', f'projects."{work}".trust_level="untrusted"']
+    return command, environment
+
+
 class Native:
     PROJECTION_VERSION = PROJECTION_VERSION
     external = False
@@ -168,36 +203,8 @@ class Native:
                 raise CodexFailure("policy_refused") from None
         if (root / "model-block.json").exists() or (auth and auth.state().get("modelBlocked")):
             self.blocked_reason = "model_unavailable"
-        environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(home), "CODEX_HOME": str(codex_home)}
-        command = [binary, "app-server", "--listen", "stdio://",
-                    "-c", 'cli_auth_credentials_store="file"' if auth and not self.external else 'cli_auth_credentials_store="ephemeral"',
-                    "-c", 'model="gpt-6.1-sol"', "-c", "features.shell_tool=true",
-                    "-c", 'model_provider="openai"',
-                    "-c", "features.multi_agent=false", "-c", "features.multi_agent_v2=false",
-                    "-c", "features.unbounded_connection_retries=false",
-                    "-c", "features.apps=false", "-c", "features.plugins=false", "-c", "features.remote_plugin=false",
-                    "-c", "features.hooks=false", "-c", "features.code_mode_host=true" if not self.fixture else "features.code_mode_host=false",
-                    "-c", "features.daemon_auto_start=false",
-                    "-c", "features.browser_use=false", "-c", "features.computer_use=false",
-                    "-c", "features.image_generation=false", "-c", 'web_search="disabled"',
-                    "-c", 'forced_login_method="chatgpt"']
-        if self.external:
-            # Same authenticated Codex endpoint, named provider solely to disable retries.
-            # The pinned built-in provider cannot be overridden. No API key route.
-            for setting in ('model_provider="access_only_openai"',
-                            'model_providers.access_only_openai.name="OpenAI"',
-                            'model_providers.access_only_openai.base_url="https://chatgpt.com/backend-api/codex"',
-                            'model_providers.access_only_openai.wire_api="responses"',
-                            'model_providers.access_only_openai.requires_openai_auth=true',
-                            'model_providers.access_only_openai.supports_websockets=false',
-                            'model_providers.access_only_openai.request_max_retries=0',
-                            'model_providers.access_only_openai.stream_max_retries=0',
-                            'analytics.enabled=false', 'otel.exporter="none"',
-                            'otel.trace_exporter="none"', 'otel.metrics_exporter="none"'):
-                command += ['-c', setting]
-        # Unified exec (and with it write_stdin) is pinned off by the managed requirements only:
-        # 0.160.1 ignores a user `features.unified_exec=false` (#68).
-        command += ['-c', f'projects."{work}".trust_level="untrusted"']
+        command, environment = native_command(binary, home, codex_home, work, file_auth=bool(auth) and not self.external,
+                                              external=self.external, fixture=self.fixture)
         self.command, self.environment = command, environment
         self.thread_policy = {"approvalPolicy": "untrusted", "approvalsReviewer": "user", "permissions": policy.PROFILE}
         self.thread_web_modes = {}

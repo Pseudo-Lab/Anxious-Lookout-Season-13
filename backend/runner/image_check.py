@@ -31,15 +31,15 @@ def codex_accepts_config():
     """The image's pinned Codex itself loads /etc/codex: start `codex app-server` offline (no login, no model,
     a throwaway CODEX_HOME), read configRequirements/read and config/read, and apply the runner's own checks.
     Returns a problem name or None. The process is always stopped before returning."""
-    home = tempfile.mkdtemp(prefix='image-check-')
-    codex_home = os.path.join(home, 'codex')
-    os.mkdir(codex_home, 0o700)
-    env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8', 'HOME': home, 'CODEX_HOME': codex_home}
+    from .app import native_command  # the runner's own start arguments (operator access mode, as deployed)
+    root = tempfile.mkdtemp(prefix='image-check-')
+    home, codex_home, work = (os.path.join(root, name) for name in ('home', 'codex', 'workspace'))
+    for path in (home, codex_home, work):
+        os.mkdir(path, 0o700)
+    command, env = native_command('/usr/local/bin/codex', home, codex_home, work, file_auth=False, external=True, fixture=False)
     try:
-        process = subprocess.Popen(['/usr/local/bin/codex', 'app-server', '--listen', 'stdio://',
-                                    '-c', 'cli_auth_credentials_store="ephemeral"'],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                   text=True, env=env, cwd=home)
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   text=True, env=env, cwd=work)
     except OSError:
         return 'codex app-server start'
     lines = queue.Queue()
@@ -60,7 +60,7 @@ def codex_accepts_config():
         process.stdin.write(json.dumps({'method': 'initialized'}) + '\n')
         process.stdin.flush()
         native_policy.check_requirements(rpc(2, 'configRequirements/read', {}))
-        native_policy.check_config(rpc(3, 'config/read', {'includeLayers': True, 'cwd': home}), native_policy.STATE_ROOT)
+        native_policy.check_config(rpc(3, 'config/read', {'includeLayers': True, 'cwd': work}), native_policy.STATE_ROOT)
         return None
     except CodexFailure:
         return 'codex config checks'
@@ -73,7 +73,7 @@ def codex_accepts_config():
         except (OSError, subprocess.TimeoutExpired):
             process.kill()
             process.wait(timeout=10)
-        shutil.rmtree(home, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def problems():

@@ -120,6 +120,15 @@ def check_requirements(result):
     require(isinstance(features, dict) and features.get('unified_exec') is False, 'requirements.unified_exec')
 
 
+def without_nulls(value):
+    """config/read fills every unset field with null (measured on 0.160.1: permissions.native gets description,
+    extends, network, workspace_roots and filesystem.glob_scan_max_depth as null). Dropping only nulls keeps the
+    comparison exact: any set field, expected or not, still counts."""
+    if isinstance(value, dict):
+        return {key: without_nulls(item) for key, item in value.items() if item is not None}
+    return value
+
+
 def check_config(result, root):
     """config/read (cwd = workspace, layers): the profile applies as written, from the system layer only."""
     require(isinstance(result, dict) and isinstance(result.get('config'), dict) and isinstance(result.get('layers'), list),
@@ -127,7 +136,7 @@ def check_config(result, root):
     expected = system_config(root)
     config = result['config']
     for key in POLICY_KEYS:
-        require(config.get(key) == expected.get(key), 'config.effective.' + key)
+        require(without_nulls(config.get(key)) == expected.get(key), 'config.effective.' + key)
     systems = []
     for layer in result['layers']:
         require(isinstance(layer, dict) and isinstance(layer.get('name'), dict) and isinstance(layer.get('config'), dict),
