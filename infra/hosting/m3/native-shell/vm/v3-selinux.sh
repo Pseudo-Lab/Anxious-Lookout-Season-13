@@ -1,7 +1,16 @@
 #!/bin/sh
-# #68 dev-VM V3: the runner image under the node's SELinux policy (container_t), in a Pod with the runner's own
-# security settings (v3-pod.json, rendered by `python -m ops.native_measure`). Development VM only. Run as root in
-# the guest after review cleared this script's SHA-256.
+# #68 dev-VM V3 reruns: the runner image under the node's SELinux policy (container_t) and the module
+# anxious_runner_bwrap (selinux-module.sh), in a Pod with the runner's own security settings (v3-pod.json, rendered
+# by `python -m ops.native_measure`). Development VM only. Run as root in the guest after review cleared this
+# script's SHA-256.
+#
+#   v3-selinux.sh v3b   after `selinux-module.sh install 1` (devpts mount)
+#   v3-selinux.sh v3c   after `selinux-module.sh upgrade 2` (adds tmpfs remount), only if V3b showed the need
+#
+# Beyond V3: the probe's second sandbox run (/proc present or not, writes into the masked paths, function survey)
+# with step timestamps for the AVC frequency, and a host observation of one sandboxed `sleep 20` (nonce handshake,
+# container cgroup, bwrap ancestor): its user/pid/mnt/net namespaces against the container's (expected to differ)
+# and its SELinux label (recorded, not judged).
 #
 # Measures, never secrets: the Pod imageID (last link of the V1 chain), the measurement volumes' owner and mode,
 # the container's SELinux label and capabilities from the host, the in-Pod probe (v3-probe.py: bubblewrap through
@@ -48,7 +57,7 @@ POD=v3-selinux
 POD_JSON="$here/v3-pod.json"
 POD_JSON_SHA=564d176b316604c9ab5d12122b2db74dd5a4bc407d7833d98ddb3a96482c80e2
 PROBE="$here/v3-probe.py"
-PROBE_SHA=1487a00168f9105b1074070f79e181b15a6d88d0572684d87efc09fdc7d6be17
+PROBE_SHA=3adac14f0779e4cd70a4f06d9954ab248411145374452c3bf339c76b4a7c38d4
 SECCOMP_FILE=$SECCOMP_DIR/anxious-runner-userns-v1.json
 SECCOMP_SHA=9a6594419eae4089e737c787597d2ed4950fd7e1031e371f490d5b2c935dff78
 READY_S=180        # kubectl wait --timeout; the process gets READY_S + 15
@@ -159,9 +168,15 @@ sys.exit(1 if bad else 0)' "$PSA_VERSION" 2>&1); s=$?
   return $s
 }
 
-start_evidence v3
-RUN=${log##*/v3-}; RUN=${RUN%.txt}
+STAGE=${1:-}
+case "$STAGE" in v3b|v3c) ;; *) echo 'usage: v3-selinux.sh v3b|v3c (V3 rerun under SELinux module version 1 or 2)'; exit 2;; esac
+start_evidence "$STAGE"
+RUN=${log##*/$STAGE-}; RUN=${RUN%.txt}
 say "run $RUN"
+# The SELinux module as installed now (read-only): name and priority, and the loaded policy's hash.
+mods=$(semodule -lfull 2>/dev/null | grep -E '(^| )anxious_runner_bwrap( |$)') || mods='none'
+say "selinux module: $mods"
+lp=$(sha256sum /sys/fs/selinux/policy 2>/dev/null) && say "loaded policy sha256 ${lp%% *}" || say 'loaded policy sha256 LOOKUP FAILED'
 probefile=$(sidecar probe) || refuse 'sidecar probe'
 avcfile=$(sidecar avc) || refuse 'sidecar avc'
 
@@ -289,10 +304,61 @@ EOF_VOLS
     printf '%s\n' "$pout" > "$probefile" || note_incomplete 'probe sidecar write'
     ph=$(sha256sum "$probefile" 2>/dev/null) && ph=${ph%% *} && [ ${#ph} = 64 ] || note_incomplete 'probe sidecar hash'
     say "probe sidecar $(printf '%s\n' "$pout" | wc -l) lines sha256 ${ph:-?}"
-    summary=$(printf '%s\n' "$pout" | grep -E '^(selinux_label|capeff|no_new_privs|seccomp|sandbox_rc|sandbox_stderr|sandbox read_ok|sandbox inner_home|sandbox bash_startup|workspace_marker|requirements|config|thread_start|thread_start_check|arg0_entries|app_server|app_server_exit|probe) ' | head -40)
+    summary=$(printf '%s\n' "$pout" | grep -E '^(selinux_label|capeff|no_new_privs|seccomp|sandbox_rc|sandbox_stderr|sandbox read_ok|sandbox inner_home|sandbox bash_startup|workspace_marker|t|functions_rc|sandbox2|sandbox2_stderr|mask_after|requirements|config|thread_start|thread_start_check|arg0_entries|app_server|app_server_exit|probe) ' | head -80)
     while IFS= read -r l; do [ -n "$l" ] && say "probe $l"; done <<EOF_SUMMARY
 $summary
 EOF_SUMMARY
+    # Host observation (the sandbox has no /proc of its own when Codex falls back): one sandboxed `sleep 20`
+    # started through the same `codex sandbox` path, found by its nonce handshake, the container's cgroup and a
+    # bwrap ancestor. Namespaces are expected to differ from the container's (the claim); the SELinux label is
+    # recorded, not judged (container_t with the same MCS is expected).
+    nonce=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+    case "$pid" in
+      ''|*[!0-9]*) note_incomplete 'host observation: no container pid';;
+      *)
+        cg=$(sed -n 's/^0:://p' "/proc/$pid/cgroup" 2>/dev/null)
+        kt 60 -n "$NS" exec "$POD" -- env HOME=/state/home CODEX_HOME=/state/codex /usr/local/bin/codex sandbox -P native \
+          -C /state/workspace -- sh -c 'echo "$1" > /state/workspace/v3-obs-ready; exec sleep 20' obs "$nonce" \
+          </dev/null >/dev/null 2>&1 &
+        obs_job=$!
+        obs_deadline=$(( $(date +%s) + 30 )); r=
+        while [ "$(date +%s)" -lt "$obs_deadline" ]; do
+          r=$(kt 10 -n "$NS" exec "$POD" -- cat /state/workspace/v3-obs-ready </dev/null 2>/dev/null)
+          [ "$r" = "$nonce" ] && break
+          sleep 1
+        done
+        if [ "$r" != "$nonce" ]; then
+          note_incomplete 'host observation: the sandboxed sleep did not report ready within 30 s'
+        else
+          found=; found_chain=
+          for sp in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do
+            [ "$(cat "/proc/$sp/comm" 2>/dev/null)" = sleep ] || continue
+            [ "$(tr '\0' ' ' < "/proc/$sp/cmdline" 2>/dev/null)" = 'sleep 20 ' ] || continue
+            a=$sp; chain=
+            while [ -n "$a" ] && [ "$a" != 1 ] && [ "$a" != "$pid" ]; do
+              chain="$chain $(cat "/proc/$a/comm" 2>/dev/null)"; a=$(awk '{print $4}' "/proc/$a/stat" 2>/dev/null)
+            done
+            case "$chain" in *bwrap*) found="$found $sp"; found_chain=$chain;; esac
+          done
+          count=$(echo $found | wc -w)
+          if [ "$count" != 1 ]; then
+            note_incomplete "host observation: $count matching sandboxed sleep processes (want 1):$found"
+          else
+            sp=$(echo $found)
+            for n in user pid mnt net; do
+              a=$(readlink "/proc/$pid/ns/$n" 2>/dev/null); b=$(readlink "/proc/$sp/ns/$n" 2>/dev/null)
+              if [ -n "$a" ] && [ -n "$b" ]; then
+                [ "$a" != "$b" ] && v=differs || v=SAME
+              else
+                v=UNKNOWN; note_incomplete "host observation: ns $n lookup"
+              fi
+              say "host observation ns $n container=$a sandbox=$b $v"
+            done
+            say "host observation sandbox pid $sp label $(tr -d '\0' < "/proc/$sp/attr/current" 2>/dev/null) start $(awk '{print $22}' "/proc/$sp/stat" 2>/dev/null) ancestry$found_chain"
+          fi
+        fi
+        wait "$obs_job" 2>/dev/null; say "host observation: sandbox exec rc $?";;
+    esac
   fi
 else
   desc=$(kt 30 -n "$NS" describe pod "$POD" </dev/null 2>&1); s=$?

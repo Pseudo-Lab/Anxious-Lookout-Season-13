@@ -16,9 +16,7 @@ Nothing here runs from a render, a test or an agent session on production.
 | 5 | Codex version: what to recheck | back, review | before any Codex pin change |
 | 6 | A `.codex` in the workspace blocks the runner: availability and recovery | operator, with the owner | when it happens |
 | 7 | Runner Pod and image (#68 order 4) | reference | the #68 window |
-
-Still to come: the SELinux policy for `container_t` (#68 requirement 3). It needs the VM's AVC
-denials under `container_t` first and will be section 8.
+| 8 | SELinux module `anxious_runner_bwrap` for `container_t` | user (production node) | before the #68 window: a section 3 precondition |
 
 ## 1. `kernel.yama.ptrace_scope=1` (user, production node)
 
@@ -221,7 +219,7 @@ one runner-Pod drain and one rollback point.
      kernel.yama.ptrace_scope` prints 1 and `systemd-sysctl --cat-config` ends with the
      `90-anxious-yama.conf` line. Record both outputs. If it is 0, stop: the window does not start.
    - The section 2 profile installed, with its digest recorded.
-   - The section 8 SELinux module installed (#68 order 4).
+   - The section 8 SELinux module installed (the version the development VM ended with).
    - `thread-check.sh` (section 7, "What catches what") run on the reviewed #68 runner digest prints
      `verdict pass`. Record the output and its SHA-256. Any other verdict: the window does not start.
    - A DB backup. The rollback digests recorded: API/runtime/worker image, runner image, and the executor
@@ -611,3 +609,58 @@ or the configuration for it.
   - Codex also runs git in the cwd **outside the sandbox** for turn metadata. It disables
     `core.fsmonitor` and hooks there, but other repository-configured programs need review.
 
+
+## 8. SELinux module `anxious_runner_bwrap` (user, production node)
+
+**Why.** Under SELinux `container_t` the sandbox does not start: bubblewrap's `--dev /dev` mounts a new devpts
+instance, and the node policy denies `container_t` `devpts_t:filesystem mount` (V3, 2026-11-05: 10 AVCs of that
+one kind, `thread/start` failed with `Can't mount devpts on /newroot/dev/pts`). Codex 0.160.1 always passes
+`--dev /dev`. The distribution policy grants exactly this rule to `container_userns_t`, a type Pod Security
+restricted does not allow. User decision 2026-11-05 (#68): a module for `container_t` with at most two rules;
+no `container_engine_t`, `spc_t` or `container_userns_t`; no proc mount; no `dontaudit`.
+
+**The module** (`selinux/`, no macros, so the compiled module adds exactly these allows):
+
+| Version | Rules | When |
+| --- | --- | --- |
+| 1 | `allow container_t devpts_t:filesystem mount;` | observed (V3) |
+| 2 | version 1 and `allow container_t tmpfs_t:filesystem remount;` | only if V3b shows the mask tmpfs `--remount-ro` denied (predicted: the tmpfs superblock is `tmpfs_t`, which `container_t` may mount and unmount but not remount) |
+
+`selinux/build.sh <out>` builds both with checkpolicy/libsepol 3.6 (Oracle Linux 9, as the nodes). The build is
+reproducible: version 1 `68270c77…f6e6`, version 2 `3f4fc25c…beea`. `vm/selinux-module.sh` pins these.
+
+**Not allowed: a fresh `/proc` in the sandbox.** Without `proc_t:filesystem mount`, Codex's preflight sees
+`Can't mount proc … Permission denied` and reruns the sandbox without `/proc` (`linux_run_main.rs`). The
+mask, read and write limits are the same in that run (measured locally and in V3b/V3c). Each command's preflight
+leaves one proc mount denial in the audit log. Owner-visible effect of a sandbox without `/proc` (local
+measurement 2026-11-05, the same fallback): `/dev/stderr`, `/dev/stdin`, `/dev/fd/*` and bash process
+substitution fail, and `/proc/self`, `/proc/cpuinfo` and `/proc/meminfo` are absent; `nproc`, Python's
+`subprocess(close_fds=True)`, `multiprocessing` and `os.cpu_count()` work; `ps` and `free` are not in the image.
+
+**Residual risk accepted by the user (2026-11-05), measured facts:**
+- The rules apply to every `container_t` process on the node, not only the runner. On the development VM,
+  `container_t` Pods without a seccomp filter (`Seccomp: 0`) run today: coredns, metrics-server,
+  local-path-provisioner and the openebs/topolvm controllers. `user.max_user_namespaces` is 29738 and k3s sets
+  no seccomp default.
+
+**Residual risk, documentation only (not measured; V3x was not run):**
+- That such a process could only mount devpts or remount tmpfs inside its own user and mount namespace (a new
+  pty instance; only tmpfs it mounted itself) and not change other namespaces or existing mounts rests on kernel
+  rules, not on measurement. It is an unverified claim.
+- A node-wide seccomp default is a follow-up issue, not a #68 precondition; its effect has to be checked on its
+  own (runtime profile, explicit Pod settings, running containers).
+
+**Production procedure** (user; read-only first):
+1. Before: on the node, list the `container_t` Pods and their seccomp state, `user.max_user_namespaces`, the
+   kubelet seccomp default, and `semodule -lfull` (no module named `anxious_runner_bwrap`). Record them.
+2. Install the version the development VM ended with: check the `.pp` SHA-256, then
+   `semodule -X 400 -i anxious_runner_bwrap-<v>.pp`. Check `semodule -lfull` shows it at priority 400 and record
+   `sha256sum /sys/fs/selinux/policy`.
+3. Check: `thread-check.sh` is local; on the node, the section 3 canary (`thread/start` and a sandboxed command)
+   is the check.
+4. Remove (rollback): `semodule -X 400 -r anxious_runner_bwrap`, then `semodule -lfull` no longer lists it. The
+   runner cannot start a sandbox without the module; roll the runner back first (section 3 rollback).
+5. PARITY records the module, its version and SHA-256 on both sides.
+
+On the development VM the same steps are `vm/selinux-module.sh install 1 | upgrade 2 | remove`, with the
+before/after module list, stored module and loaded policy recorded; V9 removes it.

@@ -1,0 +1,14 @@
+# #68 SELinux module, version 2 (V3c, only if V3b showed the denial): version 1 plus the read-only remount of
+# bubblewrap's mask tmpfs (`--perms 000 --tmpfs <path> --remount-ro <path>`). A tmpfs superblock is tmpfs_t under
+# fs_use_trans; container_t may mount and unmount it but not remount it. No macros: exactly these two allows.
+module anxious_runner_bwrap 2.0;
+
+require {
+	type container_t;
+	type devpts_t;
+	type tmpfs_t;
+	class filesystem { mount remount };
+}
+
+allow container_t devpts_t:filesystem mount;
+allow container_t tmpfs_t:filesystem remount;

@@ -22,6 +22,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 
 sys.path.insert(0, '/app')
 
@@ -82,6 +83,7 @@ for name, (target, link) in LINKS.items():
         line(name, 'ERROR %s' % type(error).__name__)
 
 # 2. Standalone bubblewrap through the Codex sandbox and the image's `native` profile (no app-server).
+line('t', 'sandbox_start %.3f' % time.time())
 READS = [MARKERS[name] for name in ('codex_marker', 'codex_rollout', 'codex_log', 'codex_sqlite', 'home_marker',
                                     'control_marker')]
 READS += [LINKS['link_rollout'][1], os.path.join(LINKS['link_codex_home'][1], 'probe-marker.txt')]
@@ -114,6 +116,49 @@ try:
 except (OSError, subprocess.TimeoutExpired) as error:
     line('sandbox_rc', 'ERROR %s' % type(error).__name__)
 line('workspace_marker', 'present' if os.path.exists(os.path.join(work, 'v3-write')) else 'absent')
+line('t', 'sandbox_done %.3f' % time.time())
+
+# 2b. A second standalone run: /proc present or not, writes into the masked paths (the markers above exist outside
+# the sandbox, written by this process), and what a sandbox without /proc can still do. A function check is a
+# capability survey, not an isolation result.
+FUNCTIONS = r"""
+if [ -d /proc/self ]; then echo "proc present"; else echo "proc absent"; fi
+for d in /state/home /control; do
+  if touch "$d/v3-mask-write" 2>/dev/null; then echo "mask_write ok $d"; else echo "mask_write denied $d"; fi
+  if ls -A -- "$d" >/dev/null 2>&1; then echo "mask_list ok $d"; else echo "mask_list denied $d"; fi
+done
+t() { n=$1; shift; if out=$("$@" 2>&1 </dev/null); then echo "fn ok $n"; else echo "fn fail $n $(printf '%s' "$out" | head -1 | cut -c1-120)"; fi; }
+t dev_stderr sh -c 'echo x > /dev/stderr'
+t tee_stderr sh -c 'echo x | tee /dev/stderr >/dev/null'
+t dev_stdin bash -c 'cat /dev/stdin <<< x >/dev/null'
+t dev_fd bash -c 'cat /dev/fd/0 <<< x >/dev/null'
+t proc_subst bash -c 'diff <(echo a) <(echo a)'
+t ls_proc_self ls /proc/self
+t cpuinfo sh -c 'head -1 /proc/cpuinfo'
+t meminfo sh -c 'head -1 /proc/meminfo'
+t nproc nproc
+t ps ps -e
+t free free
+t py_close_fds python3 -I -c 'import subprocess; subprocess.run(["true"], close_fds=True, check=True)'
+t py_proc_fd python3 -I -c 'import os; os.listdir("/proc/self/fd")'
+t py_mp python3 -I -c 'import multiprocessing as m; print(m.Pool(2).map(abs, [1, -1]))'
+t py_cpu_count python3 -I -c 'import os; assert os.cpu_count()'
+"""
+line('t', 'functions_start %.3f' % time.time())
+try:
+    result = subprocess.run(['/usr/local/bin/codex', 'sandbox', '-P', 'native', '-C', work, '--', 'sh', '-c', FUNCTIONS],
+                            env=env, cwd=work, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+    line('functions_rc', result.returncode)
+    for out in result.stdout.splitlines():
+        line('sandbox2', out.replace(TOKEN, '<token>')[:400])
+    for err in result.stderr.splitlines():
+        if 'PATH aliases' not in err:
+            line('sandbox2_stderr', err.replace(TOKEN, '<token>')[:400])
+except (OSError, subprocess.TimeoutExpired) as error:
+    line('functions_rc', 'ERROR %s' % type(error).__name__)
+for path in (os.path.join(home, 'v3-mask-write'), '/control/v3-mask-write'):
+    line('mask_after', '%s %s' % (path, 'PRESENT' if os.path.exists(path) else 'absent'))
+line('t', 'functions_done %.3f' % time.time())
 
 # 3. The runner's app-server start, config reads and thread/start.
 from runner.app import native_command  # noqa: E402
@@ -155,6 +200,7 @@ try:
             line(label, 'check ok')
         except CodexFailure:
             line(label, 'check REFUSED')
+    line('t', 'thread_start_begin %.3f' % time.time())
     message = rpc('thread/start', {'model': 'gpt-6.1-sol', 'cwd': work, 'approvalPolicy': 'untrusted',
                                    'approvalsReviewer': 'user', 'permissions': native_policy.PROFILE,
                                    'config': {'web_search': 'disabled'}, 'dynamicTools': [],
@@ -206,4 +252,5 @@ finally:
         process.kill()
         process.wait(timeout=10)
     line('app_server_exit', process.returncode)
+line('t', 'probe_done %.3f' % time.time())
 line('probe', 'done')
