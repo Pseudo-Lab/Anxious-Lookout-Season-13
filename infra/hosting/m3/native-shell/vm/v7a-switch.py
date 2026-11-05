@@ -10,7 +10,7 @@ SHA-256 of the controller inputs.json as read in the preflight.
 
 run, in this order:
 1. precheck (read-only, rc 3): no earlier V7a evidence; host issue16 mutators disabled and inactive, no guest
-   container, no runner Pod; node prerequisites (ptrace_scope 1, seccomp profile digest, SELinux module
+   container, no runner Pod; node prerequisites (SELinux Enforcing, ptrace_scope 1, seccomp profile digest, SELinux module
    anxious_runner_bwrap stored = version 2 at priority 400); k3s images (the #68 runtime tag with its manifest
    and image ID, the #68 runner digest reference, the old references a rollback needs); api and
    runner-controller are the recorded Deployments (UID), 1/1 ready, each container on its recorded old image (the
@@ -44,25 +44,37 @@ run, in this order:
 6. postcheck (rc 0): the final state printed: images, allowlists, inputs.json, plans, fences, no runner Pod.
    Entry stays frozen to the canary. The canary's first turn (V6-pre) starts its runner.
 
-Undo (any failure or interrupt after c1 began; nothing is retried): both Deployments to 0 by UID; their
-templates back by JSON Patch (`test` = the new values); the canary binding back by the tool (reverse report
-must equal the approved one, then `apply`); inputs.json back to the backed-up bytes (same rename); then both
-Deployments to 1 and /api/health. A step that cannot be undone is printed; while the binding or a template is
-not back, both Deployments stay at 0.
+Two kinds of failure are kept apart. An unexpected state (a runner Pod appears; a fence, plan or pending-work
+check fails in c5, the c6 observation or final; a plan digest is neither old nor new; another plan changed) is
+rc 8: nothing is undone, runner-controller is held at 0. Any other failure or an interrupt after c1 began is
+undone (nothing is retried): both Deployments to 0 by UID; their templates back by JSON Patch (`test` = the new
+values); the canary binding back by the tool (reverse report must equal the approved one, then `apply`);
+inputs.json back to the backed-up bytes (same rename).
+
+Reopen (after a complete undo, or after a failure before any change): entry opens to the five owners again
+only after the window-start conditions are verified again: host mutators disabled/inactive, no guest container,
+no runner Pod; all five owners idle_stopped, no pending work, the same fences as at the window start, the canary
+plan old and the other four unchanged; both templates on their old images and the five-owner allowlist, at 0;
+inputs.json the original bytes. Then api to 1 (old images, health 200) and only then runner-controller to 1.
+Any failure stops there and both Deployments are held at 0.
+
+Holding at 0 (rc 7, 8, 80) is done and proved (replicas 0, Pods gone); the printed line says FREEZE HELD
+(verified) or FREEZE NOT CONFIRMED (tell PM now).
 
 rc (never rerun on a nonzero rc; back checks the evidence read-only):
-  0  switched and verified; entry frozen to the canary
+  0  switched and verified; entry frozen to the canary; admin DSN removed; final evidence written
   3  precheck refused: nothing changed
   4  prepare/window/DSN/tool step before any change failed: no workload change (images may have been tagged or
-     loaded, printed); Deployments back to their replicas
-  5  the forward report was refused or differs: no change; Deployments back
-  6  a change or check failed: every change undone and verified (old images, both allowlists, binding,
-     inputs.json, 1/1, health)
-  7  a change failed and the undo is incomplete (printed per item); Deployments held at 0 if the binding or a
-     template is not back
-  8  unexpected state (a runner Pod appeared, a fence changed, a plan digest is neither old nor new): the
-     controller is scaled to 0 and nothing else is touched; back checks read-only
-  80 a tool container was not proved stopped: Deployments held at 0, admin DSN removed; manual via PM
+     loaded, printed); reopened after the checks
+  5  the forward report was refused or differs: no change; reopened after the checks
+  6  a change or check failed: every change undone and verified, reopened after the checks
+  7  entry held closed: an undo item or the reopen (its checks, the api, its health or the controller) failed,
+     printed per item; both Deployments held at 0 (the freeze line says whether that was proved)
+  8  unexpected state (above): runner-controller held at 0, nothing else touched; back checks read-only
+  70 the main result was 0, 4, 5 or 6 (printed as "main result") but the admin DSN was not removed or the final
+     evidence was not written
+  80 a tool container was not proved stopped: both Deployments held at 0, admin DSN removed; manual via PM
+A cleanup failure on 7, 8 or 80 keeps that code and is printed (CLEANUP FAILED).
 Output is fixed messages, states, UIDs and digests only: no DSN, password, Secret data or command error text.
 """
 import base64
@@ -387,6 +399,13 @@ def runtime_tag_manifest():
 
 
 def node_prerequisites(code):
+    try:
+        with open('/sys/fs/selinux/enforce') as stream:
+            enforcing = stream.read().strip() == '1'
+    except Exception:
+        enforcing = False
+    if not enforcing:
+        raise Stop(code, 'SELinux is not Enforcing')
     rc, scope = run(['/usr/sbin/sysctl', '-n', 'kernel.yama.ptrace_scope'])
     if rc != 0 or scope != '1':
         raise Stop(code, 'kernel.yama.ptrace_scope is %s, not 1' % (scope or 'unreadable'))
@@ -511,7 +530,7 @@ def precheck(expected, readonly):
         except Exception:
             raise Stop(3, 'precheck: runtime archive is not the V1 one') from None
     count, roles = clients(3)
-    say('precheck ok%s: host mutators disabled/inactive, no guest container, no runner Pod; ptrace_scope 1, seccomp '
+    say('precheck ok%s: host mutators disabled/inactive, no guest container, no runner Pod; SELinux Enforcing, ptrace_scope 1, seccomp '
         'profile, SELinux module v2 at 400; #68 runtime tag ok, digest reference %s; #68 runner and old references '
         'resolve; %s %s and %s %s 1/1 on their recorded old images, both allowlists the five owners; five fixture owners '
         'idle_stopped with proofs, no pending work; inputs.json as expected (has executor); health 200; guest '
@@ -919,8 +938,71 @@ def guarded(failed, item, fn, *args, **kwargs):
         failed.append(item)
 
 
+def message_of(error):
+    return error.message if isinstance(error, Stop) else type(error).__name__
+
+
+def hold(specs):
+    """Scale `specs` to 0 by UID and prove it: replicas 0 and their Pods gone. True only if proved for every one."""
+    proved = True
+    for spec in specs:
+        try:
+            if spec not in SCALED:
+                SCALED.append(spec)
+            scale(spec, 0, 7)
+            gone(spec, 7)
+            uid, want, _, current, _ = deployment(spec, 7)
+            proved = proved and uid == spec[2] and want == 0 and current == 0
+        except BaseException:
+            proved = False
+    return proved
+
+
+def freeze_line(proved, specs):
+    names = ' and '.join(spec[1] for spec in specs)
+    return ('FREEZE HELD: %s at 0 (verified)' % names) if proved else ('FREEZE NOT CONFIRMED: %s could not be '
+                                                                        'proved at 0; tell PM now' % names)
+
+
+def reopen_checks(expected, where):
+    """Before entry is open to the five owners again: every window-start condition holds again (raises Stop 7).
+    Host mutators disabled/inactive, no guest container, no runner Pod; all five owners idle_stopped with no
+    pending work, the same fences as at the window start, the canary plan old and the others unchanged; both
+    templates on their old images and the five-owner allowlist, at 0; inputs.json the original bytes."""
+    host_quiet(7)
+    by = check_owners(expected, 7, where, 'old')
+    if any(fence_of(by[o]) != RUN['before'][o] for o in OWNERS):
+        raise Stop(7, '%s: a fence differs from the window start' % where)
+    for spec in (API, CTRL):
+        _, want, _, current, d = deployment(spec, 7)
+        images, allow, _ = template_of(spec, d, 7)
+        if images != old_images(spec) or allow != ALLOW_OLD or (want, current) != (0, 0):
+            raise Stop(7, '%s: %s is not on its old template at 0' % (where, spec[1]))
+    value, _ = inputs_file(7, RUN['inputsSha256'])
+    if 'executor' not in value:
+        raise Stop(7, '%s: inputs.json is not the original' % where)
+
+
+def reopen(expected, where):
+    """Verify, then api, then (only if the api is 1/1 on its old images and healthy) runner-controller back to 1.
+    Returns (True, '') or (False, why); never continues past a failed step (finish() then holds both at 0)."""
+    try:
+        stopped(7, where)
+        reopen_checks(expected, where)
+    except BaseException as error:
+        return False, '%s refused: %s' % (where, message_of(error))
+    for spec in (API, CTRL):
+        try:
+            start(spec, manifests(old_images(spec)), 7, where)
+            if spec is API and not health():
+                raise Stop(7, '%s: /api/health is not 200' % where)
+        except BaseException as error:
+            return False, '%s: %s' % (where, message_of(error))
+    return True, ''
+
+
 def undo(image, ev, expected):
-    """Every change back. Returns the failed items; Deployments stay at 0 if the binding or a template is not back."""
+    """Every change back, then reopen after the checks. Returns the failed items (empty = undone and reopened)."""
     failed = []
     changes = RUN.get('changes', {})
     guarded(failed, 'stop both Deployments', stopped, 7, 'undo')
@@ -940,7 +1022,7 @@ def undo(image, ev, expected):
             by = owners_state(7)
             state = canary_plan_state(by[CANARY]['plan'], expected)
             if state == 'old':
-                return True
+                return True  # reopen_checks still verifies every fence and plan
             if state != 'new':
                 return False
             report(image, ev, expected, 'reverse', 7)
@@ -957,23 +1039,10 @@ def undo(image, ev, expected):
             inputs_file(7, RUN['inputsSha256'])
             change('inputs-undo', 'done')
         guarded(failed, 'inputs.json', inputs)
-    if any(item.startswith(('template', 'binding')) for item in failed):
-        return failed  # Deployments held at 0
-    for spec in (API, CTRL):
-        guarded(failed, 'start ' + spec[1], start, spec, manifests(old_images(spec)), 7, 'undo')
-    guarded(failed, 'health', health)
-    return failed
-
-
-def scale_back(replicas):
-    """Before any change: the scaled Deployments back to their replicas."""
-    failed = []
-    for spec in (API, CTRL):
-        if spec in SCALED:
-            guarded(failed, 'start ' + spec[1], start, spec, manifests(old_images(spec)), 70, 'restore')
-    if API in SCALED:
-        guarded(failed, 'health', health)
-    return failed
+    if failed:
+        return failed  # any item not back: no reopen, both held at 0 by finish()
+    ok, why = reopen(expected, 'undo reopen')
+    return [] if ok else [why]
 
 
 # Main -------------------------------------------------------------------------------------------------
@@ -1023,8 +1092,8 @@ def main(argv):
             start(API, manifests(new_images(API)), 6, 'c4')
             if not health():
                 raise Stop(6, 'c4: /api/health is not 200')
-            no_runner_pods(6, 'c5')
-            check_owners(expected, 6, 'c5', 'new')
+            no_runner_pods(8, 'c5')
+            check_owners(expected, 8, 'c5', 'new')
             start(CTRL, manifests(new_images(CTRL)), 6, 'c6')
             observe(expected, before)
             final(expected)
@@ -1041,15 +1110,18 @@ def main(argv):
 
 
 def final(expected):
+    """Everything was verified step by step; a difference now is an outside change: rc 8, never an undo."""
     for spec in (API, CTRL):
-        _, want, ready, _, d = deployment(spec, 6)
-        images, allow, _ = template_of(spec, d, 6)
+        _, want, ready, _, d = deployment(spec, 8)
+        images, allow, _ = template_of(spec, d, 8)
         say('final %s: %d/%d, images %s, %s = %s' % (spec[1], ready, want, ','.join(sorted(set(images.values()))),
                                                      ALLOW_ENV, allow))
-        if set(images.values()) != {RUNTIME_REF} or allow != ALLOW_NEW or (want, ready) != (1, 1):
-            raise Stop(6, 'final: %s is not switched' % spec[1])
-    value, _ = inputs_file(6, RUN['inputsAfterSha256'])
-    by = check_owners(expected, 6, 'final', 'new')
+        if images != new_images(spec) or allow != ALLOW_NEW or (want, ready) != (1, 1):
+            raise Stop(8, 'final: %s is not as switched' % spec[1])
+    value, _ = inputs_file(8, RUN['inputsAfterSha256'])
+    by = check_owners(expected, 8, 'final', 'new')
+    if any(fence_of(by[o]) != RUN['before'][o] for o in OWNERS):
+        raise Stop(8, 'final: a fence differs from the window start')
     no_runner_pods(8, 'final')
     say('final inputs.json: keys %s (no executor)' % ','.join(sorted(value)))
     for owner in OWNERS:
@@ -1058,6 +1130,10 @@ def final(expected):
 
 
 def finish(code, message, replicas, dsn, image, changing, expected):
+    """Cleanup nothing can skip. Order: tool containers proved gone (else rc 80, both held at 0) -> rc 8: the
+    controller held at 0 -> after a change: undo and reopen (else rc 7, both held at 0) -> before any change:
+    reopen after the checks (else rc 7, both held at 0) -> admin DSN removed and proved absent -> final evidence.
+    A DSN or evidence failure turns 0/4/5/6 into 70 (the main result is printed); 7/8/80 stay and print it."""
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             signal.signal(sig, signal.SIG_IGN)
@@ -1065,45 +1141,60 @@ def finish(code, message, replicas, dsn, image, changing, expected):
             pass
     if message:
         say('STOPPED (%d): %s' % (code, message))
-    failed, stuck = [], []
+    main_code, cleanup, stuck = code, [], []
     for name in CONTAINERS:
         guarded(stuck, name, proved_gone, name)
     if stuck or code == 80:
-        if dsn:
-            guarded(failed, 'dsn', remove_dsn, dsn)
-        say('MANUAL RECOVERY NEEDED: a tool container was not proved stopped (%s); Deployments %s; admin DSN %s; '
-            'tell PM before any further step' % (', '.join(stuck) or 'see above',
-                                                  'LEFT AT 0' if SCALED else 'untouched',
-                                                  'STILL PRESENT' if failed else 'removed' if dsn else 'not created'))
-        guarded([], 'record', record, result=80)
-        say('result rc=80')
-        return 80
-    if code == 8:
-        guarded(failed, 'controller to 0', scale, CTRL, 0, 8)
-        say('unexpected state: runner-controller scaled to 0, nothing else touched; back checks read-only')
+        code = 80
+        say('a tool container was not proved stopped (%s): the DB writers stay stopped'
+            % (', '.join(stuck) or 'see above'))
+        say(freeze_line(hold((CTRL, API)), (CTRL, API)))
+    elif code == 8:
+        say('unexpected state: runner-controller is held at 0, nothing else is touched; back checks read-only')
+        say(freeze_line(hold((CTRL,)), (CTRL,)))
     elif changing and code != 0:
-        undone = []
         try:
             undone = undo(image, EV[0], expected)
         except BaseException:
             undone = ['undo']
         if undone:
             code = 7
-            say('UNDO INCOMPLETE: %s' % ', '.join(undone))
+            say('UNDO INCOMPLETE: %s' % '; '.join(undone))
+            say(freeze_line(hold((CTRL, API)), (CTRL, API)))
         else:
             code = 6
-            say('undo: every change back and verified (old images, both allowlists five owners, canary binding old, '
-                'inputs.json restored, 1/1, health 200)')
+            say('undo: every change back and verified; reopened after the checks (old images, both allowlists five '
+                'owners, canary binding old, inputs.json original, fences as at the window start, 1/1, health 200)')
     elif code != 0 and SCALED:
-        failed += scale_back(replicas)
+        ok, why = (False, 'expected file not loaded') if expected is None else reopen(expected, 'reopen')
+        if ok:
+            say('reopened after the checks: both Deployments 1/1 on their old images, health 200')
+        else:
+            code = 7
+            say('REOPEN FAILED: %s' % why)
+            say(freeze_line(hold((CTRL, API)), (CTRL, API)))
+    result = code  # the outcome before cleanup: printed as "main result" if a cleanup failure turns it into 70
+
+    def promoted(code):
+        return 70 if code in (0, 4, 5, 6) else code
     if dsn:
-        guarded(failed, 'admin DSN still present', remove_dsn, dsn)
-        say('admin DSN %s' % ('present' if os.path.lexists(dsn) else 'absent'))
-    if failed:
-        say('RESTORE FAILED: %s' % ', '.join(failed))
-        if code == 0:
-            code = 70
-    guarded([], 'record', record, result=code, finished=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+        guarded(cleanup, 'admin DSN not removed', remove_dsn, dsn)
+        say('admin DSN %s' % ('STILL PRESENT' if os.path.lexists(dsn) else 'absent'))
+    if cleanup:
+        code = promoted(code)
+    try:
+        if not EV:
+            raise OSError
+        record(result=code, outcome=result, stopCode=main_code, cleanupFailed=cleanup,
+               finished=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+    except BaseException:
+        if EV:
+            cleanup.append('final evidence not written')
+            code = promoted(code)
+    if cleanup:
+        say('CLEANUP FAILED: %s' % ', '.join(cleanup))
+        if code != result:
+            say('main result rc=%d' % result)
     say('result rc=%d' % code)
     return code
 
