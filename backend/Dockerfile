@@ -45,6 +45,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap \
     && ln -s codex /usr/local/bin/codex-linux-sandbox
 # #68: Codex system config (the `native` permission profile) and managed requirements. Root-owned
 # and read-only for the runner; runner/native_policy.py refuses to start unless both equal it.
+# The directory first: COPY --chmod would also give a directory it creates mode 644 (not searchable).
+RUN install -d -o root -g root -m 0755 /etc/codex
 COPY --chown=0:0 --chmod=644 backend/runner/codex-etc/config.toml backend/runner/codex-etc/requirements.toml /etc/codex/
 USER 10001:10001
 CMD ["uvicorn", "runner.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log", "--no-proxy-headers"]
