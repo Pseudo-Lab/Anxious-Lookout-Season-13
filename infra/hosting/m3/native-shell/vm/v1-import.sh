@@ -18,11 +18,11 @@ set -u
 umask 077
 here=$(dirname "$0")
 . "$here/lib.sh"
-SOURCE=755f65cff7184800ae7de5c30d309bf1fa3f8b0a
+SOURCE=8548f13fc6586be9d1e0329ddcf7ce6b6fd9f77a
 # reference|archive|host image ID (docker image inspect on the build host; v1-host-build.sh images.txt).
-EXPECTED='docker.io/library/anxious-dev-runtime:68-755f65c|anxious-dev-runtime-68-755f65c.tar|sha256:f109458721e92ee6ffe98ec59f304a1d1b44bcfe59af35201c8d984155c466ea
-docker.io/library/anxious-dev-runner:68-755f65c|anxious-dev-runner-68-755f65c.tar|sha256:50de1819a6c4dd68113dbe42e91595e5bcc7f658dc69d92ba34a6018f2071e1e
-docker.io/library/anxious-dev-provisioner:68-755f65c|anxious-dev-provisioner-68-755f65c.tar|sha256:a46d31493a2ab59fddbaae2a84f69247868a38b9cbb57da644644fa31109408c'
+EXPECTED='docker.io/library/anxious-dev-runtime:68-8548f13|anxious-dev-runtime-68-8548f13.tar|sha256:3e224ac88a8831be7088789a281a3f6184e708a033e71410d788a97588364b6f
+docker.io/library/anxious-dev-runner:68-8548f13|anxious-dev-runner-68-8548f13.tar|sha256:d07e50753bc8b269b58dd5a3da1846f3dbea012d5734e0ae6573f4c6e2efc778
+docker.io/library/anxious-dev-provisioner:68-8548f13|anxious-dev-provisioner-68-8548f13.tar|sha256:1f05cd910ee52a79f932a45e637606a192385a1625071d3c0218de1768777202'
 MANIFEST="$here/v1-archives.sha256"
 
 log=; imported=0; logfail=0
