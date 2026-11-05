@@ -187,9 +187,10 @@ carries no `executor`.
 - `inputs.json` is read only when a **new** owner is prepared, by the host `issue16-controller` service (the
   provisioner image's `worker.py controller`). On the development VM that unit and its timer, like the other
   `issue16-*` units, are installed but **disabled**.
-- Entry is gated by the API's `CODEX_USER_RUNNER_ALLOWLIST` (`app/user_runners.py`). The controller starts
-  Pods for the runner requests it finds in the database. Narrowing the API allowlist alone does not stop a request
-  that was already made.
+- Two allowlists, both named `CODEX_USER_RUNNER_ALLOWLIST`: the API's gates new runner requests
+  (`app/user_runners.py`); the controller's own gates Pod creation for requests already waiting in
+  `runner_runtime.registry` (`ops/runner_controller_service.py`: `reconcile` skips an owner that is not
+  `allowed`, `ensure` requires it). Narrowing only the API's leaves already-waiting requests to the controller.
 - Each binding has its own runner and executor images (two different pairs on the development VM, neither equal
   to `inputs.json`). The rollback record keeps them per binding.
 
@@ -209,6 +210,13 @@ one runner-Pod drain and one rollback point.
      by deleting the Pod.
    - Entry frozen. Every mutator stopped: the host `issue16-controller` timer and service,
      runner-controller scaled to 0 (before #61: the host observer), any external creator.
+   - No waiting or running runner request of any owner. With real users this is a user step before the
+     window: announce the window, wait for running turns to finish, then stop runners through
+     `DELETE /api/research/codex/runner`. Check read-only that `runner_runtime.registry` has no row in
+     `provisioning`, `capacity_wait`, `ready`, `runner_unreachable` or `stopping` and
+     `runner_termination.stops` none open. If any remains, the window does not start.
+   - Both allowlists recorded (API and runner-controller `CODEX_USER_RUNNER_ALLOWLIST`): the step 5
+     narrowing and the final widening restore them.
    - `kernel.yama.ptrace_scope` is 1 on the node (section 1, applied by the user): `sysctl -n
      kernel.yama.ptrace_scope` prints 1 and `systemd-sysctl --cat-config` ends with the
      `90-anxious-yama.conf` line. Record both outputs. If it is 0, stop: the window does not start.
@@ -244,8 +252,12 @@ one runner-Pod drain and one rollback point.
      ignores it, and the rollback needs it to render the sidecar again;
    - `report`, review it, `apply` with the same inputs and the report;
    - record each new plan digest: the rollback swap needs it.
-5. **Canary**, with runner-controller started again and entry open for the allowlisted canary owner only.
-   It passes only if all of these hold, in this order:
+5. **Canary**, with runner-controller started again and entry open for the canary owner only. Before the
+   controller starts: set **both** allowlists (API and runner-controller) to the canary owner alone, and
+   check again that no other owner has a waiting request. While the canary runs, check after every step that
+   `codex-runner` holds no runner Pod but the canary's. Another owner's Pod would be an old binding rendered by
+   the new release: stop and report, do not delete it (runners stop only through the API).
+   The canary passes only if all of these hold, in this order:
    - the Pod has exactly one container and names the section 2 profile;
    - the runner log has no `runner_policy_check` line with `"result": "refused"` (the startup self-check,
      section 4, passed);
@@ -258,7 +270,9 @@ one runner-Pod drain and one rollback point.
    If any check fails: stop, swap the canary binding back (rollback step 1, for that binding only), and
    report. No other binding is swapped.
 6. **Remaining binding runner images**, with runner-controller stopped again: the step 4 swap for every
-   other binding from step 1. Then widen entry as in the rollout procedure.
+   other binding from step 1. Then widen entry as in the rollout procedure: restore both allowlists to the
+   values recorded in step 1, then start runner-controller. The development VM rehearsal (V7a) does steps
+   1–5 the same way and keeps entry narrowed until V7b.
 
 Swapping the images is what moves owners onto the native shell. The order of steps 2 and 3 only decides
 which owners could get a binding while one half is in place. With every mutator stopped from step 1 to
