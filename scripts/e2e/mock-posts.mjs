@@ -130,7 +130,7 @@ function postView(p, withContent = true) {
     updatedAt: p.updatedAt,
     author: { login: p.authorLogin },
     latestVersion: versionView(p, latest(p), withContent),
-    publication: p.publication && { id: p.publication.id, versionId: p.publication.versionId, publishedAt: p.publication.publishedAt, slug: p.slug },
+    publication: p.publication && { id: p.publication.id, versionId: p.publication.versionId, publishedAt: p.publication.publishedAt, updatedAt: p.publication.updatedAt ?? p.publication.publishedAt, slug: p.slug },
   };
 }
 function draftView(d, withContent = true) {
@@ -156,6 +156,8 @@ function publicView(p, withContent = true) {
     coverImageUrl: v.coverImageId ? imageUrl(v.coverImageId) : null,
     author: { login: pub.authorLogin, name: pub.authorName },
     publishedAt: pub.publishedAt,
+    // #80: 이전 발행본(updatedAt 없음)은 publishedAt으로 채운다(backend public_value와 같다)
+    updatedAt: pub.updatedAt ?? pub.publishedAt,
     documents: pub.documents.map((d) => ({ ...d })),
     materials: (pub.materials ?? []).map((m) => ({ ...m })),
   };
@@ -165,7 +167,8 @@ function publicView(p, withContent = true) {
 
 // ---- 기존 MDX 3개 이관(0006 seed 흉내: owner 없음, login null) ----
 
-function seed(slug, title, description, date, author, tags, markdown) {
+// updatedAt: #80 다시 발행한 이관 글(최초 발행일과 다른 날). 없으면 이전 발행본처럼 updatedAt을 저장하지 않는다.
+function seed(slug, title, description, date, author, tags, markdown, updatedAt) {
   const id = uuid();
   // 0007 이관 흉내: 기존 Markdown을 블록으로 바꿔 둔다
   const content = fromMarkdown(markdown);
@@ -173,22 +176,25 @@ function seed(slug, title, description, date, author, tags, markdown) {
   posts.set(id, {
     id, owner: null, legacy: true, version: 1, archived: false, createdAt: v.createdAt, updatedAt: v.createdAt,
     authorLogin: null, authorName: author, versions: [v], slug,
-    publication: { id: uuid(), versionId: v.id, publishedAt: v.createdAt, authorLogin: null, authorName: author, documents: [], materials: [] },
+    publication: { id: uuid(), versionId: v.id, publishedAt: v.createdAt, ...(updatedAt ? { updatedAt } : {}), authorLogin: null, authorName: author, documents: [], materials: [] },
   });
   reservedSlugs.add(slug);
 }
 seed("welcome-to-observatory", "Observatory에 오신 것을 환영합니다", "스터디 그룹의 관찰과 기록을 위한 공간, Observatory를 소개합니다.", "2026-03-19", "관리자", ["공지", "소개"],
-  "## Observatory란?\n\nObservatory는 스터디 그룹 멤버들이 각자 관심 있는 글을 읽고 정리하는 공간입니다.\n\n함께 읽고, 정리하고, 공유합시다!\n");
+  "## Observatory란?\n\nObservatory는 스터디 그룹 멤버들이 각자 관심 있는 글을 읽고 정리하는 공간입니다.\n\n함께 읽고, 정리하고, 공유합시다!\n",
+  "2026-03-21T03:00:00Z");
 seed("understanding-transformer-architecture", "Transformer 아키텍처 이해하기", "Attention Is All You Need 논문의 핵심 개념을 정리합니다.", "2026-03-18", "김스터디", ["AI", "논문리뷰", "딥러닝"],
   "## Self-Attention\n\n```python\nscores = q @ k.T / sqrt(d)\n```\n\n| 구성 | 역할 |\n|---|---|\n| Encoder | 입력 표현 |\n| Decoder | 출력 생성 |\n");
 seed("docker-basics-for-developers", "개발자를 위한 Docker 기초", "Docker의 핵심 개념과 실무에서 자주 쓰는 명령어를 정리합니다.", "2026-03-17", "박개발", ["DevOps", "Docker", "인프라"],
   // #32: 0007 이관은 raw HTML·외부 이미지가 있으면 중단한다. 여기 글자는 HTML이 아니라 문단 텍스트다.
   "## 컨테이너란?\n\n`docker run --rm hello-world`\n\n<b>raw html</b>은 렌더하지 않습니다.\n");
 
+// 발행본을 만든 시각(= updatedAt, 재발행하면 위로) 최신순. backend와 같다(#80).
+const releasedAt = (p) => p.publication.updatedAt ?? p.publication.publishedAt;
 const published = () =>
   [...posts.values()]
     .filter((p) => p.publication)
-    .sort((a, b) => (a.publication.publishedAt < b.publication.publishedAt ? 1 : a.publication.publishedAt > b.publication.publishedAt ? -1 : 0));
+    .sort((a, b) => (releasedAt(a) < releasedAt(b) ? 1 : releasedAt(a) > releasedAt(b) ? -1 : 0));
 
 /** GET /public/posts·/public/posts/{slug}·/public/post-tags. 해당 없으면 null. */
 export function handlePublicPosts(path, url) {
@@ -453,7 +459,8 @@ export function handlePostMutation(owner, method, path, b, user, docs) {
       if (b.previewToken !== preview.previewToken) return conflict("preview_changed");
       if (!preview.publishable) return invalid(refsFields(owner, v, docs));
       const t = now();
-      p.publication = { id: uuid(), versionId: v.id, publishedAt: t, authorLogin: p.authorLogin, authorName: p.authorName, documents: preview.documents, materials: preview.materials };
+      // #80 B1: 공개 중인 발행본 위에 다시 발행하면 최초 발행일을 이어받는다(발행 취소 뒤 발행은 새로)
+      p.publication = { id: uuid(), versionId: v.id, publishedAt: p.publication?.publishedAt ?? t, updatedAt: t, authorLogin: p.authorLogin, authorName: p.authorName, documents: preview.documents, materials: preview.materials };
       Object.assign(p, { version: p.version + 1, updatedAt: t });
       return ok(201, publicView(p));
     }

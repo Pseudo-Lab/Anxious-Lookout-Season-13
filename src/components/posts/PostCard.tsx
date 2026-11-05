@@ -4,7 +4,8 @@ import Link from "next/link";
 import { getPublicPost } from "@/lib/posts/api";
 import type { PublicPost } from "@/lib/posts/types";
 import { useLoad } from "@/lib/research/hooks";
-import { excerpt, formatDate } from "@/lib/posts/format";
+import { excerpt } from "@/lib/posts/format";
+import { PostDates } from "./PostArticle";
 import TagBadge from "./TagBadge";
 
 const summaryClass = "mt-2 line-clamp-2 text-stone-900";
@@ -38,10 +39,7 @@ export default function PostCard({ post }: { post: PublicPost }) {
         </div>
       </Link>
       <div className="mt-4 flex flex-wrap items-center gap-3">
-        <span className="text-sm text-stone-500">
-          {post.author.name ? `${post.author.name} · ` : ""}
-          {formatDate(post.publishedAt)}
-        </span>
+        <PostDates name={post.author.name} publishedAt={post.publishedAt} updatedAt={post.updatedAt} />
         <div className="flex flex-wrap gap-2">
           {post.tags.map((tag) => (
             <TagBadge key={tag} tag={tag} />

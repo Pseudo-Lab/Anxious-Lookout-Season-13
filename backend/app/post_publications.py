@@ -34,7 +34,20 @@ def current(db, post_id=None, slug=None):
 
 def info(db, post_id):
     row = current(db, post_id=post_id)
-    return {key: row.snapshot[key] for key in ('id', 'versionId', 'publishedAt', 'slug')} if row else None
+    if row is None: return None
+    return {**{key: row.snapshot[key] for key in ('id', 'versionId', 'publishedAt', 'slug')}, 'updatedAt': updated_at(row.snapshot)}
+
+
+def updated_at(snapshot):
+    """Snapshots written before #80 carry only publishedAt, which was then this release's own time."""
+    return snapshot.get('updatedAt', snapshot['publishedAt'])
+
+
+def release_stamps(previous, now):
+    """Republishing over a live release keeps its first publishedAt; after a withdraw there is no
+    previous release, so the next publish starts a new publishedAt (#80)."""
+    when = stamp(now)
+    return {'publishedAt': previous['publishedAt'] if previous else when, 'updatedAt': when}
 
 
 def preview(store, identity, version_id=None, base_path=''):
@@ -87,7 +100,8 @@ def publish(store, identity, body, base_path):
     identity, now = uuid.uuid4(), datetime.now(timezone.utc)
     snapshot = {key: shown[key] for key in ('postId', 'versionId', 'slug', 'title', 'description', 'content', 'textProjection', 'tags', 'author', 'documents', 'materials')}
     from .post_images import url
-    snapshot.update(id=str(identity), coverImageUrl=url(shown['coverImageId'], base_path) if shown['coverImageId'] else None, publishedAt=stamp(now))
+    snapshot.update(id=str(identity), coverImageUrl=url(shown['coverImageId'], base_path) if shown['coverImageId'] else None,
+                    **release_stamps(shown['currentPublication'], now))
     row = PostPublication(id=identity, post_id=post.id, version_id=parse_id(body.versionId), snapshot=snapshot, image_ids=[parse_id(image['id']) for image in shown['images']],
                           created_at=now, updated_at=now)
     store.db.add(row); store.db.flush()
@@ -116,7 +130,7 @@ def withdraw(store, identity, body):
 def public_value(row):
     from .post_blocks import markdown_projection, format_summary
     from .post_images import base_path
-    return {**row.snapshot, 'materials': row.snapshot.get('materials', []),
+    return {**row.snapshot, 'materials': row.snapshot.get('materials', []), 'updatedAt': updated_at(row.snapshot),
             'markdownProjection': markdown_projection(row.snapshot['content'], base_path()),
             'formatSummary': format_summary(row.snapshot['content'])}
 

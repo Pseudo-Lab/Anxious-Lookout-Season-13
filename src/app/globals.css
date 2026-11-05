@@ -213,6 +213,14 @@ html[data-chat-resizing] body {
   user-select: none;
 }
 
+/* #80 F4: 글 본문(읽기 화면·발행 미리보기·편집기 공통). 넓은 화면에서만 키운다(작은 화면은 body 크기 그대로).
+   글자 크기 mark(pt)는 절대 크기라 바뀌지 않고, 제목 등 em 단위는 함께 커진다. 읽기 폭은 PostArticle(max-w-4xl). */
+@media (min-width: 768px) {
+  .post-body {
+    font-size: 1.25rem;
+  }
+}
+
 /* Prose styling for MDX content */
 .prose h1 {
   margin-top: 2em;

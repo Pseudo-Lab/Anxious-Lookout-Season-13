@@ -192,6 +192,12 @@ await setMock("health=normal");
 // J. 글 상세: 좋아요·댓글 준비 중
 await page.goto(U("/posts/welcome-to-observatory/"));
 check("J. post detail shows like/comment 준비 중", await appears(page.getByText("좋아요와 댓글 기능은 새 서버로 옮기는 중입니다")));
+// #80 F5: 다른 날 다시 발행한 글(mock seed)은 최초 발행일과 수정일을 함께 보인다
+{
+  const head = page.locator("article header");
+  const revised = head.locator('time[datetime="2026-03-21T03:00:00Z"]');
+  check("J. #80: republished post shows first publish date and revised date", (await appears(revised)) && (await revised.innerText()).endsWith("수정") && (await head.locator('time[title="최초 발행일"]').count()) === 1);
+}
 
 // P. #28 공개 글(DB 발행본, 모의 seed = 이관된 MDX 3개)
 {
@@ -207,6 +213,7 @@ check("J. post detail shows like/comment 준비 중", await appears(page.getByTe
   check("P. home shows all 3 imported posts, newest first",
     home.indexOf("Observatory에 오신") < home.indexOf("Transformer 아키텍처") && home.indexOf("Transformer 아키텍처") < home.indexOf("개발자를 위한 Docker"), home.slice(0, 400));
   check("P. home shows imported author name", home.includes("관리자"));
+  check("P. #80: card of the republished post shows the revised date", await appears(page.locator("main article", { hasText: "Observatory에 오신" }).locator('time[datetime="2026-03-21T03:00:00Z"]')));
   check("P. home asks first page only (limit=5)", apiCalls.some((c) => c.startsWith(`${BASE}/api/public/posts?`) && c.includes("limit=5")), apiCalls.join(","));
   await page.goto(U("/posts/"));
   check("P. /posts lists posts", await appears(page.getByRole("link", { name: /개발자를 위한 Docker 기초/ })));
@@ -219,6 +226,7 @@ check("J. post detail shows like/comment 준비 중", await appears(page.getByTe
   check("P. no image loaded for a post without own images", (await page.locator("article img").count()) === 0);
   check("P. #32: migrated block body renders without a format error", (await page.locator("article [role=alert]").count()) === 0 && (await page.locator("article .prose h2").count()) === 1);
   check("P. tab title from post", (await page.title()).startsWith("개발자를 위한 Docker 기초"), await page.title());
+  check("P. #80: never-republished post shows no revised date", (await page.locator('article header time[title="최초 발행일"]').count()) === 1 && !(await page.locator("article header").innerText()).includes("수정"));
   await page.goto(U("/posts/understanding-transformer-architecture/"));
   await page.locator("article table").first().waitFor();
   check("P. table block rendered (header row as th)", (await page.locator("article table").count()) === 1 && (await page.locator("article table th").count()) === 2);

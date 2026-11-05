@@ -193,7 +193,8 @@ function SelectionMenu({ editor }: { editor: Editor }) {
       const start = editor.view.coordsAtPos(range.from);
       const end = editor.view.coordsAtPos(range.to);
       const above = start.top - el.offsetHeight - 8;
-      const top = above >= 8 ? above : end.bottom + 8;
+      // 사이트 헤더(sticky, z-50)에 가려지지 않는 높이까지만 위에 띄운다(#80 F1)
+      const top = above >= headerHeight() + 8 ? above : end.bottom + 8;
       const mid = (Math.min(start.left, end.left) + Math.max(start.right, end.right)) / 2;
       el.style.top = `${top}px`;
       el.style.left = `${Math.max(8, Math.min(mid - el.offsetWidth / 2, window.innerWidth - el.offsetWidth - 8))}px`;
@@ -232,6 +233,9 @@ function SelectionMenu({ editor }: { editor: Editor }) {
     </div>
   );
 }
+
+/** 사이트 헤더 높이(px). Header가 --site-header-height로 알린다(#80 F1). */
+const headerHeight = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--site-header-height")) || 0;
 
 const coarsePointer = () => typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches && !window.matchMedia("(pointer: fine)").matches;
 
@@ -282,7 +286,8 @@ function Toolbar({ editor, onPickImage, uploading }: { editor: Editor; onPickIma
   }
 
   return (
-    <div role="toolbar" aria-label="서식" className="sticky top-0 z-10 flex flex-wrap items-center gap-0.5 rounded-t-lg border-b border-stone-200 bg-white/95 p-1.5 backdrop-blur">
+    // #80 F1: 스크롤해도 사이트 헤더 바로 아래에 붙는다(헤더도 sticky라 top-0이면 헤더 뒤로 숨는다)
+    <div role="toolbar" aria-label="서식" className="sticky top-[var(--site-header-height,0px)] z-10 flex flex-wrap items-center gap-0.5 rounded-t-lg border-b border-stone-200 bg-white/95 p-1.5 backdrop-blur">
       <select aria-label="블록 종류" value={s.block} onChange={(e) => setBlock(e.target.value)} className="rounded border border-stone-300 px-1 py-1 text-sm" disabled={s.inCell}>
         <option value="p">본문</option>
         <option value="h2">제목 2</option>
@@ -313,6 +318,10 @@ function Toolbar({ editor, onPickImage, uploading }: { editor: Editor; onPickIma
       <Btn label="번호 목록" active={s.ordered} disabled={s.inCell} onClick={() => c().toggleOrderedList().run()}>1.</Btn>
       <Btn label="들여쓰기" disabled={!(s.bullet || s.ordered)} onClick={() => c().sinkListItem("listItem").run()}>→</Btn>
       <Btn label="내어쓰기" disabled={!(s.bullet || s.ordered)} onClick={() => c().liftListItem("listItem").run()}>←</Btn>
+      {/* #80 F2: 코드 블록은 블록 종류 목록에도 있지만 찾기 어려워 따로 둔다(인라인 코드 버튼과 다르다) */}
+      <Btn label="코드 블록" active={s.block === "code"} disabled={s.inCell} onClick={() => c().toggleCodeBlock({ language: "plain" }).run()}>
+        <span className="font-mono text-xs">{"{ }"}</span> 코드 블록
+      </Btn>
       <Btn label="인용" active={s.quote} disabled={s.inCell} onClick={() => c().toggleBlockquote().run()}>❝</Btn>
       <Btn label="구분선" disabled={s.inCell} onClick={() => c().setHorizontalRule().run()}>—</Btn>
       <Sep />
@@ -438,7 +447,7 @@ export default function BlockEditor({ initialContent, onChange, onUploading, onR
     ],
     content: initialContent ?? { type: "doc", content: [{ type: "paragraph" }] },
     editorProps: {
-      attributes: { class: "pb-editor prose max-w-none min-h-[24rem] px-4 py-3 focus:outline-none", "aria-label": "본문", "aria-multiline": "true", role: "textbox" },
+      attributes: { class: "pb-editor prose post-body max-w-none min-h-[24rem] px-4 py-3 focus:outline-none", "aria-label": "본문", "aria-multiline": "true", role: "textbox" },
     },
     onUpdate: ({ editor: e }) => onChangeRef.current?.(e.getJSON()),
   });
