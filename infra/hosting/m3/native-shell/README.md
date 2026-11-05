@@ -417,6 +417,15 @@ or the configuration for it.
   bubblewrap 0.8.0 has no `--argv0`, so Codex reaches its Linux sandbox helper through this name.
   The link is part of the image evidence chain.
 - `/etc/codex/config.toml` and `requirements.toml` (section 4).
+- **Build gate.** The `runner` stage ends with `RUN python -m runner.image_check` as UID 10001, so every
+  build, production included, fails unless the image as built passes these checks:
+  - pinned Codex binaries;
+  - bubblewrap and the sandbox link;
+  - `/etc/codex` root 0755 and both policy files (`native_policy.check_files`);
+  - no git;
+  - `/app` readable.
+
+  Unit tests cannot see file modes in the built image. The #68 V1 check found `/etc/codex` at 644 this way.
 - Pod manifest change: the Runner Pod manifest gate applies (section 3).
 - **Difference from the issue design.** The #68 issue body sketches control UID 10001 and agent UID
   10002 in separate places. This branch keeps one `runner` container with UID 10001, and the sandbox
