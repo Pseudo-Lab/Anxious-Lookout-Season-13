@@ -624,7 +624,7 @@ no `container_engine_t`, `spc_t` or `container_userns_t`; no proc mount; no `don
 | Version | Rules | When |
 | --- | --- | --- |
 | 1 | `allow container_t devpts_t:filesystem mount;` | observed (V3) |
-| 2 | version 1 and `allow container_t tmpfs_t:filesystem remount;` | only if V3b shows the mask tmpfs `--remount-ro` denied (predicted: the tmpfs superblock is `tmpfs_t`, which `container_t` may mount and unmount but not remount) |
+| 2 | version 1 and `allow container_t tmpfs_t:filesystem remount;` | V3b: the `.codex` tmpfs `--remount-ro` was denied under version 1; V3c: it passes under version 2. **The version the development VM ended with.** |
 
 **V3b (development VM, version 1 installed, 2026-11-05) — measured:**
 - Installing version 1 changed the loaded policy by exactly `allow container_t devpts_t:filesystem mount;` (one
@@ -635,7 +635,26 @@ no `container_engine_t`, `spc_t` or `container_userns_t`; no proc mount; no `don
   observation was not run.
 - No AVC was logged for that remount. The loaded policy has `dontaudit container_domain tmpfs_t:filesystem
   remount;` and no `container_t` allow for it. Treating this as the cause is an inference from the policy and the
-  failure point, not from an observed AVC. V3c (version 2) is the check after the fact. Not run yet.
+  failure point, not from an observed AVC. V3c below is the check after the fact.
+
+**V3c (development VM, version 2 installed, 2026-11-05T15:27:53Z, run by the user) — measured:**
+- Upgrading to version 2 changed the loaded policy by exactly `allow container_t tmpfs_t:filesystem remount;`
+  (one allow added, none removed; auditallow/dontaudit/type rules unchanged, so the `dontaudit` above stays). Only
+  those query kinds were compared, not roles, users, constraints or fs labelling rules.
+- With nothing else changed (same scripts, Pod and image by hash), the `.codex` remount no longer fails. Both
+  standalone sandbox runs exit 0 and `thread/start` succeeds with `runtimeWorkspaceRoots ["/state/workspace"]` and
+  `workspaceWrite`, `writableRoots []`, no network. The workspace marker is written.
+- Inside the sandbox (`container_t:s0:c419,c978`, UID 10001, CapEff 0, NoNewPrivs 1, seccomp filter):
+  - Reads and listings of `/state/codex` (state, sessions, log, sqlite), `/state/home` and `/control` are
+    denied, including through symlinks from the workspace. No credential lines are visible.
+  - `HOME` and the login home are `/usr/local/share/anxious-shell-home`, bash startup files are none, and writing
+    `.bashrc`, `.bash_profile` and `.profile` there is denied.
+  - Writes to the masks `/state/home` and `/control` are denied, and afterwards no file exists on the host side.
+- Host observation (a sandboxed `sleep`, seen from the node): the sandbox's user, pid, mount and network
+  namespaces all differ from the container's. Its label is the container's `container_t` category pair, and its
+  ancestry is `sleep` ← `codex-linux-sandbox` ← `bwrap` ← `codex-linux-sandbox` ← `codex` ← `containerd-shim`.
+- No denial other than the proc mount (below): 9 AVCs, all `bwrap` `proc_t` `filesystem mount`, and 0 USER_AVCs.
+  No third rule is indicated.
 
 `selinux/build.sh <out>` builds both with checkpolicy/libsepol 3.6 (Oracle Linux 9, as the nodes). The build is
 reproducible: version 1 `68270c77…f6e6`, version 2 `3f4fc25c…beea`. `vm/selinux-module.sh` pins these.
@@ -658,17 +677,23 @@ proc … Operation not permitted` or `Permission denied`), it reruns the sandbox
   without `/proc` on the node. Not tested: opening that rule is outside the user's decision.
 
 In the fallback run (no `/proc`) the masked paths stay unreadable and unwritable and writes stay inside the
-workspace: measured locally (2026-11-05). On the development VM this is not yet measured: V3b's sandbox stopped
-at the `.codex` remount before any inner command ran, so its `mask_after … absent` lines do not show that a write
-was blocked. It moves to V3c.
-**Proc mount AVCs (operational effect):** every V3b AVC was the same `bwrap` `proc_t` `filesystem mount` denial,
-7 in all, one per sandbox launch in that run (author's count). The node therefore logs one AVC each time Codex
-starts a sandbox (a command, a file read). The policy will not hide it: adding `dontaudit` is outside the user's
-decision. V8 records the count per turn for this section and the PR body.
-Owner-visible effect of a sandbox without `/proc` (local
-measurement 2026-11-05, the same fallback): `/dev/stderr`, `/dev/stdin`, `/dev/fd/*` and bash process
-substitution fail, and `/proc/self`, `/proc/cpuinfo` and `/proc/meminfo` are absent; `nproc`, Python's
-`subprocess(close_fds=True)`, `multiprocessing` and `os.cpu_count()` work; `ps` and `free` are not in the image.
+workspace: measured locally (2026-11-05) and on the development VM in V3c (2026-11-05, `container_t`, version
+2). V3b's `mask_after … absent` lines show nothing, because no inner command ran there.
+**Proc mount AVCs (operational effect), measured:** every AVC in V3b (7) and V3c (9) is the same `bwrap`
+`proc_t` `filesystem mount` denial, exit -13. In V3c each of the 9 comes from a different `bwrap` process, and
+their times fall one in each sandbox launch of the run:
+- standalone run 1
+- standalone run 2
+- the direct `--proc` replay
+- 5 in the `thread/start` window
+- the host-observation `sleep`
+
+The node therefore logs one AVC each time Codex starts a sandbox. The policy will not hide it: adding
+`dontaudit` is outside the user's decision. V8 records the count per turn for this section and the PR body.
+Owner-visible effect of a sandbox without `/proc` (measured locally 2026-11-05 and the same on the development VM
+in V3c): `/dev/stderr`, `/dev/stdin`, `/dev/fd/*` and bash process substitution fail, and `/proc/self`,
+`/proc/cpuinfo` and `/proc/meminfo` are absent; `nproc`, Python's `subprocess(close_fds=True)`, `multiprocessing`
+and `os.cpu_count()` work; `ps` and `free` are not in the image.
 
 **Residual risk accepted by the user (2026-11-05), measured facts:**
 - The rules apply to every `container_t` process on the node, not only the runner. On the development VM,
