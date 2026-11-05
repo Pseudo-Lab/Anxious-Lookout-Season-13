@@ -92,7 +92,9 @@ collect_state() {  # $1 pre|post: raw sidecars, then one derived state file; pri
   printf '%s\n' "$st"
 }
 avc_count() {  # $1 type: prints the count since the install window start; non-zero on an ausearch error
-  out=$(ausearch -m "$1" -ts "$avc_date" "$avc_time" --format raw 2>&1); s=$?
+  # Default output, not --format raw: with raw, "no match" is a silent rc 1 that cannot be told from an error;
+  # the default prints "<no matches>" for that and a message for a bad time or type (measured on the guest).
+  out=$(ausearch -m "$1" -ts "$avc_date" "$avc_time" 2>&1); s=$?
   case "$s" in
     0) printf '%s\n' "$out" | grep -c "^type=$1 ";;
     1) case "$out" in *'no matches'*) echo 0;; *) return 1;; esac;;
