@@ -626,6 +626,17 @@ no `container_engine_t`, `spc_t` or `container_userns_t`; no proc mount; no `don
 | 1 | `allow container_t devpts_t:filesystem mount;` | observed (V3) |
 | 2 | version 1 and `allow container_t tmpfs_t:filesystem remount;` | only if V3b shows the mask tmpfs `--remount-ro` denied (predicted: the tmpfs superblock is `tmpfs_t`, which `container_t` may mount and unmount but not remount) |
 
+**V3b (development VM, version 1 installed, 2026-11-05) — measured:**
+- Installing version 1 changed the loaded policy by exactly `allow container_t devpts_t:filesystem mount;` (one
+  allow added, none removed; auditallow/dontaudit/type rules byte-identical).
+- The devpts step passes. The sandbox then fails at the next step: `bwrap: Can't remount readonly on
+  /newroot/state/workspace/.codex: … Permission denied` (EACCES), in both standalone runs and in `thread/start`.
+  So no command ran inside the sandbox. The workspace marker is absent, `thread/start` failed, and the host
+  observation was not run.
+- No AVC was logged for that remount. The loaded policy has `dontaudit container_domain tmpfs_t:filesystem
+  remount;` and no `container_t` allow for it. Treating this as the cause is an inference from the policy and the
+  failure point, not from an observed AVC. V3c (version 2) is the check after the fact. Not run yet.
+
 `selinux/build.sh <out>` builds both with checkpolicy/libsepol 3.6 (Oracle Linux 9, as the nodes). The build is
 reproducible: version 1 `68270c77…f6e6`, version 2 `3f4fc25c…beea`. `vm/selinux-module.sh` pins these.
 
@@ -638,15 +649,22 @@ proc … Operation not permitted` or `Permission denied`), it reruns the sandbox
   masked paths).
 - **Inference, not shown by the above:** that the kernel refuses a new procfs in a user namespace because of those
   overmounts. The errno and the overmount list are facts; the specific kernel check is not observed.
-- **To be recorded in V3b (development VM, `container_t`):** the same replay's exit code and error text, the
-  overmount list, and the AVCs in the same time window. An AVC tied to that time would show SELinux refused; an
-  absent AVC does not by itself rule out other refusals.
+- **Measured in V3b (development VM, `container_t`, 2026-11-05):** the same replay gets `Can't mount proc on
+  /newroot/proc: Permission denied` (EACCES, not EPERM) and succeeds without `--proc`. An AVC from the same time
+  window matches it (`bwrap`, `proc_t`, `filesystem mount`). On the node, SELinux refuses the proc mount before any
+  kernel check is reached. The container's `/proc` overmounts there are `/proc/acpi`, `bus`, `fs`, `interrupts`,
+  `irq`, `kcore`, `keys`, `scsi`, `sys`, `sysrq-trigger` and `timer_list`.
 - **Prediction, not measured:** that allowing `proc_t:filesystem mount` in SELinux would still leave the sandbox
   without `/proc` on the node. Not tested: opening that rule is outside the user's decision.
 
 In the fallback run (no `/proc`) the masked paths stay unreadable and unwritable and writes stay inside the
-workspace: measured locally (2026-11-05); on the development VM it is a V3b/V3c result, not yet measured. Whether
-the preflight leaves a proc mount AVC per command, and how many, is a V3b result (not yet measured).
+workspace: measured locally (2026-11-05). On the development VM this is not yet measured: V3b's sandbox stopped
+at the `.codex` remount before any inner command ran, so its `mask_after … absent` lines do not show that a write
+was blocked. It moves to V3c.
+**Proc mount AVCs (operational effect):** every V3b AVC was the same `bwrap` `proc_t` `filesystem mount` denial,
+7 in all, one per sandbox launch in that run (author's count). The node therefore logs one AVC each time Codex
+starts a sandbox (a command, a file read). The policy will not hide it: adding `dontaudit` is outside the user's
+decision. V8 records the count per turn for this section and the PR body.
 Owner-visible effect of a sandbox without `/proc` (local
 measurement 2026-11-05, the same fallback): `/dev/stderr`, `/dev/stdin`, `/dev/fd/*` and bash process
 substitution fail, and `/proc/self`, `/proc/cpuinfo` and `/proc/meminfo` are absent; `nproc`, Python's
