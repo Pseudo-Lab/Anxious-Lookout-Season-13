@@ -23,7 +23,8 @@ SYSTEM = {'default_permissions': 'native', 'approvals_reviewer': 'user',
           'permissions': {'native': {'filesystem': PROFILE}}}
 REQUIREMENTS = {'allowedApprovalPolicies': ['untrusted'], 'allowedApprovalsReviewers': ['user'],
                 'featureRequirements': {'unified_exec': False}}
-THREAD_POLICY = {'approvalPolicy': 'untrusted', 'approvalsReviewer': 'user', 'activePermissionProfile': {'id': 'native'}}
+THREAD_POLICY = {'approvalPolicy': 'untrusted', 'approvalsReviewer': 'user', 'activePermissionProfile': {'id': 'native'},
+                 'sandbox': {'type': 'workspaceWrite', 'writableRoots': [], 'networkAccess': False}}
 
 
 def emit(body):
@@ -78,10 +79,10 @@ for line in sys.stdin:
         thread = str(uuid.uuid4())
         records[thread] = {"id": thread, "turns": [], "tools": params["dynamicTools"]}
         save()
-        emit({"id": identity, "result": {"thread": records[thread], "model": params["model"], "cwd": params["cwd"], **THREAD_POLICY}})
+        emit({"id": identity, "result": {"thread": records[thread], "model": params["model"], "cwd": params["cwd"], "runtimeWorkspaceRoots": [params["cwd"]], **THREAD_POLICY}})
     elif method == "thread/resume":
         emit({"id": identity, "result": {"thread": records[params["threadId"]], "model": records[params["threadId"]].get("returnModel", params["model"]),
-                                         "cwd": params["cwd"], **THREAD_POLICY}})
+                                         "cwd": params["cwd"], "runtimeWorkspaceRoots": [params["cwd"]], **THREAD_POLICY}})
     elif method == "thread/read":
         emit({"id": identity, "result": {"thread": records[params["threadId"]]}})
     elif method == "turn/start":

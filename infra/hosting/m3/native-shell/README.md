@@ -9,7 +9,7 @@ Nothing here runs from a render, a test or an agent session on production.
 
 | Section | What | Production executor | When |
 | --- | --- | --- | --- |
-| 1 | `kernel.yama.ptrace_scope=1` | user (read-only node for agents) | any time, independent of the #68 window |
+| 1 | `kernel.yama.ptrace_scope=1` | user (read-only node for agents) | before the #68 window: a section 3 precondition |
 | 2 | Seccomp profile `seccomp-runner-userns-v1.json` | PM after review | before the #68 window |
 | 3 | Controller inputs without `executor`, binding runner images | PM after review | the #68 window |
 | 4 | Runner approval path and startup self-check (reference) | nobody: runner code | every app-server launch and turn |
@@ -22,9 +22,12 @@ denials under `container_t` first and will be section 8.
 
 ## 1. `kernel.yama.ptrace_scope=1` (user, production node)
 
-**Why.** Defence in depth only. The sandboxed shell cannot see or read app-server because bubblewrap puts it
-in its own PID and user namespace (#68 requirement 2). That holds with `ptrace_scope` 0 or 1, and the
-development VM measurement checks it at both. With 1, a process can trace only its own descendants
+**Why.** The sandboxed shell cannot see or read app-server because bubblewrap puts it in its own PID and
+user namespace (#68 requirement 2). That holds with `ptrace_scope` 0 or 1, and the development VM
+measurement checks it at both. Even so, **1 on the production node is a prerequisite of the #68 production
+apply** (section 3, preconditions; user decision 2026-11-05): while app-server and the sandboxed shell share
+one container, 1 is what actually narrows memory access between processes on the node. If the runner is
+later split into separate containers, this prerequisite is reviewed again. With 1, a process can trace only its own descendants
 unless it has `CAP_SYS_PTRACE`, so a non-root process on the node can no longer attach to a sibling
 (#58 F). The development VM has had 1 since 2026-10-25 (`infra/k3s/PARITY.md`).
 
@@ -77,7 +80,8 @@ rm -- /etc/sysctl.d/90-anxious-yama.conf
 sysctl -n kernel.yama.ptrace_scope              # 0
 ```
 
-The #68 isolation does not depend on this value, so a rollback does not require a runner rollback.
+The #68 isolation does not depend on this value, so a rollback does not force a runner rollback. It does
+remove a #68 production prerequisite: report it to PM, who decides whether #68 stays applied.
 
 ### After it is applied
 
@@ -186,8 +190,13 @@ one runner-Pod drain and one rollback point.
      by deleting the Pod.
    - Entry frozen. Every mutator stopped: the host `issue16-controller` timer and service,
      runner-controller scaled to 0 (before #61: the host observer), any external creator.
+   - `kernel.yama.ptrace_scope` is 1 on the node (section 1, applied by the user): `sysctl -n
+     kernel.yama.ptrace_scope` prints 1 and `systemd-sysctl --cat-config` ends with the
+     `90-anxious-yama.conf` line. Record both outputs. If it is 0, stop: the window does not start.
    - The section 2 profile installed, with its digest recorded.
-   - The section 4 SELinux module installed (#68 order 4).
+   - The section 8 SELinux module installed (#68 order 4).
+   - `thread-check.sh` (section 7, "What catches what") run on the reviewed #68 runner digest prints
+     `verdict pass`. Record the output and its SHA-256. Any other verdict: the window does not start.
    - A DB backup. The rollback digests recorded: API/runtime/worker image, runner image, and the executor
      image named by each v2 plan.
    - A private root0600 copy of the current controller `inputs.json` in the operation directory
@@ -207,7 +216,8 @@ one runner-Pod drain and one rollback point.
      root0600, no symlink, written to a temporary file in the same directory, then `mv -T`.
 3. **Release images.** Deploy the new API/runtime/worker images by the existing rollout procedure. They
    render every Pod as one `runner` container, from a v1 or v2 plan alike.
-4. **Existing binding runner images.** For each binding from step 1, use `ops.runner_binding_image`
+4. **Existing binding runner images: the canary owner only.** Swap the canary owner's binding first;
+   every other binding waits for step 6. For each swap, use `ops.runner_binding_image`
    (`multi-user-runners/CUTOVER.md` section 6):
    - inputs: the registry fence, `oldPlanSha256` (computed in the new worker image), `newImage` = the
      reviewed #68 runner digest;
@@ -215,16 +225,25 @@ one runner-Pod drain and one rollback point.
      ignores it, and the rollback needs it to render the sidecar again;
    - `report`, review it, `apply` with the same inputs and the report;
    - record each new plan digest: the rollback swap needs it.
-5. **Canary**, with runner-controller started again and entry open for the allowlisted canary owner only:
+5. **Canary**, with runner-controller started again and entry open for the allowlisted canary owner only.
+   It passes only if all of these hold, in this order:
    - the Pod has exactly one container and names the section 2 profile;
-   - a turn that runs a shell command;
+   - the runner log has no `runner_policy_check` line with `"result": "refused"` (the startup self-check,
+     section 4, passed);
+   - the first turn creates its thread (`thread/start` succeeded: the turn reaches the model and
+     completes). A configuration that loads but cannot create a thread fails here for every owner;
+   - in that turn one shell command asks for approval before it runs, and its output comes back from
+     the sandbox;
    - stop: drain → DELETE → 404 → release.
 
-   Then widen entry as in the rollout procedure.
+   If any check fails: stop, swap the canary binding back (rollback step 1, for that binding only), and
+   report. No other binding is swapped.
+6. **Remaining binding runner images**, with runner-controller stopped again: the step 4 swap for every
+   other binding from step 1. Then widen entry as in the rollout procedure.
 
 Swapping the images is what moves owners onto the native shell. The order of steps 2 and 3 only decides
 which owners could get a binding while one half is in place. With every mutator stopped from step 1 to
-step 5, no binding is created in between. If one is anyway, for example when the input was changed early,
+step 4 and entry open to the canary owner only in step 5, no other binding is created in between. If one is anyway, for example when the input was changed early,
 on the old release:
 
 - a binding published from the new input on the **old** release is v1. That owner has no shell until the
@@ -236,9 +255,9 @@ on the old release:
 Same precondition: no Pending/Running runner Pod, entry frozen, every mutator stopped.
 
 1. **Binding runner images back.**
-   - For each binding swapped in step 4, run `ops.runner_binding_image` with the **new** release's
+   - For each binding swapped in steps 4 and 6, run `ops.runner_binding_image` with the **new** release's
      worker image and the **old** runner digest from step 1. Its `oldPlanSha256` is the digest recorded
-     in step 4.
+     at its swap.
    - A v2 plan still holds its `executor`, so the old release renders the sidecar again.
 2. **Bindings published during the new release** are v1 (no `executor`). On the old release they have
    no shell. Either:
@@ -263,7 +282,7 @@ The policy lives in the image, the expected values in runner code
 
 | File in the image | Repository | Holds |
 | --- | --- | --- |
-| `/etc/codex/config.toml` (system layer) | `backend/runner/codex-etc/config.toml` | permission profile `native`: `:minimal` read, workspace write, deny `/control`, `/run/codex-broker`, `/state/codex`, `/state/home`; `approvals_reviewer = "user"`, `default_permissions = "native"`. No `approval_policy`: 0.160.1 refuses `untrusted` in any config file and the app-server does not start |
+| `/etc/codex/config.toml` (system layer) | `backend/runner/codex-etc/config.toml` | permission profile `native`: `:minimal` read, workspace write, deny `/control`, `/run/codex-broker`, `/state/home` (not `/state/codex`: see "CODEX_HOME" below); `approvals_reviewer = "user"`, `default_permissions = "native"`. No `approval_policy`: 0.160.1 refuses `untrusted` in any config file and the app-server does not start |
 | `/etc/codex/requirements.toml` (managed) | `backend/runner/codex-etc/requirements.toml` | `allowed_approval_policies = ["untrusted"]`, `allowed_approvals_reviewers = ["user"]`, `[features] unified_exec = false`, `deny_read` (second layer only) |
 
 **Why these settings are load-bearing** (Codex 0.160.1 source, `rust-v0.160.1` `d27764b`):
@@ -272,7 +291,22 @@ The policy lives in the image, the expected values in runner code
   without a second approval because the first one already passed (`core/src/tools/orchestrator.rs`,
   `should_bypass_approval`). Codex skips that retry only when the filesystem policy has a deny entry
   (`unsandboxed_execution_allowed`). The same check turns a model's `require_escalated` into an ordinary
-  sandboxed run. The runner never sees the retry. Only the profile's deny entries stop it.
+  sandboxed run. The runner never sees the retry. Only the profile's deny entries stop it. The three
+  entries `/control`, `/run/codex-broker` and `/state/home` keep that condition true.
+- **CODEX_HOME (`/state/codex`) is not denied, and cannot be.** Codex always adds `CODEX_HOME/tmp/arg0`
+  (its execve wrapper and `codex-linux-sandbox` links, created at app-server start) as a readable root
+  (`core/src/config/permissions.rs`, `get_readable_roots_required_for_codex_runtime`). A managed
+  `deny_read` on it or an ancestor fails the configuration load at `thread/start` ("not in the allowed set
+  all managed deny_read restrictions"). A profile deny on an ancestor is masked by bubblewrap after every
+  read bind (`linux-sandbox/src/bwrap.rs`), so the helper cannot be executed and `thread/start` fails
+  (`execvp … codex-linux-sandbox: Permission denied`). Both were found on `68-755f65c`; that image is not
+  used. CODEX_HOME's protection is that the profile never reads it: the only read roots are `:minimal`
+  and the workspace (compared exactly by self-check 5), the only workspace root is the workspace and no
+  extra writable root exists (self-check 6). A sandboxed command sees nothing of CODEX_HOME but
+  `tmp/arg0`. This rests on CODEX_HOME holding no credential: the broker token lives under
+  `/run/codex-broker` (denied) and the V6 measurement checks that no token file stays in CODEX_HOME.
+  `config_tests/test_native_policy.py::test_no_deny_entry_covers_the_codex_runtime_root` refuses a deny
+  entry on `tmp/arg0` or an ancestor of it (`/`, `/state`, `/state/codex`, `/state/codex/tmp`).
 - **`unified_exec` pinned off in requirements.** 0.160.1 turns unified exec back on unless managed
   requirements pin it (`core/src/config/managed_features.rs`). The runner's former
   `-c features.unified_exec=false` had no effect; it never mattered before #68 because the shell tool was
@@ -298,7 +332,9 @@ before every turn, the runner refuses (`policy_refused`, nothing runs) unless al
      `approval_policy`, `approvals_reviewer`, `sandbox_mode`, `sandbox_workspace_write`);
    - every project layer disabled.
 6. Every `thread/start` and `thread/resume` response reports `approvalPolicy: untrusted`,
-   `approvalsReviewer: user`, `activePermissionProfile.id: native` and the workspace as `cwd`.
+   `approvalsReviewer: user`, `activePermissionProfile.id: native`, the workspace as `cwd`, the workspace
+   as the only `runtimeWorkspaceRoots` entry, and `sandbox` of type `workspaceWrite` with no extra
+   `writableRoots` and `networkAccess: false`.
 
 Not readable through the API: the compiled filesystem policy and the requirements `deny_read`. The
 VM stage judges those by behaviour: the sandbox boundary of the first and every later execution, and
@@ -327,6 +363,10 @@ new source, then on the VM:
 
 - `unsandboxed_execution_allowed` still depends on a deny entry, and the orchestrator still skips the
   unsandboxed retry under that condition;
+- which CODEX_HOME paths Codex makes readable (0.160.1: only `tmp/arg0`), whether a deny on an ancestor
+  of them still fails `thread/start`, and what `tmp/arg0` holds (0.160.1: `.lock` and four links to
+  `/usr/local/bin/codex`; `thread-check.sh` fails on anything else). CODEX_HOME stays outside every read
+  root either way;
 - `require_escalated` is still lowered to a sandboxed run when deny entries exist;
 - unified exec can still be pinned off only by managed requirements, and `write_stdin` is absent then;
 - `allowed_approvals_reviewers` still exists and `user` still means the client;
@@ -428,10 +468,22 @@ or the configuration for it.
   - `/etc/codex` root 0755 and both policy files (`native_policy.check_files`);
   - no git;
   - `/app` readable;
-  - the pinned Codex accepts the image's config: an offline `codex app-server` (throwaway home, no login)
-    answers configRequirements/read and config/read, and both pass the runner's own checks.
+  - the pinned Codex accepts the image's config: an offline `codex app-server` (no login) started in the
+    runner's own layout (`/state/home`, `/state/codex`, `/state/workspace`, removed again; the image ships
+    `/state` empty) answers configRequirements/read and config/read, and both pass the runner's own checks.
 
   Unit tests cannot see file modes in the built image. The #68 V1 check found `/etc/codex` at 644 this way.
+  Until `68-755f65c` the gate used a throwaway home under `/tmp`, so a path rule that only bites under
+  `/state` could not show there.
+- **What catches what.** A configuration can load and still fail to create a thread (`68-755f65c`:
+  CODEX_HOME denied, section 4). Four checks, each with its limit:
+
+  | Check | Runs | Catches | Cannot catch |
+  | --- | --- | --- | --- |
+  | Unit tests (`config_tests/test_native_policy.py`) | every push, back and review | policy files equal to the checked values; no deny entry on `CODEX_HOME/tmp/arg0` or an ancestor (`test_no_deny_entry_covers_the_codex_runtime_root`); read and write roots exactly `:minimal` and the workspace (`test_codex_home_is_outside_every_read_and_write_root`, the `check_config` refusals); `check_thread` refusals for another policy, profile, cwd, workspace root, writable root or network | anything about the built image or the real Codex |
+  | Build gate (`runner.image_check`) | every image build | binaries, modes, packages; the real Codex loading `/etc/codex` in the `/state` layout | thread creation: a build `RUN` has no user namespace, so bubblewrap and `thread/start` always fail there, and the build is not given more privilege |
+  | Pre-release check (`thread-check.sh <image>`) | review, on every runner image before V1 import and before the section 3 window | in one local container with the runner's UID, `/state`, `/control` and `/tmp` mounts, read-only root, no capabilities, no-new-privileges, seccomp profile and no network: bubblewrap, a workspace write, fake CODEX_HOME state, `/state/home` and `/control` unreadable (also through workspace symlinks), the config checks, `thread/start` with `check_thread`, the `tmp/arg0` contents. `verdict pass` or `verdict fail <check>` | SELinux `container_t` (V3, on the VM); what a command sees during a real turn (V4); the local AppArmor profile is the host's userns profile, not the node's |
+  | Runner start (section 4 self-check) and the section 3 canary | every app-server start and turn; once per window | everything above on the real node | nothing earlier: when it fires, the image is already deployed |
 - Pod manifest change: the Runner Pod manifest gate applies (section 3).
 - **Difference from the issue design.** The #68 issue body sketches control UID 10001 and agent UID
   10002 in separate places. This branch keeps one `runner` container with UID 10001, and the sandbox

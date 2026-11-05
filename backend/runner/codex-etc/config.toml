@@ -8,7 +8,6 @@ approvals_reviewer = "user"
 ":minimal" = "read"
 "/control" = "deny"
 "/run/codex-broker" = "deny"
-"/state/codex" = "deny"
 "/state/home" = "deny"
 
 [permissions.native.filesystem.":workspace_roots"]

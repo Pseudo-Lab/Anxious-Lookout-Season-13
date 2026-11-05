@@ -7,7 +7,7 @@ import os
 import queue
 import tomllib
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -35,10 +35,40 @@ def test_profile_has_the_load_bearing_deny_entries():
     # Codex retries a sandbox-denied command unsandboxed, without approval, unless a deny entry exists.
     table = policy.filesystem(ROOT)
     denied = {path for path, access in table.items() if access == 'deny'}
-    assert denied == {'/control', '/run/codex-broker', '/state/codex', '/state/home'}
+    assert denied == {'/control', '/run/codex-broker', '/state/home'}
     assert table[':minimal'] == 'read' and table[':workspace_roots'] == {'.': 'write'}
     assert policy.requirements(ROOT)['permissions']['filesystem']['deny_read'] == list(policy.deny_paths(ROOT))
     assert policy.requirements(ROOT)['features'] == {'unified_exec': False}
+
+
+def test_no_deny_entry_covers_the_codex_runtime_root():
+    # 0.160.1 always makes CODEX_HOME/tmp/arg0 readable; a managed deny_read on it or an ancestor fails the config
+    # load, a profile deny on it or an ancestor masks it in bubblewrap and thread/start fails (README section 5).
+    arg0 = PurePosixPath(policy.codex_runtime_root(ROOT))
+    assert arg0 == PurePosixPath(ROOT) / 'codex' / 'tmp' / 'arg0'
+    profile = [path for path, access in policy.filesystem(ROOT).items() if access == 'deny']
+    managed = policy.requirements(ROOT)['permissions']['filesystem']['deny_read']
+    for path in profile + managed:
+        assert not policy.covers_codex_runtime_root(path, ROOT), path
+
+
+@pytest.mark.parametrize('path', ['/', '/state', '/state/codex', '/state/codex/', '/state/codex/tmp',
+                                  '/state/codex/tmp/arg0', '/state/codex/tmp/arg0/codex-arg0Ab12'])
+def test_runtime_root_rule_catches_every_ancestor_and_descendant(path):
+    assert policy.covers_codex_runtime_root(path, ROOT)
+
+
+@pytest.mark.parametrize('path', ['/state/codexx', '/state/codex-other', '/state/home', '/state/workspace',
+                                  '/state/codex/tmpx', '/state/codex/sessions', '/control', '/run/codex-broker'])
+def test_runtime_root_rule_keeps_path_boundaries(path):
+    assert not policy.covers_codex_runtime_root(path, ROOT)
+
+
+def test_codex_home_is_outside_every_read_and_write_root():
+    # CODEX_HOME's only protection is that the profile never reads it: the read and write entries are exactly these.
+    table = policy.filesystem(ROOT)
+    assert {path: access for path, access in table.items() if access != 'deny'} == \
+        {':minimal': 'read', ':workspace_roots': {'.': 'write'}}
 
 
 @pytest.fixture
@@ -136,7 +166,8 @@ def test_config_applied():
                                     'session-layer', 'project-enabled', 'project-no-reason', 'system-missing',
                                     'system-twice', 'system-other-file', 'sandbox-mode', 'approval-never',
                                     'layers-missing', 'layer-malformed', 'not-dict', 'approval-in-disabled-layer',
-                                    'approval-in-system-layer', 'effective-network-set', 'effective-approval-set'])
+                                    'approval-in-system-layer', 'effective-network-set', 'effective-approval-set',
+                                    'codex-home-read', 'state-read', 'root-read', 'extends-set'])
 def test_config_not_applied_refuses(damage):
     value = good_config()
     config, layers = value['config'], value['layers']
@@ -161,6 +192,10 @@ def test_config_not_applied_refuses(damage):
     if damage == 'approval-in-system-layer': layers[0]['config']['approval_policy'] = 'untrusted'
     if damage == 'effective-network-set': profile_parent = config['permissions']['native']; profile_parent['network'] = {'enabled': True}
     if damage == 'effective-approval-set': config['approval_policy'] = 'untrusted'
+    if damage == 'codex-home-read': profile['/state/codex'] = 'read'
+    if damage == 'state-read': profile['/state'] = 'read'
+    if damage == 'root-read': profile[':root'] = 'read'
+    if damage == 'extends-set': config['permissions']['native']['extends'] = ':workspace'
     with pytest.raises(CodexFailure):
         policy.check_config(value, ROOT)
 
@@ -168,14 +203,18 @@ def test_config_not_applied_refuses(damage):
 def good_thread():
     return {'thread': {'id': 't'}, 'model': 'gpt-6.1-sol', 'cwd': WORK, 'approvalPolicy': 'untrusted',
             'approvalsReviewer': 'user', 'activePermissionProfile': {'id': 'native', 'extends': None},
-            'sandbox': {'type': 'workspaceWrite'}}
+            'runtimeWorkspaceRoots': [WORK],
+            'sandbox': {'type': 'workspaceWrite', 'writableRoots': [], 'networkAccess': False,
+                        'excludeTmpdirEnvVar': True, 'excludeSlashTmp': True}}
 
 
 def test_thread_applied():
     policy.check_thread(good_thread(), Path(WORK))
 
 
-@pytest.mark.parametrize('damage', ['policy', 'reviewer', 'profile', 'profile-missing', 'cwd', 'missing-field', 'error'])
+@pytest.mark.parametrize('damage', ['policy', 'reviewer', 'profile', 'profile-missing', 'cwd', 'missing-field', 'error',
+                                    'workspace-root-added', 'workspace-roots-missing', 'writable-root-added',
+                                    'network-on', 'sandbox-full-access', 'sandbox-missing'])
 def test_thread_start_or_resume_mismatch_refuses(damage):
     value = good_thread()
     if damage == 'policy': value['approvalPolicy'] = 'never'
@@ -185,6 +224,12 @@ def test_thread_start_or_resume_mismatch_refuses(damage):
     if damage == 'cwd': value['cwd'] = '/state'
     if damage == 'missing-field': del value['approvalPolicy']
     if damage == 'error': value = None
+    if damage == 'workspace-root-added': value['runtimeWorkspaceRoots'] = [WORK, '/state']
+    if damage == 'workspace-roots-missing': del value['runtimeWorkspaceRoots']
+    if damage == 'writable-root-added': value['sandbox']['writableRoots'] = ['/state/codex']
+    if damage == 'network-on': value['sandbox']['networkAccess'] = True
+    if damage == 'sandbox-full-access': value['sandbox'] = {'type': 'dangerFullAccess'}
+    if damage == 'sandbox-missing': del value['sandbox']
     with pytest.raises(CodexFailure):
         policy.check_thread(value, Path(WORK))
 

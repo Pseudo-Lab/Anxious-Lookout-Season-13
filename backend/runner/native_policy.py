@@ -13,6 +13,12 @@ The profile's `deny` entries are load-bearing, not a second layer. Codex retries
 sandbox-denied command without the sandbox and without a new approval unless the filesystem
 policy has a deny entry, and the same check turns `require_escalated` into an ordinary
 sandboxed run (`unsandboxed_execution_allowed`). So `check_config` refuses to run without them.
+
+CODEX_HOME (`/state/codex`) is deliberately not a deny entry: 0.160.1 always makes CODEX_HOME/tmp/arg0
+readable (its execve wrapper and `codex-linux-sandbox`), refuses a managed `deny_read` on an ancestor of it,
+and bubblewrap masks a denied ancestor after every read bind, so `thread/start` fails. Its protection is the
+profile's read roots: `:minimal` and the workspace only, compared exactly by `check_config`, with the cwd and
+workspace roots compared by `check_thread`. The remaining deny entries keep the unsandboxed retry off.
 Recheck all of this before moving the Codex pin (native-shell/README.md "Codex version").
 """
 import enum
@@ -42,8 +48,20 @@ def answer(identity, decision):
 
 
 def deny_paths(root):
+    """Never CODEX_HOME (root/codex) or an ancestor of it: see the module docstring."""
     root = PurePosixPath(root)
-    return ('/control', '/run/codex-broker', str(root/'codex'), str(root/'home'))
+    return ('/control', '/run/codex-broker', str(root/'home'))
+
+
+def codex_runtime_root(root):
+    """The CODEX_HOME path Codex 0.160.1 always adds as a readable root (execve wrapper, sandbox helper)."""
+    return str(PurePosixPath(root)/'codex'/'tmp'/'arg0')
+
+
+def covers_codex_runtime_root(path, root):
+    """Would a deny on `path` hit the runtime root: the root itself, an ancestor or something inside it."""
+    path, arg0 = PurePosixPath(path), PurePosixPath(codex_runtime_root(root))
+    return arg0.is_relative_to(path) or path.is_relative_to(arg0)
 
 
 def filesystem(root):
@@ -165,6 +183,11 @@ def check_thread(result, work):
     require(result.get('approvalsReviewer') == 'user', 'thread.approvals_reviewer')
     require(isinstance(profile, dict) and profile.get('id') == PROFILE, 'thread.permission_profile')
     require(result.get('cwd') == str(work), 'thread.cwd')
+    # The only writable and project root is the workspace; no extra writable root, no network.
+    require(result.get('runtimeWorkspaceRoots') == [str(work)], 'thread.workspace_roots')
+    sandbox = result.get('sandbox')
+    require(isinstance(sandbox, dict) and sandbox.get('type') == 'workspaceWrite'
+            and sandbox.get('writableRoots') == [] and sandbox.get('networkAccess') is False, 'thread.sandbox')
 
 
 COMMAND_FIELDS = frozenset({'kind', 'threadId', 'turnId', 'itemId', 'startedAtMs', 'approvalId', 'environmentId',

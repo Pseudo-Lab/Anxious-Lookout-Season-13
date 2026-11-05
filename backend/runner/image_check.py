@@ -5,7 +5,13 @@ build (development and production) fails if the image could not run the native s
 cannot see this: a file mode, owner or missing package only exists in the built image (#68 V1 found
 `/etc/codex` at mode 644), and only the real Codex can say whether it accepts the config (#68 V3 found
 `approval_policy = "untrusted"` refused). Offline (the Dockerfile runs it with --network=none): reads files,
-runs `bwrap --version`, and starts the pinned `codex app-server` with a throwaway home for two config reads.
+runs `bwrap --version`, and starts the pinned `codex app-server` in the runner's own layout (`/state/home`,
+`/state/codex`, `/state/workspace`, removed afterwards) for two config reads.
+
+What it cannot do: create a thread. Codex creates a thread through bubblewrap, and a build `RUN` has no user
+namespace (Docker's default seccomp and AppArmor), so thread/start always fails here. The static unit test
+`test_no_deny_entry_covers_the_codex_runtime_root` and the pre-release probe (native-shell/README.md section 7)
+cover what only a thread shows.
 """
 import hashlib
 import json
@@ -15,7 +21,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import threading
 
 from app.codex_policy import CodexFailure
@@ -28,14 +33,20 @@ SANDBOX_LINK = '/usr/local/bin/codex-linux-sandbox'
 
 
 def codex_accepts_config():
-    """The image's pinned Codex itself loads /etc/codex: start `codex app-server` offline (no login, no model,
-    a throwaway CODEX_HOME), read configRequirements/read and config/read, and apply the runner's own checks.
-    Returns a problem name or None. The process is always stopped before returning."""
+    """The image's pinned Codex itself loads /etc/codex: start `codex app-server` offline (no login, no model)
+    with the runner's real paths under /state, read configRequirements/read and config/read, and apply the
+    runner's own checks. Returns a problem name or None. The process is always stopped and the three
+    directories removed before returning; they must not exist before (the image ships /state empty)."""
     from .app import native_command  # the runner's own start arguments (operator access mode, as deployed)
-    root = tempfile.mkdtemp(prefix='image-check-')
+    root = native_policy.STATE_ROOT
     home, codex_home, work = (os.path.join(root, name) for name in ('home', 'codex', 'workspace'))
-    for path in (home, codex_home, work):
-        os.mkdir(path, 0o700)
+    try:
+        if os.listdir(root):
+            return 'state not empty'
+        for path in (home, codex_home, work):
+            os.mkdir(path, 0o700)
+    except OSError:
+        return 'state layout'
     command, env = native_command('/usr/local/bin/codex', home, codex_home, work, file_auth=False, external=True, fixture=False)
     try:
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -73,7 +84,8 @@ def codex_accepts_config():
         except (OSError, subprocess.TimeoutExpired):
             process.kill()
             process.wait(timeout=10)
-        shutil.rmtree(root, ignore_errors=True)
+        for path in (home, codex_home, work):
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def problems():

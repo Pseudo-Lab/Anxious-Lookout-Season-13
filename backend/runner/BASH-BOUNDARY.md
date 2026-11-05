@@ -5,6 +5,14 @@
 > The #23 shell executor and ShellBroker are deleted. Procedures, the startup self-check and the
 > Codex version recheck list are in `infra/hosting/m3/native-shell/README.md`. The rest of this file
 > is the 2026-10-16 investigation record; its enforcement gaps are what the #68 VM stage measures.
+>
+> **Reads under #68** (see "Workspace-write bounds writes" below). The `native` profile reads only
+> `:minimal` and the workspace. `/control`, `/run/codex-broker` and `/state/home` are also denied
+> explicitly; those deny entries are what keep Codex from retrying a denied command outside the sandbox.
+> `/state/codex` (CODEX_HOME) is **not** denied: Codex 0.160.1 cannot run with a deny on an ancestor of
+> `CODEX_HOME/tmp/arg0`, its sandbox helper. CODEX_HOME's protection is that it is not a read root,
+> checked exactly at every start and thread. This is rechecked at every Codex pin change
+> (native-shell/README.md sections 4 and 5).
 
 Bash remains disabled. The user/PM decision on 2026-10-16 excludes Bash from #14
 and moves executor isolation, resource bounds and image rebuilds to

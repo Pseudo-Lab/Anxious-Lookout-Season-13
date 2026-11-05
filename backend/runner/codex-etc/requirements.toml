@@ -11,5 +11,9 @@ allowed_approvals_reviewers = ["user"]
 unified_exec = false
 
 # Second layer only. The profile's deny entries (config.toml) are the first.
+# No "/state/codex" (CODEX_HOME) here or in the profile: 0.160.1 always adds CODEX_HOME/tmp/arg0 (its
+# execve wrapper and codex-linux-sandbox) as a readable root, refuses to load a managed deny_read on an
+# ancestor of it, and bubblewrap masks a denied ancestor over it. CODEX_HOME is not a readable root of
+# the profile, so the sandbox does not see it (native-shell/README.md sections 4 and 5).
 [permissions.filesystem]
-deny_read = ["/control", "/run/codex-broker", "/state/codex", "/state/home"]
+deny_read = ["/control", "/run/codex-broker", "/state/home"]
