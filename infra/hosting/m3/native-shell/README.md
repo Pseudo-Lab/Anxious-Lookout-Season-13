@@ -195,7 +195,11 @@ carries no `executor`.
 Before the production window, the user checks the same points read-only, because "every mutator stopped" names
 different things if production differs: whether the host `issue16-*` units and timers are enabled; the
 `runner-controller` replicas and image; the API and controller allowlists; pending runner requests in the
-database; and the runner and executor image of every binding.
+database; the runner and executor image of every binding; and the image of **every container and init
+container** of the API and `runner-controller` Deployments. They can differ: on the development VM the API's
+`runner-pool-input` init container was still on an earlier runtime than its `api` container, because an earlier
+rollout patched only the `api` container. The release step then sets every one of them to the new runtime, and
+the rollback record keeps each container's own old image.
 
 ### Order
 
