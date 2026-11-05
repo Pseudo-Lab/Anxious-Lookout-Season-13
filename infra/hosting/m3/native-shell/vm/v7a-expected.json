@@ -1,0 +1,50 @@
+{
+  "canary": "00000000-0000-4000-8000-000000005804",
+  "forward": {
+    "inputs": {
+      "owner": "00000000-0000-4000-8000-000000005804",
+      "state": "5ff583e9-abe1-4ef8-b277-4a5afead6b80",
+      "generation": 7,
+      "revision": 28,
+      "oldPlanSha256": "86c691bae85544e319f0528d69fc3c878d59b919c065099b0adb6e9c92a6a481",
+      "newImage": "docker.io/library/anxious-dev-runner@sha256:840679946e8071b5495b9609c6e9f33c0708d9196e712e262361e200d4641801"
+    },
+    "report": {
+      "owner": "00000000-0000-4000-8000-000000005804",
+      "state": "5ff583e9-abe1-4ef8-b277-4a5afead6b80",
+      "generation": 7,
+      "revision": 28,
+      "oldImage": "docker.io/library/anxious-dev-runner@sha256:067c77de5d6b3673ece9b243f7753a9184a007cd44ab0ea1c93dc3044458a5e4",
+      "newImage": "docker.io/library/anxious-dev-runner@sha256:840679946e8071b5495b9609c6e9f33c0708d9196e712e262361e200d4641801",
+      "oldPlanSha256": "86c691bae85544e319f0528d69fc3c878d59b919c065099b0adb6e9c92a6a481",
+      "newPlanSha256": "3d0c611a636f10c94ffe1f07560bb7073827c71fb7f5810e7a22a88fc06c91b4"
+    }
+  },
+  "reverse": {
+    "inputs": {
+      "owner": "00000000-0000-4000-8000-000000005804",
+      "state": "5ff583e9-abe1-4ef8-b277-4a5afead6b80",
+      "generation": 7,
+      "revision": 28,
+      "oldPlanSha256": "3d0c611a636f10c94ffe1f07560bb7073827c71fb7f5810e7a22a88fc06c91b4",
+      "newImage": "docker.io/library/anxious-dev-runner@sha256:067c77de5d6b3673ece9b243f7753a9184a007cd44ab0ea1c93dc3044458a5e4"
+    },
+    "report": {
+      "owner": "00000000-0000-4000-8000-000000005804",
+      "state": "5ff583e9-abe1-4ef8-b277-4a5afead6b80",
+      "generation": 7,
+      "revision": 28,
+      "oldImage": "docker.io/library/anxious-dev-runner@sha256:840679946e8071b5495b9609c6e9f33c0708d9196e712e262361e200d4641801",
+      "newImage": "docker.io/library/anxious-dev-runner@sha256:067c77de5d6b3673ece9b243f7753a9184a007cd44ab0ea1c93dc3044458a5e4",
+      "oldPlanSha256": "3d0c611a636f10c94ffe1f07560bb7073827c71fb7f5810e7a22a88fc06c91b4",
+      "newPlanSha256": "86c691bae85544e319f0528d69fc3c878d59b919c065099b0adb6e9c92a6a481"
+    }
+  },
+  "otherPlans": {
+    "00000000-0000-4000-8000-000000000048": "75f6336aa81a874f512e2388c7b8c3060ad274900668e938a00174523f938228",
+    "00000000-0000-4000-8000-000000005801": "b27150dfcd18b2201b963a1e6c8a14ff26dd0d4ddc70c0e7c67c41789efbde5e",
+    "00000000-0000-4000-8000-000000005802": "d40a779ce92b518c673be89a24c8536dbfe972089092f2a67c15cad942985afd",
+    "00000000-0000-4000-8000-000000005803": "28a60c7d1ff40954ceb84050aa8eb15d589e2ab1b5e97521d2dc5db30bad21b4"
+  },
+  "inputsSha256": "0a25ed427dd66c5f167ae62e9f607dab30c96bf2f5271b92de43528dc8110d03"
+}
