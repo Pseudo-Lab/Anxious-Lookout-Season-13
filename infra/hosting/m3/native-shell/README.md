@@ -201,6 +201,18 @@ container** of the API and `runner-controller` Deployments. They can differ: on 
 rollout patched only the `api` container. The release step then sets every one of them to the new runtime, and
 the rollback record keeps each container's own old image.
 
+"The API and controller allowlists" means `CODEX_USER_RUNNER_ALLOWLIST` on the `api` container and on the
+`controller` container: runner entry is gated there (`app/user_runners.py` `selected()`,
+`ops/runner_provision_worker.py` `allowed()`). The pre-check also lists the env names of every init container
+and records any `CODEX_USER_RUNNER_ALLOWLIST` found there as a separate observation, together with that init
+container's actual command and what the command calls. Such a value is not treated as an entry control, and it
+is not assumed to be unused, until that is checked. On the development VM the `runner-pool-input` init
+container carries one (the four owners other than the canary). It was left there by earlier work and is not
+from `ops/runner_rollout.py`, which gives the init container no env. Its command is exactly `INIT` from
+`ops/runner_rollout.py` (the same command digest before and after V7a, and the same as the digest computed from
+the source). That code copies `pool.json` with `runner.auth` and does not read the variable. This holds for that
+command only, not for init containers in general. V7a did not change the value.
+
 ### Order
 
 Run it after #61 and #63, or inside their window. Either way it is the same window procedure: one freeze,
