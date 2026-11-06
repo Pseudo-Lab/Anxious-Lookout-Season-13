@@ -257,6 +257,25 @@ one runner-Pod drain and one rollback point.
      root0600, no symlink, written to a temporary file in the same directory, then `mv -T`.
 3. **Release images.** Deploy the new API/runtime/worker images by the existing rollout procedure. They
    render every Pod as one `runner` container, from a v1 or v2 plan alike.
+   - **The host preparer is part of this step.** It is a separate component from the in-cluster
+     runner-controller: the `issue16-controller` service runs the worker (provisioner) image's
+     `worker.py controller` with its own `CODEX_USER_RUNNER_ALLOWLIST` and `--inputs` path. It prepares
+     storage and publishes the first binding of a **new** owner only. Swapping an existing owner's binding
+     (steps 4 and 6) does not go through it.
+   - Before the window, the user checks it read-only (agents do not read production host files):
+     - the image ID the unit's script runs;
+     - the SHA-256 of the `worker.py` it mounts, against the reviewed release's file;
+     - its allowlist;
+     - its `--inputs` path (the step 2 file).
+     These can drift. On the development VM (2026-11-06) the script still ran an image from before #61,
+     and its `worker.py` matched no version in the repository. Where that file came from is unknown.
+   - Release: the reviewed worker image, the reviewed `worker.py` (compared by SHA-256), and the allowlist
+     the rollout procedure sets. Record the old image ID, the old file's hash and the old allowlist for the
+     rollback.
+   - While the window runs, entry is frozen (step 1) and both allowlists are narrowed (step 5), so no new
+     owner reaches the preparer. After the window, the next new owner is prepared by the preparer this step
+     installed. If that is not the #68 one, the owner's first binding comes from the old code, which is
+     not the native-shell v1 path.
 4. **Existing binding runner images: the canary owner only.** Swap the canary owner's binding first;
    every other binding waits for step 6. For each swap, use `ops.runner_binding_image`
    (`multi-user-runners/CUTOVER.md` section 6):
@@ -285,8 +304,16 @@ one runner-Pod drain and one rollback point.
    report. No other binding is swapped.
 6. **Remaining binding runner images**, with runner-controller stopped again: the step 4 swap for every
    other binding from step 1. Then widen entry as in the rollout procedure: restore both allowlists to the
-   values recorded in step 1, then start runner-controller. The development VM rehearsal (V7a) does steps
-   1–5 the same way and keeps entry narrowed until V7b.
+   values recorded in step 1, then start runner-controller.
+
+**What the development VM rehearsal (V7a) did and did not do.**
+- V7a did steps 1, 2, 4 and 5 as written, and keeps entry narrowed until V7b.
+- Of step 3, it did only the API and runner-controller runtime image.
+- It did not change the host preparer (worker image, `worker.py`, allowlist). The unit was disabled and did
+  not run during V7a, so the V7a result stands: the switch, the canary restriction and unchanged fences.
+- V7a is not evidence for the preparer part of step 3. The development VM changes the preparer in a
+  separate stage, before its first new owner. That stage and the rest of the development-VM-only procedure
+  (broker account, new fixture owner) are in `vm/` (V6a, V6b), not in this section.
 
 Swapping the images is what moves owners onto the native shell. The order of steps 2 and 3 only decides
 which owners could get a binding while one half is in place. With every mutator stopped from step 1 to
@@ -315,7 +342,9 @@ Same precondition: no Pending/Running runner Pod, entry frozen, every mutator st
    Which one is a user decision at the time of the rollback.
 3. **Controller input.** Install the step 1 copy of `inputs.json` (with `executor`) the same way:
    temporary file, `mv -T`, root0600.
-4. **Release images.** Re-deploy the previous API/runtime/worker images.
+4. **Release images.** Re-deploy the previous API/runtime/worker images. That includes the host preparer
+   as recorded in step 3 (image ID, `worker.py` by SHA-256, allowlist). Check each one read-only after
+   the change.
 5. Leave the section 2 profile and section 1 sysctl in place. Neither depends on the release.
 6. Resume the mutators and lift the freeze on the old release.
 
