@@ -48,10 +48,28 @@ failed; 6 inputs.json could not be written; checks print booleans only):
    The runner-controller does not read inputs.json; the host preparer reads it when stage V6b runs it.
 No backup taken after step 2 holds the new id. A failure stops; nothing is undone in the run.
 
-restore (only on a PM decision; rc 3 refused; 5 failed): refuses while /data/codex/auth.json exists that is
-not the synthetic file's identity (the user runs `codex logout` first, which revokes the session at OpenAI);
-moves /data/mock-auth.json.r1 back, puts the StatefulSet template back from the mock-off backup (test = UID,
-resourceVersion), waits for the Pod, and writes the original inputs.json bytes back if bind changed them.
+Temporary files that may hold the account id (the patch file, the inputs.json temporary file) are removed in
+the same run on every exit path the process can handle: success, failure, SIGINT, SIGTERM and SIGHUP (each
+handled signal raises inside the run, so the cleanup in `finally` runs). If a removal fails, the run prints
+"TEMPORARY FILE NOT REMOVED: <path>" and exits 71. SIGKILL and power loss are not covered: back then checks
+read-only for `private/.patch-*` and `inputs.json.v6a-tmp` and reports to PM.
+
+restore (only on a PM decision; rc 3 refused; 5 failed): works from whatever state an earlier mock-off, bind
+or restore left. It reads the state first and does only the steps still missing, in this order:
+  a. /data/codex/auth.json present and NOT the synthetic file (inode, size and mtime differ from the identity
+     mock-off recorded) -> refused: a real login is present. The user removes it with `codex logout` first.
+     That command removes the stored credentials; whether it also invalidates the session server-side is not
+     shown here, so V9 does not rely on it for revocation.
+  b. /data/mock-auth.json.r1 present, auth.json absent -> mv -n back; the result must have the recorded
+     identity.
+  c. StatefulSet without the mock -> the template from the mock-off backup (test = UID, resourceVersion);
+     rollout. StatefulSet already back on the mock layout -> no patch, only the Pod check.
+  d. inputs.json not the V7a file and a bind backup exists -> the original bytes back (temporary file in the
+     same directory, rename) -> must be the V7a file.
+  The states it accepts are exactly the ones mock-off, bind and restore can leave: (mock layout, auth.json
+  moved away), (mock-free, auth.json absent: after mock-off, or after a logout), (mock-free, synthetic
+  auth.json back: restore stopped after b), (mock layout, synthetic auth.json: restore stopped after c), each
+  with inputs.json either the V7a file or the bound one. Anything else is refused and printed.
 
 Output is fixed messages, UIDs, states and booleans: no account id, token, Secret data or command error text.
 """
@@ -59,6 +77,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -97,6 +116,34 @@ class Stop(Exception):
     def __init__(self, code, message):
         super().__init__(message)
         self.code, self.message = code, message
+
+
+class Interrupted(BaseException):
+    """SIGINT/SIGTERM/SIGHUP, raised inside the run so every `finally` cleanup runs."""
+
+
+def interrupted(signum, frame):
+    signal.signal(signum, signal.SIG_IGN)  # one signal is enough; a second one must not cut the cleanup
+    raise Interrupted()
+
+
+TEMPORARY = []  # files this run created that may hold the account id
+
+
+def remove_temporary():
+    """Remove every temporary file this run created; the paths that could not be removed."""
+    left = []
+    while TEMPORARY:
+        path = TEMPORARY.pop()
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+        if os.path.lexists(path):
+            left.append(path)
+    return left
 
 
 def say(text):
@@ -272,18 +319,24 @@ def rollout(code, old_uid, containers):
 def patch(ops, code, private):
     """kubectl patch --patch-file with a root 0600 file under private/, removed in the same run."""
     path = os.path.join(private, '.patch-%d' % os.getpid())
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    TEMPORARY.append(path)
     try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'w') as stream:
             json.dump(ops, stream)
         return run([K3S, 'kubectl', '-n', NS, 'patch', 'statefulset', STS, '--type=json', '--patch-file', path])[0]
     finally:
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
-        if os.path.exists(path):
-            raise Stop(code, 'PATCH FILE NOT REMOVED: %s (tell PM)' % path)
+        left = remove_temporary()
+        if left:
+            raise Stop(71, 'TEMPORARY FILE NOT REMOVED: %s (tell PM)' % ', '.join(left))
+
+
+def identity(path, code):
+    """'<inode> <size> <mtime>' of a file in the broker container, or 'absent'. Not secret."""
+    rc, out = in_broker("if [ -e %s ]; then stat -c '%%i %%s %%Y' %s; else echo absent; fi" % (path, path), code, '')
+    if rc != 0 or not (out == 'absent' or re.fullmatch(r'\d+ \d+ \d+', out)):
+        raise Stop(code, 'broker file identity check failed')
+    return out
 
 
 def read_account(code):
@@ -322,6 +375,23 @@ def record(ev, **items):
         os.fsync(stream.fileno())
     os.replace(path + '.tmp', path)
     return value
+
+
+def replace_inputs(data):
+    """Write inputs.json via a root 0600 temporary file in the same directory and rename it. The temporary file
+    is removed on every handled exit path (it may hold the account id). True when the rename happened."""
+    temp = INPUTS + '.v6a-tmp'
+    TEMPORARY.append(temp)
+    try:
+        write_new(temp, data)
+        os.replace(temp, INPUTS)
+        return True
+    except OSError:
+        return False
+    finally:
+        left = remove_temporary()
+        if left:
+            raise Stop(71, 'TEMPORARY FILE NOT REMOVED: %s (tell PM)' % ', '.join(left))
 
 
 def inputs_bytes(code):
@@ -364,10 +434,13 @@ def mock_off():
     record(ev, action='mock-off', started=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), oldPod=old_uid,
            resourceVersion=d['metadata']['resourceVersion'])
     say('evidence: %s' % ev)
+    synthetic = identity(AUTH, 4)
+    record(ev, syntheticIdentity=synthetic, kept='pending')
     rc, _ = in_broker('mv -n %s %s' % (AUTH, KEPT), 4, '')
-    if rc != 0 or present(AUTH, 4) != 'absent' or present(KEPT, 4) != '10001 600 1 regular file':
+    if rc != 0 or present(AUTH, 4) != 'absent' or present(KEPT, 4) != '10001 600 1 regular file' \
+            or identity(KEPT, 4) != synthetic:
         record(ev, kept='failed')
-        raise Stop(4, 'synthetic auth.json not moved to %s' % KEPT)
+        raise Stop(4, 'synthetic auth.json not moved to %s with its identity' % KEPT)
     record(ev, kept='done')
     say('synthetic auth.json kept as %s' % KEPT)
     base = '/spec/template/spec'
@@ -451,14 +524,10 @@ def bind():
     value = json.loads(original)
     value['providerAccountId'] = account
     data = (json.dumps(value, indent=2, sort_keys=True) + '\n').encode()
-    temp = INPUTS + '.v6a-tmp'
     record(ev, inputs='pending')
-    try:
-        write_new(temp, data)
-        os.replace(temp, INPUTS)
-    except OSError:
+    if not replace_inputs(data):
         record(ev, inputs='failed')
-        raise Stop(6, 'inputs.json not written (temporary %s may remain)' % temp)
+        raise Stop(6, 'inputs.json not written (the temporary file was removed)')
     now = json.loads(inputs_bytes(6))
     same = {k: v for k, v in now.items() if k != 'providerAccountId'} == \
         {k: v for k, v in json.loads(original).items() if k != 'providerAccountId'}
@@ -474,6 +543,7 @@ def bind():
 
 
 def restore():
+    """Does only the steps still missing; see the module docstring for the accepted states."""
     if os.geteuid() != 0:
         raise Stop(3, 'run as root')
     found = runs()
@@ -481,54 +551,88 @@ def restore():
         raise Stop(3, 'expected exactly one v6a evidence directory')
     ev = os.path.join(EVIDENCE, found[0])
     private = os.path.join(ev, 'private')
+    state = json.load(open(os.path.join(ev, 'run.json')))
     before = json.load(open(os.path.join(private, 'statefulset-before.json')))
-    if present(AUTH, 3) != 'absent':
-        raise Stop(3, 'auth.json exists: the user runs `codex logout` in the broker container first')
-    if present(KEPT, 3) != '10001 600 1 regular file':
-        raise Stop(3, 'the kept synthetic file is missing')
-    fences = entry_closed(3, 'precheck')
+    synthetic = state.get('syntheticIdentity')
     d = statefulset(3)
-    if not unmocked(d):
-        raise Stop(3, 'StatefulSet is not the mock-free layout')
-    old_uid = broker_pod(3, ['broker'])
-    rc, _ = in_broker('mv -n %s %s' % (KEPT, AUTH), 5, '')
-    if rc != 0 or present(AUTH, 5) != '10001 600 1 regular file':
-        raise Stop(5, 'synthetic auth.json not moved back')
-    ops = [{'op': 'test', 'path': '/metadata/uid', 'value': STS_UID},
-           {'op': 'test', 'path': '/metadata/resourceVersion', 'value': d['metadata']['resourceVersion']},
-           {'op': 'replace', 'path': '/spec/template', 'value': before['spec']['template']}]
-    patch(ops, 5, private)
-    if not mocked(statefulset(5)):
-        raise Stop(5, 'StatefulSet template not restored')
-    uid = rollout(5, old_uid, ['broker', 'mock-oauth'])
-    kept = os.path.join(private, 'inputs.json.before-bind')
-    if os.path.exists(kept):
-        with open(kept, 'rb') as stream:
+    layout_now = 'mock' if mocked(d) else ('mock-free' if unmocked(d) else 'other')
+    auth, kept = identity(AUTH, 3), identity(KEPT, 3)
+    auth_kind = 'absent' if auth == 'absent' else ('synthetic' if auth == synthetic else 'other')
+    inputs_now = hashlib.sha256(inputs_bytes(3)).hexdigest()
+    backup = os.path.join(private, 'inputs.json.before-bind')
+    say('restore: state found: StatefulSet %s, auth.json %s, kept copy %s, inputs.json %s' % (
+        layout_now, auth_kind, 'present' if kept != 'absent' else 'absent',
+        'V7a file' if inputs_now == INPUTS_V7A else 'changed'))
+    if layout_now == 'other' or synthetic is None:
+        raise Stop(3, 'not a state mock-off, bind or restore can leave (StatefulSet layout, or no recorded identity)')
+    if auth_kind == 'other':
+        raise Stop(3, 'a real login is present: the user runs `codex logout` in the broker container first')
+    if not ((auth_kind == 'absent' and kept == synthetic) or (auth_kind == 'synthetic' and kept == 'absent')):
+        raise Stop(3, 'auth.json and the kept copy are not one synthetic file in one of the two places')
+    if inputs_now != INPUTS_V7A and not os.path.exists(backup):
+        raise Stop(3, 'inputs.json changed but no bind backup exists')
+    fences = entry_closed(3, 'precheck')
+    if auth_kind == 'absent':
+        rc, _ = in_broker('mv -n %s %s' % (KEPT, AUTH), 5, '')
+        if rc != 0 or identity(AUTH, 5) != synthetic or identity(KEPT, 5) != 'absent':
+            raise Stop(5, 'synthetic auth.json not moved back with its identity')
+        record(ev, restoreMovedBack=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+        say('restore: synthetic auth.json moved back (identity as recorded)')
+    if layout_now == 'mock-free':
+        old_uid = broker_pod(5, ['broker'])
+        ops = [{'op': 'test', 'path': '/metadata/uid', 'value': STS_UID},
+               {'op': 'test', 'path': '/metadata/resourceVersion', 'value': d['metadata']['resourceVersion']},
+               {'op': 'replace', 'path': '/spec/template', 'value': before['spec']['template']}]
+        patch(ops, 5, private)
+        if not mocked(statefulset(5)):
+            raise Stop(5, 'StatefulSet template not restored')
+        record(ev, restorePatched=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+        uid = rollout(5, old_uid, ['broker', 'mock-oauth'])
+    else:
+        if run([K3S, 'kubectl', '-n', NS, 'rollout', 'status', 'statefulset/' + STS, '--timeout=300s'], 330)[0] != 0:
+            raise Stop(5, 'broker rollout did not finish')
+        uid = broker_pod(5, ['broker', 'mock-oauth'])
+        if not healthz(5):
+            raise Stop(5, 'broker /healthz is not 200')
+    if identity(AUTH, 5) != synthetic:
+        raise Stop(5, 'auth.json is not the synthetic file after the rollout')
+    if inputs_now != INPUTS_V7A:
+        with open(backup, 'rb') as stream:
             data = stream.read()
-        temp = INPUTS + '.v6a-tmp'
-        write_new(temp, data)
-        os.replace(temp, INPUTS)
+        if hashlib.sha256(data).hexdigest() != INPUTS_V7A or not replace_inputs(data):
+            raise Stop(5, 'inputs.json not restored')
         if hashlib.sha256(inputs_bytes(5)).hexdigest() != INPUTS_V7A:
             raise Stop(5, 'inputs.json not restored')
     entry_closed(5, 'end', fences)
     record(ev, restored=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), restoredPod=uid)
-    say('restored: mock layout, Pod %s 2/2, synthetic auth.json back, inputs.json the V7a file' % uid)
+    say('restored: mock layout, Pod %s 2/2, synthetic auth.json in place, inputs.json the V7a file' % uid)
 
 
 def main(argv):
     if len(argv) != 2 or argv[1] not in ('precheck', 'mock-off', 'bind', 'restore'):
         say('usage: v6a-broker.py precheck|mock-off|bind|restore')
         return 2
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, interrupted)
+    code = 0
     try:
         {'precheck': precheck_mock, 'mock-off': mock_off, 'bind': bind, 'restore': restore}[argv[1]]()
     except Stop as stop:
         say('STOP rc %d: %s' % (stop.code, stop.message))
-        return stop.code
-    except KeyboardInterrupt:
-        say('STOP rc 130: interrupted (state printed above; back checks read-only)')
-        return 130
-    say('result rc=0')
-    return 0
+        code = stop.code
+    except Interrupted:
+        say('STOP rc 130: interrupted by a signal (state printed above; back checks read-only)')
+        code = 130
+    finally:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        left = remove_temporary()
+        if left:
+            say('TEMPORARY FILE NOT REMOVED: %s (tell PM)' % ', '.join(left))
+            code = 71
+    if code == 0:
+        say('result rc=0')
+    return code
 
 
 if __name__ == '__main__':

@@ -307,8 +307,13 @@ one runner-Pod drain and one rollback point.
    values recorded in step 1, then start runner-controller.
 
 **What the development VM rehearsal (V7a) did and did not do.**
-- V7a did steps 1, 2, 4 and 5 as written, and keeps entry narrowed until V7b.
+- V7a did steps 1, 2 and 4 as written.
 - Of step 3, it did only the API and runner-controller runtime image.
+- Of step 5, it did only the setup: both allowlists set to the canary owner, runner-controller started
+  again, a 90-second observation with no runner Pod. It started no runner Pod and ran no turn. None of
+  the step 5 pass criteria (Pod spec, startup self-check, first turn, approved shell command, stop) were
+  checked. The canary's functional verdict is still open; it comes after V6-pre. Entry stays narrowed until
+  V7b.
 - It did not change the host preparer (worker image, `worker.py`, allowlist). The unit was disabled and did
   not run during V7a, so the V7a result stands: the switch, the canary restriction and unchanged fences.
 - V7a is not evidence for the preparer part of step 3. The development VM changes the preparer in a
