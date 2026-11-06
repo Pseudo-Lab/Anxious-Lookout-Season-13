@@ -49,10 +49,13 @@ failed; 6 inputs.json could not be written; checks print booleans only):
 No backup taken after step 2 holds the new id. A failure stops; nothing is undone in the run.
 
 Temporary files that may hold the account id (the patch file, the inputs.json temporary file) are removed in
-the same run on every exit path the process can handle: success, failure, SIGINT, SIGTERM and SIGHUP (each
-handled signal raises inside the run, so the cleanup in `finally` runs). If a removal fails, the run prints
-"TEMPORARY FILE NOT REMOVED: <path>" and exits 71. SIGKILL and power loss are not covered: back then checks
-read-only for `private/.patch-*` and `inputs.json.v6a-tmp` and reports to PM.
+the same run on every exit path the process can handle: success, failure, SIGINT, SIGTERM and SIGHUP (the
+first handled signal sets all three to ignored and raises inside the run, so the cleanup in `finally` runs
+and no later signal cuts it). Only files this run created are removed. A file is registered right after its
+O_EXCL create succeeds, with the three signals blocked between the two. An existing path is never this run's:
+it is left as it is and the run stops with "TEMPORARY PATH ALREADY EXISTS" (rc 72). If a removal fails, the
+run prints "TEMPORARY FILE NOT REMOVED: <path>" and exits 71. SIGKILL and power loss are not covered: back
+then checks read-only for `private/.patch-*` and `inputs.json.v6a-tmp` and reports to PM.
 
 restore (only on a PM decision; rc 3 refused; 5 failed): works from whatever state an earlier mock-off, bind
 or restore left. It reads the state first and does only the steps still missing, in this order:
@@ -122,28 +125,57 @@ class Interrupted(BaseException):
     """SIGINT/SIGTERM/SIGHUP, raised inside the run so every `finally` cleanup runs."""
 
 
+SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+def ignore_signals():
+    for signum in SIGNALS:
+        signal.signal(signum, signal.SIG_IGN)
+
+
 def interrupted(signum, frame):
-    signal.signal(signum, signal.SIG_IGN)  # one signal is enough; a second one must not cut the cleanup
+    ignore_signals()  # one handled signal is enough; no later one (of any of the three) can cut the cleanup
     raise Interrupted()
 
 
-TEMPORARY = []  # files this run created that may hold the account id
+TEMPORARY = []  # files THIS run created (O_EXCL succeeded) that may hold the account id
+
+
+def create_temporary(path):
+    """O_EXCL-create a root 0600 file and register it, with the three signals blocked between the two, so a
+    file is registered exactly when this run created it. An existing path is not this run's: it is left as it
+    is and the run stops (rc 72)."""
+    old = signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
+    try:
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            raise Stop(72, 'TEMPORARY PATH ALREADY EXISTS (not created by this run, left as it is): %s (tell PM)'
+                       % path) from None
+        except OSError:
+            raise Stop(72, 'temporary file not created: %s' % path) from None
+        TEMPORARY.append(path)
+        return fd
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old)
 
 
 def remove_temporary():
-    """Remove every temporary file this run created; the paths that could not be removed."""
-    left = []
-    while TEMPORARY:
-        path = TEMPORARY.pop()
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
-        if os.path.lexists(path):
-            left.append(path)
-    return left
+    """Remove every file this run created and still owns; the paths that could not be removed."""
+    old = signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
+    try:
+        left = []
+        while TEMPORARY:
+            path = TEMPORARY.pop()
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            if os.path.lexists(path):
+                left.append(path)
+        return left
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old)
 
 
 def say(text):
@@ -319,9 +351,8 @@ def rollout(code, old_uid, containers):
 def patch(ops, code, private):
     """kubectl patch --patch-file with a root 0600 file under private/, removed in the same run."""
     path = os.path.join(private, '.patch-%d' % os.getpid())
-    TEMPORARY.append(path)
+    fd = create_temporary(path)
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'w') as stream:
             json.dump(ops, stream)
         return run([K3S, 'kubectl', '-n', NS, 'patch', 'statefulset', STS, '--type=json', '--patch-file', path])[0]
@@ -381,10 +412,18 @@ def replace_inputs(data):
     """Write inputs.json via a root 0600 temporary file in the same directory and rename it. The temporary file
     is removed on every handled exit path (it may hold the account id). True when the rename happened."""
     temp = INPUTS + '.v6a-tmp'
-    TEMPORARY.append(temp)
+    fd = create_temporary(temp)
     try:
-        write_new(temp, data)
-        os.replace(temp, INPUTS)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        old = signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
+        try:
+            os.replace(temp, INPUTS)
+            TEMPORARY.remove(temp)  # renamed: the path is no longer this run's temporary file
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old)
         return True
     except OSError:
         return False
@@ -624,8 +663,7 @@ def main(argv):
         say('STOP rc 130: interrupted by a signal (state printed above; back checks read-only)')
         code = 130
     finally:
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        ignore_signals()
         left = remove_temporary()
         if left:
             say('TEMPORARY FILE NOT REMOVED: %s (tell PM)' % ', '.join(left))
