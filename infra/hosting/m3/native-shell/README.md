@@ -299,7 +299,8 @@ one runner-Pod drain and one rollback point.
      These can drift. On the development VM (2026-11-06/08) the script still ran an image from before #61,
      its token had expired on 2026-10-26, its DSN named a postgres Pod IP from before the 2026-11-04 reboot (the
      V6b preparer run on 2026-11-08 exited 1 with no output; a TCP connect to that address timed out; the DSN
-     was then moved to the Pod IP and, by user decision, to the `postgres-preparer` ClusterIP), and its
+     was then moved to the current Pod IP; by user decision it is to move to the `postgres-preparer`
+     ClusterIP, not yet done on 2026-11-08), and its
      `worker.py` was the #46 file (`997ba77`,
      `multi-user-runners/rollout/worker.py`). That file differs from the reviewed one (unchanged since
      `952e409`) only in `run_batch`: it still accepts the host supply and observer roles that #60 and #61
