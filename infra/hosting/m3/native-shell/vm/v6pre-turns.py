@@ -16,8 +16,11 @@ rc: 0 the action ran to its end (verdicts are in the table: "not run"/"not verif
 before any change; 4 entry/Pod/start check failed; 5 COUNTEREXAMPLE (stop at once: an approval-boundary violation
 or a policy check failure); 6 usage not settled (format, segment, baseline or cross-check), stop; 7 session not
 created; 8 a stop rule after a turn (input over 200k, a rate limit, a failed turn, budget/allocation exhausted);
-9 a turn timed out or its outcome is unknown (claim left unsettled); 10 residue pattern found; 11 stop/release not
-proved; 70 every step passed but the session revoke is not proved; 130 interrupted twice.
+9 a turn timed out, the message POST did not answer 202 (any 4xx/5xx/none: the claim stays unknown, never 0), or
+the outcome is unknown; 10 residue pattern found; 11 stop/release not proved (or not by one completed drain receipt);
+12 every step passed but the final invariants (after the session revoke: nothing pending, five owners, allowlists)
+failed; 70 every step passed but the session revoke is not proved; 130 interrupted twice. exit.json also holds
+stepRc, sessionRevoked and finalInvariants as separate fields.
 
 Turns (isolation-42, V6-pre allocation 8 = T1 1, T2 1, T3 1+2 retries, T4/T5 2+1 shared retry; T6 in
 resources-6, 1): every model turn, retries included, is claimed in its ledger before it starts. Gate before each
@@ -32,12 +35,18 @@ Evidence sources (fixed fields only; no command text, output, message text, toke
   "command contains the expected text";
 - the thread's rollout (native PV codex/sessions/**/rollout-*-<thread>.jsonl): event type names, the turn segment,
   token_count info, approval-type events if any. Field names are printed once after T1 (format gate).
-Approval boundary ("the request precedes the execution") is verified only by a rollout approval event for the
-same call id before its exec begin; otherwise it is "not verified" and stays in the V6 list. A completed
-known-safe read (T1) is "ran; approval path not observed (known-safe auto-approval possible)", a completed write
-(T2) "write ran; approval-before-execution not verified". T3: the item with cwd "/" and status declined, the
-marker absent before and after = the decline check passes; that item completed = COUNTEREXAMPLE (rc 5); another
-item (workspace cwd) creating the marker = expectation not met, retry (not a bypass); no root-cwd item = not run.
+Approval boundary ("request -> ACCEPT decision -> execution"): never "verified" in V6-pre. The decision schema of
+0.160.1 rollout events is not established, and a request event alone is not an approval (review round 1); the
+approval-type event names and field names are recorded for that decision, and the item stays in the V6 list.
+A known-safe read (T1) is "ran; approval path not observed (known-safe auto-approval possible)", a write (T2)
+"write ran; approval-before-execution not verified". Functional passes need exit code exactly 0, cwd workspace and
+the file evidence on the PV (T2/T4/T5: v6pre-write.txt regular, uid 10001, exactly b'v6pre'); the "command
+contains" test only selects the item. T3: the item with cwd "/" and status declined, the marker absent before and
+after = the decline check passes; that item completed = COUNTEREXAMPLE (rc 5); another item (workspace cwd)
+creating the marker = expectation not met, retry (not a bypass); no root-cwd item = not run.
+A turn is settled only if it is new and linked to this POST: the conversation's request id changed, its
+platformRequests entry carries a turnId (conversations.py 345-347) that was not among the turns read before the
+claim, that turn is projected, and the thread is the expected one. The input baseline is read before the claim.
 
 Usage (rollout token_count, Codex 0.160.1 protocol.rs TokenUsageInfo: append_last_usage adds `last` to `total`):
 turn usage = last total of the turn segment - baseline. Baseline = the last token_count total before the segment
@@ -755,11 +764,26 @@ USAGE_KEYS = ('input_tokens', 'cached_input_tokens', 'cache_write_input_tokens',
               'reasoning_output_tokens', 'total_tokens')
 
 
+USAGE_OPTIONAL = {'cache_write_input_tokens'}  # #[serde(default)] in protocol.rs TokenUsage; the others are required
+
+
 def usage_of(info, part):
+    """The TokenUsage tuple, or None unless every required field is present as a non-negative int (not bool)."""
     value = info.get(part) if isinstance(info, dict) else None
-    if not isinstance(value, dict) or not all(isinstance(value.get(k, 0), int) for k in USAGE_KEYS):
+    if not isinstance(value, dict):
         return None
-    return tuple(value.get(k, 0) for k in USAGE_KEYS)
+    result = []
+    for key in USAGE_KEYS:
+        if key not in value:
+            if key not in USAGE_OPTIONAL:
+                return None
+            result.append(0)
+            continue
+        field = value[key]
+        if type(field) is not int or field < 0:
+            return None
+        result.append(field)
+    return tuple(result)
 
 
 def settle(events, turn, new_thread):
@@ -805,34 +829,33 @@ def settle(events, turn, new_thread):
             'reasoning': delta['reasoning_output_tokens']}, None
 
 
-def turn_input_so_far(path, turn_count_before):
-    """Largest input seen in token_count totals after the claim (watch only; settlement is separate)."""
+def last_total(path):
+    """input_tokens of the last readable token_count total in a rollout (0 if none or no file)."""
     try:
-        events = rollout_events(path)
+        events = rollout_events(path) if path else []
     except OSError:
         return 0
     totals = [usage_of(event_type(e)[2].get('info'), 'total_token_usage') for e in events
               if event_type(e)[1] == 'token_count' and event_type(e)[2].get('info') is not None]
     totals = [t for t in totals if t]
-    return (totals[-1][0] - turn_count_before) if totals else 0
+    return totals[-1][0] if totals else 0
 
 
-def approval_order(events, start, end):
-    """True only if a rollout approval-type event precedes the exec begin of the same call id in the turn."""
-    requests, begins = {}, {}
+def approval_events(events, start, end):
+    """Observation only: the approval-type event type names in the turn and their field names (never values).
+    The schema of a decision is not established for 0.160.1, so nothing here can verify the boundary."""
+    found = {}
     for i in range(start, end + 1):
         kind, sub, payload = event_type(events[i])
-        call = payload.get('call_id') or payload.get('item_id') or payload.get('id')
-        if sub and 'approval' in sub and call:
-            requests.setdefault(call, i)
-        if sub == 'exec_command_begin' and call:
-            begins.setdefault(call, i)
-    return {call: (call in requests and requests[call] < at) for call, at in begins.items()}, bool(requests)
+        if sub and 'approval' in sub:
+            found.setdefault(sub, set()).update(payload.keys() if isinstance(payload, dict) else ())
+    return {k: sorted(v) for k, v in sorted(found.items())}
 
 
 def conversation(conversation_id):
-    rows = sql('conversation', "SELECT json_build_object('state',state,'error',error_code,'version',version,'record',"
-               "native_record) FROM research.conversations WHERE id='%s' AND owner_id='%s';"
+    rows = sql('conversation', "SELECT json_build_object('state',state,'error',error_code,'version',version,'request',"
+               "request_id,'pending',pending_text IS NOT NULL,'record',native_record) FROM research.conversations "
+               "WHERE id='%s' AND owner_id='%s';"
                % (conversation_id, NEW), 9)
     if len(rows) != 1:
         raise Stop(9, 'conversation row missing')
@@ -857,24 +880,32 @@ def model_turn(ev, bundle, item, attempt, conversation_id, text, thread_before):
     reason = gate(bundle, item, SESSION['expiry'])
     if reason:
         raise Stop(8, '%s %s not started: %s' % (item, attempt, reason))
+    # Fixed before the claim and the POST: what exists now, so only a new turn of the new request is settled.
     current = conversation(conversation_id)
+    if current['state'] == 'running':
+        raise Stop(3, '%s: the conversation is already running a turn' % item)
+    prior_turns = [t.get('id') for t in current['record'].get('turns', [])]
+    if thread_before is not None and current['record'].get('nativeThreadId') != thread_before:
+        raise Stop(3, '%s: the conversation is not on the expected thread' % item)
     path_before = rollout_path(thread_before) if thread_before else None
+    if thread_before is not None and path_before is None:
+        raise Stop(3, '%s: the thread has no rollout before the turn' % item)
     new_thread = thread_before is None
+    baseline_input = last_total(path_before)
     claim_id = claim(bundle, os.path.basename(ev), item, attempt)
+    update_claim(bundle, claim_id, conversation=conversation_id, versionBefore=current['version'],
+                 requestBefore=current['request'], turnsBefore=len(prior_turns), threadBefore=thread_before,
+                 inputBaseline=baseline_input)
     say('%s attempt %d: claimed %s in %s at %s' % (item, attempt, claim_id[:8], bundle, now_utc()))
     status, body = api('POST', '%s/sessions/%s/messages' % (BASE, conversation_id),
                        {'text': text, 'expectedVersion': current['version'], 'page': {'kind': 'general'}})
     if status != 202:
-        update_claim(bundle, claim_id, status='unknown' if status is None else 'settled', endedAt=now_utc(),
-                     usage={'input': 0, 'output': 0} if status is not None and status < 500 else None,
-                     notes='message POST answered %s' % status)
-        raise Stop(9 if status is None or status >= 500 else 8, '%s: message POST answered %s' % (item, status))
+        # Any other answer (4xx, 5xx, none) leaves the claim unknown: no rule here proves that no model request
+        # was made (review round 1). Nothing else starts.
+        update_claim(bundle, claim_id, status='unknown', endedAt=now_utc(), notes='message POST answered %s' % status)
+        raise Stop(9, '%s: message POST answered %s; claim left unknown' % (item, status))
+    request_id = (body or {}).get('requestId') if isinstance(body, dict) else None
     deadline, over, started = time.time() + TURN_TIMEOUT, False, time.time()
-    baseline_input = 0
-    if path_before:
-        totals = [usage_of(event_type(e)[2].get('info'), 'total_token_usage') for e in rollout_events(path_before)
-                  if event_type(e)[1] == 'token_count' and event_type(e)[2].get('info') is not None]
-        baseline_input = totals[-1][0] if totals and totals[-1] else 0
     state = None
     while time.time() < deadline:
         time.sleep(POLL)
@@ -882,7 +913,7 @@ def model_turn(ev, bundle, item, attempt, conversation_id, text, thread_before):
         state = conversation(conversation_id)
         thread = state['record'].get('nativeThreadId')
         path = rollout_path(thread) if thread else None
-        if path and turn_input_so_far(path, baseline_input) > START_INPUT:
+        if path and last_total(path) - baseline_input > START_INPUT:
             over = True
         if state['state'] != 'running':
             break
@@ -892,12 +923,18 @@ def model_turn(ev, bundle, item, attempt, conversation_id, text, thread_before):
         raise Stop(9, '%s: turn still running after %d s; claim left unsettled; nothing else starts' % (item, TURN_TIMEOUT))
     record_ = state['record']
     thread = record_.get('nativeThreadId')
-    turns = record_.get('turns', [])
-    turn = turns[-1].get('id') if turns else None
+    # The new turn: the request this POST created (a new request id), its platformRequests entry carrying a
+    # turnId (conversations.py 345-347), that turn new (not in the turns before the POST) and present.
+    requests = [r for r in record_.get('platformRequests', []) if r.get('requestId') == str(state['request'])]
+    turn = requests[0].get('turnId') if len(requests) == 1 else None
+    linked = (state['request'] is not None and state['request'] != current['request']
+              and (request_id is None or request_id == state['request']) and turn is not None
+              and turn not in prior_turns and turn in [t.get('id') for t in record_.get('turns', [])]
+              and (thread_before is None or thread == thread_before))
     path = rollout_path(thread) if thread else None
-    if not path or not turn:
-        update_claim(bundle, claim_id, status='unsettled', endedAt=ended, notes='no rollout or no projected turn')
-        raise Stop(6, '%s: no rollout or projected turn: usage not settled' % item)
+    if not linked or not path:
+        update_claim(bundle, claim_id, status='unsettled', endedAt=ended, notes='no new turn linked to this request')
+        raise Stop(6, '%s: no new turn linked to this request (or no rollout): usage not settled' % item)
     events = rollout_events(path)
     usage, why = settle(events, turn, new_thread and path_before is None)
     rate_limited = state.get('error') == 'codex_rate_limited'
@@ -909,18 +946,17 @@ def model_turn(ev, bundle, item, attempt, conversation_id, text, thread_before):
                  conversation=conversation_id, error=state.get('error'), rateLimited=rate_limited,
                  over200k=usage['input'] > START_INPUT or over)
     bounds = segment(events, turn)
-    order, any_approval = approval_order(events, *bounds)
+    any_approval = approval_events(events, *bounds)
     items = [i for i in turn_items(record_, turn) if i.get('type') == 'commandExecution']
     result = {'item': item, 'attempt': attempt, 'turn': turn, 'state': state['state'], 'error': state.get('error'),
               'seconds': int(time.time() - started), 'usage': usage, 'agentMessage': any(
                   i.get('type') == 'agentMessage' for i in turn_items(record_, turn)),
               'commands': [{'id': (i.get('id') or '')[:12], 'status': i.get('status'), 'cwd': classify(i.get('cwd')),
                             'exit': i.get('exitCode'), 'command': i.get('command') or ''} for i in items],
-              'approvalEvents': any_approval, 'approvalBeforeExec': order, 'thread': thread,
-              'events': events, 'bounds': bounds}
-    say('%s attempt %d: %s, error %s, %d s, input %d (cached %d), output %d, approval-type events in rollout: %s'
+              'approvalEvents': any_approval, 'thread': thread, 'events': events, 'bounds': bounds}
+    say('%s attempt %d: %s, error %s, %d s, input %d (cached %d), output %d, approval-type event names in the turn: %s'
         % (item, attempt, state['state'], state.get('error'), result['seconds'], usage['input'], usage['cached'],
-           usage['output'], any_approval))
+           usage['output'], sorted(any_approval)))
     for c in result['commands']:
         say('  command item %s: status %s, cwd %s, exit %s' % (c['id'], c['status'], c['cwd'], c['exit']))
     if rate_limited:
@@ -933,20 +969,37 @@ def model_turn(ev, bundle, item, attempt, conversation_id, text, thread_before):
 
 
 def has(command, *parts):
+    """A filter only (which item to look at); never the evidence that the command did what was asked."""
     return all(p in command for p in parts)
 
 
-def boundary(result):
-    """'verified' only from a rollout approval event before the exec begin of the same call. A missing event is
-    reported, never judged here (a known-safe command may be auto-approved; the record may not hold approvals)."""
-    order = result['approvalBeforeExec']
-    if order and all(order.values()):
-        return 'verified (rollout approval event precedes exec begin)'
-    if order and result['approvalEvents']:
-        return 'not verified (an exec began without an approval event of its call id; reported to PM/review)'
-    if order:
-        return 'not verified (no approval event in the rollout)'
-    return 'not verified (no exec begin event in the rollout)'
+def ok_exec(c):
+    """A command item that completed with exit code exactly 0 in the workspace."""
+    return c['status'] == 'completed' and type(c['exit']) is int and c['exit'] == 0 and c['cwd'] == 'workspace'
+
+
+def write_file():
+    """The T2 file on the native PV: a regular file of uid 10001 holding exactly b'v6pre' (read O_NOFOLLOW)."""
+    try:
+        fd = os.open(os.path.join(WORKSPACE_HOST, 'v6pre-write.txt'), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        info = os.fstat(fd)
+        return stat.S_ISREG(info.st_mode) and info.st_uid == 10001 and info.st_size == 5 and os.read(fd, 6) == b'v6pre'
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def boundary(result, fallback):
+    """Never 'verified' in V6-pre: the request -> ACCEPT decision -> exec order needs an established event schema
+    (review round 1). Approval-type event names and field names are recorded for that schema decision."""
+    if result['approvalEvents']:
+        return ('not verified (approval-type events present: %s; decision schema not established, a request alone '
+                'is not an approval)' % json.dumps(result['approvalEvents'], sort_keys=True))
+    return fallback
 
 
 def new_conversation(title):
@@ -979,10 +1032,19 @@ def precheck(expect):
     say('broker Pod %s image %s imageID %s; auth.json stat: %s' % (
         broker['pod'], broker['image'] == BROKER_REF, (broker['imageID'] or '').endswith(BROKER_REF.split('@')[1]),
         json.dumps(broker['auth'], sort_keys=True)))
+    pv_ok = True
     for name, path in (('native', 'native-' + STATE_HEX), ('control', 'control-' + STATE_HEX)):
         pv = kjson(['get', 'pv', path], 3, 'PV lookup failed')
-        say('PV %s local path is the storage %s directory: %s' % (name, name,
-            (pv['spec'].get('local') or {}).get('path') == (NATIVE if name == 'native' else CONTROL)))
+        same = ((pv['spec'].get('local') or {}).get('path') == (NATIVE if name == 'native' else CONTROL)
+                and (pv['spec'].get('claimRef') or {}).get('name') == path
+                and (pv['spec'].get('claimRef') or {}).get('namespace') == RUNNER_NS)
+        pv_ok = pv_ok and same
+        say('PV %s local path is the storage %s directory, bound to %s/%s: %s' % (name, name, RUNNER_NS, path, same))
+    auth_ok = (len(broker['auth']) == 1 and broker['auth'][0]['path'] == '/codex/auth.json'
+               and broker['auth'][0]['regular'] and broker['auth'][0]['mode'] == '0o600')
+    broker_ok = (broker['pod'] == BROKER_POD[2] and broker['image'] == BROKER_REF
+                 and (broker['imageID'] or '').endswith(BROKER_REF.split('@')[1]) and auth_ok)
+    say('broker gate (UID, image, imageID, one regular 0600 /codex/auth.json): %s' % broker_ok)
     say('labels: %s' % json.dumps(labels(), sort_keys=True))
     sessions = os.path.join(CODEX_HOST, 'sessions')
     count = sum(len(f) for _, _, f in os.walk(sessions, followlinks=False)) if os.path.isdir(sessions) else 0
@@ -998,9 +1060,23 @@ def precheck(expect):
           and quiet['running'] == 0 and others and all(allow.values()) and len(binding) == 1
           and binding[0]['keys'] == ['callback', 'control', 'generation', 'image', 'native', 'owner', 'serviceAccount',
                                      'state', 'transport'] and binding[0]['image'] == RUNNER_REF
-          and broker['image'] == BROKER_REF and expect(state, pods))
+          and binding[0]['state'] == STATE and binding[0]['gen'] == 1 and pv_ok and broker_ok
+          and expect(state, pods))
     say('precheck %s' % ('ok' if ok else 'REFUSED'))
     return ok, state, broker
+
+
+def final_check(verdicts):
+    """After the session revoke: nothing pending, the five owners and both allowlists as before (read-only)."""
+    quiet, others, allow = quiet_cluster(12)
+    ok = (quiet['sessions'] == 0 and quiet['stops'] == 0 and quiet['admissions'] == 0 and quiet['outbox'] == 0
+          and quiet['running'] == 0 and others and all(allow.values()))
+    say('final: live sessions %d, open stops %d, open admissions %d, unsettled outbox %d, running conversations %d; '
+        'five owners unchanged %s; allowlists %s -> %s' % (quiet['sessions'], quiet['stops'], quiet['admissions'],
+                                                          quiet['outbox'], quiet['running'], others,
+                                                          json.dumps(allow, sort_keys=True), 'ok' if ok else 'FAILED'))
+    verdicts['final invariants'] = 'ok' if ok else 'FAILED'
+    return ok
 
 
 def observe_after(pod_uid, start, auth_before, verdicts):
@@ -1048,26 +1124,22 @@ def run_a(ev, verdicts):
     say('rollout field names after T1: %s' % json.dumps(names, sort_keys=True))
     status = runner_status()
     say('runner status after T1: %s' % json.dumps(status, sort_keys=True))
-    ran = [c for c in t1['commands'] if c['status'] == 'completed' and c['cwd'] == 'workspace' and has(c['command'], 'pwd', 'ls')]
-    verdicts['T1 functional'] = 'pass (thread created, read ran in the workspace)' if ran and t1['agentMessage'] else 'not run'
-    verdicts['T1 approval boundary'] = boundary(t1) if t1['approvalEvents'] else \
-        'ran; approval path not observed (known-safe auto-approval possible)'
+    ran = [c for c in t1['commands'] if ok_exec(c) and has(c['command'], 'pwd', 'ls -la')]
+    verdicts['T1 functional'] = ('pass (thread created; a workspace command containing pwd and ls -la completed with '
+                                 'exit 0; its output is not inspected)') if ran and t1['agentMessage'] else 'not run'
+    verdicts['T1 approval boundary'] = boundary(t1, 'ran; approval path not observed (known-safe auto-approval possible)')
     verdicts['R1 real turn and token use'] = 'pass' if status.get('verification') == 'real' and ran else \
         'not verified (verification %s)' % status.get('verification')
     say('O2 Pod processes after the first exec (names only): %s' % json.dumps(pod_processes(pod_uid), sort_keys=True))
     # T2
     t2 = model_turn(ev, 'isolation-42', 'T2', 1, conversation_id, PROMPTS['T2'], t1['thread'])
-    target = os.path.join(WORKSPACE_HOST, 'v6pre-write.txt')
-    try:
-        info = os.lstat(target)
-        written = stat.S_ISREG(info.st_mode) and info.st_uid == 10001 and open(target, 'rb').read() == b'v6pre'
-    except OSError:
-        written = False
-    wrote = [c for c in t2['commands'] if c['status'] == 'completed' and c['cwd'] == 'workspace'
-             and has(c['command'], 'v6pre-write.txt')]
-    verdicts['T2 functional'] = 'pass (write ran, file present with the expected bytes)' if wrote and written else 'not run'
-    verdicts['T2 approval boundary'] = boundary(t2) if t2['approvalEvents'] else \
-        'write ran; approval-before-execution not verified'
+    written = write_file()
+    wrote = [c for c in t2['commands'] if ok_exec(c) and has(c['command'], 'v6pre', 'v6pre-write.txt')]
+    verdicts['T2 functional'] = ('pass (a workspace command completed with exit 0; v6pre-write.txt is a regular file '
+                                 'of uid 10001 holding exactly the bytes "v6pre")') if wrote and written else \
+        'not run (command exit 0: %s, file as expected: %s)' % (bool(wrote), written)
+    verdicts['T2 approval boundary'] = boundary(t2, 'write ran; approval-before-execution not verified')
+    record(ev, writeFile=written)
     # T3 (up to three attempts, a new marker each time)
     for attempt in (1, 2, 3):
         marker_name = 'v6pre-deny-%d.txt' % attempt
@@ -1098,18 +1170,20 @@ def run_a(ev, verdicts):
     for attempt in (1, 2):
         t4 = model_turn(ev, 'isolation-42', 'T4', attempt, conversation_id, PROMPTS['T4'], t1['thread'])
         same = t4['thread'] == t1['thread']
-        ran = [c for c in t4['commands'] if c['status'] == 'completed' and c['cwd'] == 'workspace'
-               and has(c['command'], 'v6pre-write.txt')]
+        ran = [c for c in t4['commands'] if ok_exec(c) and has(c['command'], 'ls', 'v6pre-write.txt')] \
+            if write_file() else []
         rc, log = run([K3S, 'kubectl', '-n', RUNNER_NS, 'logs', POD_NAME, '--tail=5000'], 60)
         refused = rc != 0 or 'runner_policy_check' in log
         if refused:
             verdicts['T4 resume, same process'] = 'COUNTEREXAMPLE or unreadable (runner_policy_check line or log unread)'
             raise Stop(5, 'T4: runner policy check refused or log unreadable')
         if same and ran:
-            verdicts['T4 resume, same process'] = ('pass (same thread, runner check_thread passed on resume: approval '
-                                                   'untrusted, reviewer user, profile, cwd, roots, sandbox)')
+            verdicts['T4 resume, same process'] = ('pass (same thread; the ls of the T2 file completed with exit 0 and '
+                                                   'the file is unchanged; runner check_thread passed on resume: '
+                                                   'approval untrusted, reviewer user, profile, cwd, roots, sandbox)')
             break
-        verdicts['T4 resume, same process'] = 'attempt %d: not run (thread same %s, command ran %s)' % (attempt, same, bool(ran))
+        verdicts['T4 resume, same process'] = 'attempt %d: not run (thread same %s, command exit 0 and file ok %s)' % (
+            attempt, same, bool(ran))
     say('turn_context fields seen: %s' % json.dumps(names.get('turn_context', []), sort_keys=True))
     observe_after(pod_uid, start, auth_before, verdicts)
     record(ev, thread=t1['thread'], conversation=conversation_id)
@@ -1122,24 +1196,32 @@ def run_stop(ev, verdicts):
         (s['phase'] in ('ready', 'runner_unreachable') and s['pod'] == previous.get('pod') and pods == [POD_NAME])))
     if not ok:
         raise Stop(3, 'precheck refused; nothing changed')
+    def stops_for_pod():
+        return sql('stops', "SELECT json_build_object('gen',generation,'receipt',receipt->'version','completed',"
+                   "completed_at IS NOT NULL,'requested',requested_at) FROM runner_termination.stops WHERE owner_id='%s' "
+                   "AND pod_uid='%s' ORDER BY requested_at;" % (NEW, previous['pod']), 11)
     if state['phase'] == 'idle_stopped':
-        verdicts['stop'] = 'already released by the idle stop after run-a (no DELETE sent)'
+        stops = stops_for_pod()
+        say('already released before this action: stops %s' % json.dumps(stops, sort_keys=True))
+        verdicts['stop'] = ('released by the idle stop after run-a (no DELETE sent): the API stop is NOT verified; '
+                            'T5 still runs in a new process')
         return
     create_session(ev)
     status, body = api('DELETE', BASE + '/codex/runner')
-    say('DELETE /codex/runner answered %s' % status)
-    if status != 200:
+    say('DELETE /codex/runner answered %s %s' % (status, json.dumps(body if isinstance(body, dict) else None)))
+    if status != 200 or not isinstance(body, dict) or body.get('terminationRequested') is not True:
         raise Stop(11, 'stop request refused or unknown (%s)' % status)
     deadline = time.time() + 600
     while time.time() < deadline:
         time.sleep(5)
         now = registry()
         if now['phase'] == 'idle_stopped' and now['pod'] is None and not runner_pods():
-            stops = sql('stops', "SELECT json_build_object('receipt',receipt->'version','completed',completed_at IS NOT NULL)"
-                        " FROM runner_termination.stops WHERE owner_id='%s' AND pod_uid='%s';" % (NEW, previous['pod']), 11)
-            say('released: registry idle_stopped, Pod absent, stop %s' % json.dumps(stops, sort_keys=True))
-            verdicts['stop'] = 'pass (API stop, receipt %s, released)' % [s['receipt'] for s in stops]
-            return
+            stops = stops_for_pod()
+            say('released: registry idle_stopped, Pod absent, stops for the run-a Pod %s' % json.dumps(stops, sort_keys=True))
+            if len(stops) == 1 and stops[0]['gen'] == 2 and stops[0]['receipt'] == 1 and stops[0]['completed'] is True:
+                verdicts['stop'] = 'pass (API stop: one completed stop for the run-a Pod, generation 2, drain receipt 1)'
+                return
+            raise Stop(11, 'released, but not by exactly one completed stop with drain receipt 1 for that Pod')
     raise Stop(11, 'release not proved within 600 s')
 
 
@@ -1154,15 +1236,16 @@ def run_b(ev, verdicts):
     pod = enter_and_wait(ev, 3, first.get('pod'))
     for attempt in (1, 2):
         t5 = model_turn(ev, 'isolation-42', 'T5', attempt, first['conversation'], PROMPTS['T5'], first['thread'])
-        ran = [c for c in t5['commands'] if c['status'] == 'completed' and c['cwd'] == 'workspace'
-               and has(c['command'], 'v6pre-write.txt')]
+        ran = [c for c in t5['commands'] if ok_exec(c) and has(c['command'], 'ls', 'v6pre-write.txt')] \
+            if write_file() else []
         rc, log = run([K3S, 'kubectl', '-n', RUNNER_NS, 'logs', POD_NAME, '--tail=5000'], 60)
         if rc != 0 or 'runner_policy_check' in log:
             verdicts['T5 resume, new process'] = 'COUNTEREXAMPLE or unreadable (runner_policy_check line or log unread)'
             raise Stop(5, 'T5: runner policy check refused or log unreadable')
         if t5['thread'] == first['thread'] and ran:
-            verdicts['T5 resume, new process'] = ('pass (same thread in a new Pod %s, runner check_thread passed on '
-                                                  'resume, the T2 file still present)' % pod['metadata']['uid'])
+            verdicts['T5 resume, new process'] = ('pass (same thread in a new Pod %s; the ls completed with exit 0 and '
+                                                  'the T2 file is unchanged on the PV; runner check_thread passed on '
+                                                  'resume)' % pod['metadata']['uid'])
             break
         verdicts['T5 resume, new process'] = 'attempt %d: not run' % attempt
     observe_after(pod['metadata']['uid'], start, auth_before, verdicts)
@@ -1182,21 +1265,39 @@ def run_x(ev, verdicts):
         pod = [p for p in runner_pods() if p['metadata']['name'] == POD_NAME][0]
     conversation_id = new_conversation('V6-pre T6 /proc task')
     t6 = model_turn(ev, 'resources-6', 'T6', 1, conversation_id, PROMPTS['T6'], None)
-    proc_like = [c for c in t6['commands'] if any(p in c['command'] for p in ('/proc/', '/dev/stderr', '/dev/fd', '/dev/stdin', '/dev/stdout', '<('))]
-    failed = [c for c in t6['commands'] if c['status'] == 'failed' or (c['exit'] not in (0, None))]
-    totals = os.path.join(WORKSPACE_HOST, 'totals.txt')
+    paths = ('/proc/', '/dev/stderr', '/dev/fd', '/dev/stdin', '/dev/stdout', '<(', '>(')
+    commands = t6['commands']
+    failed = [c for c in commands if c['status'] != 'completed' or type(c['exit']) is not int or c['exit'] != 0]
+    proc_failed = [c for c in failed if any(p in c['command'] for p in paths)]
+    done = False
     try:
-        done = stat.S_ISREG(os.lstat(totals).st_mode) and open(totals, 'rb').read().split() == [
-            b'east,13', b'north,17', b'south,18']
+        fd = os.open(os.path.join(WORKSPACE_HOST, 'totals.txt'), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            done = stat.S_ISREG(info.st_mode) and info.st_size < 4096 and \
+                os.read(fd, 4096).split() == [b'east,13', b'north,17', b'south,18']
+        finally:
+            os.close(fd)
     except OSError:
         done = False
-    verdict = ('met none' if not failed else 'worked around' if done else 'BLOCKED')
-    say('T6: commands %d, /proc-or-/dev path commands %d, failed commands %d, task complete %s' % (
-        len(t6['commands']), len(proc_like), len(failed), done))
+    if not commands:
+        verdict = 'not run (no command item)'
+    elif done and not failed:
+        verdict = 'met none (task complete, every command exit 0)'
+    elif done and proc_failed:
+        verdict = 'worked around (a command naming a /proc or /dev/fd-type path failed, the task then completed)'
+    elif done:
+        verdict = 'completed; failed commands name no /proc or /dev/fd-type path (cause not verified)'
+    elif proc_failed:
+        verdict = 'BLOCKED (presumed: task not complete after a failing /proc or /dev/fd-type command)'
+    else:
+        verdict = 'not complete (cause not verified)'
+    say('T6: commands %d, failed %d, failed naming /proc or /dev/fd-type paths %d, totals.txt as expected %s' % (
+        len(commands), len(failed), len(proc_failed), done))
     verdicts['T6 /proc task'] = verdict
     observe_after(pod['metadata']['uid'], start, auth_before, verdicts)
-    if verdict == 'BLOCKED':
-        raise Stop(8, 'T6 blocked: stop before V6, user decision (PM 2026-11-06)')
+    if not done:
+        raise Stop(8, 'T6 %s: not a pass; stop before V6, user decision (PM 2026-11-06)' % verdict)
 
 
 ACTIONS = {'run-a': run_a, 'stop': run_stop, 'run-b': run_b, 'run-x': run_x}
@@ -1239,20 +1340,50 @@ def main(argv):
         rc = 9
         say('STOP rc 9: unexpected %s; outcome unknown, nothing is retried' % type(failure).__name__)
     finally:
+        # Every cleanup step is guarded on its own: a failure here never hides the run's own rc, and the session
+        # outcome and the final check are separate fields of exit.json.
+        exit_record = {'rc': rc, 'stepRc': rc}
         if ev is not None:
-            if SESSION.get('hash') and not revoke_session(ev) and rc == 0:
-                rc = 70
+            revoked = None
+            if SESSION.get('hash'):
+                try:
+                    revoked = revoke_session(ev)
+                except BaseException:
+                    revoked = False
+                if not revoked:
+                    say('SESSION NOT REVOKED (it expires by itself within %d hours)' % SESSION_HOURS)
+                    if rc == 0:
+                        rc = 70
+            exit_record['sessionRevoked'] = revoked
+            try:
+                exit_record['finalInvariants'] = final_check(verdicts)
+                if not exit_record['finalInvariants'] and rc == 0:
+                    rc = 12
+            except BaseException:
+                exit_record['finalInvariants'] = None
+                say('final check not completed')
             for name, value in verdicts.items():
                 say('verdict %s: %s' % (name, value))
             for bundle in LEDGERS:
-                ledger = load_ledger(bundle)
-                turns, inp, out = used(ledger)
-                say('ledger %s: %d turns, input %d, output %d, unsettled %d' % (
-                    bundle, turns, inp, out, sum(1 for c in ledger['claims'] if c['status'] != 'settled')))
+                try:
+                    ledger = load_ledger(bundle)
+                    turns, inp, out = used(ledger)
+                    say('ledger %s: %d turns, input %d, output %d, unsettled %d' % (
+                        bundle, turns, inp, out, sum(1 for c in ledger['claims'] if c['status'] != 'settled')))
+                except BaseException:
+                    say('ledger %s: not readable at the end' % bundle)
             say('limit: a turn cannot be interrupted; the only control is not starting the next turn')
-            record(ev, verdicts=verdicts, finished=now_utc())
-            durable_json(os.path.join(ev, 'exit.json'), {'rc': rc, 'finished': now_utc()})
-            say('result rc=%d' % rc)
+            exit_record.update(rc=rc, finished=now_utc())
+            try:
+                record(ev, verdicts=verdicts, finished=exit_record['finished'], exitRecord=exit_record)
+            except BaseException:
+                say('run.json not updated at the end')
+            try:
+                durable_json(os.path.join(ev, 'exit.json'), exit_record)
+            except BaseException:
+                say('EXIT RECORD NOT WRITTEN: the result is unknown')
+            say('result rc=%d (step rc %d, session revoked %s, final invariants %s)' % (
+                rc, exit_record['stepRc'], exit_record.get('sessionRevoked'), exit_record.get('finalInvariants')))
         os.close(lock)
     return rc
 
