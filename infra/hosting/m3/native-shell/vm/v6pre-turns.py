@@ -20,8 +20,8 @@ created; 8 a stop rule after a turn (input over 200k, a rate limit, a failed tur
 the outcome is unknown; 10 residue pattern found; 11 stop/release not proved (or not by one completed drain receipt);
 12 every step passed but the final invariants (after the session revoke: nothing pending, five owners, allowlists)
 failed or could not be checked (not verified is not a pass);
-13 format gate: the first turn of the action has a tool call but no interpretable exec pair (nothing else
-starts: the same check is not repeated at cost); 70 every step passed but the session revoke is not proved;
+13 format gate: a turn has a tool call but no interpretable exec pair, or its record is incomplete (nothing
+else starts: the same check is not repeated at cost); 70 every step passed but the session revoke is not proved;
 130 interrupted twice. exit.json also holds stepRc, sessionRevoked and finalInvariants as separate fields.
 
 Revision 2 (after run-a, 2026-11-09): the pinned model is code-mode only, so a shell command is a rollout
@@ -35,7 +35,15 @@ rollout pairs:
   rollout segment, no unreadable line in it, no exec call/output, no other *_call record or exec/tool/mcp/patch
   event, the projected turn present with no tool item); "call present, nested result not extractable" when a
   call or record exists but no pair is interpretable (name exec, status completed, a call id with exactly one
-  output, the input naming only tools.exec_command, the output text readable); otherwise "pairs";
+  output, the input naming only tools.exec_command, the output text readable, valid timestamps, the call before
+  its output); "pairs" only when the whole turn record is complete (every call and output paired and
+  interpretable, no unreadable line, no other tool record, no projected tool item); "partial" when some pairs are
+  interpretable but the record is not complete (no verdict rests on it: T5 stops at the format gate, T6 leaves
+  the /proc question not verified; review r2);
+- T5 checks the T2 file's content and owner before the entry and fixes the metadata baseline after the Pod is
+  ready, before the first claim (the Pod start may relabel it); T6 is complete only when both sales.csv and
+  totals.txt are exact, owned by 10001 and written inside the turn;
+- the stop verdict names the API answer and the release observed; the requester is never verified;
 - the outer exec "completed" and anything the model prints (an `echo rc=$?` included) are never the evidence of
   the inner command's success. Verdicts are "limited functional observation": the host effect (the PV file's
   state before and after, its content and times inside the turn) plus fixed booleans of the pair's result; the
@@ -975,40 +983,52 @@ def output_text(output):
 
 
 def tool_calls(events, bounds, items):
-    """The turn's tool calls from its rollout segment. Returns (kind, pairs, counts): kind 'none' only when every
-    record path is intact and shows no call; 'unextractable' when a call/record exists, or a path is not intact,
-    and no pair is interpretable; 'pairs' otherwise. Each pair keeps the input and result text in memory only
-    (never printed or stored); the caller derives fixed booleans from them."""
+    """The turn's tool calls from its rollout segment. Returns (kind, pairs, counts):
+    - 'none': every record path intact and none shows a call;
+    - 'pairs': the whole record is complete and interpretable: no unreadable line, no other tool record, no
+      projected tool item, every exec call with exactly one output and every output with exactly one call, every
+      pair interpretable and in order (valid timestamps, the call before its output by position and time);
+    - 'partial': some pairs are interpretable but the rest of the record is not (review r2: one good pair never
+      hides an incomplete record); the pairs are returned, but no verdict may rest on the record being complete;
+    - 'unextractable': a call or record exists, or a path is not intact, and no pair is interpretable.
+    Each pair keeps the input and result text in memory only (never printed or stored)."""
     start, end = bounds
     calls, outputs, other, intact = {}, {}, 0, True
-    for event in events[start:end + 1]:
+    for index in range(start, end + 1):
+        event = events[index]
         kind, sub, payload = event_type(event)
         if kind == '<unreadable line>':
             intact = False
         elif kind == 'response_item' and sub == 'custom_tool_call':
-            calls.setdefault(payload.get('call_id'), []).append((payload, stamp(event.get('timestamp'))))
+            calls.setdefault(payload.get('call_id'), []).append((payload, stamp(event.get('timestamp')), index))
         elif kind == 'response_item' and sub == 'custom_tool_call_output':
-            outputs.setdefault(payload.get('call_id'), []).append((payload, stamp(event.get('timestamp'))))
+            outputs.setdefault(payload.get('call_id'), []).append((payload, stamp(event.get('timestamp')), index))
         elif kind == 'response_item' and isinstance(sub, str) and (sub.endswith('_call') or sub.endswith('_call_output')):
             other += 1
         elif kind == 'event_msg' and isinstance(sub, str) and any(w in sub for w in TOOL_EVENT_WORDS):
             other += 1
     projected = sum(1 for i in items if i.get('type') not in MESSAGE_ITEMS)
-    pairs = []
+    pairs, rejected = [], 0
     for call_id, found in calls.items():
         answers = outputs.get(call_id, [])
         if not (isinstance(call_id, str) and call_id and len(found) == 1 and len(answers) == 1):
+            rejected += 1
             continue
-        (call, at), (answer, out_at) = found[0], answers[0]
+        (call, at, call_index), (answer, out_at, out_index) = found[0], answers[0]
         source, text = call.get('input'), output_text(answer.get('output'))
         if not (call.get('name') == 'exec' and call.get('status') == 'completed' and isinstance(source, str)
-                and text is not None and sorted(set(re.findall(r'\btools\.([A-Za-z_]\w*)', source))) == ['exec_command']):
+                and text is not None and sorted(set(re.findall(r'\btools\.([A-Za-z_]\w*)', source))) == ['exec_command']
+                and at is not None and out_at is not None and call_index < out_index and at <= out_at):
+            rejected += 1
             continue
         pairs.append({'call': call_id, 'at': at, 'outAt': out_at, 'input': source, 'text': text})
+    orphans = sum(len(v) for k, v in outputs.items() if k not in calls)
+    complete = intact and not other and not projected and not rejected and not orphans
     counts = {'execCalls': sum(len(v) for v in calls.values()), 'execOutputs': sum(len(v) for v in outputs.values()),
-              'otherToolRecords': other, 'projectedToolItems': projected, 'intact': intact, 'pairs': len(pairs)}
+              'otherToolRecords': other, 'projectedToolItems': projected, 'intact': intact, 'pairs': len(pairs),
+              'callsNotInterpretable': rejected, 'orphanOutputs': orphans, 'complete': complete}
     if pairs:
-        return 'pairs', pairs, counts
+        return ('pairs' if complete else 'partial'), pairs, counts
     if intact and not calls and not outputs and not other and not projected:
         return 'none', [], counts
     return 'unextractable', [], counts
@@ -1402,8 +1422,10 @@ def run_stop(ev, verdicts):
                             'the API stop is NOT verified; T5 still runs in a new process')
         return
     # Idle and API stops write the same row (runner_termination_control.request_stop), and a DELETE answers with a
-    # stop already requested. So the API stop counts only if no stop existed for the Pod before the DELETE and the
-    # one stop was requested after it was sent (the database and this script share the node clock).
+    # stop already requested. The timing below only rules out a stop that existed before the DELETE; an idle stop
+    # at the same moment is not ruled out, so the requester is never verified (review r2 question): the verdict
+    # names the API answer and the release observed, not the cause. (The database and this script share the node
+    # clock.)
     if stops_for_pod():
         raise Stop(3, 'a stop for the run-a Pod exists before the DELETE; nothing sent')
     create_session(ev)
@@ -1422,8 +1444,10 @@ def run_stop(ev, verdicts):
             if len(stops) == 1 and stops[0]['gen'] == 2 and stops[0]['receipt'] == 1 and stops[0]['completed'] is True:
                 requested = stamp(stops[0]['requested'].replace('+00:00', 'Z')) if isinstance(stops[0]['requested'], str) else None
                 if requested is not None and requested >= sent:
-                    verdicts['stop'] = ('pass (API stop: one completed stop for the run-a Pod, generation 2, drain '
-                                        'receipt 1, requested after the DELETE was sent)')
+                    verdicts['stop'] = ('API answer and release observed: DELETE answered terminationRequested; one '
+                                        'completed stop for the run-a Pod, generation 2, drain receipt 1, requested '
+                                        'after the DELETE was sent; the requester is not verified (an idle stop at '
+                                        'the same moment writes the same row)')
                 else:
                     verdicts['stop'] = ('released by one completed stop (receipt 1) requested before the DELETE or at '
                                         'an unreadable time (an idle stop race): the API stop is NOT verified')
@@ -1438,17 +1462,27 @@ def run_b(ev, verdicts):
                                  and not pods)
     if not ok:
         raise Stop(3, 'precheck refused; nothing changed')
-    # The unique file of T5: the T2 file, whose state before the action is fixed here (present, uid 10001, exactly
-    # b'v6pre'); T5 only lists it, so the same state after each turn is part of the observation.
+    # The unique file of T5: the T2 file. Before the entry only what must survive is checked (present, uid 10001,
+    # exactly b'v6pre'): the Pod start may change its metadata (an SELinux relabel changes the ctime; run-a saw the
+    # MCS pair change). The metadata baseline for the turn comparison is fixed after the Pod is ready, right
+    # before the first claim, so a startup change is told apart from a change during a turn (review r2).
     target = os.path.join(WORKSPACE_HOST, 'v6pre-write.txt')
-    before = file_state(target)
-    say('T5 file before: present %s, uid 10001 %s, exactly v6pre %s' % (before is not None, bool(before) and before['uid'] == 10001,
-                                                                    bool(before) and before['lines'] == [b'v6pre'] and before['size'] == 5))
-    if not (before and before['uid'] == 10001 and before['size'] == 5 and before['lines'] == [b'v6pre']):
+
+    def kept(state):
+        return bool(state) and state['uid'] == 10001 and state['size'] == 5 and state['lines'] == [b'v6pre']
+    entry_state = file_state(target)
+    say('T5 file before the entry: present %s, uid 10001 and exactly v6pre %s' % (entry_state is not None, kept(entry_state)))
+    if not kept(entry_state):
         raise Stop(3, 'T5: the T2 file is not as expected before the action; nothing changed')
     start, auth_before = time.time(), broker['auth']
     create_session(ev)
     pod = enter_and_wait(ev, 3, first.get('pod'))
+    before = file_state(target)
+    say('T5 file after the Pod start: content and owner kept %s; inode same %s, ctime same %s (startup changes are '
+        'not turn effects)' % (kept(before), bool(before) and before['ino'] == entry_state['ino'],
+                               bool(before) and before['ctime_ns'] == entry_state['ctime_ns']))
+    if not kept(before):
+        raise Stop(4, 'T5: the T2 file content or owner changed during the Pod start; no turn started')
     name = 'T5 resume, new process'
     for attempt in (1, 2):
         t5 = model_turn(ev, 'isolation-42', 'T5', attempt, first['conversation'], PROMPTS['T5'], first['thread'])
@@ -1466,16 +1500,19 @@ def run_b(ev, verdicts):
         if not unchanged:
             verdicts[name] = 'attempt %d: the T2 file changed during a listing turn: not met (cause not verified)' % attempt
             raise Stop(8, 'T5: the T2 file changed; nothing else starts')
-        if same and listed:
+        if kind == 'pairs' and same and listed:
             verdicts[name] = ('limited functional observation, exit-0 check not met (inner exit code and cwd not '
                               'recorded): same thread in a new Pod %s; an exec call with a nested exec_command whose '
                               'result shows an ls -l line naming the T2 file with size 5; the T2 file identical on the '
-                              'PV before and after; policy inferred, not observed (the pinned check_thread on '
-                              'resume)' % pod['metadata']['uid'])
+                              'PV between the Pod start and after the turn; the whole turn record complete; policy '
+                              'inferred, not observed (the pinned check_thread on resume)' % pod['metadata']['uid'])
             break
-        if kind == 'unextractable':
-            verdicts[name] = 'attempt %d: call present, nested result not extractable (not verified)' % attempt
-            raise Stop(13, 'T5: format gate: a tool call but no interpretable exec pair; nothing else starts')
+        if kind in ('unextractable', 'partial'):
+            why = ('call present, nested result not extractable' if kind == 'unextractable' else
+                   'the turn record is incomplete (an unreadable line, another tool record, an orphan or an '
+                   'uninterpretable call)')
+            verdicts[name] = 'attempt %d: %s (not verified)' % (attempt, why)
+            raise Stop(13, 'T5: format gate (%s); nothing else starts' % kind)
         verdicts[name] = ('attempt %d: no tool call on every record path (not run)' % attempt if kind == 'none' else
                           'attempt %d: exec pairs present, the expected listing not shown (thread same %s): not met'
                           % (attempt, same))
@@ -1506,20 +1543,23 @@ def run_x(ev, verdicts):
     expected_sales = [b'region,item,amount', b'north,apple,12', b'south,apple,7', b'north,pear,5', b'east,apple,9',
                       b'south,pear,11', b'east,pear,4']
     sales_ok = bool(sales) and sales['uid'] == 10001 and sales['lines'] == expected_sales and in_window(sales, first_at, last_at)
-    done = bool(totals) and totals['uid'] == 10001 and totals['lines'] == [b'east,13', b'north,17', b'south,18'] \
+    totals_ok = bool(totals) and totals['uid'] == 10001 and totals['lines'] == [b'east,13', b'north,17', b'south,18'] \
         and in_window(totals, first_at, last_at)
+    done = sales_ok and totals_ok  # the task is complete only when both files are as expected (review r2)
     kind, pairs = t6['calls']['kind'], t6['calls']['pairs']
     proc_named = [p for p in pairs if any(x in p['input'] for x in PROC_PATHS)]
     proc_error = [p for p in proc_named if ERROR_WORDS.search(p['text'])]
     say('T6: kind %s, exec pairs %d, naming /proc or /dev/fd-type paths %d, of those whose result shows an error word '
         '%d; sales.csv exact and written in the turn %s; totals.txt exact and written in the turn %s' % (
-            kind, len(pairs), len(proc_named), len(proc_error), sales_ok, done))
+            kind, len(pairs), len(proc_named), len(proc_error), sales_ok, totals_ok))
     label = ('limited functional observation, exit-0 check not met (per-command exit codes not recorded): task '
-             'complete on the PV (totals.txt exact, written inside the turn); ')
+             'complete on the PV (sales.csv and totals.txt exact, written inside the turn); ')
     if kind == 'none':
         verdict = 'not run (no tool call on every record path)'
     elif done and kind == 'unextractable':
         verdict = label + 'call results not extractable: the /proc question is not answered'
+    elif done and kind == 'partial':
+        verdict = label + 'the turn record is incomplete: the /proc question is not verified'
     elif done and proc_error:
         verdict = label + 'worked around (presumed: a call naming a /proc or /dev/fd-type path shows an error word)'
     elif done and proc_named:
@@ -1528,13 +1568,15 @@ def run_x(ev, verdicts):
         verdict = label + 'no call names a /proc or /dev/fd-type path (met none, presumed)'
     elif kind == 'unextractable':
         verdict = 'not complete; call present, nested result not extractable (cause not verified)'
+    elif kind == 'partial':
+        verdict = 'not complete; the turn record is incomplete (cause not verified)'
     elif proc_error:
         verdict = 'BLOCKED (presumed: task not complete after a call naming a /proc or /dev/fd-type path shows an error word)'
     else:
         verdict = 'not complete (cause not verified)'
     verdicts['T6 /proc task'] = verdict
     observe_after(pod['metadata']['uid'], start, auth_before, verdicts)
-    if not done and kind == 'unextractable':
+    if not done and kind in ('unextractable', 'partial'):
         raise Stop(13, 'T6 %s: format gate; stop before V6, user decision' % verdict)
     if not done:
         raise Stop(8, 'T6 %s: not complete; stop before V6, user decision (PM 2026-11-06)' % verdict)
