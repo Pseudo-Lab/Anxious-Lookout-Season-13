@@ -173,6 +173,12 @@ its old runner image until it is swapped. The old runner image has no bubblewrap
 setup, so under the new manifest it would start with no shell. **Every existing binding is swapped
 in the window.**
 
+A **new** owner's first plan takes its image from the controller input's `image` key (rendered from the rollout
+values' `runnerImage`, `ops/runner_rollout.py` `inputs`), not from the release. Removing `executor` alone leaves
+that key on the old runner, so the next new owner would get a v1 plan on an image without the native shell. The
+key is set to the reviewed #68 runner digest in step 2. On the development VM it still named a #59 runner
+(`anxious-review59-runner`, read-only 2026-11-08); stage V6b changes it.
+
 Until #63 the controller input is `/etc/anxious-lookout/issue16/controller/inputs.json`, used by the host
 `issue16-controller`. If #63 replaces that path first, the same rule applies to its replacement: it
 carries no `executor`.
@@ -249,10 +255,12 @@ one runner-Pod drain and one rollback point.
        FROM runner_bindings.bindings ORDER BY owner_id;
      ```
 2. **Controller input.**
-   - Remove `executor` from the private `values.json` and render with the new release's renderer. That
-     renderer refuses a value set that still has the key.
-   - Diff the new `controller-inputs.json` against the installed one. The only difference must be the
-     removed `executor`.
+   - Before the window, the user checks read-only the installed file's current `image` value and records it
+     (rollback input, together with the step 1 copy).
+   - In the private `values.json`: remove `executor` and set `runnerImage` to the reviewed #68 runner digest.
+     Render with the new release's renderer. That renderer refuses a value set that still has `executor`.
+   - Diff the new `controller-inputs.json` against the installed one. The differences must be exactly these
+     two: `executor` removed, and `image` the reviewed #68 runner digest (if it already was, only the first).
    - Install it the same way as before (`multi-user-runners/rollout/README.md` "Installation"):
      root0600, no symlink, written to a temporary file in the same directory, then `mv -T`.
 3. **Release images.** Deploy the new API/runtime/worker images by the existing rollout procedure. They
@@ -266,9 +274,17 @@ one runner-Pod drain and one rollback point.
      - the image ID the unit's script runs;
      - the SHA-256 of the `worker.py` it mounts, against the reviewed release's file;
      - its allowlist;
-     - its `--inputs` path (the step 2 file).
-     These can drift. On the development VM (2026-11-06) the script still ran an image from before #61,
-     and its `worker.py` matched no version in the repository. Where that file came from is unknown.
+     - its `--inputs` path (the step 2 file) and that file's `image` (step 2);
+     - that its `kubeTokenFile` token is still valid for the window. These host tokens are TokenRequest
+       tokens with a reviewed expiry (`multi-user-runners/rollout/README.md` "Private host inputs"); an
+       expired one makes the preparer stop at its first Kubernetes call (`reconciliation_required`). How often
+       production renews it is a user check item: agents do not read production values.
+     These can drift. On the development VM (2026-11-06/08) the script still ran an image from before #61,
+     its token had expired on 2026-10-26, and its `worker.py` was the #46 file (`997ba77`,
+     `multi-user-runners/rollout/worker.py`). That file differs from the reviewed one (unchanged since
+     `952e409`) only in `run_batch`: it still accepts the host supply and observer roles that #60 and #61
+     removed. The `restore` path, which `issue16-restore` runs at every boot with its own image, is the same in
+     both files.
    - Release: the reviewed worker image, the reviewed `worker.py` (compared by SHA-256), and the allowlist
      the rollout procedure sets. Record the old image ID, the old file's hash and the old allowlist for the
      rollback.
