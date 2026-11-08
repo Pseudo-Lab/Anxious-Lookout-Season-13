@@ -19,7 +19,8 @@ created; 8 a stop rule after a turn (input over 200k, a rate limit, a failed tur
 9 a turn timed out, the message POST did not answer 202 (any 4xx/5xx/none: the claim stays unknown, never 0), or
 the outcome is unknown; 10 residue pattern found; 11 stop/release not proved (or not by one completed drain receipt);
 12 every step passed but the final invariants (after the session revoke: nothing pending, five owners, allowlists)
-failed; 70 every step passed but the session revoke is not proved; 130 interrupted twice. exit.json also holds
+failed or could not be checked (not verified is not a pass);
+70 every step passed but the session revoke is not proved; 130 interrupted twice. exit.json also holds
 stepRc, sessionRevoked and finalInvariants as separate fields.
 
 Turns (isolation-42, V6-pre allocation 8 = T1 1, T2 1, T3 1+2 retries, T4/T5 2+1 shared retry; T6 in
@@ -46,7 +47,10 @@ after = the decline check passes; that item completed = COUNTEREXAMPLE (rc 5); a
 creating the marker = expectation not met, retry (not a bypass); no root-cwd item = not run.
 A turn is settled only if it is new and linked to this POST: the conversation's request id changed, its
 platformRequests entry carries a turnId (conversations.py 345-347) that was not among the turns read before the
-claim, that turn is projected, and the thread is the expected one. The input baseline is read before the claim.
+claim, that turn is projected, and the thread is the expected one. The input baseline is read before the claim:
+0 only for a new thread (no rollout); for an existing thread the LAST token_count with info must be valid (an
+unreadable line or a malformed last total refuses the turn before any claim; an earlier total is never used).
+A later action starts only after the earlier one passed: rc 0, stepRc 0, finalInvariants true, session revoked or none.
 
 Usage (rollout token_count, Codex 0.160.1 protocol.rs TokenUsageInfo: append_last_usage adds `last` to `total`):
 turn usage = last total of the turn segment - baseline. Baseline = the last token_count total before the segment
@@ -279,6 +283,18 @@ def exit_rc(folder):
         return None
 
 
+def completed_ok(folder):
+    """The earlier action ended as a pass: exit.json rc 0 and stepRc 0, finalInvariants exactly True, and the
+    session revoked (True), or no session at all (None and run.json never recorded one)."""
+    try:
+        done = json.load(open(os.path.join(EVIDENCE, folder, 'exit.json')))
+        run_record = json.load(open(os.path.join(EVIDENCE, folder, 'run.json')))
+    except Exception:
+        return False
+    session_ok = done.get('sessionRevoked') is True or (done.get('sessionRevoked') is None and 'session' not in run_record)
+    return done.get('rc') == 0 and done.get('stepRc') == 0 and done.get('finalInvariants') is True and session_ok
+
+
 def record(ev, **items):
     path = os.path.join(ev, 'run.json')
     value = json.load(open(path)) if os.path.exists(path) else {}
@@ -304,8 +320,9 @@ def guard(action):
     before = {'stop': 'run-a', 'run-b': 'stop', 'run-x': 'run-b'}.get(action)
     if before is not None:
         done = runs(before)
-        if len(done) != 1 or exit_rc(done[0]) != 0:
-            raise Stop(3, '%s needs exactly one %s with rc 0' % (action, before))
+        if len(done) != 1 or not completed_ok(done[0]):
+            raise Stop(3, '%s needs exactly one %s that passed (rc 0, step rc 0, final invariants true, session '
+                          'revoked or never created)' % (action, before))
 
 
 def open_evidence(action):
@@ -829,16 +846,30 @@ def settle(events, turn, new_thread):
             'reasoning': delta['reasoning_output_tokens']}, None
 
 
-def last_total(path):
-    """input_tokens of the last readable token_count total in a rollout (0 if none or no file)."""
+def rollout_baseline(path):
+    """input_tokens of the LAST token_count total (an event with info) of an existing thread's rollout, or None
+    when it cannot be proved: file unreadable, any unreadable line, no token_count with info, or that last one
+    malformed (an earlier valid total is never used instead). Read before the claim: a None refuses the turn."""
     try:
-        events = rollout_events(path) if path else []
+        events = rollout_events(path)
     except OSError:
-        return 0
-    totals = [usage_of(event_type(e)[2].get('info'), 'total_token_usage') for e in events
-              if event_type(e)[1] == 'token_count' and event_type(e)[2].get('info') is not None]
-    totals = [t for t in totals if t]
-    return totals[-1][0] if totals else 0
+        return None
+    if any(e.get('type') == '<unreadable line>' for e in events):
+        return None
+    infos = [event_type(e)[2].get('info') for e in events
+             if event_type(e)[1] == 'token_count' and event_type(e)[2].get('info') is not None]
+    if not infos:
+        return None
+    total = usage_of(infos[-1], 'total_token_usage')
+    return total[0] if total else None
+
+
+def watch_input(path):
+    """Watch only (during the turn): the last valid total's input, or None if it cannot be read now."""
+    try:
+        return rollout_baseline(path)
+    except Exception:
+        return None
 
 
 def approval_events(events, start, end):
@@ -891,7 +922,12 @@ def model_turn(ev, bundle, item, attempt, conversation_id, text, thread_before):
     if thread_before is not None and path_before is None:
         raise Stop(3, '%s: the thread has no rollout before the turn' % item)
     new_thread = thread_before is None
-    baseline_input = last_total(path_before)
+    if new_thread:
+        baseline_input = 0  # this turn creates the thread: no rollout exists before it
+    else:
+        baseline_input = rollout_baseline(path_before)
+        if baseline_input is None:
+            raise Stop(3, '%s: the existing thread has no provable last token_count baseline; not started' % item)
     claim_id = claim(bundle, os.path.basename(ev), item, attempt)
     update_claim(bundle, claim_id, conversation=conversation_id, versionBefore=current['version'],
                  requestBefore=current['request'], turnsBefore=len(prior_turns), threadBefore=thread_before,
@@ -905,7 +941,7 @@ def model_turn(ev, bundle, item, attempt, conversation_id, text, thread_before):
         update_claim(bundle, claim_id, status='unknown', endedAt=now_utc(), notes='message POST answered %s' % status)
         raise Stop(9, '%s: message POST answered %s; claim left unknown' % (item, status))
     request_id = (body or {}).get('requestId') if isinstance(body, dict) else None
-    deadline, over, started = time.time() + TURN_TIMEOUT, False, time.time()
+    deadline, over, started, watch_gaps = time.time() + TURN_TIMEOUT, False, time.time(), 0
     state = None
     while time.time() < deadline:
         time.sleep(POLL)
@@ -913,7 +949,10 @@ def model_turn(ev, bundle, item, attempt, conversation_id, text, thread_before):
         state = conversation(conversation_id)
         thread = state['record'].get('nativeThreadId')
         path = rollout_path(thread) if thread else None
-        if path and last_total(path) - baseline_input > START_INPUT:
+        seen = watch_input(path) if path else None
+        if seen is None and path:
+            watch_gaps += 1  # recorded; settlement after the turn decides (unsettled stops)
+        elif seen is not None and seen - baseline_input > START_INPUT:
             over = True
         if state['state'] != 'running':
             break
@@ -939,10 +978,10 @@ def model_turn(ev, bundle, item, attempt, conversation_id, text, thread_before):
     usage, why = settle(events, turn, new_thread and path_before is None)
     rate_limited = state.get('error') == 'codex_rate_limited'
     if usage is None:
-        update_claim(bundle, claim_id, status='unsettled', endedAt=ended, turn=turn, thread=thread, notes=why,
+        update_claim(bundle, claim_id, status='unsettled', endedAt=ended, turn=turn, thread=thread, notes=why, watchGaps=watch_gaps,
                      rateLimited=rate_limited)
         raise Stop(6, '%s: usage not settled (%s)' % (item, why))
-    update_claim(bundle, claim_id, status='settled', endedAt=ended, turn=turn, thread=thread, usage=usage,
+    update_claim(bundle, claim_id, status='settled', endedAt=ended, turn=turn, thread=thread, usage=usage, watchGaps=watch_gaps,
                  conversation=conversation_id, error=state.get('error'), rateLimited=rate_limited,
                  over200k=usage['input'] > START_INPUT or over)
     bounds = segment(events, turn)
@@ -1179,7 +1218,8 @@ def run_a(ev, verdicts):
             raise Stop(5, 'T4: runner policy check refused or log unreadable')
         if same and ran:
             verdicts['T4 resume, same process'] = ('pass (same thread; the ls of the T2 file completed with exit 0 and '
-                                                   'the file is unchanged; runner check_thread passed on resume: '
+                                                   'the file is unchanged; policy inferred, not observed: the pinned '
+                                                   'runner check_thread must pass on resume before the turn ran: '
                                                    'approval untrusted, reviewer user, profile, cwd, roots, sandbox)')
             break
         verdicts['T4 resume, same process'] = 'attempt %d: not run (thread same %s, command exit 0 and file ok %s)' % (
@@ -1244,7 +1284,8 @@ def run_b(ev, verdicts):
             raise Stop(5, 'T5: runner policy check refused or log unreadable')
         if t5['thread'] == first['thread'] and ran:
             verdicts['T5 resume, new process'] = ('pass (same thread in a new Pod %s; the ls completed with exit 0 and '
-                                                  'the T2 file is unchanged on the PV; runner check_thread passed on '
+                                                  'the T2 file is unchanged on the PV; policy inferred, not observed: '
+                                                  'the pinned runner check_thread must pass on '
                                                   'resume)' % pod['metadata']['uid'])
             break
         verdicts['T5 resume, new process'] = 'attempt %d: not run' % attempt
@@ -1360,8 +1401,11 @@ def main(argv):
                 if not exit_record['finalInvariants'] and rc == 0:
                     rc = 12
             except BaseException:
-                exit_record['finalInvariants'] = None
-                say('final check not completed')
+                exit_record['finalInvariants'] = None  # not verified is not a pass
+                verdicts['final invariants'] = 'NOT VERIFIED (the check did not complete)'
+                say('final check not completed: not verified')
+                if rc == 0:
+                    rc = 12
             for name, value in verdicts.items():
                 say('verdict %s: %s' % (name, value))
             for bundle in LEDGERS:
