@@ -32,15 +32,20 @@ install (rc 3 refused, nothing changed; 4 image load or check failed; 5 a file s
 3. inputs.json: the original bytes copied to private/; `image` -> the #68 runner digest (the one V7a gave
    …5804); every other key unchanged (boolean). Temporary file in the same directory, root 0600, rename.
 4. worker.py -> the reviewed file; controller.sh -> the old file with exactly two changes: the image ID and the
-   allowlist (…5805 only). Each old file is kept as <name>.r1 by a hard link that refuses an existing .r1
-   ("backup collision": stop), then the new file is renamed over it: the path always holds one complete file.
-   Modes restored (worker.py 0600, controller.sh 0700, root:root) and every SHA-256 checked.
+   allowlist (…5805 only). For each: the new file is written to a temporary file in the same directory (root,
+   final mode), the old file is moved to <name>.r1 with `mv -n` (an existing .r1 is refused before the call:
+   "backup collision", nothing moved; the move is proved by inode), then the temporary file is renamed to the
+   name. The move and the rename run with signals blocked; only a failing rename leaves the name absent with
+   .r1 = the old file, which restore accepts. The name is empty only between the two calls, inside the window
+   where the unit cannot run (checked before and after). Modes (worker.py 0600, controller.sh 0700, root:root)
+   and every SHA-256 checked.
 No mixed version can run: nothing starts the unit (disabled, timer disabled, inactive), and even a manual start
 during install has no owner to prepare (no …5805 row exists until enter; the five owners have bindings).
 enter checks every installed file again before it starts the unit.
 
 enter (rc 3 refused; 6 account/allowlist step failed; 7 session or POST failed; 8 token renewal failed; 9 the
-preparer did not report …5805 processed; 10 the runner Pod not proved Running; 11 a result check failed):
+preparer did not report …5805 processed; 10 the runner Pod not proved Running; 11 a result check failed;
+70 every step passed but the session revoke is not proved: not a V6b pass):
 1. evidence directory v6b-enter-<UTC>.
 2. auth.accounts row …5805 (github_id 900000005805, login SYNTHETIC-DEVVM68-5805-NOT-A-USER, editor, approved).
 3. allowlists (the V7a way): runner-controller and api to 0 by UID; one JSON Patch each (tests: UID,
@@ -51,8 +56,12 @@ preparer did not report …5805 processed; 10 the runner Pod not proved Running;
    outcome: never repeated.
 5. the preparer's kube-token (24 h TokenRequest tokens, expired since 2026-10-26): one new token for
    runner-pool-controller with --duration=24h (rollout README "Private host inputs"); temporary file root 0600 in
-   the same directory; the old file kept as kube-token.r1 (hard link, refuses an existing one), then rename. Only
-   the expiry time is printed. Nothing else holds the token.
+   the same directory; the old file moved to kube-token.r1 with `mv -n` (as for the files above), then rename. Only
+   the expiry time is printed. Nothing else holds the token. The request is made once whatever its outcome: a
+   failed or unknown request, an invalid response, or a token that could not be installed is recorded as such
+   and is never reissued (the approval covers one issuance). A failing rename leaves kube-token absent with
+   kube-token.r1 = the old (expired) file: the preparer is then not started, and any further step is a PM
+   decision (a new token needs a new approval).
 6. `systemctl start issue16-controller.service` once (the timer stays disabled). Pass: unit Result=success and
    exactly one worker line {"owner": "…5805", "stage": "provision", "result": "processed"}.
 7. the runner Pod (created by the in-cluster runner-controller from the published binding) Running within 300 s.
@@ -62,8 +71,11 @@ preparer did not report …5805 processed; 10 the runner Pod not proved Running;
    automount; the runner log has no `runner_policy_check` refused line; /control/operator-account on the new
    storage equals the broker's BROKER_ACCOUNT_ID; the runner /health through runner-controller's own code names
    the owner, state and Pod; the five owners' fences and plans unchanged; no other runner Pod.
-9. the session is revoked (also on every failure after it was created). The Pod is left to the controller's idle
-   stop (CODEX_USER_RUNNER_IDLE_SECONDS=1800). No model turn: V6-pre.
+9. the session is revoked, on success and on every failure after its insert was attempted. A revoke that is not
+   proved (DELETE or the check failed) is printed as SESSION NOT REVOKED and recorded (sessionLeft) together
+   with the step's own failure; after a run whose steps all passed it is rc 70. A session that may still be live
+   is never a V6b pass. The Pod is left to the controller's idle stop (CODEX_USER_RUNNER_IDLE_SECONDS=1800). No
+   model turn: V6-pre.
 Reverting files does not undo state. After step 4 the …5805 registry row exists; after step 6 its storage
 (loop-backed ext4 under the storage root), PV/PVC/Secret, provision output and binding exist. They stay until V9.
 
@@ -71,9 +83,14 @@ An enter that stops inside step 3 can leave api and runner-controller at 0: entr
 
 restore (PM decision only; rc 3 refused, 5 failed): refused while a …5805 runner Pod exists (stop it through the
 API first). Does only what is still missing: both allowlists back to …5804 and both Deployments 1/1 again (step 3
-in reverse, also after an enter that stopped with them at 0); controller.sh and
-worker.py back from .r1 (the installed file kept as <name>.v6b by a refusing hard link); inputs.json back to the
-install backup. It never deletes the account row, registry row, binding, storage, image or the new kube-token.
+in reverse, also after an enter that stopped with them at 0); controller.sh and worker.py back from .r1 with
+`mv -n` (the installed file first moved to <name>.v6b with `mv -n`); inputs.json back to the install backup
+(temporary file, rename). Per file, identified by the SHA-256 of (name, .r1, .v6b), every state install or
+restore can leave:
+   (old, -, -) not installed, (old, -, new) restored: nothing to do;
+   (new, old, -) installed: both moves; (-, old, new) restore stopped between its moves: the second move;
+   (-, old, -) install's rename failed: the second move.
+Anything else is refused. It never deletes the account row, registry row, binding, storage, image or kube-token.
 
 Temporary files (the inputs.json and kube-token temporary files may hold the account id or a token; the patch
 file holds no secret) are removed in the same run on every exit path the process can handle (as in V6a: O_EXCL
@@ -118,6 +135,7 @@ OWNERS = tuple(sorted(FENCES))
 OLD_ALLOW = ','.join(OWNERS)
 
 K3S, DOCKER, SYSTEMCTL, JOURNALCTL = '/usr/local/bin/k3s', '/usr/bin/docker', '/usr/bin/systemctl', '/usr/bin/journalctl'
+MV = '/usr/bin/mv'
 EVIDENCE = '/root/native68/evidence'
 LIB = '/usr/local/lib/anxious-lookout/issue16'
 CONTROLLER_SH, WORKER = LIB + '/controller.sh', LIB + '/worker.py'
@@ -350,6 +368,12 @@ def host_files(code, state):
             raise Stop(code, '%s is not in the %s state' % (path, 'pre-install' if state == 'old' else 'installed'))
 
 
+def file_state(path, code):
+    """(sha of path, of path.r1, of path.v6b), None where absent; each present one a root file with one link."""
+    return tuple(None if data is None else sha_bytes(data)
+                 for data in (read_file(name, code, MODES[path]) for name in (path, path + '.r1', path + '.v6b')))
+
+
 def inputs_now(code):
     data = read_file(INPUTS, code, 0o600)
     if data is None:
@@ -555,9 +579,26 @@ def fsync_dir(folder):
         os.close(fd)
 
 
+def move_noreplace(source, target, code):
+    """`mv -n -T source target`, proved by inode: `target` did not exist, now holds the inode `source` had, and
+    `source` is gone. mv -n never overwrites; an existing target is refused before the call."""
+    before = os.lstat(source)
+    if os.path.lexists(target):
+        raise Stop(code, 'backup collision: %s exists (nothing moved)' % target)
+    rc, _ = run([MV, '-n', '-T', source, target], 30)
+    try:
+        moved = not os.path.lexists(source) and os.lstat(target).st_ino == before.st_ino
+    except OSError:
+        moved = False
+    if not moved:
+        raise Stop(code, '%s not moved to %s (mv rc %d)' % (source, target, rc))
+
+
 def replace_file(path, data, mode, code, keep=None):
-    """Write `data` to a temporary file in the same directory (root, `mode`), optionally keep the current file as
-    `keep` by a hard link that refuses an existing one, then rename over `path`. True when the rename happened."""
+    """Write `data` to a temporary file in the same directory (root, `mode`); optionally move the current file to
+    `keep` with mv -n (refuses an existing `keep`); then rename the temporary file to `path`. The move and the
+    rename run with the three signals blocked, so only a failing rename can leave `path` absent with `keep`
+    holding the old file (restore accepts that state). True when the rename happened."""
     folder, base = os.path.split(path)
     temp = os.path.join(folder, '.%s.v6b-%d' % (base, os.getpid()))
     fd = create_temporary(temp, mode)
@@ -568,16 +609,15 @@ def replace_file(path, data, mode, code, keep=None):
             os.fsync(stream.fileno())
         os.chown(temp, 0, 0)
         os.chmod(temp, mode)
-        if keep is not None:
-            try:
-                os.link(path, keep)
-            except FileExistsError:
-                raise Stop(code, 'backup collision: %s exists (nothing replaced)' % keep) from None
-            except OSError:
-                raise Stop(code, 'backup %s not made (nothing replaced)' % keep) from None
         old = signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
         try:
-            os.rename(temp, path)
+            if keep is not None:
+                move_noreplace(path, keep, code)
+            try:
+                os.rename(temp, path)
+            except OSError:
+                raise Stop(code, '%s: rename failed%s' % (path, '' if keep is None else
+                                                          ' (the old file is %s; restore accepts this)' % keep)) from None
             TEMPORARY.remove(temp)
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, old)
@@ -793,9 +833,10 @@ def post(token, csrf):
 
 
 def renew_token(ev):
-    """One 24 h TokenRequest token for runner-pool-controller; only its expiry is printed."""
+    """One 24 h TokenRequest token for runner-pool-controller; only its expiry is printed. The request is made
+    once: whatever its outcome, it is the one approved issuance and is never repeated."""
     before = os.lstat(KUBE_TOKEN)
-    record(ev, kubeToken='pending', kubeTokenOldMtime=int(before.st_mtime))
+    record(ev, kubeToken='requested (the one approved issuance)', kubeTokenOldMtime=int(before.st_mtime))
     rc, out = run([K3S, 'kubectl', '-n', RUNNER_NS, 'create', 'token', 'runner-pool-controller', '--duration=24h',
                    '-o', 'json'], 60)
     try:
@@ -805,10 +846,18 @@ def renew_token(ev):
         token, expiry = None, None
     out = None
     if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_.-]{100,4096}', token) or not expiry:
-        record(ev, kubeToken='failed (no token issued or unreadable)')
-        raise Stop(8, 'kube-token: no token issued (the old file is unchanged)')
-    replace_file(KUBE_TOKEN, (token + '\n').encode(), 0o600, 8, keep=KUBE_TOKEN + '.r1')
-    token = None
+        token = None
+        what = ('the request failed or its outcome is unknown (kubectl rc %d)' % rc if rc != 0 else
+                'the response is invalid (a token may have been issued)')
+        record(ev, kubeToken='not installed: %s; not reissued (the one issuance is used)' % what)
+        raise Stop(8, 'kube-token: %s; not reissued; the old file is unchanged' % what)
+    try:
+        replace_file(KUBE_TOKEN, (token + '\n').encode(), 0o600, 8, keep=KUBE_TOKEN + '.r1')
+    except Stop:
+        record(ev, kubeToken='issued but not installed (discarded; not reissued; the one issuance is used)')
+        raise
+    finally:
+        token = None
     info, kept = os.lstat(KUBE_TOKEN), os.lstat(KUBE_TOKEN + '.r1')
     ok = (stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == 0 and info.st_nlink == 1 and kept.st_ino == before.st_ino
           and kept.st_nlink == 1)
@@ -942,57 +991,70 @@ def enter():
         % (NEW_CONTROLLER_SHA[:12], NEW_WORKER_SHA[:12], NEW_IMAGE_ID[:19]))
     ev = evidence('enter')
     try:
-        record(ev, account='pending')
-        row = sql('account', "WITH a AS (INSERT INTO auth.accounts(id,github_id,login,role,is_approved) VALUES "
-                  "('%s','%s','%s','editor',true) RETURNING id) SELECT json_build_object('id',id) FROM a;"
-                  % (NEW, NEW_GITHUB, NEW_LOGIN), 6, write=True)
-        found = new_owner(6)
-        ok = row == [{'id': NEW}] and found['account'] == {'github': NEW_GITHUB, 'login': NEW_LOGIN, 'role': 'editor',
-                                                            'approved': True}
-        record(ev, account='done' if ok else 'uncertain')
-        if not ok:
-            raise Stop(6, 'account row …5805 not proved')
-        say('account: …5805 %s, editor, approved' % NEW_LOGIN)
-        allowlists(OLD_CANARY, NEW, 6, ev)
-        if runner_pods(6):
-            raise Stop(6, 'a runner Pod appeared after the restart')
-        owners(6, 'after the allowlists')
-        token, csrf = create_session(ev)
-        record(ev, post='pending')
-        status, body = post(token, csrf)
-        token = csrf = None
-        record(ev, post='unknown' if status is None else status, postBody=body)
-        if status is None:
-            raise Stop(7, 'POST outcome unknown (timeout or connection lost); never repeated; back checks read-only')
-        say('POST %s: status %d %s' % (RUNNER_PATH, status, json.dumps(body, sort_keys=True)))
-        if status != 202:
-            raise Stop(7, 'POST answered %d; no retry' % status)
-        reg = new_owner(7)['registry'] or {}
-        if (reg.get('phase'), reg.get('generation'), reg.get('pod')) != ('provisioning', 1, None):
-            raise Stop(7, 'registry …5805 is not provisioning, generation 1, no Pod: %s'
-                       % json.dumps({k: reg.get(k) for k in ('phase', 'generation', 'pod')}))
-        record(ev, state=reg['state'])
-        say('registry …5805: state %s, provisioning, generation 1, no Pod' % reg['state'])
-        renew_token(ev)
-        host_files(9, 'new')
-        units_quiet(9, 'before the preparer')
-        preparer(ev)
-        pod, found = wait_pod()
-        say('runner Pod %s Running, ready; registry %s' % (pod['metadata']['uid'], json.dumps(
-            {k: found['registry'].get(k) for k in ('phase', 'generation', 'revision')}, sort_keys=True)))
-        checks, health, files = result_checks(pod, found, account)
-        account = None
-        for name, ok in checks.items():
-            say('check %s: %s' % (name, ok))
-        say('runner health: %s; provision output files: %s' % (json.dumps(health, sort_keys=True), ' '.join(files)))
-        record(ev, pod=pod['metadata']['uid'], checks=checks, health=health, outputFiles=files)
-        if not all(checks.values()):
-            raise Stop(11, 'a result check failed; no rerun, no undo; back checks read-only')
-    finally:
-        revoke_session(ev)
+        enter_steps(ev, account)
+    except BaseException:
+        if not revoke_session(ev):
+            record(ev, sessionLeft=True)
+            say('SESSION NOT REVOKED: session %s may stay live until it expires (at most 1 hour); tell PM'
+                % SESSION['hash'][:16])
+        raise
+    if not revoke_session(ev):
+        record(ev, sessionLeft=True, result=70)
+        raise Stop(70, 'every step passed but the session revoke is not proved: session %s may stay live until it '
+                       'expires (at most 1 hour); V6b is not passed; tell PM' % SESSION['hash'][:16])
     record(ev, result=0, finished=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
     say('entered: …5805 has a v1 binding on the #68 runner from the #68 preparer and a running Pod; session revoked; '
         'the Pod is left to the idle stop; next: V6-pre')
+
+
+def enter_steps(ev, account):
+    """Steps 2-8 of enter. The caller revokes the session on every exit."""
+    record(ev, account='pending')
+    row = sql('account', "WITH a AS (INSERT INTO auth.accounts(id,github_id,login,role,is_approved) VALUES "
+              "('%s','%s','%s','editor',true) RETURNING id) SELECT json_build_object('id',id) FROM a;"
+              % (NEW, NEW_GITHUB, NEW_LOGIN), 6, write=True)
+    found = new_owner(6)
+    ok = row == [{'id': NEW}] and found['account'] == {'github': NEW_GITHUB, 'login': NEW_LOGIN, 'role': 'editor',
+                                                        'approved': True}
+    record(ev, account='done' if ok else 'uncertain')
+    if not ok:
+        raise Stop(6, 'account row …5805 not proved')
+    say('account: …5805 %s, editor, approved' % NEW_LOGIN)
+    allowlists(OLD_CANARY, NEW, 6, ev)
+    if runner_pods(6):
+        raise Stop(6, 'a runner Pod appeared after the restart')
+    owners(6, 'after the allowlists')
+    token, csrf = create_session(ev)
+    record(ev, post='pending')
+    status, body = post(token, csrf)
+    token = csrf = None
+    record(ev, post='unknown' if status is None else status, postBody=body)
+    if status is None:
+        raise Stop(7, 'POST outcome unknown (timeout or connection lost); never repeated; back checks read-only')
+    say('POST %s: status %d %s' % (RUNNER_PATH, status, json.dumps(body, sort_keys=True)))
+    if status != 202:
+        raise Stop(7, 'POST answered %d; no retry' % status)
+    reg = new_owner(7)['registry'] or {}
+    if (reg.get('phase'), reg.get('generation'), reg.get('pod')) != ('provisioning', 1, None):
+        raise Stop(7, 'registry …5805 is not provisioning, generation 1, no Pod: %s'
+                   % json.dumps({k: reg.get(k) for k in ('phase', 'generation', 'pod')}))
+    record(ev, state=reg['state'])
+    say('registry …5805: state %s, provisioning, generation 1, no Pod' % reg['state'])
+    renew_token(ev)
+    host_files(9, 'new')
+    units_quiet(9, 'before the preparer')
+    preparer(ev)
+    pod, found = wait_pod()
+    say('runner Pod %s Running, ready; registry %s' % (pod['metadata']['uid'], json.dumps(
+        {k: found['registry'].get(k) for k in ('phase', 'generation', 'revision')}, sort_keys=True)))
+    checks, health, files = result_checks(pod, found, account)
+    account = None
+    for name, ok in checks.items():
+        say('check %s: %s' % (name, ok))
+    say('runner health: %s; provision output files: %s' % (json.dumps(health, sort_keys=True), ' '.join(files)))
+    record(ev, pod=pod['metadata']['uid'], checks=checks, health=health, outputFiles=files)
+    if not all(checks.values()):
+        raise Stop(11, 'a result check failed; no rerun, no undo; back checks read-only')
 
 
 # restore ----------------------------------------------------------------------------------------------------
@@ -1023,15 +1085,20 @@ def restore():
         say('allowlists: back to …5804 only, api then runner-controller restarted')
     for path, new_sha, old_sha in ((CONTROLLER_SH, NEW_CONTROLLER_SHA, OLD_CONTROLLER_SHA),
                                    (WORKER, NEW_WORKER_SHA, OLD_WORKER_SHA)):
-        current = read_file(path, 5, MODES[path])
-        backup = read_file(path + '.r1', 5, MODES[path])
-        if current is not None and sha_bytes(current) == old_sha and backup is None:
-            continue  # already the old file
-        if current is None or sha_bytes(current) != new_sha or backup is None or sha_bytes(backup) != old_sha:
+        state = file_state(path, 5)
+        if state in ((old_sha, None, None), (old_sha, None, new_sha)):
+            continue  # the old file (not installed, or restored earlier)
+        if state not in ((new_sha, old_sha, None), (None, old_sha, new_sha), (None, old_sha, None)):
             raise Stop(5, '%s is in no state restore accepts' % path)
         record(ev, **{os.path.basename(path): 'pending'})
-        replace_file(path, backup, MODES[path], 5, keep=path + '.v6b')
-        os.unlink(path + '.r1')
+        old = signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
+        try:
+            if state[0] is not None:
+                move_noreplace(path, path + '.v6b', 5)  # the installed file kept
+            move_noreplace(path + '.r1', path, 5)      # the old file back (same inode)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old)
+        fsync_dir(os.path.dirname(path))
         record(ev, **{os.path.basename(path): 'done'})
     before = os.path.join(EVIDENCE, installs[0], 'private', 'inputs.json.before-v6b')
     original = read_file(before, 5, 0o600)
