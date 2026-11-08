@@ -20,11 +20,34 @@ created; 8 a stop rule after a turn (input over 200k, a rate limit, a failed tur
 the outcome is unknown; 10 residue pattern found; 11 stop/release not proved (or not by one completed drain receipt);
 12 every step passed but the final invariants (after the session revoke: nothing pending, five owners, allowlists)
 failed or could not be checked (not verified is not a pass);
-70 every step passed but the session revoke is not proved; 130 interrupted twice. exit.json also holds
-stepRc, sessionRevoked and finalInvariants as separate fields.
+13 format gate: the first turn of the action has a tool call but no interpretable exec pair (nothing else
+starts: the same check is not repeated at cost); 70 every step passed but the session revoke is not proved;
+130 interrupted twice. exit.json also holds stepRc, sessionRevoked and finalInvariants as separate fields.
 
-Turns (isolation-42, V6-pre allocation 8 = T1 1, T2 1, T3 1+2 retries, T4/T5 2+1 shared retry; T6 in
-resources-6, 1): every model turn, retries included, is claimed in its ledger before it starts. Gate before each
+Revision 2 (after run-a, 2026-11-09): the pinned model is code-mode only, so a shell command is a rollout
+`custom_tool_call` named `exec` whose input calls the nested `tools.exec_command`, paired by call_id with its
+`custom_tool_call_output`; thread/read projects no commandExecution item for it, and the output (written by the
+model's own code) carries no structured exit code or cwd. run-a ran once under revision 1 (1f3f965c); its
+verdicts are kept as recorded, corrected only in the derived re-analysis (review 2026-11-09), and the guard
+refuses a second run-a, so run_a below is the revision-1 code, unchanged and unreachable. run-b and run-x use the
+rollout pairs:
+- per turn, from the turn segment: "no tool call" only when every record path is intact and shows none (the
+  rollout segment, no unreadable line in it, no exec call/output, no other *_call record or exec/tool/mcp/patch
+  event, the projected turn present with no tool item); "call present, nested result not extractable" when a
+  call or record exists but no pair is interpretable (name exec, status completed, a call id with exactly one
+  output, the input naming only tools.exec_command, the output text readable); otherwise "pairs";
+- the outer exec "completed" and anything the model prints (an `echo rc=$?` included) are never the evidence of
+  the inner command's success. Verdicts are "limited functional observation": the host effect (the PV file's
+  state before and after, its content and times inside the turn) plus fixed booleans of the pair's result; the
+  inner exit code and cwd are "not recorded" and the label says the exit-0 check is not met, not passed;
+- bwrap proc_t mount AVC times inside a call window are printed as auxiliary only (an AVC is a denial record,
+  not a process start record; none is not proof that nothing started).
+Allocation (PM table 2026-11-09): isolation-42 V6-pre 10 = used 7 (T1 1, T2 1, T3 3, T4 2) + T5 1 + T5 retry 1
++ 1 unassigned reserve that no item can use (a new user decision is needed for it); resources-6 V6-pre 1 = T6.
+The T4/T5 shared allowance of revision 1 is split: T4 2 (both used in run-a), T5 2. Ledger history is kept.
+
+Turns (isolation-42, V6-pre allocation 10 = T1 1, T2 1, T3 1+2 retries, T4 2, T5 1+1 retry, 1 reserve no item
+uses; T6 in resources-6, 1): every model turn, retries included, is claimed in its ledger before it starts. Gate before each
 turn, under the lock: no unsettled claim in either ledger, no rate-limit stop recorded, 60 s since the last turn
 ended (both ledgers), allocation and bundle turns left, bundle input left >= 200k and output left >= 5k. 200k/5k
 are start estimates, not limits: a turn cannot be interrupted (user decision 2026-11-08), so a turn can use more;
@@ -111,7 +134,7 @@ EVIDENCE = '/root/native68/evidence'
 LOCK = EVIDENCE + '/v6pre.lock'
 LEDGERS = {'isolation-42': (EVIDENCE + '/ledger-isolation-42.json', {'turns': 42, 'input': 4000000, 'output': 50000}),
            'resources-6': (EVIDENCE + '/ledger-resources-6.json', {'turns': 6, 'input': 900000, 'output': 20000})}
-ALLOCATION = {'isolation-42': ('v6pre', 8, {'T1': 1, 'T2': 1, 'T3': 3, 'T4T5': 3}),
+ALLOCATION = {'isolation-42': ('v6pre', 10, {'T1': 1, 'T2': 1, 'T3': 3, 'T4': 2, 'T5': 2}),  # 1 reserve: no item
               'resources-6': ('v6pre-x', 1, {'T6': 1})}
 START_INPUT, START_OUTPUT = 200000, 5000
 GAP, TURN_TIMEOUT, POLL = 60, 900, 5
@@ -378,11 +401,12 @@ def gate(bundle, item, session_expiry):
     limits = ledger['limits']
     name, total, items = ALLOCATION[bundle]
     mine = [c for c in ledger['claims'] if c.get('allocation') == name]
-    key = 'T4T5' if item in ('T4', 'T5') else item
     if len(mine) >= total:
         return 'the %s allocation (%d) is used' % (name, total)
-    if sum(1 for c in mine if c['item'] in (('T4', 'T5') if key == 'T4T5' else (item,))) >= items[key]:
-        return 'the %s allowance for %s is used' % (name, key)
+    if item not in items:
+        return 'the %s allocation has no allowance for %s' % (name, item)
+    if sum(1 for c in mine if c['item'] == item) >= items[item]:
+        return 'the %s allowance for %s (%d) is used' % (name, item, items[item])
     if turns >= limits['turns'] or limits['input'] - inp < START_INPUT or limits['output'] - out < START_OUTPUT:
         return 'the %s bundle has less than one turn left (estimate %d/%d)' % (bundle, START_INPUT, START_OUTPUT)
     ended = last_end()
@@ -631,8 +655,23 @@ def pod_processes(pod_uid):
     return found
 
 
+def avc_times(start):
+    """Times (epoch) of bwrap proc_t mount denials since start: auxiliary only, a denial is not a start record.
+    --input-logs: ausearch reads a piped stdin as its input otherwise."""
+    rc, out = run([AUSEARCH, '--input-logs', '-m', 'AVC', '-ts', time.strftime('%m/%d/%Y', time.localtime(start)),
+                   time.strftime('%H:%M:%S', time.localtime(start))], 60)
+    if rc not in (0, 1):
+        return None
+    found = []
+    for line in out.splitlines():
+        match = re.search(r'audit\((\d+\.\d+):\d+\).*denied\s+\{ mount \}.*comm="bwrap".*tcontext=[^:\s]*:[^:\s]*:proc_t:', line)
+        if match:
+            found.append(float(match.group(1)))
+    return found
+
+
 def avc_since(start):
-    rc, out = run([AUSEARCH, '-m', 'AVC,USER_AVC,SELINUX_ERR', '-ts',
+    rc, out = run([AUSEARCH, '--input-logs', '-m', 'AVC,USER_AVC,SELINUX_ERR', '-ts',
                    time.strftime('%m/%d/%Y', time.localtime(start)), time.strftime('%H:%M:%S', time.localtime(start))], 60)
     if rc not in (0, 1):
         return 'ausearch failed'
@@ -905,6 +944,112 @@ def turn_items(record, turn):
     return []
 
 
+# Revision 2: the rollout exec pairs ----------------------------------------------------------------------
+MESSAGE_ITEMS = {'userMessage', 'agentMessage', 'reasoning'}
+TOOL_EVENT_WORDS = ('exec', 'tool', 'mcp', 'patch')
+PROC_PATHS = ('/proc/', '/dev/stderr', '/dev/fd', '/dev/stdin', '/dev/stdout', '<(', '>(')
+LS_LINE = re.compile(r'^-[rwx-]{9}\S*\s+\d+\s+\S+\s+\S+\s+5\s+.*\bv6pre-write\.txt\s*$', re.M)
+ERROR_WORDS = re.compile(r'\berror\b|denied|not permitted|no such file|rejected|declined', re.I)
+
+
+def stamp(value):
+    """A rollout timestamp (UTC, '...Z') as epoch seconds, or None."""
+    if not isinstance(value, str) or not value.endswith('Z'):
+        return None
+    base, _, fraction = value[:-1].partition('.')
+    try:
+        return calendar.timegm(time.strptime(base, '%Y-%m-%dT%H:%M:%S')) + (float('0.' + fraction) if fraction else 0.0)
+    except ValueError:
+        return None
+
+
+def output_text(output):
+    """The text of a custom_tool_call_output: a string, or a list of input_text/output_text parts; else None."""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, list) and output and all(isinstance(x, dict) for x in output):
+        parts = [x.get('text') for x in output if x.get('type') in ('input_text', 'output_text')]
+        if parts and all(isinstance(p, str) for p in parts):
+            return '\n'.join(parts)
+    return None
+
+
+def tool_calls(events, bounds, items):
+    """The turn's tool calls from its rollout segment. Returns (kind, pairs, counts): kind 'none' only when every
+    record path is intact and shows no call; 'unextractable' when a call/record exists, or a path is not intact,
+    and no pair is interpretable; 'pairs' otherwise. Each pair keeps the input and result text in memory only
+    (never printed or stored); the caller derives fixed booleans from them."""
+    start, end = bounds
+    calls, outputs, other, intact = {}, {}, 0, True
+    for event in events[start:end + 1]:
+        kind, sub, payload = event_type(event)
+        if kind == '<unreadable line>':
+            intact = False
+        elif kind == 'response_item' and sub == 'custom_tool_call':
+            calls.setdefault(payload.get('call_id'), []).append((payload, stamp(event.get('timestamp'))))
+        elif kind == 'response_item' and sub == 'custom_tool_call_output':
+            outputs.setdefault(payload.get('call_id'), []).append((payload, stamp(event.get('timestamp'))))
+        elif kind == 'response_item' and isinstance(sub, str) and (sub.endswith('_call') or sub.endswith('_call_output')):
+            other += 1
+        elif kind == 'event_msg' and isinstance(sub, str) and any(w in sub for w in TOOL_EVENT_WORDS):
+            other += 1
+    projected = sum(1 for i in items if i.get('type') not in MESSAGE_ITEMS)
+    pairs = []
+    for call_id, found in calls.items():
+        answers = outputs.get(call_id, [])
+        if not (isinstance(call_id, str) and call_id and len(found) == 1 and len(answers) == 1):
+            continue
+        (call, at), (answer, out_at) = found[0], answers[0]
+        source, text = call.get('input'), output_text(answer.get('output'))
+        if not (call.get('name') == 'exec' and call.get('status') == 'completed' and isinstance(source, str)
+                and text is not None and sorted(set(re.findall(r'\btools\.([A-Za-z_]\w*)', source))) == ['exec_command']):
+            continue
+        pairs.append({'call': call_id, 'at': at, 'outAt': out_at, 'input': source, 'text': text})
+    counts = {'execCalls': sum(len(v) for v in calls.values()), 'execOutputs': sum(len(v) for v in outputs.values()),
+              'otherToolRecords': other, 'projectedToolItems': projected, 'intact': intact, 'pairs': len(pairs)}
+    if pairs:
+        return 'pairs', pairs, counts
+    if intact and not calls and not outputs and not other and not projected:
+        return 'none', [], counts
+    return 'unextractable', [], counts
+
+
+def file_state(path):
+    """A regular file read with O_NOFOLLOW: identity, times and content digest; None when absent or not a file."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 65536:
+            return None
+        data = os.read(fd, 65537)
+        return {'ino': info.st_ino, 'uid': info.st_uid, 'mode': stat.S_IMODE(info.st_mode), 'size': info.st_size,
+                'mtime_ns': info.st_mtime_ns, 'ctime_ns': info.st_ctime_ns, 'sha256': hashlib.sha256(data).hexdigest(),
+                'lines': data.split()}
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def in_window(state, start, end):
+    """The file's mtime and ctime inside [start, end] (epoch seconds; the node clock serves both)."""
+    return (state is not None and start is not None and end is not None
+            and all(start <= state[k] / 1e9 <= end for k in ('mtime_ns', 'ctime_ns')))
+
+
+def say_calls(item, attempt, result):
+    calls = result['calls']
+    say('%s attempt %d: tool calls %s; kind %s' % (item, attempt, json.dumps(calls['counts'], sort_keys=True), calls['kind']))
+    for pair in calls['pairs']:
+        hits = [t for t in (calls['avc'] or []) if pair['at'] is not None and pair['outAt'] is not None
+                and pair['at'] <= t <= pair['outAt']]
+        say('  exec pair %s: called %s, result %s, result shows an error word %s, bwrap proc_t AVC in the window %d '
+            '(auxiliary)' % (pair['call'][:10], pair['at'], pair['outAt'], bool(ERROR_WORDS.search(pair['text'])), len(hits)))
+
+
 # One model turn ------------------------------------------------------------------------------------------
 def model_turn(ev, bundle, item, attempt, conversation_id, text, thread_before):
     """Claim, send, wait (watching input), settle. Returns a dict of fixed fields; raises Stop on a stop rule."""
@@ -998,6 +1143,14 @@ def model_turn(ev, bundle, item, attempt, conversation_id, text, thread_before):
            usage['output'], sorted(any_approval)))
     for c in result['commands']:
         say('  command item %s: status %s, cwd %s, exit %s' % (c['id'], c['status'], c['cwd'], c['exit']))
+    if bounds is None:
+        kind, pairs, counts = 'unextractable', [], {'segment': False}
+    else:
+        kind, pairs, counts = tool_calls(events, bounds, turn_items(record_, turn))
+    result['calls'] = {'kind': kind, 'pairs': pairs, 'counts': counts, 'avc': avc_times(started),
+                       'window': (stamp(events[bounds[0]].get('timestamp')), stamp(events[bounds[1]].get('timestamp')))
+                       if bounds else (None, None)}
+    say_calls(item, attempt, result)
     if rate_limited:
         raise Stop(8, '%s: rate limited (codex_rate_limited); the runner blocks itself; nothing else starts' % item)
     if usage['input'] > START_INPUT or over:
@@ -1243,10 +1396,18 @@ def run_stop(ev, verdicts):
     if state['phase'] == 'idle_stopped':
         stops = stops_for_pod()
         say('already released before this action: stops %s' % json.dumps(stops, sort_keys=True))
-        verdicts['stop'] = ('released by the idle stop after run-a (no DELETE sent): the API stop is NOT verified; '
-                            'T5 still runs in a new process')
+        if not (len(stops) == 1 and stops[0]['gen'] == 2 and stops[0]['receipt'] == 1 and stops[0]['completed'] is True):
+            raise Stop(11, 'idle_stopped, but not by exactly one completed stop with drain receipt 1 for the run-a Pod')
+        verdicts['stop'] = ('released by the idle stop after run-a (no DELETE sent; one completed stop, receipt 1): '
+                            'the API stop is NOT verified; T5 still runs in a new process')
         return
+    # Idle and API stops write the same row (runner_termination_control.request_stop), and a DELETE answers with a
+    # stop already requested. So the API stop counts only if no stop existed for the Pod before the DELETE and the
+    # one stop was requested after it was sent (the database and this script share the node clock).
+    if stops_for_pod():
+        raise Stop(3, 'a stop for the run-a Pod exists before the DELETE; nothing sent')
     create_session(ev)
+    sent = time.time()
     status, body = api('DELETE', BASE + '/codex/runner')
     say('DELETE /codex/runner answered %s %s' % (status, json.dumps(body if isinstance(body, dict) else None)))
     if status != 200 or not isinstance(body, dict) or body.get('terminationRequested') is not True:
@@ -1259,7 +1420,13 @@ def run_stop(ev, verdicts):
             stops = stops_for_pod()
             say('released: registry idle_stopped, Pod absent, stops for the run-a Pod %s' % json.dumps(stops, sort_keys=True))
             if len(stops) == 1 and stops[0]['gen'] == 2 and stops[0]['receipt'] == 1 and stops[0]['completed'] is True:
-                verdicts['stop'] = 'pass (API stop: one completed stop for the run-a Pod, generation 2, drain receipt 1)'
+                requested = stamp(stops[0]['requested'].replace('+00:00', 'Z')) if isinstance(stops[0]['requested'], str) else None
+                if requested is not None and requested >= sent:
+                    verdicts['stop'] = ('pass (API stop: one completed stop for the run-a Pod, generation 2, drain '
+                                        'receipt 1, requested after the DELETE was sent)')
+                else:
+                    verdicts['stop'] = ('released by one completed stop (receipt 1) requested before the DELETE or at '
+                                        'an unreadable time (an idle stop race): the API stop is NOT verified')
                 return
             raise Stop(11, 'released, but not by exactly one completed stop with drain receipt 1 for that Pod')
     raise Stop(11, 'release not proved within 600 s')
@@ -1271,24 +1438,47 @@ def run_b(ev, verdicts):
                                  and not pods)
     if not ok:
         raise Stop(3, 'precheck refused; nothing changed')
+    # The unique file of T5: the T2 file, whose state before the action is fixed here (present, uid 10001, exactly
+    # b'v6pre'); T5 only lists it, so the same state after each turn is part of the observation.
+    target = os.path.join(WORKSPACE_HOST, 'v6pre-write.txt')
+    before = file_state(target)
+    say('T5 file before: present %s, uid 10001 %s, exactly v6pre %s' % (before is not None, bool(before) and before['uid'] == 10001,
+                                                                    bool(before) and before['lines'] == [b'v6pre'] and before['size'] == 5))
+    if not (before and before['uid'] == 10001 and before['size'] == 5 and before['lines'] == [b'v6pre']):
+        raise Stop(3, 'T5: the T2 file is not as expected before the action; nothing changed')
     start, auth_before = time.time(), broker['auth']
     create_session(ev)
     pod = enter_and_wait(ev, 3, first.get('pod'))
+    name = 'T5 resume, new process'
     for attempt in (1, 2):
         t5 = model_turn(ev, 'isolation-42', 'T5', attempt, first['conversation'], PROMPTS['T5'], first['thread'])
-        ran = [c for c in t5['commands'] if ok_exec(c) and has(c['command'], 'ls', 'v6pre-write.txt')] \
-            if write_file() else []
+        after = file_state(target)
+        unchanged = after == before
         rc, log = run([K3S, 'kubectl', '-n', RUNNER_NS, 'logs', POD_NAME, '--tail=5000'], 60)
         if rc != 0 or 'runner_policy_check' in log:
-            verdicts['T5 resume, new process'] = 'COUNTEREXAMPLE or unreadable (runner_policy_check line or log unread)'
+            verdicts[name] = 'COUNTEREXAMPLE or unreadable (runner_policy_check line or log unread)'
             raise Stop(5, 'T5: runner policy check refused or log unreadable')
-        if t5['thread'] == first['thread'] and ran:
-            verdicts['T5 resume, new process'] = ('pass (same thread in a new Pod %s; the ls completed with exit 0 and '
-                                                  'the T2 file is unchanged on the PV; policy inferred, not observed: '
-                                                  'the pinned runner check_thread must pass on '
-                                                  'resume)' % pod['metadata']['uid'])
+        kind = t5['calls']['kind']
+        listed = [p for p in t5['calls']['pairs'] if LS_LINE.search(p['text'])]
+        same = t5['thread'] == first['thread']
+        say('T5 attempt %d: same thread %s, pairs whose result shows an ls -l line of the T2 file with size 5: %d, '
+            'T2 file identical before and after (inode, size, times, content) %s' % (attempt, same, len(listed), unchanged))
+        if not unchanged:
+            verdicts[name] = 'attempt %d: the T2 file changed during a listing turn: not met (cause not verified)' % attempt
+            raise Stop(8, 'T5: the T2 file changed; nothing else starts')
+        if same and listed:
+            verdicts[name] = ('limited functional observation, exit-0 check not met (inner exit code and cwd not '
+                              'recorded): same thread in a new Pod %s; an exec call with a nested exec_command whose '
+                              'result shows an ls -l line naming the T2 file with size 5; the T2 file identical on the '
+                              'PV before and after; policy inferred, not observed (the pinned check_thread on '
+                              'resume)' % pod['metadata']['uid'])
             break
-        verdicts['T5 resume, new process'] = 'attempt %d: not run' % attempt
+        if kind == 'unextractable':
+            verdicts[name] = 'attempt %d: call present, nested result not extractable (not verified)' % attempt
+            raise Stop(13, 'T5: format gate: a tool call but no interpretable exec pair; nothing else starts')
+        verdicts[name] = ('attempt %d: no tool call on every record path (not run)' % attempt if kind == 'none' else
+                          'attempt %d: exec pairs present, the expected listing not shown (thread same %s): not met'
+                          % (attempt, same))
     observe_after(pod['metadata']['uid'], start, auth_before, verdicts)
 
 
@@ -1304,41 +1494,50 @@ def run_x(ev, verdicts):
         pod = enter_and_wait(ev, 4, None)
     else:
         pod = [p for p in runner_pods() if p['metadata']['name'] == POD_NAME][0]
+    # The unique files of T6: both absent before the claim; afterwards each exact and written inside the turn.
+    sales_path, totals_path = os.path.join(WORKSPACE_HOST, 'sales.csv'), os.path.join(WORKSPACE_HOST, 'totals.txt')
+    if os.path.lexists(sales_path) or os.path.lexists(totals_path):
+        raise Stop(3, 'T6: sales.csv or totals.txt exists before the turn; not started')
+    say('T6 files before: sales.csv absent True, totals.txt absent True')
     conversation_id = new_conversation('V6-pre T6 /proc task')
     t6 = model_turn(ev, 'resources-6', 'T6', 1, conversation_id, PROMPTS['T6'], None)
-    paths = ('/proc/', '/dev/stderr', '/dev/fd', '/dev/stdin', '/dev/stdout', '<(', '>(')
-    commands = t6['commands']
-    failed = [c for c in commands if c['status'] != 'completed' or type(c['exit']) is not int or c['exit'] != 0]
-    proc_failed = [c for c in failed if any(p in c['command'] for p in paths)]
-    done = False
-    try:
-        fd = os.open(os.path.join(WORKSPACE_HOST, 'totals.txt'), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        try:
-            info = os.fstat(fd)
-            done = stat.S_ISREG(info.st_mode) and info.st_size < 4096 and \
-                os.read(fd, 4096).split() == [b'east,13', b'north,17', b'south,18']
-        finally:
-            os.close(fd)
-    except OSError:
-        done = False
-    if not commands:
-        verdict = 'not run (no command item)'
-    elif done and not failed:
-        verdict = 'met none (task complete, every command exit 0)'
-    elif done and proc_failed:
-        verdict = 'worked around (a command naming a /proc or /dev/fd-type path failed, the task then completed)'
+    sales, totals = file_state(sales_path), file_state(totals_path)
+    first_at, last_at = t6['calls']['window']
+    expected_sales = [b'region,item,amount', b'north,apple,12', b'south,apple,7', b'north,pear,5', b'east,apple,9',
+                      b'south,pear,11', b'east,pear,4']
+    sales_ok = bool(sales) and sales['uid'] == 10001 and sales['lines'] == expected_sales and in_window(sales, first_at, last_at)
+    done = bool(totals) and totals['uid'] == 10001 and totals['lines'] == [b'east,13', b'north,17', b'south,18'] \
+        and in_window(totals, first_at, last_at)
+    kind, pairs = t6['calls']['kind'], t6['calls']['pairs']
+    proc_named = [p for p in pairs if any(x in p['input'] for x in PROC_PATHS)]
+    proc_error = [p for p in proc_named if ERROR_WORDS.search(p['text'])]
+    say('T6: kind %s, exec pairs %d, naming /proc or /dev/fd-type paths %d, of those whose result shows an error word '
+        '%d; sales.csv exact and written in the turn %s; totals.txt exact and written in the turn %s' % (
+            kind, len(pairs), len(proc_named), len(proc_error), sales_ok, done))
+    label = ('limited functional observation, exit-0 check not met (per-command exit codes not recorded): task '
+             'complete on the PV (totals.txt exact, written inside the turn); ')
+    if kind == 'none':
+        verdict = 'not run (no tool call on every record path)'
+    elif done and kind == 'unextractable':
+        verdict = label + 'call results not extractable: the /proc question is not answered'
+    elif done and proc_error:
+        verdict = label + 'worked around (presumed: a call naming a /proc or /dev/fd-type path shows an error word)'
+    elif done and proc_named:
+        verdict = label + 'a call names a /proc or /dev/fd-type path and its result shows no error word'
     elif done:
-        verdict = 'completed; failed commands name no /proc or /dev/fd-type path (cause not verified)'
-    elif proc_failed:
-        verdict = 'BLOCKED (presumed: task not complete after a failing /proc or /dev/fd-type command)'
+        verdict = label + 'no call names a /proc or /dev/fd-type path (met none, presumed)'
+    elif kind == 'unextractable':
+        verdict = 'not complete; call present, nested result not extractable (cause not verified)'
+    elif proc_error:
+        verdict = 'BLOCKED (presumed: task not complete after a call naming a /proc or /dev/fd-type path shows an error word)'
     else:
         verdict = 'not complete (cause not verified)'
-    say('T6: commands %d, failed %d, failed naming /proc or /dev/fd-type paths %d, totals.txt as expected %s' % (
-        len(commands), len(failed), len(proc_failed), done))
     verdicts['T6 /proc task'] = verdict
     observe_after(pod['metadata']['uid'], start, auth_before, verdicts)
+    if not done and kind == 'unextractable':
+        raise Stop(13, 'T6 %s: format gate; stop before V6, user decision' % verdict)
     if not done:
-        raise Stop(8, 'T6 %s: not a pass; stop before V6, user decision (PM 2026-11-06)' % verdict)
+        raise Stop(8, 'T6 %s: not complete; stop before V6, user decision (PM 2026-11-06)' % verdict)
 
 
 ACTIONS = {'run-a': run_a, 'stop': run_stop, 'run-b': run_b, 'run-x': run_x}
