@@ -4,6 +4,7 @@ first binding through it (user decisions 2026-11-06; PM 2026-11-08). Development
     python3 -I /root/native68/v6b-preparer.py precheck   # read-only: changes nothing, writes no file
     python3 -I /root/native68/v6b-preparer.py install    # once, after review: preparer files, no entry
     python3 -I /root/native68/v6b-preparer.py enter      # once, after review and install rc 0
+    python3 -I /root/native68/v6b-preparer.py prepare-again   # once, only after an enter rc 9 and a fix
     python3 -I /root/native68/v6b-preparer.py restore    # only on a PM decision
 
 The reviewed worker.py (repository file infra/hosting/m3/multi-user-runners/rollout/worker.py, SHA-256 a3eb51be…,
@@ -79,6 +80,21 @@ preparer did not report …5805 processed; 10 the runner Pod not proved Running;
 Reverting files does not undo state. After step 4 the …5805 registry row exists; after step 6 its storage
 (loop-backed ext4 under the storage root), PV/PVC/Secret, provision output and binding exist. They stay until V9.
 
+prepare-again (rc 3 refused, nothing changed; 9/10/11 as in enter): added after the 2026-11-08 enter stopped at
+step 6 (rc 9): the preparer's DSN named an earlier postgres Pod IP. After the user fixed that outside this script,
+it runs the preparer once more. One run only (v6b-prepare-<UTC>); it creates no session, makes no POST and issues
+no token. Precheck (all read-only): exactly one install (rc 0) and one enter whose record ends at the preparer
+(rc 1, exit-code, no worker line, session revoked, token done, no result); the enter token expires at least 1 h
+later (so a start is refused from expiry - 1 h on; a new token needs a new approval); kube-token 0600 newer than
+the enter start and kube-token.r1 the old file; installed files, inputs.json and image as installed; the broker
+account equals inputs.json; entry closed with both allowlists …5805 (no live session, no runner Pod, the five
+owners as recorded); …5805 is the account enter created and its registry row is exactly provisioning, generation
+1, revision 1, no Pod, on enter's state; no binding, binding resources, lock, provision output, storage, PV, PVC
+or transport Secret for it; the unit failed once with Result=exit-code, NRestarts 0, CanStart yes (its start limit
+is 5 in 10 s; one start this boot), the timer inactive and disabled, no runtime directory, no Docker container.
+Then enter steps 6-8 (systemctl start once, the Pod, the checks) and a final "no live session" check. The DSN
+file is not read.
+
 An enter that stops inside step 3 can leave api and runner-controller at 0: entry is then closed for everyone.
 
 restore (PM decision only; rc 3 refused, 5 failed): refused while a …5805 runner Pod exists (stop it through the
@@ -101,6 +117,7 @@ checks read-only for `.inputs.json.v6b-*`, `.kube-token.v6b-*`, `.<name>.v6b-*` 
 Output is fixed messages, UIDs, states, digests of non-secret files and booleans: no account id, token, Secret
 data, DSN or command error text.
 """
+import calendar
 import hashlib
 import http.client
 import json
@@ -1057,6 +1074,122 @@ def enter_steps(ev, account):
         raise Stop(11, 'a result check failed; no rerun, no undo; back checks read-only')
 
 
+# prepare-again ---------------------------------------------------------------------------------------------
+TOKEN_MARGIN = 3600  # the run must start at least this long before the enter token expires
+
+
+def unit_failed_once(code):
+    """The preparer unit after enter's one failed run: failed with Result=exit-code and no restart, or inactive;
+    exactly one start this boot; the timer inactive and disabled; no runtime directory or Docker container."""
+    rc, out = run([SYSTEMCTL, 'show', '-p', 'ActiveState,Result,NRestarts,UnitFileState,CanStart',
+                   'issue16-controller.service'])
+    props = dict(line.split('=', 1) for line in out.splitlines() if '=' in line)
+    ok = rc == 0 and props.get('UnitFileState') == 'disabled' and props.get('NRestarts') == '0' and \
+        props.get('CanStart') == 'yes' and ((props.get('ActiveState'), props.get('Result')) in
+                                            (('failed', 'exit-code'), ('inactive', 'success')))
+    _, log = run([JOURNALCTL, '-u', 'issue16-controller.service', '-b', '-o', 'cat', '--no-pager'], 60)
+    starts = sum(1 for line in log.splitlines() if line.startswith('Starting Issue18 runner controller'))
+    if not ok or starts != 1:
+        raise Stop(code, 'the preparer unit is not the state enter left (failed once, exit-code, no restart, '
+                         'disabled): %s, starts this boot %d' % (json.dumps(props, sort_keys=True), starts))
+    rc, out = run([SYSTEMCTL, 'show', '-p', 'ActiveState,UnitFileState', 'issue16-controller.timer'])
+    props = dict(line.split('=', 1) for line in out.splitlines() if '=' in line)
+    if rc != 0 or props.get('ActiveState') != 'inactive' or props.get('UnitFileState') != 'disabled':
+        raise Stop(code, 'the preparer timer is not inactive and disabled')
+    if os.path.lexists(RUNTIME_DIR):
+        raise Stop(code, '%s exists' % RUNTIME_DIR)
+    rc, out = run([DOCKER, 'ps', '-q'])
+    if rc != 0 or out:
+        raise Stop(code, 'a Docker container is running')
+
+
+def no_new_objects(code, state):
+    """No …5805 binding, resources, lock, output, storage, PV, PVC or transport Secret for `state`."""
+    found = new_owner(code)
+    if found['binding'] is not None:
+        raise Stop(code, '…5805 already has a binding')
+    count = sql('resources', "SELECT json_build_object('n',count(*)) FROM runner_bindings.resources WHERE owner_id='%s';"
+                % NEW, code)
+    if count != [{'n': 0}]:
+        raise Stop(code, '…5805 has binding resources')
+    host_dirs(code, False)  # exactly the five owners: no …5805 lock, output or storage
+    hexed = uuid.UUID(state).hex
+    names = set(kubectl(['-n', RUNNER_NS, 'get', 'pvc,secret', '-o', 'name'], code, 'PVC/Secret lookup failed').split())
+    names |= set(kubectl(['get', 'pv', '-o', 'name'], code, 'PV lookup failed').split())
+    clash = {'persistentvolumeclaim/native-' + hexed, 'persistentvolumeclaim/control-' + hexed,
+             'persistentvolume/native-' + hexed, 'persistentvolume/control-' + hexed, 'secret/transport-' + hexed} & names
+    if clash:
+        raise Stop(code, '…5805 objects already exist: %s' % ' '.join(sorted(clash)))
+
+
+def prepare_again():
+    """After enter stopped at step 6 (rc 9) and the cause was fixed outside this script: the preparer once more,
+    with no session, POST or token. One run only (v6b-prepare-<UTC>)."""
+    if os.geteuid() != 0:
+        raise Stop(3, 'run as root')
+    installs, enters = runs('install'), runs('enter')
+    if runs('prepare') or len(installs) != 1 or len(enters) != 1:
+        raise Stop(3, 'prepare-again needs one install, one enter and no earlier prepare-again (one run only)')
+    done = json.load(open(os.path.join(EVIDENCE, installs[0], 'run.json')))
+    entered = json.load(open(os.path.join(EVIDENCE, enters[0], 'run.json')))
+    if done.get('result') != 0 or 'result' in entered or entered.get('preparer') != 'rc 1' or \
+            entered.get('preparerResult') != 'exit-code' or entered.get('preparerLines') != [] or \
+            entered.get('session') != 'revoked' or entered.get('kubeToken') != 'done' or not entered.get('state'):
+        raise Stop(3, 'the records are not install rc 0 and an enter that stopped at the preparer (rc 9)')
+    try:
+        expiry = calendar.timegm(time.strptime(entered['kubeTokenExpiry'], '%Y-%m-%dT%H:%M:%SZ'))
+    except Exception:
+        raise Stop(3, 'the token expiry in the enter record is unreadable') from None
+    left = expiry - time.time()
+    if left < TOKEN_MARGIN:
+        raise Stop(3, 'the enter token expires at %s: less than %d s left (%d s); not started; a new token needs a '
+                      'new approval' % (entered['kubeTokenExpiry'], TOKEN_MARGIN, int(left)))
+    token, kept = os.lstat(KUBE_TOKEN), os.lstat(KUBE_TOKEN + '.r1')
+    if stat.S_IMODE(token.st_mode) != 0o600 or token.st_uid != 0 or token.st_nlink != 1 or \
+            int(kept.st_mtime) != entered.get('kubeTokenOldMtime') or kept.st_nlink != 1 or \
+            token.st_mtime < calendar.timegm(time.strptime(entered['started'], '%Y-%m-%dT%H:%M:%SZ')):
+        raise Stop(3, 'kube-token or kube-token.r1 is not what enter left')
+    host_files(3, 'new')
+    value, data = inputs_now(3)
+    if sha_bytes(data) != done.get('inputsAfterSha256') or value['image'] != RUNNER_REF:
+        raise Stop(3, 'inputs.json is not the installed file')
+    if docker_image(3) != NEW_IMAGE_ID:
+        raise Stop(3, 'the #68 provisioner image is not present')
+    account = broker_account(3, value)
+    entry_closed(3, 'precheck', allow=NEW)  # no live session, no runner Pod, both allowlists …5805, five owners
+    reg = new_owner(3)
+    if reg['account'] != {'github': NEW_GITHUB, 'login': NEW_LOGIN, 'role': 'editor', 'approved': True} or \
+            reg['registry'] != {'state': entered['state'], 'phase': 'provisioning', 'generation': 1, 'revision': 1,
+                                'pod': None} or reg['sessions'] != 0:
+        raise Stop(3, '…5805 is not the account and provisioning registry row enter left')
+    no_new_objects(3, entered['state'])
+    unit_failed_once(3)
+    say('precheck ok: one install (rc 0) and one enter stopped at the preparer; token expires %s (%d s left); '
+        'installed files, inputs.json and image as installed; entry closed (allowlists …5805, no session, no '
+        'runner Pod, five owners as recorded); …5805 provisioning gen 1 rev 1 with no binding, resources, lock, '
+        'output, storage, PV, PVC or Secret; preparer failed once (exit-code), timer disabled'
+        % (entered['kubeTokenExpiry'], int(left)))
+    ev = evidence('prepare')
+    record(ev, enterRecord=enters[0], tokenSecondsLeft=int(left))
+    preparer(ev)
+    pod, found = wait_pod()
+    say('runner Pod %s Running, ready; registry %s' % (pod['metadata']['uid'], json.dumps(
+        {k: found['registry'].get(k) for k in ('phase', 'generation', 'revision')}, sort_keys=True)))
+    checks, health, files = result_checks(pod, found, account)
+    account = None
+    live = sql('sessions', "SELECT json_build_object('n',count(*)) FROM auth.sessions WHERE expires_at>now();", 11)
+    checks['no live session (none was created)'] = live == [{'n': 0}]
+    for name, ok in checks.items():
+        say('check %s: %s' % (name, ok))
+    say('runner health: %s; provision output files: %s' % (json.dumps(health, sort_keys=True), ' '.join(files)))
+    record(ev, pod=pod['metadata']['uid'], checks=checks, health=health, outputFiles=files)
+    if not all(checks.values()):
+        raise Stop(11, 'a result check failed; no rerun, no undo; back checks read-only')
+    record(ev, result=0, finished=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+    say('prepared: …5805 has a v1 binding on the #68 runner from the #68 preparer and a running Pod; no session; '
+        'the Pod is left to the idle stop; next: V6-pre')
+
+
 # restore ----------------------------------------------------------------------------------------------------
 def restore():
     if os.geteuid() != 0:
@@ -1114,9 +1247,10 @@ def restore():
 
 
 def main(argv):
-    actions = {'precheck': None, 'install': install, 'enter': enter, 'restore': restore}
+    actions = {'precheck': None, 'install': install, 'enter': enter, 'prepare-again': prepare_again,
+               'restore': restore}
     if len(argv) != 2 or argv[1] not in actions:
-        say('usage: v6b-preparer.py precheck|install|enter|restore')
+        say('usage: v6b-preparer.py precheck|install|enter|prepare-again|restore')
         return 2
     for signum in SIGNALS:
         signal.signal(signum, interrupted)
