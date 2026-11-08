@@ -85,7 +85,9 @@ step 6 (rc 9): the preparer's DSN named an earlier postgres Pod IP. After the us
 it runs the preparer once more. One run only (v6b-prepare-<UTC>); it creates no session, makes no POST and issues
 no token. Precheck (all read-only): exactly one install (rc 0) and one enter whose record ends at the preparer
 (rc 1, exit-code, no worker line, session revoked, token done, no result); the enter token expires at least 1 h
-later (so a start is refused from expiry - 1 h on; a new token needs a new approval); kube-token 0600 newer than
+later, checked once in the precheck and again right before `systemctl start` (that second value is recorded;
+a start is refused from expiry - 1 h on, i.e. after 2026-11-09T08:36:00Z for the 2026-11-08 token; a new token
+needs a new approval); kube-token 0600 newer than
 the enter start and kube-token.r1 the old file; installed files, inputs.json and image as installed; the broker
 account equals inputs.json; entry closed with both allowlists …5805 (no live session, no runner Pod, the five
 owners as recorded); …5805 is the account enter created and its registry row is exactly provisioning, generation
@@ -884,7 +886,10 @@ def renew_token(ev):
     say('kube-token: new runner-pool-controller token, expires %s; the old one kept as kube-token.r1' % expiry)
 
 
-def preparer(ev):
+def preparer(ev, gate=None):
+    """`gate`, if given, runs right before the start and may refuse it (prepare-again's token margin)."""
+    if gate is not None:
+        gate()
     since = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(time.time() - 2))
     record(ev, preparer='started', preparerStarted=since + ' UTC')
     rc, _ = run([SYSTEMCTL, 'start', 'issue16-controller.service'], PREPARER_TIMEOUT)
@@ -1170,8 +1175,19 @@ def prepare_again():
         'output, storage, PV, PVC or Secret; preparer failed once (exit-code), timer disabled'
         % (entered['kubeTokenExpiry'], int(left)))
     ev = evidence('prepare')
-    record(ev, enterRecord=enters[0], tokenSecondsLeft=int(left))
-    preparer(ev)
+    record(ev, enterRecord=enters[0])
+
+    def gate():
+        # The margin is a gate on the start itself: checked again after the whole precheck, just before it.
+        now_left = expiry - time.time()
+        record(ev, tokenSecondsLeftAtStart=int(now_left))
+        if now_left < TOKEN_MARGIN:
+            record(ev, preparer='not started (token margin)')
+            raise Stop(3, 'the enter token now has %d s left (< %d s) at the start gate: the preparer was not '
+                          'started; a new token needs a new approval' % (int(now_left), TOKEN_MARGIN))
+        say('start gate: token %d s left (>= %d s)' % (int(now_left), TOKEN_MARGIN))
+
+    preparer(ev, gate)
     pod, found = wait_pod()
     say('runner Pod %s Running, ready; registry %s' % (pod['metadata']['uid'], json.dumps(
         {k: found['registry'].get(k) for k in ('phase', 'generation', 'revision')}, sort_keys=True)))

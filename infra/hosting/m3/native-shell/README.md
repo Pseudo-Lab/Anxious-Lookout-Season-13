@@ -281,9 +281,10 @@ one runner-Pod drain and one rollback point.
        production renews it is a user check item: agents do not read production values;
      - that the host in its database DSN file reaches the current database endpoint from the host network
        (the user checks; only "reaches / does not reach" is shared, never the DSN). The preparer runs with
-       `--network=host`, so a cluster DNS name or a Pod IP that has changed does not reach the database. The
-       wrapper (`worker.py run_batch`) drops the worker's stderr, so such a failure shows only as the unit's exit
-       status 1 with no output line.
+       `--network=host`: the host has to resolve the DSN's host name, and a Pod IP written into it stops working
+       when the Pod gets another IP. On the development VM the DSN held a Pod IP from before a reboot. The
+       wrapper (`worker.py run_batch`) drops the worker's stderr, so there such a failure showed only as the
+       unit's exit status 1 with no output line.
      These can drift. On the development VM (2026-11-06/08) the script still ran an image from before #61,
      its token had expired on 2026-10-26, its DSN named a postgres Pod IP from before the 2026-11-04 reboot (the
      V6b preparer run on 2026-11-08 exited 1 with no output; a TCP connect to that address timed out), and its
