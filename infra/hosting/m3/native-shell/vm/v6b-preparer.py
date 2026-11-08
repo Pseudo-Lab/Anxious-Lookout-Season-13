@@ -5,6 +5,7 @@ first binding through it (user decisions 2026-11-06; PM 2026-11-08). Development
     python3 -I /root/native68/v6b-preparer.py install    # once, after review: preparer files, no entry
     python3 -I /root/native68/v6b-preparer.py enter      # once, after review and install rc 0
     python3 -I /root/native68/v6b-preparer.py prepare-again   # once, only after an enter rc 9 and a fix
+    python3 -I /root/native68/v6b-preparer.py prepare-again-new-token   # instead of it, with a token approval
     python3 -I /root/native68/v6b-preparer.py restore    # only on a PM decision
 
 The reviewed worker.py (repository file infra/hosting/m3/multi-user-runners/rollout/worker.py, SHA-256 a3eb51be…,
@@ -94,8 +95,18 @@ owners as recorded); …5805 is the account enter created and its registry row i
 1, revision 1, no Pod, on enter's state; no binding, binding resources, lock, provision output, storage, PV, PVC
 or transport Secret for it; the unit failed once with Result=exit-code, NRestarts 0, CanStart yes (its start limit
 is 5 in 10 s; one start this boot), the timer inactive and disabled, no runtime directory, no Docker container.
-Then enter steps 6-8 (systemctl start once, the Pod, the checks) and a final "no live session" check. The DSN
-file is not read.
+The DB path (user decision 2026-11-08, after the Pod-IP fix): the Service m2-hosting/postgres-preparer
+(rollout/postgres-preparer-service.yaml) is type ClusterIP 10.43.0.68 with selector app=hosting-postgres, port
+5432, no node port or external IP, and Endpoints exactly the postgres Pod 10.42.0.25; one TCP connect from the
+host network to 10.43.0.68:5432 succeeds; database-url, database-url.r1 (first fix) and database-url.r2 (second
+fix) are root 0600 single-link files. The DSN is never opened: that its host is the ClusterIP comes from the
+user's second fix log.
+Then enter steps 6-8 (systemctl start once, the Pod, the checks) and a final "no live session" check.
+prepare-again-new-token is the same run (the same one-run guard) for when the enter token is too close to its
+expiry: it needs a new user approval for one token. Its precheck skips the 1 h margin and also requires
+kube-token.r2 to be absent; right after the precheck it issues one 24 h token as in enter step 5, keeping the
+enter token as kube-token.r2 (kube-token.r1 stays the 2026-10-25 file), and the start gate then checks the new
+token's margin. A failed or unknown issuance stops with rc 8 before the preparer starts and is never repeated.
 
 An enter that stops inside step 3 can leave api and runner-controller at 0: entry is then closed for everyone.
 
@@ -851,9 +862,10 @@ def post(token, csrf):
     return status, safe
 
 
-def renew_token(ev):
+def renew_token(ev, keep=KUBE_TOKEN + '.r1'):
     """One 24 h TokenRequest token for runner-pool-controller; only its expiry is printed. The request is made
-    once: whatever its outcome, it is the one approved issuance and is never repeated."""
+    once: whatever its outcome, it is the one approved issuance and is never repeated. The current file is
+    moved to `keep` (mv -n)."""
     before = os.lstat(KUBE_TOKEN)
     record(ev, kubeToken='requested (the one approved issuance)', kubeTokenOldMtime=int(before.st_mtime))
     rc, out = run([K3S, 'kubectl', '-n', RUNNER_NS, 'create', 'token', 'runner-pool-controller', '--duration=24h',
@@ -871,19 +883,21 @@ def renew_token(ev):
         record(ev, kubeToken='not installed: %s; not reissued (the one issuance is used)' % what)
         raise Stop(8, 'kube-token: %s; not reissued; the old file is unchanged' % what)
     try:
-        replace_file(KUBE_TOKEN, (token + '\n').encode(), 0o600, 8, keep=KUBE_TOKEN + '.r1')
+        replace_file(KUBE_TOKEN, (token + '\n').encode(), 0o600, 8, keep=keep)
     except Stop:
         record(ev, kubeToken='issued but not installed (discarded; not reissued; the one issuance is used)')
         raise
     finally:
         token = None
-    info, kept = os.lstat(KUBE_TOKEN), os.lstat(KUBE_TOKEN + '.r1')
+    info, kept = os.lstat(KUBE_TOKEN), os.lstat(keep)
     ok = (stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == 0 and info.st_nlink == 1 and kept.st_ino == before.st_ino
           and kept.st_nlink == 1)
     record(ev, kubeToken='done' if ok else 'uncertain', kubeTokenExpiry=expiry)
     if not ok:
         raise Stop(8, 'kube-token: the new file or the kept old one is not as expected')
-    say('kube-token: new runner-pool-controller token, expires %s; the old one kept as kube-token.r1' % expiry)
+    say('kube-token: new runner-pool-controller token, expires %s; the old one kept as %s'
+        % (expiry, os.path.basename(keep)))
+    return expiry
 
 
 def preparer(ev, gate=None):
@@ -1081,6 +1095,9 @@ def enter_steps(ev, account):
 
 # prepare-again ---------------------------------------------------------------------------------------------
 TOKEN_MARGIN = 3600  # the run must start at least this long before the enter token expires
+DB_SERVICE = ('m2-hosting', 'postgres-preparer', '10.43.0.68', 5432)  # rollout/postgres-preparer-service.yaml
+POSTGRES_POD_IP = '10.42.0.25'
+DSN_FILES = [PRIVATE_DIR + '/database-url', PRIVATE_DIR + '/database-url.r1', PRIVATE_DIR + '/database-url.r2']
 
 
 def unit_failed_once(code):
@@ -1127,7 +1144,48 @@ def no_new_objects(code, state):
         raise Stop(code, '…5805 objects already exist: %s' % ' '.join(sorted(clash)))
 
 
-def prepare_again():
+def db_path(code):
+    """The reviewed Service exists, selects the postgres Pod, and answers from the host network; the DSN files
+    (the current one and the two fix backups) are root 0600 single-link files. The DSN is never opened."""
+    import socket
+    ns, name, ip, port = DB_SERVICE
+    svc = kjson(['-n', ns, 'get', 'service', name], code, 'Service %s lookup failed' % name)
+    ep = kjson(['-n', ns, 'get', 'endpoints', name], code, 'Endpoints %s lookup failed' % name)
+    try:
+        spec, subsets = svc['spec'], ep.get('subsets') or []
+        ok = (spec.get('type') == 'ClusterIP' and spec.get('clusterIP') == ip and
+              spec.get('selector') == {'app': 'hosting-postgres'} and [p.get('port') for p in spec['ports']] == [port]
+              and not any(p.get('nodePort') for p in spec['ports']) and not spec.get('externalIPs') and
+              sorted(a['ip'] for sub in subsets for a in sub.get('addresses') or []) == [POSTGRES_POD_IP] and
+              not any(sub.get('notReadyAddresses') for sub in subsets))
+    except Exception:
+        ok = False
+    if not ok:
+        raise Stop(code, 'Service %s/%s is not the reviewed ClusterIP %s selecting the postgres Pod' % (ns, name, ip))
+    s = socket.socket()
+    s.settimeout(5)
+    try:
+        s.connect((ip, port))
+    except OSError:
+        raise Stop(code, 'the ClusterIP %s:%d does not answer from the host network' % (ip, port)) from None
+    finally:
+        s.close()
+    for path in DSN_FILES:
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            raise Stop(code, '%s missing (the two DSN fixes did not both run)' % os.path.basename(path)) from None
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or \
+                stat.S_IMODE(info.st_mode) != 0o600:
+            raise Stop(code, '%s is not a root 0600 single-link file' % os.path.basename(path))
+
+
+def prepare_again_new_token():
+    """prepare-again with one new token issued right before the start (user approval needed)."""
+    prepare_again(new_token=True)
+
+
+def prepare_again(new_token=False):
     """After enter stopped at step 6 (rc 9) and the cause was fixed outside this script: the preparer once more,
     with no session, POST or token. One run only (v6b-prepare-<UTC>)."""
     if os.geteuid() != 0:
@@ -1146,9 +1204,11 @@ def prepare_again():
     except Exception:
         raise Stop(3, 'the token expiry in the enter record is unreadable') from None
     left = expiry - time.time()
-    if left < TOKEN_MARGIN:
+    if not new_token and left < TOKEN_MARGIN:
         raise Stop(3, 'the enter token expires at %s: less than %d s left (%d s); not started; a new token needs a '
-                      'new approval' % (entered['kubeTokenExpiry'], TOKEN_MARGIN, int(left)))
+                      'new approval (prepare-again-new-token)' % (entered['kubeTokenExpiry'], TOKEN_MARGIN, int(left)))
+    if new_token and os.path.lexists(KUBE_TOKEN + '.r2'):
+        raise Stop(3, 'kube-token.r2 already exists (backup collision)')
     token, kept = os.lstat(KUBE_TOKEN), os.lstat(KUBE_TOKEN + '.r1')
     if stat.S_IMODE(token.st_mode) != 0o600 or token.st_uid != 0 or token.st_nlink != 1 or \
             int(kept.st_mtime) != entered.get('kubeTokenOldMtime') or kept.st_nlink != 1 or \
@@ -1169,13 +1229,19 @@ def prepare_again():
         raise Stop(3, '…5805 is not the account and provisioning registry row enter left')
     no_new_objects(3, entered['state'])
     unit_failed_once(3)
+    db_path(3)
     say('precheck ok: one install (rc 0) and one enter stopped at the preparer; token expires %s (%d s left); '
         'installed files, inputs.json and image as installed; entry closed (allowlists …5805, no session, no '
         'runner Pod, five owners as recorded); …5805 provisioning gen 1 rev 1 with no binding, resources, lock, '
         'output, storage, PV, PVC or Secret; preparer failed once (exit-code), timer disabled'
         % (entered['kubeTokenExpiry'], int(left)))
+    say('db path ok: Service %s/%s ClusterIP %s selects the postgres Pod and answers from the host network; DSN '
+        'files root 0600 (not opened)' % DB_SERVICE[:3])
     ev = evidence('prepare')
-    record(ev, enterRecord=enters[0])
+    record(ev, enterRecord=enters[0], newToken=new_token)
+    if new_token:
+        # The one newly approved issuance, right before the start: the enter token is kept as kube-token.r2.
+        expiry = calendar.timegm(time.strptime(renew_token(ev, keep=KUBE_TOKEN + '.r2'), '%Y-%m-%dT%H:%M:%SZ'))
 
     def gate():
         # The margin is a gate on the start itself: checked again after the whole precheck, just before it.
@@ -1264,9 +1330,9 @@ def restore():
 
 def main(argv):
     actions = {'precheck': None, 'install': install, 'enter': enter, 'prepare-again': prepare_again,
-               'restore': restore}
+               'prepare-again-new-token': prepare_again_new_token, 'restore': restore}
     if len(argv) != 2 or argv[1] not in actions:
-        say('usage: v6b-preparer.py precheck|install|enter|prepare-again|restore')
+        say('usage: v6b-preparer.py precheck|install|enter|prepare-again|prepare-again-new-token|restore')
         return 2
     for signum in SIGNALS:
         signal.signal(signum, interrupted)

@@ -285,9 +285,21 @@ one runner-Pod drain and one rollback point.
        when the Pod gets another IP. On the development VM the DSN held a Pod IP from before a reboot. The
        wrapper (`worker.py run_batch`) drops the worker's stderr, so there such a failure showed only as the
        unit's exit status 1 with no output line.
+     - **The preparer DSN host must be a non-headless ClusterIP Service for the postgres Pod.** The `postgres`
+       Service is headless (StatefulSet DNS) and has no address the host can use. Before the window, if the
+       DSN does not already name such a Service (the user checks; the value is not shared), the user does, in
+       order: create `multi-user-runners/rollout/postgres-preparer-service.yaml` with a free address of that
+       cluster's service CIDR as `clusterIP` (the file pins the development VM's `10.43.0.68`); check its
+       Endpoints are the postgres Pod and a TCP connect from the host to `<clusterIP>:5432` succeeds; replace
+       only the host in the DSN file (root 0600, the old file kept with `mv -n`); check the TCP connect again.
+       The Service exposes nothing outside the node (no NodePort, LoadBalancer or external IP). The node's
+       host network reaches a ClusterIP through kube-proxy (on the development VM k3s's own, with Cilium's
+       kube-proxy replacement off); a node set up otherwise is checked the same way first. #63 removes the
+       host preparer and this Service together.
      These can drift. On the development VM (2026-11-06/08) the script still ran an image from before #61,
      its token had expired on 2026-10-26, its DSN named a postgres Pod IP from before the 2026-11-04 reboot (the
-     V6b preparer run on 2026-11-08 exited 1 with no output; a TCP connect to that address timed out), and its
+     V6b preparer run on 2026-11-08 exited 1 with no output; a TCP connect to that address timed out; the DSN
+     was then moved to the Pod IP and, by user decision, to the `postgres-preparer` ClusterIP), and its
      `worker.py` was the #46 file (`997ba77`,
      `multi-user-runners/rollout/worker.py`). That file differs from the reviewed one (unchanged since
      `952e409`) only in `run_batch`: it still accepts the host supply and observer roles that #60 and #61
