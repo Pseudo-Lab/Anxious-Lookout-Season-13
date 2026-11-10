@@ -51,7 +51,10 @@ Structure (design r3 sections):
   needs every one of these facts:
   - the inside mountinfo parses with the full proc(5) line structure;
   - no mount point is listed more than once (else the mountinfo is ambiguous and fails; no stacking order is
-    assumed);
+    assumed). Round 8 (D1) exception: the case root mount point may be listed exactly twice, as the same
+    directory source (same device, root field and fstype, and that device is the inside '.' device), because
+    Codex binds a writable root read-only first and writable after (source cited at parent_judgement). Every
+    other duplicate stays ambiguous, and the duplicates are counted by class (D2: case root, parent, '/', other);
   - the most specific mount covering '/' is a fresh tmpfs (mount point '/', root '/');
   - the most specific mount covering the parent path is that same mount entry;
   - the inside '..' and '/' are on that mount's device;
@@ -1054,14 +1057,34 @@ def parent_judgement(probe, cwd, host_root, host_parent, marker, pod_devs, pod_o
     dotdot, root = _id3(probe.get('dotdot')), _id3(probe.get('root'))
     # Round 6 r2 (PM decision on the review question): any mount point listed more than once makes the mountinfo
     # ambiguous (no stacking order is assumed); the count of such mount points is recorded.
+    # Round 8 (D1 + D2): one exception, from the Codex source. A writable root is also a readable root
+    # (protocol/src/permissions.rs L129-131 can_read is !Deny; L1455-1478 get_readable_roots_with_cwd), so the
+    # restricted bootstrap binds the case root read-only (linux-sandbox/src/bwrap.rs L565-585) and the writable bind
+    # follows on the same path (L655-657). Exactly two entries on this launch's case root mount point are accepted
+    # as one directory source when both have the same device, root field and fstype and that device is the inside
+    # '.' device; no order between them is assumed. This identifies the directory for containment only: it does not
+    # mean the two mounts have the same options, ro/rw state or other security attributes (G1 and the profile check
+    # cover the writable root). Every other duplicate, a third case-root entry, or any mismatch stays ambiguous.
     seen = {}
     for e in entries:
         seen[e['mp']] = seen.get(e['mp'], 0) + 1
     c['duplicate_mount_points'] = sum(1 for n in seen.values() if n > 1)
-    c['mountinfo_ambiguous'] = c['duplicate_mount_points'] > 0
+    parent_path = os.path.dirname(cwd)
+    dup = {'case_root': 0, 'parent': 0, 'root': 0, 'other': 0}
+    for mp, n in seen.items():
+        if n > 1:
+            dup['case_root' if mp == cwd else 'parent' if mp == parent_path else 'root' if mp == '/' else 'other'] += 1
+    c.update({'dup_' + k: v for k, v in dup.items()})
+    cr = [e for e in entries if e['mp'] == cwd]
+    c['case_root_entries'] = len(cr)
+    c['case_root_same_source'] = (len(cr) == 2 and all(cr[0][k] == cr[1][k] for k in ('dev', 'root', 'fstype'))
+                                  and cr[0]['dev'] == dot[:2]) if len(cr) == 2 else None
+    c['pair_exception_used'] = c['case_root_same_source'] is True
+    c['mountinfo_ambiguous'] = (dup['parent'] + dup['root'] + dup['other'] > 0
+                                or (dup['case_root'] > 0 and not c['pair_exception_used']))
     rm = covering_mount(entries, '/')
-    pm = covering_mount(entries, os.path.dirname(cwd))
-    dm = covering_mount(entries, cwd)
+    pm = covering_mount(entries, parent_path)
+    dm = cr[0] if c['pair_exception_used'] else covering_mount(entries, cwd)
     c['ids_read'] = dotdot is not None and root is not None and host_parent is not None and pod_devs is not None
     c['root_mount_fresh_tmpfs'] = bool(rm and rm['mp'] == '/' and rm['root'] == '/' and rm['fstype'] == 'tmpfs')
     c['parent_mount_is_root_mount'] = bool(rm is not None and pm is rm)
