@@ -62,6 +62,19 @@ Structure (design r3 sections):
   end checks are not clean (snapshot, observation errors, protected names elsewhere, any parent-probe marker).
   This verifies that one path at that time only. It is not a claim about every Pod path, and sequential
   observations cannot see a change undone between them.
+- Round 7 (K1 + K2): for a successful parent write, the mountinfo comes from the Pod side.
+  - Which process: the harness reads /proc/<pid>/mountinfo of the one live waiter python of this launch, below
+    the pinned launcher, matched by its argv '-c WAITER ident'.
+  - Before and after the read: same start time, pidfd not exited, same mount namespace.
+  - Linked to the probe: the target's cwd is the Pod-side case root, and its root has the dev/ino the waiter saw
+    for '/'.
+  - Proc(5) gives mount points relative to the target's root, so it is the sandbox's own view.
+  - The waiter's own mountinfo is only a cross-check:
+    - if both are present they must be equal;
+    - a waiter parse error is never covered by the Pod-side read;
+    - any Pod-side failure (not identified, changed, denied, read error, unlinked, parse error) fails.
+  - Each source's state, errno name and parser rule name are recorded as fixed fields; no path or mountinfo text
+    is output.
 - Change detection per phase (§6): a recursive lstat snapshot of /state, /control, /tmp, /dev/shm (+ identity of
   the runtime rw files) before and after; allowed changes are exact: the phase's own root(s) (the root itself, its
   fixed control files, the four protected names but nothing under them), the phase's TMPDIR(s) (the directory and
@@ -165,11 +178,22 @@ try:
 except OSError:
     r['cwd'] = None
 r['dot'], r['dotdot'], r['root'] = ident('.'), ident('..'), ident('/')
+def en(e):
+    return errno.errorcode.get(e.errno, 'other') if e.errno is not None else 'none'
+r['proc_present'], r['proc_errno'] = None, None
+try:
+    os.lstat('/proc')
+    r['proc_present'] = True
+except FileNotFoundError:
+    r['proc_present'] = False
+except OSError as e:
+    r['proc_errno'] = en(e)
+r['mi_errno'] = None
 try:
     with open('/proc/self/mountinfo', 'rb') as f:
         r['mountinfo'] = f.read().decode('utf-8', 'surrogateescape')
-except OSError:
-    r['mountinfo'] = None
+except OSError as e:
+    r['mountinfo'], r['mi_errno'] = None, en(e)
 open('probe-' + i, 'w').write(json.dumps(r))
 open('ready-' + i, 'w').close()
 while not os.path.exists('go-' + i):
@@ -791,27 +815,27 @@ def parse_mountinfo(text):
     - exactly three fields after it: fstype, source, super options, each non-empty.
     No field may be empty (no doubled or trailing spaces). Empty input is an error too."""
     if not isinstance(text, str):
-        raise ValueError('no mountinfo')
+        raise ValueError('no_text')
     out = []
     for line in text.splitlines():
         f = line.split(' ')
         if any(x == '' for x in f):
-            raise ValueError('empty field')
+            raise ValueError('empty_field')
         try:
             sep = f.index('-', 6)
         except ValueError:
-            raise ValueError('no separator') from None
+            raise ValueError('no_separator') from None
         if len(f) != sep + 4:
-            raise ValueError('not exactly fstype, source and super options after the separator')
+            raise ValueError('field_count')
         if not (f[0].isdigit() and f[1].isdigit() and _MI_DEV.fullmatch(f[2])):
-            raise ValueError('bad mount ID, parent ID or major:minor')
+            raise ValueError('bad_ids')
         if not (f[3].startswith('/') or _MI_NSROOT.fullmatch(f[3])) or not f[4].startswith('/'):
-            raise ValueError('bad root or mount point')
+            raise ValueError('bad_path')
         major, minor = f[2].split(':')
         out.append({'dev': (int(major), int(minor)), 'root': mi_unescape(f[3]), 'mp': mi_unescape(f[4]),
                     'fstype': mi_unescape(f[sep + 1])})
     if not out:
-        raise ValueError('empty mountinfo')
+        raise ValueError('empty')
     return out
 
 
@@ -862,12 +886,145 @@ def _id3(v):
     return tuple(v) if isinstance(v, list) and len(v) == 3 and all(isinstance(x, int) for x in v) else None
 
 
-def parent_judgement(probe, cwd, host_root, host_parent, marker, pod_devs):
+# --- round 7 (K1 + K2): where the mountinfo comes from, and why it failed -------------------------------------
+# K2: each mountinfo source is classified by fixed fields. For the waiter: state absent (ENOENT), read_error (another
+# errno, named), parse_error (read, rejected by the strict parser; the rule name is kept), ok, or invalid (the probe
+# lacks the fields). proc_present is true/false, or null when its lookup failed (its errno name is kept apart).
+# K1: the harness reads /proc/<pid>/mountinfo of the one live waiter python of this launch from the Pod side. Per
+# proc(5) its field 5 (mount point) is relative to that process's root directory, so the table is the sandbox's own
+# view, and the same strict parser and containment facts apply. A pidfd keeps the process from being reaped but does
+# not stop a /proc/<pid> path from naming another process after the pid is reused, so the start time is checked
+# before and after every read, the pidfd must still be open and not signalled as exited, and the mount namespace
+# identity (/proc/<pid>/ns/mnt dev/ino) must be the same before and after. The read is linked to the probe: the
+# target's cwd (/proc/<pid>/cwd) must be the Pod-side case root, and its root (/proc/<pid>/root) must have the
+# dev/ino the waiter recorded for '/'. No permission, namespace or /proc exposure is added: a refused read fails.
+MI_RULES = frozenset({'no_text', 'empty_field', 'no_separator', 'field_count', 'bad_ids', 'bad_path', 'empty'})
+
+
+def mi_rule(e):
+    return str(e) if str(e) in MI_RULES else 'other'
+
+
+def waiter_mi_state(probe):
+    """(fields, entries or None) for the waiter's own mountinfo record."""
+    f = {'waiter_mi_state': None, 'waiter_mi_errno': None, 'waiter_mi_rule': None, 'waiter_proc_present': None,
+         'waiter_proc_errno': None}
+    pp = probe.get('proc_present')
+    f['waiter_proc_present'] = pp if pp in (True, False) else None
+    pe = probe.get('proc_errno')
+    f['waiter_proc_errno'] = pe if isinstance(pe, str) and re.fullmatch(r'[A-Z][A-Z0-9]{1,15}|other|none', pe) else None
+    text, err = probe.get('mountinfo'), probe.get('mi_errno')
+    if isinstance(text, str):
+        try:
+            entries = parse_mountinfo(text)
+        except ValueError as e:
+            f['waiter_mi_state'], f['waiter_mi_rule'] = 'parse_error', mi_rule(e)
+            return f, None
+        f['waiter_mi_state'] = 'ok'
+        return f, entries
+    if text is None and isinstance(err, str) and re.fullmatch(r'[A-Z][A-Z0-9]{1,15}|other|none', err):
+        f['waiter_mi_state'] = 'absent' if err == 'ENOENT' else 'read_error'
+        f['waiter_mi_errno'] = err
+        return f, None
+    f['waiter_mi_state'] = 'invalid'
+    return f, None
+
+
+def waiter_candidates(launcher_pid, ident):
+    """[(pid, start)] of live processes below the pinned launcher whose role is python and whose argv ends with
+    exactly '-c', WAITER, ident (this launch's waiter; cases 7/8 pass each launch's own launcher and ident)."""
+    out = []
+    for pid, _, st in tree(launcher_pid):
+        if pid == launcher_pid or role(pid) != 'python':
+            continue
+        a = argv(pid)
+        if len(a) >= 4 and a[-1] == ident and a[-2] == WAITER and a[-3] == '-c':
+            out.append((pid, st))
+    return out
+
+
+def _proc_id(path):
+    s = os.stat(path)
+    return (os.major(s.st_dev), os.minor(s.st_dev), s.st_ino)
+
+
+def pod_side_mountinfo(launcher_pid, ident, host_root, probe_root):
+    """(fields, entries or None). States: not_identified (0 or several candidates), changed (start time, liveness
+    or mount namespace changed, or the process vanished), denied (EACCES/EPERM), read_error (another errno),
+    unlinked (cwd or root not this probe's), parse_error (with rule), ok."""
+    f = {'pod_mi_state': None, 'pod_mi_errno': None, 'pod_mi_rule': None, 'pod_candidates': None,
+         'pod_linked_cwd': None, 'pod_linked_root': None, 'pod_ns_same': None}
+    cands = waiter_candidates(launcher_pid, ident)
+    f['pod_candidates'] = len(cands)
+    if len(cands) != 1:
+        f['pod_mi_state'] = 'not_identified'
+        return f, None
+    pid, st = cands[0]
+    w = Ident(pid, st)
+    if not w.ok():
+        f['pod_mi_state'] = 'changed'
+        return f, None
+    try:
+        try:
+            ns1 = _proc_id('/proc/%d/ns/mnt' % pid)
+            cwd_id = _proc_id('/proc/%d/cwd' % pid)
+            root_id = _proc_id('/proc/%d/root' % pid)
+            with open('/proc/%d/mountinfo' % pid, 'rb') as fh:
+                text = fh.read().decode('utf-8', 'surrogateescape')
+            ns2 = _proc_id('/proc/%d/ns/mnt' % pid)
+        except (FileNotFoundError, ProcessLookupError):
+            f['pod_mi_state'] = 'changed'
+            return f, None
+        except OSError as e:
+            f['pod_mi_errno'] = errname(e)
+            f['pod_mi_state'] = 'denied' if e.errno in (errno.EACCES, errno.EPERM) else 'read_error'
+            return f, None
+        f['pod_ns_same'] = ns1 == ns2
+        if starttime(pid) != st or w.gone(0) or not f['pod_ns_same']:
+            f['pod_mi_state'] = 'changed'
+            return f, None
+        f['pod_linked_cwd'] = host_root is not None and cwd_id == host_root
+        f['pod_linked_root'] = probe_root is not None and root_id == probe_root
+        if not (f['pod_linked_cwd'] and f['pod_linked_root']):
+            f['pod_mi_state'] = 'unlinked'
+            return f, None
+        try:
+            entries = parse_mountinfo(text)
+        except ValueError as e:
+            f['pod_mi_state'], f['pod_mi_rule'] = 'parse_error', mi_rule(e)
+            return f, None
+        f['pod_mi_state'] = 'ok'
+        return f, entries
+    finally:
+        w.close()
+
+
+def select_mountinfo(wf, w_entries, pf, p_entries):
+    """(source, why, entries). The Pod-side read is required. Table (round 7, review condition 4):
+    waiter parse_error -> fail (never covered by the other source); waiter invalid -> fail; Pod-side not ok
+    (not_identified, changed, denied, read_error, unlinked, parse_error) -> fail; both ok and different -> fail;
+    both ok and equal -> 'both'; waiter absent or read_error and Pod-side ok -> 'pod_side'."""
+    ws, ps = wf.get('waiter_mi_state'), pf.get('pod_mi_state')
+    if ws in ('parse_error', 'invalid'):
+        return None, 'waiter mountinfo %s' % ws, None
+    if ps != 'ok':
+        return None, 'pod-side mountinfo %s' % (ps or 'missing'), None
+    if ws == 'ok':
+        if w_entries != p_entries:
+            return None, 'mountinfo sources differ', None
+        return 'both', None, p_entries
+    if ws in ('absent', 'read_error'):
+        return 'pod_side', None, p_entries
+    return None, 'waiter mountinfo state unknown', None
+
+
+def parent_judgement(probe, cwd, host_root, host_parent, marker, pod_devs, pod_obs=None):
     """(branch, why, fields). branch 'refused' or 'contained' when the premise holds, else None with why. Order:
     1 probe missing/invalid -> fail; 2 marker outside -> fail; 3 the inside '.' is not the case root (same path,
     and dev/ino equal to the Pod-side case root) -> fail; 4 pw '0' (the write was refused inside) -> 'refused';
-    5 pw '1' -> 'contained' only if every containment fact holds, else fail (a mount observation that fails or
-    cannot be parsed is a failure)."""
+    5 pw '1' -> the mountinfo is chosen by select_mountinfo (round 7: the Pod-side read is required, the waiter's
+    is a cross-check) and 'contained' only if every containment fact holds, else fail (a mount observation that
+    fails, is ambiguous or cannot be parsed is a failure). pod_obs is (fields, entries) from pod_side_mountinfo."""
     f = {'parent_probe_ok': False}
     if not isinstance(probe, dict) or probe.get('pw') not in ('0', '1'):
         return None, 'parent probe missing or invalid', f
@@ -880,15 +1037,20 @@ def parent_judgement(probe, cwd, host_root, host_parent, marker, pod_devs):
     f['root_identity'] = bool(f['root_same_path'] and dot is not None and host_root is not None and dot == host_root)
     if not f['root_identity']:
         return None, 'case root identity not confirmed', f
+    wf, w_entries = waiter_mi_state(probe)
+    f.update(wf)
     if probe['pw'] == '0':
         return 'refused', None, f
+    pf, p_entries = pod_obs if pod_obs is not None else ({'pod_mi_state': None}, None)
+    f.update(pf)
+    source, swhy, entries = select_mountinfo(wf, w_entries, pf, p_entries)
+    f['mi_source'] = source
     c = {}
-    try:
-        entries = parse_mountinfo(probe.get('mountinfo'))
-        c['mountinfo_parsed'] = True
-    except ValueError:
+    if entries is None:
         f['containment'] = {'mountinfo_parsed': False}
+        f['mi_select_why'] = swhy
         return None, 'parent write not contained', f
+    c['mountinfo_parsed'] = True
     dotdot, root = _id3(probe.get('dotdot')), _id3(probe.get('root'))
     # Round 6 r2 (PM decision on the review question): any mount point listed more than once makes the mountinfo
     # ambiguous (no stacking order is assumed); the count of such mount points is recorded.
@@ -940,8 +1102,13 @@ def premises(rec, prefix, cwd, ident, proc):
     rec[prefix + 'cwd_is_root'] = prof['cwd_is_root']
     marker = os.path.lexists(os.path.join(os.path.dirname(cwd), 'parent-probe-' + ident))
     rec[prefix + 'parent_marker_outside'] = marker
-    branch, pwhy, fields = parent_judgement(probe_value(cwd, ident), cwd, host_ident(cwd),
-                                            host_ident(os.path.dirname(cwd)), marker, pod_mount_devs())
+    probe = probe_value(cwd, ident)
+    host_root = host_ident(cwd)
+    pod_obs = None
+    if isinstance(probe, dict) and probe.get('pw') == '1':  # round 7: only a successful write needs mount facts
+        pod_obs = pod_side_mountinfo(launcher.pid, ident, host_root, _id3(probe.get('root')))
+    branch, pwhy, fields = parent_judgement(probe, cwd, host_root, host_ident(os.path.dirname(cwd)), marker,
+                                            pod_mount_devs(), pod_obs)
     rec.update({prefix + k: v for k, v in fields.items()})
     rec[prefix + 'parent_branch'] = branch
     if not structure['bwrap_identified']:
