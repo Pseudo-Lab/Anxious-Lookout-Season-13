@@ -637,8 +637,9 @@ or the configuration for it.
    kubectl -n codex-runner exec "$pod" -c runner -- \
      sh -c 'test -e /state/workspace/.codex && mv -T /state/workspace/.codex /state/workspace/codex-dir-kept-$(date -u +%Y%m%dT%H%M%SZ)'
    ```
-   Use the same `mv` for `CODEX_HOME/config.toml` or `rules` (`/state/codex/...`) only after
-   confirming what wrote them; those are not owner files, so report them to back first.
+   Do not use this `mv` for `CODEX_HOME/config.toml` or `rules` (`/state/codex/...`). Those are not owner
+   files: report them to back first. For a `config.toml` written by Codex's project-trust persistence, see
+   "#68 G5" below.
 3. Let the runner stop and release normally. Never delete the Pod by hand. The next entry starts a
    new Pod, and the startup check runs again from the beginning.
 4. If the Pod is already gone, the next entry recreates it and it blocks again; repeat step 2 on that Pod.
@@ -716,6 +717,39 @@ placeholder with the recovery procedure above (`mv -T … codex-dir-kept-<UTC>`)
 - The record file and the staging directory may stay. The earlier code never reads them.
 - If the G2 image comes back, a valid record with an absent `.codex` creates a new placeholder (`replaced`).
   The renamed directory is never accepted again.
+
+### #68 G5: `CODEX_HOME/config.toml` written by Codex's project-trust persistence
+
+**Cause (Codex 0.160.1 source; measured in Docker on the runner image's binary, #68 G5 M-a).**
+- When the workspace's project trust is unset, `thread/start` persists
+  `projects."/state/workspace".trust_level = "trusted"` into `CODEX_HOME/config.toml` (54 bytes, mode 0600). On the
+  G2 image the empty `.codex` placeholder makes the workspace a project, so this path is reached.
+- The runner pinned the trust to `untrusted` with `-c 'projects."<work>".trust_level="untrusted"'`, but Codex splits
+  a `-c` key on every `.` without reading quotes. That set a key with literal quotes, so the trust stayed unset.
+- From then on every start refuses with `local.codex_home_config`. The runner never removes the file.
+
+**The fix (a′).** The runner passes the trust as one inline table:
+`-c 'projects={"/state/workspace"={trust_level="untrusted"}}'` (the path TOML-encoded). Measured in Docker, Codex
+then reports the workspace `untrusted` with the project layer disabled, `thread/start` writes no `config.toml`, and
+the runner's `check_config` / `check_thread` pass. The image build gate (`runner.image_check`) now fails if Codex's
+`config/read` does not show exactly that one project as `untrusted`, or if `CODEX_HOME/config.toml` exists after it.
+The system layer, `native_policy` and `check_local` are unchanged: any `CODEX_HOME/config.toml` still refuses.
+
+**`CODEX_HOME/config.toml` present (`runner_policy_check` `local.codex_home_config`).**
+1. First make sure the owner's runner image carries the (a′) fix. Otherwise the next `thread/start` writes the file
+   again.
+2. Then an operator renames the file aside, in place, to `config.toml.kept-<UTC>`, through a reviewed, root-run
+   bundle (the #68 E3 pattern). It is never removed, never renamed by the runner and never automatic:
+   - before: the path to CODEX_HOME walked with no-follow directory fds; the file's pinned identity (dev, inode,
+     type, uid, gid, mode, nlink, size, mtime) and its exact bytes; no runner Pod for the owner; the registry row
+     and the ledgers as pinned;
+   - the move: `renameat2(RENAME_NOREPLACE)` relative to that same CODEX_HOME directory fd, held from the walk to
+     the end (no path is resolved again; no overwrite), after the identity, the bytes and the target's absence are
+     checked again through that fd;
+   - after: the source absent, the target with the same identity and bytes, the other CODEX_HOME entries
+     unchanged, still no Pod, and the path walking to the same directory; anything else stops with the observed
+     state, no retry.
+3. A file of any other content or shape is a separate investigation: do not rename it under this procedure.
 
 ## 7. Runner Pod and image (#68 order 4)
 

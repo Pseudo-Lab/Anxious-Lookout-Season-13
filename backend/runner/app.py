@@ -132,8 +132,29 @@ def native_command(binary, home, codex_home, work, *, file_auth, external, fixtu
             command += ['-c', setting]
     # Unified exec (and with it write_stdin) is pinned off by the managed requirements only:
     # 0.160.1 ignores a user `features.unified_exec=false` (#68).
-    command += ['-c', f'projects."{work}".trust_level="untrusted"']
+    # The workspace's project trust, as one inline table (#68 G5 (a′)): Codex splits a `-c` key on every `.` and
+    # does not read quotes, so the earlier `projects."<work>".trust_level=...` set a key with literal quotes and
+    # never applied. With the trust unset, 0.160.1's thread/start persisted `trusted` into CODEX_HOME/config.toml.
+    command += ['-c', 'projects={%s={trust_level="untrusted"}}' % toml_basic_string(str(work))]
     return command, environment
+
+
+def toml_basic_string(text):
+    """`text` as a TOML 1.0 basic string: `"` and `\\` escaped, control characters as \\uXXXX. A lone surrogate
+    (a path that is not valid UTF-8) cannot be encoded and is refused rather than passed on: Codex would read an
+    unparsable `-c` value as a plain string and the trust pin would silently not apply."""
+    out = []
+    for char in text:
+        code = ord(char)
+        if 0xD800 <= code <= 0xDFFF:
+            raise CodexFailure("policy_refused")
+        if char in '"\\':
+            out.append('\\' + char)
+        elif code < 0x20 or code == 0x7F:
+            out.append('\\u%04X' % code)
+        else:
+            out.append(char)
+    return '"' + ''.join(out) + '"'
 
 
 class Native:

@@ -6,7 +6,8 @@ cannot see this: a file mode, owner or missing package only exists in the built 
 `/etc/codex` at mode 644), and only the real Codex can say whether it accepts the config (#68 V3 found
 `approval_policy = "untrusted"` refused). Offline (the Dockerfile runs it with --network=none): reads files,
 runs `bwrap --version`, and starts the pinned `codex app-server` in the runner's own layout (`/state/home`,
-`/state/codex`, `/state/workspace`, removed afterwards) for two config reads.
+`/state/codex`, `/state/workspace`, removed afterwards) for two config reads; since #68 G5 (a′) it also requires
+the workspace to be reported `untrusted` (the runner's `-c` trust pin applied) and no `CODEX_HOME/config.toml`.
 
 What it cannot do: create a thread. Codex creates a thread through bubblewrap, and a build `RUN` has no user
 namespace (Docker's default seccomp and AppArmor), so thread/start always fails here. The static unit test
@@ -71,7 +72,12 @@ def codex_accepts_config():
         process.stdin.write(json.dumps({'method': 'initialized'}) + '\n')
         process.stdin.flush()
         native_policy.check_requirements(rpc(2, 'configRequirements/read', {}))
-        native_policy.check_config(rpc(3, 'config/read', {'includeLayers': True, 'cwd': work}), native_policy.STATE_ROOT)
+        config = rpc(3, 'config/read', {'includeLayers': True, 'cwd': work})
+        native_policy.check_config(config, native_policy.STATE_ROOT)
+        if not workspace_untrusted(config, work):
+            return 'workspace trust pin not applied'
+        if os.path.lexists(os.path.join(codex_home, 'config.toml')):
+            return 'codex wrote CODEX_HOME/config.toml'
         return None
     except CodexFailure:
         return 'codex config checks'
@@ -86,6 +92,18 @@ def codex_accepts_config():
             process.wait(timeout=10)
         for path in (home, codex_home, work):
             shutil.rmtree(path, ignore_errors=True)
+
+
+def workspace_untrusted(config, work):
+    """#68 G5 (a′): the effective config Codex reports has exactly one project, the workspace, and it is
+    `untrusted`. The earlier quoted-key pin showed up as a different key (with literal quotes) and no workspace
+    entry; this is what the build gate now catches. The image has no user config, so the entry can only come
+    from the runner's own `-c` argument."""
+    projects = ((config or {}).get('config') or {}).get('projects')
+    if not isinstance(projects, dict) or list(projects) != [work]:
+        return False
+    entry = projects[work]
+    return isinstance(entry, dict) and entry.get('trust_level') == 'untrusted'
 
 
 def problems():

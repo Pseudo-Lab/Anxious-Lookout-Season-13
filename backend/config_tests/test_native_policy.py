@@ -451,6 +451,15 @@ def test_model_writable_policy_refuses(local, place):
         local.check_local()
 
 
+def test_the_persisted_trust_entry_still_refuses(local):
+    """#68 G5 (a′) does not relax line `local.codex_home_config`: the exact 54-byte entry 0.160.1 wrote before the
+    fix still refuses, at every phase (removing it is the README section 6 operator step, never the runner)."""
+    (local.codex_home / 'config.toml').write_bytes(b'[projects."/state/workspace"]\ntrust_level = "trusted"\n')
+    for phase in ('start', 'launch', 'turn_pre'):
+        with pytest.raises(CodexFailure):
+            local.check_local(phase)
+
+
 def test_recorded_placeholder_passes_check_local(local):
     """#68 G2: the runner's own recorded empty `.codex` is the only `.codex` check_local allows, at every phase."""
     from runner import dot_codex
