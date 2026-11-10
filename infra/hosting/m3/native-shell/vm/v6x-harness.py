@@ -14,7 +14,19 @@ this harness made. No command text, no command output, no environment, no token,
 disallowed change is described by fixed fields, its names only as an exact match of a fixed candidate name or as a
 sha256; see CANDIDATES). Exit 0 when
 every phase was attempted (results are in the records), 2 when the environment, the baseline or the gate stopped
-the run before the cases, 3 when a case stopped the run; the host script reads the records, not only the rc.
+the run before the cases, 3 when a case stopped the run, 4 when the shared daemon root precondition (round 5) is
+not met; the host script reads the records, not only the rc.
+
+Round 5 (C2, review r1 conditions): the measurement models one condition only, "a valid, empty shared daemon root
+already exists". Codex 0.160.1 keeps that root at the fixed /tmp/codex-daemon-<euid> (uds/src/daemon_directory.rs;
+static source r1 28c6f650…), outside TMPDIR. Before the baseline the harness creates exactly that one path, mode
+0700. If the path already exists in the fresh Pod, or the lookup fails, it stops with rc 4 and changes nothing: it
+never deletes or chmods it to fit. It records that it made the path (record "daemon"). After the gate and after
+each case it compares the path's lstat type, uid, gid, full st_mode, inode and emptiness with that record; an error
+or any difference stops the run, as do (through the unchanged snapshot rules) its replacement, removal, a symlink
+or any entry below it. Sequential observations cannot see a change that is undone between two of them. Results hold
+under this precondition only; they do not show the naturally created path, or which process made it in earlier
+runs. The allowance (Phase.category and the existing stop rules) is unchanged.
 
 Structure (design r3 sections):
 - §6 environment: rw mounts against ALLOWED_RW (fixed below), the required security values (UID/GID 10001,
@@ -80,6 +92,10 @@ BUNDLED_BWRAP = ('/usr/local/bin/codex-resources/bwrap', '/usr/local/codex-resou
 READY_S, EXIT_S, STOP_S, PATHS_S = 10, 10, 2, 2
 UID = GID = 10001
 REGISTRY = 'codex-bwrap-synthetic-mount-targets-%d' % UID
+# Round 5 (C2): Codex's shared daemon root for the measured UID (the environment check requires UID 10001 first).
+DAEMON_ROOT = '/tmp/codex-daemon-%d' % UID
+DAEMON_MODE = stat.S_IFDIR | 0o700
+DAEMON_FIELDS = ('exists', 'type', 'uid', 'gid', 'mode', 'ino', 'empty')
 SNAP_ROOTS = ('/state', '/control', '/tmp', '/dev/shm')
 IDENTITY_FILES = ('/etc/hosts', '/etc/hostname', '/etc/resolv.conf', '/dev/termination-log')
 # rw mounts allowed in the Pod (review r3: a fixed set in code): the three emptyDirs, the runtime's /dev, /dev/pts,
@@ -524,7 +540,8 @@ class Phase:
 # of which process made the entry, or whether that was inside or outside the sandbox. A hash identifies neither the
 # path nor its origin; it only lets two runs be compared. No path text leaves the Pod.
 CANDIDATES = frozenset(
-    set(NAMES) | {REGISTRY, 'home', 'codex', 'tmp', 'arg0', 'gate', 'g1', 'gate-result'}
+    set(NAMES) | {REGISTRY, os.path.basename(DAEMON_ROOT), 'home', 'codex', 'tmp', 'arg0', 'gate', 'g1',
+                  'gate-result'}
     | {'c%s' % i for i in ('1', '2', '3', '4', '5', '6', '7', '8', '8a', '8b')}
     | {n + i for i in ('gate', '1', '2', '3', '4', '5', '6', '7a', '7b', '8a', '8b')
        for n in ('probe-', 'ready-', 'go-', 'parent-probe-')})
@@ -1020,6 +1037,56 @@ def concurrent(n, cwd, tmp_a, tmp_b, expect_remaining):
     return judge(rec, expect_remaining)
 
 
+# --- round 5 (C2): the shared daemon root precondition --------------------------------------------------------
+def daemon_obs():
+    """lstat of DAEMON_ROOT as fixed fields: exists, type, uid, gid, full st_mode (octal), inode, empty; an error
+    other than 'not found' is recorded as its errno name (an observation error)."""
+    try:
+        s = os.lstat(DAEMON_ROOT)
+    except FileNotFoundError:
+        return {'exists': False}
+    except OSError as e:
+        return {'error': errname(e)}
+    o = {'exists': True, 'type': FTYPES.get(stat.S_IFMT(s.st_mode), 'other'), 'uid': s.st_uid, 'gid': s.st_gid,
+         'mode': oct(s.st_mode), 'ino': s.st_ino}
+    if stat.S_ISDIR(s.st_mode):
+        try:
+            o['empty'] = not os.listdir(DAEMON_ROOT)
+        except OSError as e:
+            o['error'] = errname(e)
+    return o
+
+
+def daemon_prepare():
+    """(ok, record). Refuses a path that already exists or cannot be looked up (nothing is changed then; its
+    inode is not reported, the harness did not make it). Else creates exactly DAEMON_ROOT with mode 0700 and
+    requires: a directory, owned by the effective uid and gid, st_mode exactly S_IFDIR|0700, empty. A path made but
+    not as required is left as it is (no chmod) and the run stops."""
+    pre = daemon_obs()
+    if 'error' in pre or pre.get('exists'):
+        return False, {'name': os.path.basename(DAEMON_ROOT), 'created': False, 'pre_existing': pre.get('exists'),
+                       'before': {k: pre[k] for k in ('exists', 'type', 'uid', 'gid', 'mode', 'empty', 'error')
+                                  if k in pre}}
+    try:
+        os.mkdir(DAEMON_ROOT, 0o700)
+    except OSError as e:
+        return False, {'name': os.path.basename(DAEMON_ROOT), 'created': False, 'pre_existing': False,
+                       'mkdir_error': errname(e)}
+    o = daemon_obs()
+    good = ('error' not in o and o.get('exists') is True and o.get('type') == 'dir' and o.get('uid') == os.geteuid()
+            and o.get('gid') == os.getegid() and o.get('mode') == oct(DAEMON_MODE) and o.get('empty') is True)
+    return good, {'name': os.path.basename(DAEMON_ROOT), 'created': True, 'pre_existing': False,
+                  'as_required': good, 'state': o}
+
+
+def daemon_check(ref):
+    """Fixed fields comparing DAEMON_ROOT now with the state recorded when the harness made it."""
+    o = daemon_obs()
+    differs = [k for k in DAEMON_FIELDS if o.get(k) != ref.get(k)]
+    return {'daemon_same': not differs and 'error' not in o, 'daemon_differs': differs,
+            'daemon_error': o.get('error')}
+
+
 def main():
     # Prepared before the baseline (round 1 blocker): HOME, CODEX_HOME and the deny marker for G3.
     for d in (HOME, CODEX_HOME):
@@ -1031,6 +1098,13 @@ def main():
     if not environment():
         out('summary', phase='environment', aborted=True)
         return 2
+    # Round 5 (C2): the one shared daemon root, made here before the baseline, or the run stops (rc 4).
+    daemon_ok, daemon_rec = daemon_prepare()
+    out('daemon', **daemon_rec)
+    if not daemon_ok:
+        out('summary', phase='daemon_precondition', aborted=True)
+        return 4
+    daemon_ref = daemon_rec['state']
     base, err, err_kinds = snapshot()
     out('change', after='baseline', observation_errors=err, observation_error_kinds=err_kinds)
     if err:
@@ -1043,11 +1117,15 @@ def main():
     count, cats, det = changes(base, snap, Phase(['/state/gate'], ['/tmp/gate'],
                                                  ['g1', 'gate-result', 'ready-gate', 'go-gate']))
     elsewhere = protected_elsewhere(snap, roots)
+    dchk = daemon_check(daemon_ref)
     out('change', after='gate', changed=count, unexpected=sum(cats.values()), categories=cats,
         observation_errors=err, observation_error_kinds=err_kinds, protected_elsewhere=elsewhere, strays=live,
-        exited_unreaped=exited, reaped=reaped, **det)
+        exited_unreaped=exited, reaped=reaped, **det, **dchk)
     if not ok or cats or err or elsewhere or live:
         out('summary', phase='gate', aborted=True)
+        return 2
+    if not dchk['daemon_same']:  # round 5: an added stop; the rule above is unchanged
+        out('summary', phase='gate', aborted=True, stopped_by='daemon_root')
         return 2
     plan = [
         ('1', Phase(['/state/c1'], ['/tmp/c1'], control_files('1')),
@@ -1093,10 +1171,14 @@ def main():
         rec.update(det)
         rec['observation_errors'], rec['observation_error_kinds'] = err, err_kinds
         rec['protected_elsewhere'] = protected_elsewhere(snap, roots)
+        rec.update(daemon_check(daemon_ref))
         out('case', **rec)
         results[n] = rec['result']
         if rec['result'] == 'harness_failed' or cats or err or rec['protected_elsewhere'] or rec['strays']:
             aborted = 'case %s' % n
+            break
+        if not rec['daemon_same']:  # round 5: an added stop; the rule above is unchanged
+            aborted = 'case %s daemon_root' % n
             break
     out('summary', phase='cases', aborted=bool(aborted), stopped_at=aborted, results=results)
     return 3 if aborted else 0
