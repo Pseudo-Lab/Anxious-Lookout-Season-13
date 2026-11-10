@@ -42,8 +42,26 @@ Structure (design r3 sections):
   purpose, ⑧ uses /tmp/c8a and /tmp/c8b, ⑤ reuses /state/c4 with /tmp/c5).
 - Every launch is checked before its case is judged (else harness_failed after recovery): launcher identified and
   pinned, its --sandbox-policy-cwd/--command-cwd and the profile's only write root equal the case root (measured
-  cwd_is_root), the profile equals the expected native profile, the waiter's parent write failed and its marker is
-  absent outside the sandbox; and after: a go ends with wrapper rc 0, a signalled launcher is gone.
+  cwd_is_root), the profile equals the expected native profile, the waiter's parent write did not reach the Pod
+  (round 6, below); and after: a go ends with wrapper rc 0, a signalled launcher is gone.
+- Round 6 (P1): the parent-write premise protects one thing: a write outside the one write root must not reach
+  the Pod's storage. Order (parent_judgement): the probe record must be readable and valid, the marker outside
+  must be absent, and the inside '.' must be the case root (same path, and the inside dev/ino equal to the Pod-side
+  case root's). Then a refused write passes ('refused'). A successful write passes only as 'contained', which
+  needs every one of these facts:
+  - the inside mountinfo parses with the full proc(5) line structure;
+  - no mount point is listed more than once (else the mountinfo is ambiguous and fails; no stacking order is
+    assumed);
+  - the most specific mount covering '/' is a fresh tmpfs (mount point '/', root '/');
+  - the most specific mount covering the parent path is that same mount entry;
+  - the inside '..' and '/' are on that mount's device;
+  - that device is not mounted anywhere in the Pod;
+  - the inside '..' differs from the Pod-side parent;
+  - the case root is its own mount on the case root's device.
+  Mount IDs are never compared across namespaces. A contained case is also downgraded to harness_failed if its
+  end checks are not clean (snapshot, observation errors, protected names elsewhere, any parent-probe marker).
+  This verifies that one path at that time only. It is not a claim about every Pod path, and sequential
+  observations cannot see a change undone between them.
 - Change detection per phase (§6): a recursive lstat snapshot of /state, /control, /tmp, /dev/shm (+ identity of
   the runtime rw files) before and after; allowed changes are exact: the phase's own root(s) (the root itself, its
   fixed control files, the four protected names but nothing under them), the phase's TMPDIR(s) (the directory and
@@ -51,8 +69,12 @@ Structure (design r3 sections):
   and the tmp/arg0 subtree (Codex's execve wrapper and helper links). Anything else, any observation error, and any protected name outside the roots used so far stop the run.
   Round 4 (allowance unchanged): each disallowed change is also recorded (unexpected_detail, at most DETAIL_MAX)
   and observation errors are counted per kind (observation_error_kinds), so a stop says what kind of entry changed.
-- The waiter inside the sandbox never forks or execs: it writes probe-<id> (0/1: did a write to the parent
-  succeed), then ready-<id>, then polls for go-<id>.
+- The waiter inside the sandbox never forks or execs. It writes probe-<id>, then ready-<id>, then polls for
+  go-<id>. probe-<id> is a JSON record (round 6):
+  - pw 0/1 and the errno name of a refusal;
+  - its cwd;
+  - the dev/ino of '.', '..' and '/';
+  - its /proc/self/mountinfo text, which stays in the Pod: the harness parses it and outputs fixed fields only.
 - Signals go only through pidfds whose start time was checked against /proc/<pid>/stat right after opening.
 - Leftovers (round 2): the harness is the child subreaper (recorded), so descendants orphaned by a killed launcher
   come to it. After the gate and each case, live launch processes are killed and stop the run; processes that
@@ -69,6 +91,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import select
 import signal
 import socket
@@ -122,14 +145,32 @@ PROFILE_FIXED = sorted([(':minimal', 'read'), ('/control', 'deny'), ('/run/codex
 PROFILE_FIXED_WITH_RUNTIME = sorted(PROFILE_FIXED + [(CODEX_TMP + '/arg0', 'read')])
 
 WAITER = r'''
-import os, sys, time
+import errno, json, os, sys, time
 i = sys.argv[1]
+r = {}
 try:
     open('../parent-probe-' + i, 'w').close()
-    r = '1'
+    r['pw'], r['pw_errno'] = '1', None
+except OSError as e:
+    r['pw'] = '0'
+    r['pw_errno'] = errno.errorcode.get(e.errno, 'other') if e.errno is not None else 'none'
+def ident(p):
+    try:
+        s = os.stat(p)
+        return [os.major(s.st_dev), os.minor(s.st_dev), s.st_ino]
+    except OSError:
+        return None
+try:
+    r['cwd'] = os.getcwd()
 except OSError:
-    r = '0'
-open('probe-' + i, 'w').write(r)
+    r['cwd'] = None
+r['dot'], r['dotdot'], r['root'] = ident('.'), ident('..'), ident('/')
+try:
+    with open('/proc/self/mountinfo', 'rb') as f:
+        r['mountinfo'] = f.read().decode('utf-8', 'surrogateescape')
+except OSError:
+    r['mountinfo'] = None
+open('probe-' + i, 'w').write(json.dumps(r))
 open('ready-' + i, 'w').close()
 while not os.path.exists('go-' + i):
     time.sleep(0.05)
@@ -713,11 +754,166 @@ def reap_tree(proc, wrapper):
 
 
 def probe_value(cwd, ident):
+    """The waiter's probe record (round 6: JSON), or None when it is missing, unreadable or not a JSON object."""
     try:
-        with open(os.path.join(cwd, 'probe-' + ident)) as f:
-            return f.read().strip()
+        with open(os.path.join(cwd, 'probe-' + ident), 'rb') as f:
+            r = json.loads(f.read().decode('utf-8', 'surrogateescape'))
+    except (OSError, ValueError):
+        return None
+    return r if isinstance(r, dict) else None
+
+
+# --- round 6 (P1): where the waiter's parent write went -------------------------------------------------------
+# What the parent-write premise protects: a write by the sandboxed command outside its one write root must not
+# reach the Pod's storage (the emptyDirs outside the sandbox). Codex 0.160.1 builds a restricted-read sandbox on a
+# private `--tmpfs /` that is not remounted read-only (linux-sandbox/src/bwrap.rs L524-589; only masks are
+# remounted read-only), with the case root bound in (L655-657); so a create in the parent of the case root can
+# succeed inside the sandbox without reaching the Pod. Round 6 accepts such a success only when fixed identity and
+# mount facts show that the parent is on that private root tmpfs (below), and the Pod-side checks stay clean.
+_MI_ESCAPE = re.compile(r'\\([0-7]{3})')
+
+
+def mi_unescape(s):
+    """Undo /proc/self/mountinfo octal escapes (space, tab, newline, backslash: \\040 \\011 \\012 \\134)."""
+    return _MI_ESCAPE.sub(lambda m: chr(int(m.group(1), 8)), s)
+
+
+_MI_DEV = re.compile(r'[0-9]+:[0-9]+')
+_MI_NSROOT = re.compile(r'[a-z_]+:\[[0-9]+\]')  # e.g. a bind-mounted namespace file: 'net:[4026531992]'
+
+
+def parse_mountinfo(text):
+    """[{'dev': (major, minor), 'root': str, 'mp': str, 'fstype': str}] in file order. Every line must have the
+    proc(5) structure, else ValueError (round 6 r2, review major):
+    - fields 1-6: mount ID and parent ID (decimal), major:minor (decimal:decimal), root (absolute, or a namespace
+      file 'type:[n]'), mount point (absolute), mount options (non-empty);
+    - zero or more optional fields (non-empty), then the separator '-' (searched from field 7);
+    - exactly three fields after it: fstype, source, super options, each non-empty.
+    No field may be empty (no doubled or trailing spaces). Empty input is an error too."""
+    if not isinstance(text, str):
+        raise ValueError('no mountinfo')
+    out = []
+    for line in text.splitlines():
+        f = line.split(' ')
+        if any(x == '' for x in f):
+            raise ValueError('empty field')
+        try:
+            sep = f.index('-', 6)
+        except ValueError:
+            raise ValueError('no separator') from None
+        if len(f) != sep + 4:
+            raise ValueError('not exactly fstype, source and super options after the separator')
+        if not (f[0].isdigit() and f[1].isdigit() and _MI_DEV.fullmatch(f[2])):
+            raise ValueError('bad mount ID, parent ID or major:minor')
+        if not (f[3].startswith('/') or _MI_NSROOT.fullmatch(f[3])) or not f[4].startswith('/'):
+            raise ValueError('bad root or mount point')
+        major, minor = f[2].split(':')
+        out.append({'dev': (int(major), int(minor)), 'root': mi_unescape(f[3]), 'mp': mi_unescape(f[4]),
+                    'fstype': mi_unescape(f[sep + 1])})
+    if not out:
+        raise ValueError('empty mountinfo')
+    return out
+
+
+def covering_mount(entries, path):
+    """The most specific mount covering an absolute path: the longest mount point equal to the path or a whole-
+    component prefix of it ('/a' covers '/a' and '/a/b', not '/ab'). None if nothing covers it, and None when that
+    mount point is listed more than once (round 6 r2: no stacking order is assumed; parent_judgement also fails on
+    any duplicate mount point). Mount IDs are not used."""
+    covering = [e for e in entries
+                if e['mp'] == '/' or path == e['mp'] or path.startswith(e['mp'].rstrip('/') + '/')]
+    if not covering:
+        return None
+    longest = max(len(e['mp']) for e in covering)
+    top = [e for e in covering if len(e['mp']) == longest]
+    return top[0] if len(top) == 1 else None
+
+
+def pod_mount_devs():
+    """The set of (major, minor) of every mount in this harness's (the Pod's) mount namespace, or None on error."""
+    try:
+        with open('/proc/self/mountinfo', 'rb') as f:
+            return {e['dev'] for e in parse_mountinfo(f.read().decode('utf-8', 'surrogateescape'))}
+    except (OSError, ValueError):
+        return None
+
+
+def parent_markers(roots):
+    """Count of 'parent-probe-*' names in the parents of the given case roots (Pod side), or None on a lookup
+    error (None is not 0, so it fails the 'contained' confirmation)."""
+    n = 0
+    for d in sorted({os.path.dirname(r) for r in roots}):
+        try:
+            n += sum(1 for x in os.listdir(d) if x.startswith('parent-probe-'))
+        except OSError:
+            return None
+    return n
+
+
+def host_ident(path):
+    try:
+        s = os.stat(path)
+        return (os.major(s.st_dev), os.minor(s.st_dev), s.st_ino)
     except OSError:
         return None
+
+
+def _id3(v):
+    return tuple(v) if isinstance(v, list) and len(v) == 3 and all(isinstance(x, int) for x in v) else None
+
+
+def parent_judgement(probe, cwd, host_root, host_parent, marker, pod_devs):
+    """(branch, why, fields). branch 'refused' or 'contained' when the premise holds, else None with why. Order:
+    1 probe missing/invalid -> fail; 2 marker outside -> fail; 3 the inside '.' is not the case root (same path,
+    and dev/ino equal to the Pod-side case root) -> fail; 4 pw '0' (the write was refused inside) -> 'refused';
+    5 pw '1' -> 'contained' only if every containment fact holds, else fail (a mount observation that fails or
+    cannot be parsed is a failure)."""
+    f = {'parent_probe_ok': False}
+    if not isinstance(probe, dict) or probe.get('pw') not in ('0', '1'):
+        return None, 'parent probe missing or invalid', f
+    f.update(parent_probe_ok=True, parent_write=probe['pw'], parent_write_errno=probe.get('pw_errno')
+             if isinstance(probe.get('pw_errno'), str) else None)
+    if marker:
+        return None, 'parent write reached outside', f
+    dot = _id3(probe.get('dot'))
+    f['root_same_path'] = probe.get('cwd') == cwd
+    f['root_identity'] = bool(f['root_same_path'] and dot is not None and host_root is not None and dot == host_root)
+    if not f['root_identity']:
+        return None, 'case root identity not confirmed', f
+    if probe['pw'] == '0':
+        return 'refused', None, f
+    c = {}
+    try:
+        entries = parse_mountinfo(probe.get('mountinfo'))
+        c['mountinfo_parsed'] = True
+    except ValueError:
+        f['containment'] = {'mountinfo_parsed': False}
+        return None, 'parent write not contained', f
+    dotdot, root = _id3(probe.get('dotdot')), _id3(probe.get('root'))
+    # Round 6 r2 (PM decision on the review question): any mount point listed more than once makes the mountinfo
+    # ambiguous (no stacking order is assumed); the count of such mount points is recorded.
+    seen = {}
+    for e in entries:
+        seen[e['mp']] = seen.get(e['mp'], 0) + 1
+    c['duplicate_mount_points'] = sum(1 for n in seen.values() if n > 1)
+    c['mountinfo_ambiguous'] = c['duplicate_mount_points'] > 0
+    rm = covering_mount(entries, '/')
+    pm = covering_mount(entries, os.path.dirname(cwd))
+    dm = covering_mount(entries, cwd)
+    c['ids_read'] = dotdot is not None and root is not None and host_parent is not None and pod_devs is not None
+    c['root_mount_fresh_tmpfs'] = bool(rm and rm['mp'] == '/' and rm['root'] == '/' and rm['fstype'] == 'tmpfs')
+    c['parent_mount_is_root_mount'] = bool(rm is not None and pm is rm)
+    c['parent_on_root_fs'] = bool(c['ids_read'] and rm and dotdot[:2] == root[:2] == rm['dev'])
+    c['root_fs_not_in_pod'] = bool(c['ids_read'] and root[:2] not in pod_devs)
+    c['parent_not_pod_parent'] = bool(c['ids_read'] and dotdot != host_parent and dotdot[:2] != host_parent[:2])
+    c['case_root_is_own_mount'] = bool(dm and dm['mp'] == cwd and dot[:2] == dm['dev'])
+    c['contained'] = not c['mountinfo_ambiguous'] and all(
+        c[k] for k in ('mountinfo_parsed', 'ids_read', 'root_mount_fresh_tmpfs', 'parent_mount_is_root_mount',
+                       'parent_on_root_fs', 'root_fs_not_in_pod', 'parent_not_pod_parent', 'case_root_is_own_mount'))
+    f['containment'] = c
+    if not c['contained']:
+        return None, 'parent write not contained', f
+    return 'contained', None, f
 
 
 def failed(rec, why, proc, wrapper, *pins):
@@ -732,8 +928,9 @@ def failed(rec, why, proc, wrapper, *pins):
 
 def premises(rec, prefix, cwd, ident, proc):
     """The launch premises before any action (round 1): launcher identified and pinned, bwrap identified, the
-    profile and its root measured equal to the case root, the waiter's parent write refused and its marker absent
-    outside the sandbox. Returns (launcher Ident or None, why or None)."""
+    profile and its root measured equal to the case root, and (round 6) the waiter's parent write either refused,
+    or contained in the sandbox's private root tmpfs (parent_judgement), with its marker absent outside the
+    sandbox in both. Returns (launcher Ident or None, why or None)."""
     launcher, structure = find_launcher(proc.pid)
     rec[prefix + 'structure'] = structure
     if launcher is None:
@@ -741,16 +938,18 @@ def premises(rec, prefix, cwd, ident, proc):
     prof = profile_check(launcher.pid, cwd)
     rec[prefix + 'profile'] = prof
     rec[prefix + 'cwd_is_root'] = prof['cwd_is_root']
-    pw = probe_value(cwd, ident)
     marker = os.path.lexists(os.path.join(os.path.dirname(cwd), 'parent-probe-' + ident))
-    rec[prefix + 'parent_write'] = pw
     rec[prefix + 'parent_marker_outside'] = marker
+    branch, pwhy, fields = parent_judgement(probe_value(cwd, ident), cwd, host_ident(cwd),
+                                            host_ident(os.path.dirname(cwd)), marker, pod_mount_devs())
+    rec.update({prefix + k: v for k, v in fields.items()})
+    rec[prefix + 'parent_branch'] = branch
     if not structure['bwrap_identified']:
         return launcher, 'bwrap not identified'
     if not prof['ok']:
         return launcher, 'profile or root not as expected'
-    if pw != '0' or marker:
-        return launcher, 'parent write not refused'
+    if pwhy:
+        return launcher, pwhy
     return launcher, None
 
 
@@ -1172,6 +1371,15 @@ def main():
         rec['observation_errors'], rec['observation_error_kinds'] = err, err_kinds
         rec['protected_elsewhere'] = protected_elsewhere(snap, roots)
         rec.update(daemon_check(daemon_ref))
+        # Round 6: a 'contained' parent write counts only if this case's Pod-side checks also stay clean: no
+        # parent-probe marker in the parent of the case root at the end, and the full snapshot without a disallowed
+        # change, observation error or protected name elsewhere. Otherwise the case is not evaluated.
+        if any(rec.get(p + 'parent_branch') == 'contained' for p in ('', 'a_', 'b_')):
+            rec['parent_markers_end'] = parent_markers(phase.roots)
+            if rec['result'] != 'harness_failed' and (cats or err or rec['protected_elsewhere']
+                                                      or rec['parent_markers_end'] != 0):
+                rec['result'] = 'harness_failed'
+                rec['why'] = 'contained parent write not confirmed by the case checks'
         out('case', **rec)
         results[n] = rec['result']
         if rec['result'] == 'harness_failed' or cats or err or rec['protected_elsewhere'] or rec['strays']:
