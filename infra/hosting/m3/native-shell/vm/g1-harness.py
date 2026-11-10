@@ -16,10 +16,23 @@ rc: 0 every planned case ran (verdicts in the records); 2 a gate stopped the run
 or, r1, a case whose app-server did not start or whose gate - policy, S0, C0 - failed: that case is recorded and
 ended without any further launch); 3 a contamination gate stopped the run (leftover processes or an app-server that
 did not end; checked before the gate stop); the host reads records.
+
+r3 (design g1-r3 r1; diagnosis only, no verdict, gate, case or variable change):
+- §A: per launch a `diag` record from the command/exec reply. It holds:
+  - sizes: received vs inspected (64 KiB), and incomplete;
+  - the parse stage of the inspected stdout;
+  - the probe's stderr markers G1START / G1CALL and the reach stage (the last observed position only);
+  - a fixed message signature with exit_hint (an observation, not a cause).
+  The text is not kept.
+- §B: the requested environment per case, a computed runner reference, and per launch the requested values and the
+  observed values from G1START.
+- §C (off unless the host script sent REF_B64): after a failed gate and its stop_case, one reference launch through
+  `codex sandbox -P native`, recorded as reference_launch. The case stays gate_failed.
 """
 import errno
 import json
 import os
+import re
 import select
 import signal
 import stat
@@ -47,13 +60,67 @@ UTIME_NS = 1_000_000_000
 RPC_S, EXEC_MS, READY_S, END_S, GONE_S, HOLD_MS = 30, 30000, 10, 20, 10, 90000
 
 # The probe: one syscall per call, one JSON line on stdout. Run in the sandbox as `python3 -I -c PROBE <op> ...`.
+# r3 (§A5/§B2): two diagnosis lines on stderr only, `G1START {json}` first and `G1CALL <op>` at the marker position
+# right before the operation's syscall. Every marker step (environment lookups, JSON, the write, the flush) is
+# guarded on its own: a failure there is swallowed and never stops the syscall or the stdout record. stdout is as in
+# r2 (one record, the same keys). A marker only shows that the probe reached that write; G1CALL is not proof that the
+# syscall was made or finished.
 PROBE = r'''
 import errno, json, os, sys, time
+MARK_FD = sys.stderr is not None  # fd 2 was open when python started (else sys.stderr is None): only then mark
+def mark(line):
+    # unbuffered os.write on fd 2: a failed write (closed fd, broken pipe) leaves nothing buffered for python's exit
+    # flush, so a marker failure cannot change the exit code (a buffered sys.stderr made it 120)
+    if not MARK_FD:
+        return
+    try:
+        b = (line + "\n").encode("utf-8", "replace")
+        while b:
+            b = b[os.write(2, b):]
+    except Exception:
+        pass
+def start_info():
+    info = {}
+    try:
+        info["cwd"] = os.getcwd()
+    except OSError as e:
+        info["cwd"] = "error:" + errno.errorcode.get(e.errno, "other")
+    except Exception:
+        info["cwd"] = "error:other"
+    for k in ("uid", "euid", "gid"):
+        try:
+            info[k] = {"uid": os.getuid, "euid": os.geteuid, "gid": os.getgid}[k]()
+        except Exception:
+            pass
+    for k in ("HOME", "TMPDIR", "CODEX_HOME", "PATH"):
+        try:
+            info[k.lower()] = os.environ.get(k)
+        except Exception:
+            pass
+    try:
+        os.lstat("/proc/self")
+        info["proc_self"] = "present"
+    except FileNotFoundError:
+        info["proc_self"] = "absent"
+    except OSError as e:
+        info["proc_self"] = "error:" + errno.errorcode.get(e.errno, "other")
+    except Exception:
+        info["proc_self"] = "error:other"
+    try:
+        info["python"] = list(sys.version_info[:3])
+    except Exception:
+        pass
+    return info
+try:
+    mark("G1START " + json.dumps(start_info(), sort_keys=True))
+except Exception:
+    pass
 def rec(op, ok, e=None):
     name = None if e is None else (errno.errorcode.get(e.errno, "other") if e.errno is not None else "none")
     sys.stdout.write(json.dumps({"op": op, "called": True, "ok": ok, "errno": name, "uid": os.geteuid()}) + "\n")
     sys.stdout.flush()
 def call(op, a):
+    mark("G1CALL " + str(op))
     if op == "create":
         os.close(os.open(a[0], os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
     elif op == "mkdir":
@@ -159,7 +226,249 @@ def parse_probe(stdout, op):
     return r if valid_probe(r, op) else None
 
 
-LSTAT_KEYS = ('type', 'dev', 'ino', 'mtime_ns', 'mode', 'uid', 'gid')
+# --- r3 diagnosis (design g1-r3 §A/§B): fixed fields beside the verdict inputs; no verdict function reads them ------
+INSPECT_BYTES = 64 * 1024        # the harness looks at most at this prefix of each received stream (UTF-8 bytes)
+CODEX_CAP_BYTES = 1024 * 1024    # Codex 0.160.1 utils/pty DEFAULT_OUTPUT_BYTES_CAP: reaching it is a loss hint only
+MARK_VALUE_MAX = 4096            # longest string value taken from a G1START marker
+SHELL_HOME = '/usr/local/share/anxious-shell-home'   # the image's shell_environment_policy HOME
+LINE_ENDS = '\n\r\x0b\x0c\x1c\x1d\x1e\x85  '  # str.splitlines boundaries
+START_FIELDS = {'cwd': 'str', 'uid': 'int', 'euid': 'int', 'gid': 'int', 'home': 'str_or_none',
+                'tmpdir': 'str_or_none', 'codex_home': 'str_or_none', 'path': 'str_or_none', 'proc_self': 'proc',
+                'python': 'version'}
+# Panic messages of codex-linux-sandbox 0.160.1 (linux-sandbox/src/linux_run_main.rs, launcher.rs): a panic whose
+# message starts with one of these is `sandbox_panic`; any other Rust panic is `rust_panic_other`.
+SANDBOX_PANICS = (('error applying legacy Linux sandbox restrictions', 'legacy_restrictions'),
+                  ('error applying Linux sandbox restrictions', 'restrictions'),
+                  ('failed to exec system bubblewrap', 'exec_bwrap'),
+                  ('failed to fork for bubblewrap', 'fork_bwrap'),
+                  ('failed to fork sandboxed command', 'fork_command'),
+                  ('filesystem-restricted execution requires bubblewrap', 'needs_bwrap'),
+                  ('failed to verify descriptor-backed bubblewrap mount', 'fd_mount'),
+                  ('Linux sandbox retained effective or permitted capabilities', 'capabilities'),
+                  ('No command specified to execute', 'no_command'))
+BWRAP_SUBCLASSES = (("Can't mount proc", 'proc_mount'), ("Can't chdir", 'chdir'),
+                    ('Creating new namespace failed', 'namespace'),
+                    ('No permissions to create new namespace', 'namespace'),
+                    ('uid map', 'uid_map'), ("Can't find source path", 'source_path'))
+EXIT_HINTS = {1: 'exit_1', 8: 'exit_8_bwrap_digest_code', 101: 'exit_101_rust_panic_code',
+              127: 'exit_127_not_found_code'}
+
+
+def builtin_exceptions():
+    import builtins
+    return frozenset(n for n, v in vars(builtins).items() if isinstance(v, type) and issubclass(v, BaseException))
+
+
+def inspect_stream(text, received_bytes=None):
+    """(lines, fields) for one stream. fields: bytes_received (the whole stream as received, UTF-8; or the count
+    the reader saw when it kept only a prefix), bytes_inspected / lines_inspected (the prefix looked at), incomplete
+    (the prefix is not the whole stream). When incomplete, a last line without its line end is dropped (it may be cut
+    in the middle of a JSON value, a UTF-8 sequence or a marker)."""
+    if not isinstance(text, str):
+        return [], {'bytes_received': received_bytes, 'bytes_inspected': 0, 'lines_inspected': 0, 'incomplete': True}
+    raw = text.encode('utf-8', 'replace')
+    total = len(raw) if received_bytes is None else received_bytes
+    head = raw[:INSPECT_BYTES]
+    incomplete = total > len(head) or len(raw) > len(head)  # also when replacement characters grew the prefix
+    s = head.decode('utf-8', 'replace')
+    parts = s.splitlines(True)
+    if incomplete and parts and parts[-1][-1:] not in LINE_ENDS:
+        parts = parts[:-1]
+    lines = [p.splitlines()[0] if p.splitlines() else '' for p in parts]
+    return lines, {'bytes_received': total, 'bytes_inspected': len(head), 'lines_inspected': len(lines),
+                   'incomplete': incomplete}
+
+
+def parse_stage(lines, incomplete, op):
+    """Why the inspected stdout prefix holds no valid record (diagnosis only; parse_probe on the whole stdout stays the
+    verdict input): ok / empty / multiple_lines / not_json / not_object / keys / other_op / fields, or
+    inspection_incomplete when the prefix is not the whole stream."""
+    if incomplete:
+        return 'inspection_incomplete'
+    body = [l for l in lines if l.strip()]
+    if not body:
+        return 'empty'
+    if len(body) > 1:
+        return 'multiple_lines'
+    try:
+        r = json.loads(body[0])
+    except ValueError:
+        return 'not_json'
+    if not isinstance(r, dict):
+        return 'not_object'
+    if set(r) != PROBE_KEYS:
+        return 'keys'
+    if r.get('op') != op:
+        return 'other_op'
+    return 'ok' if valid_probe(r, op) else 'fields'
+
+
+def start_effective(obj):
+    """Allowed G1START keys only, each type- and length-checked; (effective, rejected_count, extra_count). The marker
+    JSON itself is never kept."""
+    eff, rejected = {}, 0
+    for k, kind in START_FIELDS.items():
+        if k not in obj:
+            continue
+        v = obj[k]
+        ok = ((kind == 'int' and type(v) is int) or
+              (kind == 'str' and isinstance(v, str) and len(v) <= MARK_VALUE_MAX) or
+              (kind == 'str_or_none' and (v is None or (isinstance(v, str) and len(v) <= MARK_VALUE_MAX))) or
+              (kind == 'proc' and isinstance(v, str)
+               and re.fullmatch(r'present|absent|error:[A-Za-z0-9_]{1,32}', v) is not None) or
+              (kind == 'version' and isinstance(v, list) and len(v) == 3 and all(type(x) is int for x in v)))
+        if ok:
+            eff[k] = v
+        else:
+            rejected += 1
+    return eff, rejected, len(set(obj) - set(START_FIELDS))
+
+
+def markers(lines, op, incomplete):
+    """The probe's stderr markers. start / call: valid, absent (or absent_incomplete when the inspected prefix is
+    not the whole stream), duplicate, malformed, other_op (call only). Only a valid marker is an observation: a
+    valid call marker shows that the probe reached the write right before the syscall, not that the syscall was made
+    or finished. Returns (start, call, effective, rejected, extra, other_lines)."""
+    starts = [l for l in lines if l.startswith('G1START')]
+    calls = [l for l in lines if l.startswith('G1CALL')]
+    rest = [l for l in lines if not (l.startswith('G1START') or l.startswith('G1CALL'))]
+    absent = 'absent_incomplete' if incomplete else 'absent'
+    eff, rejected, extra = None, 0, 0
+    if not starts:
+        start = absent
+    elif len(starts) > 1:
+        start = 'duplicate'
+    else:
+        start = 'malformed'
+        if starts[0].startswith('G1START ') and len(starts[0]) <= 16 * MARK_VALUE_MAX:
+            try:
+                obj = json.loads(starts[0][len('G1START '):])
+            except ValueError:
+                obj = None
+            if isinstance(obj, dict):
+                start = 'valid'
+                eff, rejected, extra = start_effective(obj)
+    if not calls:
+        call = absent
+    elif len(calls) > 1:
+        call = 'duplicate'
+    elif calls[0] == 'G1CALL ' + op:
+        call = 'valid'
+    elif re.fullmatch(r'G1CALL [a-z]{1,16}', calls[0]):
+        call = 'other_op'
+    else:
+        call = 'malformed'
+    return start, call, eff, rejected, extra, rest
+
+
+def reach_stage(start, call, record_valid):
+    """The last observed position: record (a valid stdout record), call_marker, start_marker, or
+    no_marker_received (which is not proof that python never started)."""
+    if record_valid is True:
+        return 'record'
+    if call == 'valid':
+        return 'call_marker'
+    if start == 'valid':
+        return 'start_marker'
+    return 'no_marker_received'
+
+
+def exit_hint(code):
+    if code == 0:
+        return None
+    if type(code) is not int:
+        return 'exit_unknown'
+    return EXIT_HINTS.get(code, 'exit_other')
+
+
+def classify_failure(out_lines, err_lines, exit_code, incomplete):
+    """Fixed message signatures seen in the inspected lines (stderr without the probe's markers, then stdout). A
+    signature says that this message form was observed, not that it is the cause. An exit code alone never makes a
+    signature: it only sets exit_hint (a child can exit with any code). Priority, first match wins:
+    bwrap_build_error > bwrap_execvp_enoent > bwrap_message > sandbox_panic > rust_panic_other > python_traceback;
+    then empty_output (all blank and complete); else unknown / unknown_incomplete. Returns signature, subclass,
+    signatures_seen (sorted names), matched_lines, exit_hint."""
+    lines = list(err_lines) + list(out_lines)
+    found = []
+    for i, l in enumerate(lines):
+        if l.startswith('error building bubblewrap command: '):
+            found.append((0, 'bwrap_build_error', None))
+        elif re.fullmatch(r'bwrap: execvp .*: No such file or directory', l):
+            found.append((1, 'bwrap_execvp_enoent', None))
+        elif l.startswith('bwrap: '):
+            found.append((2, 'bwrap_message', next((k for p, k in BWRAP_SUBCLASSES if p in l), 'other')))
+        elif re.match(r"thread '[^']*' panicked at", l):
+            msg = l + '\n' + (lines[i + 1] if i + 1 < len(lines) else '')
+            sub = next((k for p, k in SANDBOX_PANICS if p in msg), None)
+            found.append((3, 'sandbox_panic', sub) if sub else (4, 'rust_panic_other', None))
+        elif l == 'Traceback (most recent call last):':
+            name = 'other'
+            for later in lines[i + 1:]:
+                if later.strip() and later[:1] not in (' ', '\t'):
+                    m = re.match(r'([A-Za-z_][A-Za-z0-9_.]*)(:|$)', later)
+                    if m:
+                        n = m.group(1).rsplit('.', 1)[-1]
+                        name = n if n in builtin_exceptions() else 'other'
+                    break
+            found.append((5, 'python_traceback', name))
+    if found:
+        best = min(found, key=lambda x: x[0])
+        signature, subclass = best[1], best[2]
+    elif not incomplete and not any(l.strip() for l in lines):
+        signature, subclass = 'empty_output', None
+    else:
+        signature, subclass = ('unknown_incomplete' if incomplete else 'unknown'), None
+    return {'signature': signature, 'subclass': subclass, 'signatures_seen': sorted({f[1] for f in found}),
+            'matched_lines': len(found), 'exit_hint': exit_hint(exit_code)}
+
+
+def diagnose(stdout, stderr, exit_code, op, record_valid, received=None):
+    """All §A fields for one launch. stdout/stderr: the received text (or a kept prefix with its received byte
+    counts in `received`). record_valid: parse_probe on the whole stdout found a record (the verdict input)."""
+    received = received or {}
+    out_lines, of = inspect_stream(stdout, received.get('stdout'))
+    err_lines, ef = inspect_stream(stderr, received.get('stderr'))
+    start, call, eff, rejected, extra, err_rest = markers(err_lines, op, ef['incomplete'])
+    stage = parse_stage(out_lines, of['incomplete'], op)
+    d = {'stdout': of, 'stderr': ef,
+         'codex_cap_hint': any(isinstance(x['bytes_received'], int) and x['bytes_received'] >= CODEX_CAP_BYTES
+                               for x in (of, ef)),
+         'parse_stage': stage, 'record_valid': record_valid is True,
+         'exit_code_zero': exit_code == 0, 'start_marker': start, 'call_marker': call,
+         'reach_stage': reach_stage(start, call, record_valid), 'effective': eff,
+         'effective_rejected': rejected, 'effective_extra_keys': extra}
+    # stage ok: stdout is exactly the one valid record, which is not a failure message
+    d.update(classify_failure([] if stage == 'ok' else out_lines, err_rest, exit_code,
+                              of['incomplete'] or ef['incomplete']))
+    return d
+
+
+def compare_effective(eff, cwd):
+    """§B2: the observed values against the request (None when no valid start marker was received)."""
+    if not isinstance(eff, dict):
+        return {'cwd_same': None, 'uid_expected': None, 'home_is_shell_home': None}
+    return {'cwd_same': eff.get('cwd') == cwd if 'cwd' in eff else None,
+            'uid_expected': eff.get('uid') == UID if 'uid' in eff else None,
+            'home_is_shell_home': eff.get('home') == SHELL_HOME if 'home' in eff else None}
+
+
+ENV_FIXED = ('PATH', 'LANG', 'HOME', 'CODEX_HOME', 'TMPDIR')
+LAUNCH_FIELDS = ('rpc', 'exit_code', 'reached', 'uid_inside', 'profile', 'requested', 'diag')  # per launch record
+
+
+def env_view(env):
+    """§B1: values for the fixed keys of this unauthenticated measurement path, names only for any other key."""
+    return {'fixed': {k: env.get(k) for k in ENV_FIXED},
+            'other_keys': sorted(k for k in env if k not in ENV_FIXED)}
+
+
+def env_compare(here, runner):
+    """Key names only: present only here, only in the runner reference, or with a different value."""
+    return {'only_here': sorted(set(here) - set(runner)), 'only_runner': sorted(set(runner) - set(here)),
+            'value_differs': sorted(k for k in set(here) & set(runner) if here[k] != runner[k])}
+
+
+LSTAT_KEYS =('type', 'dev', 'ino', 'mtime_ns', 'mode', 'uid', 'gid')
 SNAP_FIELDS = ('type', 'ino', 'mtime_ns', 'entries', 'entries_error', 'error')  # recorded snapshot fields
 
 
@@ -551,6 +860,9 @@ class AppServer:
         from runner.app import native_command  # the image's runner code (pinned image)
         command, env = native_command(CODEX, home, codex_home, work, file_auth=False, external=False, fixture=False)
         env = dict(env, TMPDIR=tmpdir)
+        import hashlib
+        self.env, self.cwd = env, work  # r3 §B1: kept for the record and the §C reference launch
+        self.argv_sha256 = hashlib.sha256(json.dumps(command).encode()).hexdigest()
         self.proc = subprocess.Popen(command, env=env, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, text=True, bufsize=1)
         self.pin = Pin(self.proc.pid)
@@ -620,25 +932,32 @@ class AppServer:
         ident = self.send('command/exec', params)
         if not wait:
             return ident
-        return self.bind(self.exec_result(ident, op, timeout_ms / 1000 + 5), work)
+        return self.bind(self.exec_result(ident, op, timeout_ms / 1000 + 5), work, timeout_ms)
 
     @staticmethod
-    def bind(r, work):
+    def bind(r, work, timeout_ms=None):
         """Bound per launch (target and control are separate launches): the profile and cwd this launch requested,
-        the uid seen inside, reach. profile/cwd are the request's values, not observed inside the sandbox."""
+        the uid seen inside, reach. profile/cwd are the request's values, not observed inside the sandbox. r3: the
+        requested values as one record (§B2) and, when a diagnosis exists, the observed values compared to them."""
         x = r.get('rec')
         r.update(profile=PROFILE, cwd=work, reached=well_formed(x) and x['called'] is True,
-                 uid_inside=x['uid'] if well_formed(x) else None)
+                 uid_inside=x['uid'] if well_formed(x) else None,
+                 requested={'permissionProfile': PROFILE, 'cwd': work, 'timeoutMs': timeout_ms})
+        if isinstance(r.get('diag'), dict):
+            r['diag']['compare'] = compare_effective(r['diag'].get('effective'), work)
         return r
 
     def exec_result(self, ident, op, timeout):
         r = self.wait(ident, timeout)
         if not r:
-            return {'rpc': 'no_reply', 'rec': None}
+            return {'rpc': 'no_reply', 'rec': None, 'diag': None}
         if 'error' in r:
-            return {'rpc': 'error', 'rec': None}
+            return {'rpc': 'error', 'rec': None, 'diag': None}
         res = r.get('result') or {}
-        return {'rpc': 'ok', 'exit_code': res.get('exitCode'), 'rec': parse_probe(res.get('stdout'), op)}
+        rec = parse_probe(res.get('stdout'), op)  # the verdict input, from the whole stdout, as in r2
+        # r3 §A: the diagnosis from the same reply; the text itself is not kept beyond this call
+        return {'rpc': 'ok', 'exit_code': res.get('exitCode'), 'rec': rec,
+                'diag': diagnose(res.get('stdout'), res.get('stderr'), res.get('exitCode'), op, rec is not None)}
 
     def end_normally(self):
         """Close stdin; exit 0 within END_S confirmed (True/False)."""
@@ -701,6 +1020,11 @@ def pins():
         checks['helper'] = 'HELPER_B64' in globals()
     except Exception:
         checks['helper'] = False
+    if 'REF_B64' in globals():  # r3 §C: only when the host script sent the reference module
+        try:
+            checks['reference'] = reference_module() is not None
+        except Exception:
+            checks['reference'] = False
     out('pins', checks=checks)
     return all(checks.values())
 
@@ -809,7 +1133,7 @@ def gate_for(app, d):
     ok, failed_part = gate_result(pol_ok, s0_ok, c0_valid, os.path.isfile(d['work'] + '/ctl/c0'))
     g = {'ok': ok, 'failed': failed_part, 'policy': pol_ok, 'policy_checks': pol_names, 's0': s0_ok,
          's0_why': s0_why, 's0_errno': (s0['rec'] or {}).get('errno'), 'c0': c0_valid,
-         'launches': [{k: x.get(k) for k in ('rpc', 'exit_code', 'reached', 'uid_inside', 'profile')} for x in (s0, c0)]}
+         'launches': [{k: x.get(k) for k in LAUNCH_FIELDS} for x in (s0, c0)]}
     return ok, g
 
 
@@ -881,7 +1205,7 @@ def protect_case(cid):
     verdict, why = judge(gate_ok, ctl_valid, ctl['rec'], ctl_effect, tgt_valid, tgt['rec'], t_effect, same, empty,
                          path_points)
     ended, forced, clean, left = end_and_check(app)
-    bound = ('rpc', 'rec', 'profile', 'cwd', 'reached', 'uid_inside', 'exit_code')
+    bound = ('rpc', 'rec', 'profile', 'cwd', 'reached', 'uid_inside', 'exit_code', 'requested', 'diag')
     rec.update(gate_ok=gate_ok, gate=g,
                control=dict({k: ctl.get(k) for k in bound}, valid=ctl_valid, effect=ctl_effect),
                target=dict({k: tgt.get(k) for k in bound}, valid=tgt_valid, effect=t_effect, same=same, empty=empty,
@@ -903,14 +1227,104 @@ def stop_case(app, rec, reason):
 def open_case(app, d, rec):
     """The common start of C1-C8 and L1-L4 (r1, review r0 major 3): app-server start, then the gate (policy, S0,
     C0) recorded in rec. Returns (gate_ok, gate record, None) to continue, or (False, g, stop_case(...)) after the
-    app-server was ended: the caller returns that triple without any further launch."""
+    app-server was ended: the caller returns that triple without any further launch. r3: the environment record
+    (§B1) first; after a failed gate and its stop_case, the §C reference launch when enabled (diagnosis only: the
+    stop reason stays 'gate_failed'; a process it leaves makes the case not clean)."""
+    rec['environment'] = environment_record(app)
     if not app.start():
         return False, None, stop_case(app, rec, 'app_server_start')
     gate_ok, g = gate_for(app, d)
     rec.update(gate_ok=gate_ok, gate=g)
     if not gate_ok:
-        return False, g, stop_case(app, rec, 'gate_failed')
+        return False, g, reference_after_stop(d, app, stop_case(app, rec, 'gate_failed'))
     return True, g, None
+
+
+# --- r3 §B1 environment record and §C reference launch -------------------------------------------------------------
+REF_SHA = '644988017b0e26e1d29f3a3c71b865180a4a637b9c4cc5a1d50f7d64d96efeaa'  # g1-reference.py r0
+_REF = {}
+
+
+def environment_record(app):
+    """§B1: the app-server environment as built here (requested) and the runner's own, computed with the same image
+    function and the runner's paths (a computed comparison value, not an observation of a running runner). A failure
+    here is recorded as an error value and never stops the case."""
+    try:
+        sys.path.insert(0, APP)
+        from runner.app import native_command
+        rcmd, renv = native_command(CODEX, ROOT + '/home', ROOT + '/codex', ROOT + '/workspace', file_auth=False,
+                                    external=False, fixture=False)
+    except Exception as e:
+        return {'error': type(e).__name__}
+    return {'requested': env_view(app.env), 'cwd': app.cwd, 'argv_sha256': app.argv_sha256,
+            'runner_reference': dict(env_view(renv), computed=True,
+                                     file_auth='runner True when an auth binding exists (runner/app.py); G1 False'),
+            'diff': env_compare(app.env, renv)}
+
+
+def reference_module():
+    """g1-reference.py from REF_B64 (sha256 == REF_SHA), its own namespace; None when not sent (the default)."""
+    if 'm' not in _REF:
+        src = globals().get('REF_B64')
+        if src is None:
+            _REF['m'] = None
+        else:
+            import base64
+            import hashlib
+            import types
+            data = base64.b64decode(src)
+            if hashlib.sha256(data).hexdigest() != REF_SHA:
+                raise RuntimeError('reference digest')
+            m = types.ModuleType('g1_reference')
+            exec(compile(data, 'g1-reference.py', 'exec'), m.__dict__)
+            _REF['m'] = m
+    return _REF['m']
+
+
+def ref_state(d):
+    """What a CLI launch in the same workspace and TMPDIR could change indirectly: workspace top-level names (made
+    by this harness), the placeholder's identity, TMPDIR entry count, the shared daemon directory, own children."""
+    w, s = d['work'], {}
+    try:
+        s['work_names'] = sorted(os.listdir(w))
+    except OSError as e:
+        s['work_names'] = 'error:' + errname(e)
+    s['placeholder'] = {k: v for k, v in snap(w + '/.codex').items() if k in SNAP_FIELDS}
+    try:
+        s['tmp_entries'] = len(os.listdir(d['tmp']))
+    except OSError as e:
+        s['tmp_entries'] = 'error:' + errname(e)
+    s['daemon_dir'] = {k: v for k, v in snap('/tmp/codex-daemon-%d' % os.geteuid()).items() if k in SNAP_FIELDS}
+    s['own_children'] = len(own_children())
+    return s
+
+
+def reference_after_stop(d, app, stopped):
+    """§C: after stop_case of a failed gate. Not enabled (no REF_B64) -> recorded as such, nothing runs. Enabled
+    and the case ended clean -> the state is written out first (a 'pre_reference' line), then one reference launch,
+    then the state again. The returned stop reason is the one stop_case gave; clean also needs the reference's own
+    cleanup confirmed."""
+    rec, clean, reason = stopped
+    m = reference_module()
+    if m is None:
+        rec['reference_launch'] = 'not_enabled'
+        return stopped
+    if clean is not True:
+        rec['reference_launch'] = 'skipped:case_not_clean'
+        return stopped
+    before = ref_state(d)
+    out('pre_reference', id=rec.get('id'), gate=rec.get('gate'), environment=rec.get('environment'), state=before)
+    w = d['work']
+    ctx = {'argv': [CODEX, 'sandbox', '-P', PROFILE, '-C', w, '--', PYTHON, '-I', '-c', PROBE, 'create',
+                    w + '/ctl/ref0'],
+           'env': app.env, 'cwd': w, 'target': w + '/ctl/ref0', 'op': 'create', 'Pin': Pin, 'reap_all': reap_all,
+           'own_children': own_children, 'parse_probe': parse_probe, 'diagnose': diagnose,
+           'record_fields': sorted(PROBE_KEYS)}
+    ref, ref_clean = m.launch(ctx)
+    ref['compare'] = compare_effective((ref.get('diag') or {}).get('effective'), w)
+    rec['reference_launch'] = dict(ref, state_before=before, state_after=ref_state(d),
+                                   note='comparison observation only; the case stays gate_failed')
+    return rec, bool(clean and ref_clean), reason
 
 
 def case_transition(cid, verdict, clean, stop):
@@ -969,9 +1383,9 @@ def c8_case():
         # r1: release the parent anyway (the child, if any, never gets go) so the spawn launch itself is judged;
         # the verdict is inconclusive (child_not_observed) whatever the launch shows
         open(w + '/c8/release-' + tok, 'w').close()
-        res = AppServer.bind(app.exec_result(ident, 'spawn', HOLD_MS / 1000 + 5), w)
+        res = AppServer.bind(app.exec_result(ident, 'spawn', HOLD_MS / 1000 + 5), w, HOLD_MS)
         obs['spawn_valid'] = exec_valid(res, 'spawn', w)
-        rec['spawn'] = {k: res.get(k) for k in ('rpc', 'exit_code', 'reached', 'uid_inside', 'profile')}
+        rec['spawn'] = {k: res.get(k) for k in LAUNCH_FIELDS}
     if child:
         cpin = Pin(child)
         chain = chain_to(parent, app.proc.pid)
@@ -979,9 +1393,9 @@ def c8_case():
         obs['child_seen'] = cpin.ok() and all(x.ok() for x in lpins) and bool(lpins)
         rec['chain_roles'] = [r for _, _, r in chain]
         open(w + '/c8/release-' + tok, 'w').close()  # the parent ends only after the identities are pinned
-        res = AppServer.bind(app.exec_result(ident, 'spawn', HOLD_MS / 1000 + 5), w)
+        res = AppServer.bind(app.exec_result(ident, 'spawn', HOLD_MS / 1000 + 5), w, HOLD_MS)
         obs['spawn_valid'] = exec_valid(res, 'spawn', w)  # rpc ok, exit 0, a spawn record, uid 10001
-        rec['spawn'] = {k: res.get(k) for k in ('rpc', 'exit_code', 'reached', 'uid_inside', 'profile')}
+        rec['spawn'] = {k: res.get(k) for k in LAUNCH_FIELDS}
         obs['launchers_gone'] = bool(lpins) and all(x.exited(GONE_S) for x in lpins)
         if obs['launchers_gone']:
             if cpin.exited(0.5):
@@ -1042,7 +1456,8 @@ def l1_case():
     for _ in range(5):
         r = app.exec_probe(w, 'noop')
         runs.append({'rpc': r['rpc'], 'exit_code': r.get('exit_code'), 'uid_inside': r.get('uid_inside'),
-                     'valid': exec_valid(r, 'noop', w), 'same': identity_same(first, snap(p))})
+                     'valid': exec_valid(r, 'noop', w), 'same': identity_same(first, snap(p)),
+                     'requested': r.get('requested'), 'diag': r.get('diag')})
     verdict, why = judge_l1(gate_ok, runs)
     ended, forced, clean, left = end_and_check(app)
     rec.update(runs=runs, verdict=verdict, reason=why, ended=ended, forced=forced, clean=clean, leftover=left)
@@ -1136,7 +1551,7 @@ def k_case(kid):
     w = d['work']
     ev = placeholder(d) if kid == 'K1' else None
     app = AppServer(d['home'], d['codex'], w, d['tmp'])
-    rec = {'id': kid, 'placeholder': ev}
+    rec = {'id': kid, 'placeholder': ev, 'environment': environment_record(app)}
     if not app.start():
         return stop_case(app, rec, 'app_server_start')
     ok, names = policy_check(app, w)

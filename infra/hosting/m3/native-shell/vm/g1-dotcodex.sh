@@ -5,7 +5,10 @@
 # limits and the record summary differ. Development VM only. Run as root in the guest, once, under a systemd-run
 # unit (g1-commands.md), after review cleared this script's SHA-256 and PM gave the go:
 #
-#   g1-dotcodex.sh <RUN>     RUN = the UTC stamp the command made (also passed to g1-cleanup.sh in ExecStopPost)
+#   g1-dotcodex.sh <RUN> [reference]   RUN = the UTC stamp the command made (also passed to g1-cleanup.sh in
+#                                      ExecStopPost). r3: `reference` (only under the §3R go) also sends
+#                                      g1-reference.py (its own pin) as REF_B64; without it the harness never makes the
+#                                      §C reference launch and records `not_enabled`.
 #
 # What it does: one measurement Pod g1-dotcodex in the existing namespace native68-measure (the V3 rendering as for
 # V6x: the runner's Pod and container security settings, three emptyDir volumes, `sleep infinity`), plus this run's
@@ -45,10 +48,12 @@ NS=native68-measure
 POD=g1-dotcodex
 POD_JSON="$here/g1-pod.json"
 POD_JSON_SHA=44d404ca011be4bdb4944a0e9378a1e8053ffc228e9c1a81d5a85b8df78780e2
-HARNESS="$here/g1-harness.py"
-HARNESS_SHA=0a7f7df1a380789363b4a6a3973b97e367f07628d0fdaa04f36d1b27c1d7b88d
+HARNESS="$here/g1-harness-r3.py"  # r3: installed next to the r2 files under a new name (install never overwrites)
+HARNESS_SHA=a05fdd2437821cce249bc521cee58b02204e1725b195b1ce89cd137aeeb22bc0
 HELPER="$here/dot_codex.py"
 HELPER_SHA=2ca0793e3a4304bbeb7093ac47adb920512619b6a958d73049e051239cf478c6
+REF="$here/g1-reference.py"
+REF_SHA=644988017b0e26e1d29f3a3c71b865180a4a637b9c4cc5a1d50f7d64d96efeaa
 SECCOMP_FILE=$SECCOMP_DIR/anxious-runner-userns-v1.json
 SECCOMP_SHA=9a6594419eae4089e737c787597d2ed4950fd7e1031e371f490d5b2c935dff78
 PSA_VERSION=v1.36
@@ -59,7 +64,9 @@ KUBELET_PODS=/var/lib/kubelet/pods
 
 RUN=${1:-}
 case "$RUN" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
-  *) echo 'usage: g1-dotcodex.sh <RUN UTC stamp YYYYmmddTHHMMSSZ>'; exit 2;; esac
+  *) echo 'usage: g1-dotcodex.sh <RUN UTC stamp YYYYmmddTHHMMSSZ> [reference]'; exit 2;; esac
+MODE=${2:-}
+case "$MODE" in ''|reference) ;; *) echo 'usage: g1-dotcodex.sh <RUN UTC stamp YYYYmmddTHHMMSSZ> [reference]'; exit 2;; esac
 
 # Evidence named by RUN (not start_evidence's own stamp: g1-cleanup.sh finds it by RUN). Same rules as
 # start_evidence: root, created atomically, rc 3 if impossible.
@@ -68,7 +75,7 @@ install -d -o root -g root -m 0700 "$EVIDENCE" || { echo 'evidence directory; no
 candidate="$EVIDENCE/g1-dotcodex-$RUN.txt"
 ( set -C; : > "$candidate" ) 2>/dev/null || { echo "cannot create $candidate (exists?); nothing changed"; exit 3; }
 log=$candidate
-say "g1-dotcodex: $(date -u +%Y-%m-%dT%H:%M:%SZ) run $RUN"
+say "g1-dotcodex: $(date -u +%Y-%m-%dT%H:%M:%SZ) run $RUN reference ${MODE:-off}"
 harnessfile=$(sidecar harness) || refuse 'sidecar harness'
 runfile=$(sidecar run) || refuse 'sidecar run'
 printf 'run %s\npod %s/%s\n' "$RUN" "$NS" "$POD" >> "$runfile" || refuse 'run sidecar write'
@@ -196,6 +203,9 @@ sys.exit(1 if bad else 0)' "$PSA_VERSION" 2>&1); s=$?
 [ "$(sha256sum "$POD_JSON" 2>/dev/null | cut -d' ' -f1)" = "$POD_JSON_SHA" ] || refuse 'g1-pod.json digest'
 [ "$(sha256sum "$HARNESS" 2>/dev/null | cut -d' ' -f1)" = "$HARNESS_SHA" ] || refuse 'g1-harness.py digest'
 [ "$(sha256sum "$HELPER" 2>/dev/null | cut -d' ' -f1)" = "$HELPER_SHA" ] || refuse 'dot_codex.py digest'
+if [ "$MODE" = reference ]; then
+  [ "$(sha256sum "$REF" 2>/dev/null | cut -d' ' -f1)" = "$REF_SHA" ] || refuse 'g1-reference.py digest'
+fi
 grep -Fq "\"image\": \"$DIGEST_REF\"" "$POD_JSON" || refuse 'g1-pod.json does not name the digest reference'
 grep -Fq '"annotations"' "$POD_JSON" && refuse 'g1-pod.json already has annotations'
 [ "$(sha256sum "$SECCOMP_FILE" 2>/dev/null | cut -d' ' -f1)" = "$SECCOMP_SHA" ] || refuse 'seccomp profile digest'
@@ -245,7 +255,12 @@ say "pod identity before the harness ok: $(identity_say "$id_before")"
 # The helper goes in as one base64 assignment line before the harness (its own namespace inside; sha256 checked
 # again there against the harness's HELPER_SHA). Both files were checked against their pins above.
 hb64=$(base64 -w0 "$HELPER") && [ -n "$hb64" ] || { say 'helper encoding failed'; end_run 5; }
-hout=$({ printf 'HELPER_B64 = "%s"\n' "$hb64"; cat "$HARNESS"; } | kt "$HARNESS_S" -n "$NS" exec -i "$POD" -- python3 -I - 2>&1); hrc=$?
+rline=
+if [ "$MODE" = reference ]; then  # r3 §C: only with the `reference` argument (§3R go); checked against its pin above
+  rb64=$(base64 -w0 "$REF") && [ -n "$rb64" ] || { say 'reference encoding failed'; end_run 5; }
+  rline=$(printf 'REF_B64 = "%s"' "$rb64")
+fi
+hout=$({ printf 'HELPER_B64 = "%s"\n' "$hb64"; [ -z "$rline" ] || printf '%s\n' "$rline"; cat "$HARNESS"; } | kt "$HARNESS_S" -n "$NS" exec -i "$POD" -- python3 -I - 2>&1); hrc=$?
 say "harness rc $hrc"
 id_after=$(pod_identity) || id_after=
 if [ -n "$id_after" ] && [ "$id_after" = "$id_before" ]; then id_same=true; else id_same=false; fi
@@ -267,6 +282,20 @@ for line in sys.stdin:
         print(k + " " + ("checks ok" if r.get("checks") and not bad else "failed: " + " ".join(bad)))
     elif k == "case":
         print("case %s %s%s" % (r.get("id"), r.get("verdict"), (" (" + str(r["reason"]) + ")") if r.get("reason") else ""))
+        for x in ((r.get("gate") or {}).get("launches") or []):  # r3: fixed diagnosis fields only
+            d = x.get("diag") if isinstance(x, dict) else None
+            if isinstance(d, dict):
+                print("  gate launch exit %s reach %s signature %s/%s stage %s" % (x.get("exit_code"), d.get("reach_stage"),
+                      d.get("signature"), d.get("subclass"), d.get("parse_stage")))
+        ref = r.get("reference_launch")
+        if isinstance(ref, dict):
+            d = ref.get("diag") or {}
+            print("  reference rc %s reach %s signature %s/%s effect %s none_left %s" % (ref.get("rc"), d.get("reach_stage"),
+                  d.get("signature"), d.get("subclass"), ref.get("effect"), ref.get("none_left")))
+        elif ref is not None:
+            print("  reference %s" % ref)
+    elif k == "pre_reference":
+        print("pre_reference recorded for %s" % r.get("id"))
     elif k == "summary":
         print("summary %s" % json.dumps({x: r[x] for x in r if x != "k"}, sort_keys=True))
 ' 2>&1 | while IFS= read -r l; do say "harness: $l"; done
