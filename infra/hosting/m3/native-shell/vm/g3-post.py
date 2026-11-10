@@ -1,4 +1,4 @@
-"""#68 G3 read-only post-check (design g3 r3 §3; extends the approved e2-post.py r0). Guest, root; once per stage;
+"""#68 G3 read-only post-check (design g3 r4 §3; extends the approved e2-post.py r0). Guest, root; once per stage;
 changes nothing:
 
     ssh … 'sudo -n python3 -I -B - <stage> <sha256 of g3-expected.json>' < g3-post.py      # stage: g3-2 | g3a | g3b
@@ -36,6 +36,9 @@ REGISTRY = {'g3-2': 6, 'g3a': 7, 'g3b': 8}
 LEDGERS = {'isolation-42': '9a1a8173e3aebf45729cfed5b024d6732366886ecc8dd01bcaaaf6dbdfa98d3e',
            'resources-6': '51e7ae651e8dcb79213082362fef2bd6873c11f2000b9567719974c61b6eafeb'}
 # The E2-accepted fields (e2-post-1.txt, 2026-11-10; ctime not compared).
+# r2 (G3a post 2026-11-10, design g3 r4 §3): the SELinux label is printed (recorded) but not compared. Each runner Pod
+# start relabels the owner PV with its own MCS pair (design g2 ⑪), so after G3a it is c449,c803 where E2 saw
+# c576,c788. LABEL is the E2 value, kept for reference only.
 LABEL = 'system_u:object_r:container_file_t:s0:c576,c788'
 KEPT = {'codex-dir-kept-20261110T090017Z': (131192, '2026-11-09T14:17:24.293441Z'),
         'codex-dir-kept-20261110T170732Z': (131200, '2026-11-10T10:23:29.233552Z')}
@@ -114,8 +117,9 @@ def digest(plan):
 def same_fields(entry, ino, mtime):
     return (entry.get('exists') is True and entry.get('dev') == '7:10' and entry.get('ino') == ino
             and entry.get('type') == 'dir' and entry.get('uid') == 10001 and entry.get('gid') == 10001
-            and entry.get('mode') == '0o755' and entry.get('mtime') == mtime and entry.get('selinux') == LABEL
-            and entry.get('entries') == 0)
+            and entry.get('mode') == '0o755' and entry.get('mtime') == mtime and entry.get('entries') == 0
+            and isinstance(entry.get('selinux'), str) and entry['selinux'] != ''
+            and not entry['selinux'].startswith('error'))  # r2: the label is read and printed, never compared
 
 
 def evaluate(stage, o, expected, g3a):
@@ -184,7 +188,7 @@ def evaluate(stage, o, expected, g3a):
 
 
 def main(argv):
-    o = {'owner': OWNER, 'version': 'g3-post-r1', 'time': utc(datetime.datetime.now().timestamp())}
+    o = {'owner': OWNER, 'version': 'g3-post-r2', 'time': utc(datetime.datetime.now().timestamp())}
     if len(argv) != 3 or argv[1] not in STAGES or not HEX64.fullmatch(argv[2]):
         print(json.dumps({'usage': 'g3-post.py g3-2|g3a|g3b <sha256 of g3-expected.json>', 'pass': False}))
         return
