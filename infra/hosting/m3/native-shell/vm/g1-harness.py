@@ -28,6 +28,11 @@ r3 (design g1-r3 r1; diagnosis only, no verdict, gate, case or variable change):
   observed values from G1START.
 - §C (off unless the host script sent REF_B64): after a failed gate and its stop_case, one reference launch through
   `codex sandbox -P native`, recorded as reference_launch. The case stays gate_failed.
+
+r4 (design g1-r4 r1, candidate A; diagnosis only): each launch's `diag` gains execvp_target, the fixed class of a
+`bwrap: execvp …: No such file or directory` target (arg0_alias / probe_interpreter / other / unknown / null),
+anchored to the case CODEX_HOME, and execvp_lines (a count within the inspected prefix). The path is never kept.
+Nothing else changes: verdicts, gate, cases, launch variables, §B, §C, and g1-reference.py stays byte-identical.
 """
 import errno
 import json
@@ -422,7 +427,58 @@ def classify_failure(out_lines, err_lines, exit_code, incomplete):
             'matched_lines': len(found), 'exit_hint': exit_hint(exit_code)}
 
 
-def diagnose(stdout, stderr, exit_code, op, record_valid, received=None):
+EXECVP_PREFIX = 'bwrap: execvp '
+EXECVP_ENOENT = re.compile(r'bwrap: execvp (?P<t>.+): No such file or directory')
+
+
+def valid_anchor(codex_home):
+    """The case CODEX_HOME as an anchor: a non-empty absolute printable-ASCII path with no whitespace."""
+    return (isinstance(codex_home, str) and codex_home.startswith('/') and codex_home.isascii()
+            and codex_home.isprintable() and not any(c.isspace() for c in codex_home))
+
+
+def execvp_target_class(err_lines, codex_home, incomplete):
+    """r4 (design g1-r4 r1, candidate A): the target of a `bwrap: execvp <t>: No such file or directory` line as a
+    fixed class; the path itself is never kept. In order:
+    1 the inspected stderr is incomplete -> unknown (a further message may lie beyond the prefix);
+    2 no `bwrap: execvp ` line -> None; more than one -> unknown;
+    3 not the full ENOENT form -> unknown;
+    4 the target is not printable ASCII, is empty, or has leading/trailing whitespace -> unknown;
+    5 equal to PYTHON -> probe_interpreter (decided without the anchor);
+    6 no valid case anchor (codex_home) -> unknown;
+    7 exactly <anchor>/tmp/arg0/codex-arg0 + 6 of [A-Za-z0-9] + /codex-linux-sandbox -> arg0_alias;
+    8 alias-shaped with any other middle part -> unknown (the tempfile name rule is an unverified assumption);
+    9 not absolute -> unknown;
+    10 otherwise -> other: not PYTHON and not alias-shaped under this case's anchor (it refutes only that narrow
+    hypothesis, not an indirect alias-related cause)."""
+    if incomplete:
+        return 'unknown'
+    lines = [l for l in err_lines if l.startswith(EXECVP_PREFIX)]
+    if not lines:
+        return None
+    if len(lines) > 1:
+        return 'unknown'
+    m = EXECVP_ENOENT.fullmatch(lines[0])
+    if not m:
+        return 'unknown'
+    t = m.group('t')
+    if not t or not t.isascii() or not t.isprintable() or t != t.strip():
+        return 'unknown'
+    if t == PYTHON:
+        return 'probe_interpreter'
+    if not valid_anchor(codex_home):
+        return 'unknown'
+    base = re.escape(codex_home) + '/tmp/arg0/codex-arg0'
+    if re.fullmatch(base + r'[A-Za-z0-9]{6}/codex-linux-sandbox', t):
+        return 'arg0_alias'
+    if re.fullmatch(base + r'[^/]*/codex-linux-sandbox', t):
+        return 'unknown'
+    if not t.startswith('/'):
+        return 'unknown'
+    return 'other'
+
+
+def diagnose(stdout, stderr, exit_code, op, record_valid, received=None, codex_home=None):
     """All §A fields for one launch. stdout/stderr: the received text (or a kept prefix with its received byte
     counts in `received`). record_valid: parse_probe on the whole stdout found a record (the verdict input)."""
     received = received or {}
@@ -440,6 +496,9 @@ def diagnose(stdout, stderr, exit_code, op, record_valid, received=None):
     # stage ok: stdout is exactly the one valid record, which is not a failure message
     d.update(classify_failure([] if stage == 'ok' else out_lines, err_rest, exit_code,
                               of['incomplete'] or ef['incomplete']))
+    # r4 candidate A: always both keys; execvp_lines counts the inspected prefix only, never the whole stream
+    d['execvp_lines'] = sum(1 for l in err_rest if l.startswith(EXECVP_PREFIX))
+    d['execvp_target'] = execvp_target_class(err_rest, codex_home, ef['incomplete'])
     return d
 
 
@@ -957,7 +1016,8 @@ class AppServer:
         rec = parse_probe(res.get('stdout'), op)  # the verdict input, from the whole stdout, as in r2
         # r3 §A: the diagnosis from the same reply; the text itself is not kept beyond this call
         return {'rpc': 'ok', 'exit_code': res.get('exitCode'), 'rec': rec,
-                'diag': diagnose(res.get('stdout'), res.get('stderr'), res.get('exitCode'), op, rec is not None)}
+                'diag': diagnose(res.get('stdout'), res.get('stderr'), res.get('exitCode'), op, rec is not None,
+                                 codex_home=self.env.get('CODEX_HOME'))}  # r4: the case anchor for candidate A
 
     def end_normally(self):
         """Close stdin; exit 0 within END_S confirmed (True/False)."""
@@ -1318,7 +1378,9 @@ def reference_after_stop(d, app, stopped):
     ctx = {'argv': [CODEX, 'sandbox', '-P', PROFILE, '-C', w, '--', PYTHON, '-I', '-c', PROBE, 'create',
                     w + '/ctl/ref0'],
            'env': app.env, 'cwd': w, 'target': w + '/ctl/ref0', 'op': 'create', 'Pin': Pin, 'reap_all': reap_all,
-           'own_children': own_children, 'parse_probe': parse_probe, 'diagnose': diagnose,
+           'own_children': own_children, 'parse_probe': parse_probe,
+           # r4: g1-reference.py stays byte-identical; the harness adds the case anchor for candidate A here
+           'diagnose': lambda *a: diagnose(*a, codex_home=app.env.get('CODEX_HOME')),
            'record_fields': sorted(PROBE_KEYS)}
     ref, ref_clean = m.launch(ctx)
     ref['compare'] = compare_effective((ref.get('diag') or {}).get('effective'), w)
