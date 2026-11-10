@@ -10,7 +10,9 @@ conditions only; it does not establish the cause of the run-b T5 paths.
 
 Output: one JSON object per line on stdout ("k" names the record), fixed fields only: booleans, counts, fixed
 names (roles, errno names, change categories, special-path kinds), inode numbers and nanosecond times of the paths
-this harness made. No command text, no command output, no environment, no token, no other path names. Exit 0 when
+this harness made. No command text, no command output, no environment, no token, no other path names (round 4: a
+disallowed change is described by fixed fields, its names only as an exact match of a fixed candidate name or as a
+sha256; see CANDIDATES). Exit 0 when
 every phase was attempted (results are in the records), 2 when the environment, the baseline or the gate stopped
 the run before the cases, 3 when a case stopped the run; the host script reads the records, not only the rc.
 
@@ -35,6 +37,8 @@ Structure (design r3 sections):
   fixed control files, the four protected names but nothing under them), the phase's TMPDIR(s) (the directory and
   the Codex registry codex-bwrap-synthetic-mount-targets-<uid> below it), the entries CODEX_HOME and CODEX_HOME/tmp
   and the tmp/arg0 subtree (Codex's execve wrapper and helper links). Anything else, any observation error, and any protected name outside the roots used so far stop the run.
+  Round 4 (allowance unchanged): each disallowed change is also recorded (unexpected_detail, at most DETAIL_MAX)
+  and observation errors are counted per kind (observation_error_kinds), so a stop says what kind of entry changed.
 - The waiter inside the sandbox never forks or execs: it writes probe-<id> (0/1: did a write to the parent
   succeed), then ready-<id>, then polls for go-<id>.
 - Signals go only through pidfds whose start time was checked against /proc/<pid>/stat right after opening.
@@ -50,6 +54,7 @@ Structure (design r3 sections):
   tree is covered.
 """
 import errno
+import hashlib
 import json
 import os
 import select
@@ -164,6 +169,10 @@ s = socket.socket(); s.settimeout(3)
 s.connect(('127.0.0.1', int(sys.argv[1])))
 s.close()
 '''
+
+
+def errname(e):
+    return errno.errorcode.get(e.errno, 'other') if getattr(e, 'errno', None) is not None else 'none'
 
 
 def out(kind, **fields):
@@ -434,29 +443,32 @@ def none_present(obs):
 
 
 def snapshot():
-    """(entries, observation error count). A walk or lstat error is counted, never skipped silently."""
-    snap, errors = {}, [0]
+    """(entries, observation error count, error kinds). A walk or lstat error is counted, never skipped silently;
+    round 4: the count is also kept per kind as '<where>:<errno name>' (where: walk, lstat, identity)."""
+    snap, kinds = {}, {}
 
-    def onerror(_):
-        errors[0] += 1
+    def note(where, e):
+        k = '%s:%s' % (where, errname(e))
+        kinds[k] = kinds.get(k, 0) + 1
 
     for top in SNAP_ROOTS:
-        for dirpath, dirnames, filenames in os.walk(top, onerror=onerror, followlinks=False):
+        for dirpath, dirnames, filenames in os.walk(top, onerror=lambda e: note('walk', e), followlinks=False):
             for name in dirnames + filenames:
                 p = os.path.join(dirpath, name)
                 try:
                     s = os.lstat(p)
-                except OSError:
-                    errors[0] += 1
+                except OSError as e:
+                    note('lstat', e)
                     continue
                 snap[p] = (stat.S_IFMT(s.st_mode), s.st_ino, s.st_size, s.st_mtime_ns)
     for p in IDENTITY_FILES:
         try:
             s = os.lstat(p)
-            snap['id:' + p] = (s.st_ino, s.st_size, s.st_mtime_ns)
-        except OSError:
-            errors[0] += 1
-    return snap, errors[0]
+            # round 4: the file type leads the tuple as for the other entries (the change detail reports it).
+            snap['id:' + p] = (stat.S_IFMT(s.st_mode), s.st_ino, s.st_size, s.st_mtime_ns)
+        except OSError as e:
+            note('identity', e)
+    return snap, sum(kinds.values()), kinds
 
 
 def under(p, d):
@@ -494,15 +506,71 @@ class Phase:
                 return name
         return 'other'
 
+    def prefix(self, p, cat):
+        """The directory a category is counted below (for the detail's depth); category() itself is unchanged."""
+        if cat == 'root_other':
+            return next(r for r in self.roots if p.startswith(r + '/'))
+        if cat == 'tmpdir_other':
+            return next(t for t in self.tmpdirs if p.startswith(t + '/'))
+        return {'codex_home_other': CODEX_HOME, 'home': HOME, 'control': '/control', 'state_other': '/state',
+                'tmp_other': '/tmp', 'dev_shm': '/dev/shm'}.get(cat, '/')
+
+
+# Round 4 observation detail for changes that are NOT allowed (the allowance itself is unchanged). Each one is
+# described by fixed fields only: added/removed/changed, the file type before and after, which of the snapshot values
+# differ, the category, the depth below the category's directory, and its basename (and, deeper than one level, the
+# first name below that directory) as a name from CANDIDATES on an exact, whole-name match, else only the sha256 of
+# the name. A candidate match says only that the name is equal to one this harness already knows; it is not evidence
+# of which process made the entry, or whether that was inside or outside the sandbox. A hash identifies neither the
+# path nor its origin; it only lets two runs be compared. No path text leaves the Pod.
+CANDIDATES = frozenset(
+    set(NAMES) | {REGISTRY, 'home', 'codex', 'tmp', 'arg0', 'gate', 'g1', 'gate-result'}
+    | {'c%s' % i for i in ('1', '2', '3', '4', '5', '6', '7', '8', '8a', '8b')}
+    | {n + i for i in ('gate', '1', '2', '3', '4', '5', '6', '7a', '7b', '8a', '8b')
+       for n in ('probe-', 'ready-', 'go-', 'parent-probe-')})
+DETAIL_MAX = 20
+FTYPES = {stat.S_IFREG: 'file', stat.S_IFDIR: 'dir', stat.S_IFLNK: 'symlink'}
+
+
+def ftype(v):
+    return 'absent' if v is None else FTYPES.get(v[0], 'other')
+
+
+def name_field(name):
+    """Exact candidate name, else the sha256 of the name's filesystem bytes (review r4: os.fsencode keeps a
+    non-UTF-8 name's original bytes from os.walk's surrogateescape; str.encode() would raise on it)."""
+    return {'name': name} if name in CANDIDATES else {'name_sha256': hashlib.sha256(os.fsencode(name)).hexdigest()}
+
+
+def detail(p, cat, b, a, phase):
+    d = {'change': 'added' if b is None else 'removed' if a is None else 'changed', 'before': ftype(b),
+         'after': ftype(a), 'category': cat}
+    if b is not None and a is not None:
+        d['differs'] = [f for f, i in (('type', 0), ('inode', 1), ('size', 2), ('mtime', 3)) if b[i] != a[i]]
+    if cat == 'identity':
+        d['identity_file'] = p[3:]  # one of the fixed IDENTITY_FILES
+        return d
+    base = phase.prefix(p, cat)
+    rel = p[len(base):].lstrip('/').split('/')
+    d['depth'] = len(rel)
+    d.update(name_field(rel[-1]))
+    if len(rel) > 1:
+        d.update({'top_' + k: v for k, v in name_field(rel[0]).items()})
+    return d
+
 
 def changes(before, after, phase):
-    changed = [p for p in set(before) | set(after) if before.get(p) != after.get(p)]
-    cats = {}
+    """(changed count, categories, details): details describe the disallowed changes only (round 4), at most
+    DETAIL_MAX in path order, with the rest counted as omitted."""
+    changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+    cats, details = {}, []
     for p in changed:
         c = phase.category(p)
         if c is not None:
             cats[c] = cats.get(c, 0) + 1
-    return len(changed), cats
+            details.append(detail(p, c, before.get(p), after.get(p), phase))
+    return len(changed), cats, {'unexpected_detail': details[:DETAIL_MAX],
+                                'unexpected_detail_omitted': max(0, len(details) - DETAIL_MAX)}
 
 
 def protected_elsewhere(snap, roots):
@@ -963,20 +1031,21 @@ def main():
     if not environment():
         out('summary', phase='environment', aborted=True)
         return 2
-    base, err = snapshot()
-    out('change', after='baseline', observation_errors=err)
+    base, err, err_kinds = snapshot()
+    out('change', after='baseline', observation_errors=err, observation_error_kinds=err_kinds)
     if err:
         out('summary', phase='baseline', aborted=True)
         return 2
     roots = {'/state/gate'}
     ok = gate()
     live, exited, reaped = strays()
-    snap, err = snapshot()
-    count, cats = changes(base, snap, Phase(['/state/gate'], ['/tmp/gate'],
-                                            ['g1', 'gate-result', 'ready-gate', 'go-gate']))
+    snap, err, err_kinds = snapshot()
+    count, cats, det = changes(base, snap, Phase(['/state/gate'], ['/tmp/gate'],
+                                                 ['g1', 'gate-result', 'ready-gate', 'go-gate']))
     elsewhere = protected_elsewhere(snap, roots)
     out('change', after='gate', changed=count, unexpected=sum(cats.values()), categories=cats,
-        observation_errors=err, protected_elsewhere=elsewhere, strays=live, exited_unreaped=exited, reaped=reaped)
+        observation_errors=err, observation_error_kinds=err_kinds, protected_elsewhere=elsewhere, strays=live,
+        exited_unreaped=exited, reaped=reaped, **det)
     if not ok or cats or err or elsewhere or live:
         out('summary', phase='gate', aborted=True)
         return 2
@@ -1018,10 +1087,11 @@ def main():
         if n == '4':
             case4 = rec
         rec['strays'], rec['exited_unreaped'], rec['reaped'] = strays()
-        snap, err = snapshot()
-        count, cats = changes(before, snap, phase)
+        snap, err, err_kinds = snapshot()
+        count, cats, det = changes(before, snap, phase)
         rec['changed'], rec['unexpected'], rec['categories'] = count, sum(cats.values()), cats
-        rec['observation_errors'] = err
+        rec.update(det)
+        rec['observation_errors'], rec['observation_error_kinds'] = err, err_kinds
         rec['protected_elsewhere'] = protected_elsewhere(snap, roots)
         out('case', **rec)
         results[n] = rec['result']
