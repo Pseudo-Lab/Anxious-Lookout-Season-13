@@ -12,7 +12,7 @@ import pytest
 from app.codex_policy import MODEL, CodexFailure
 from runner.app import Native, Turn, bind_owner
 from runner.auth import PersonalAuth, cleanup, read_private, write_private
-from tests.test_runner_protocol import wait_idle
+from tests.test_runner_protocol import start_after_restore, wait_idle
 
 HTTP_CLIENT = httpx.Client
 
@@ -106,7 +106,8 @@ def test_three_dispatch_limit_survives_restart_resume_retry_and_native_restore(t
         assert len(read_private(control / "ledger.json")["requests"]) == 3
     finally:
         native.close()
-    native = native_fixture(control, restored, owner, monkeypatch, calls)
+    # #68 G2: the copied `.codex` refuses first; the README section 6 operator rename, then the ledger check below.
+    native = start_after_restore(restored, lambda: native_fixture(control, restored, owner, monkeypatch, calls))
     try:
         with pytest.raises(CodexFailure) as denied:
             native.accept(session, message())

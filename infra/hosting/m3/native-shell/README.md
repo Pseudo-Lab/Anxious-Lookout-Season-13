@@ -578,9 +578,10 @@ new source, then on the VM:
 
 ## 6. A `.codex` in the workspace blocks the runner
 
-**Availability constraint (accepted, user decision pending).** If `/state/workspace/.codex`, a `.codex`
-above it, `CODEX_HOME/config.toml` or `CODEX_HOME/rules` exists, the runner refuses to start Codex and
-refuses every turn (`policy_refused`, section 4 check 3). It does not matter how the file got there.
+**Availability constraint (accepted, user decision pending).** If `/state/workspace/.codex` (other than
+the runner's own recorded placeholder, see "#68 G2" below), a `.codex` above it, `CODEX_HOME/config.toml`
+or `CODEX_HOME/rules` exists, the runner refuses to start Codex and refuses every turn (`policy_refused`,
+section 4 check 3). It does not matter how the file got there.
 The owner then cannot chat or run commands until an operator resolves it. This is deliberate
 fail-closed behaviour: the approval policy is never relaxed to get past it, and the runner never
 removes or renames the file itself. Auto-removal is refused because the file could be recreated
@@ -641,6 +642,80 @@ or the configuration for it.
 3. Let the runner stop and release normally. Never delete the Pod by hand. The next entry starts a
    new Pod, and the startup check runs again from the beginning.
 4. If the Pod is already gone, the next entry recreates it and it blocks again; repeat step 2 on that Pod.
+
+### #68 G2: the runner-owned empty `.codex` placeholder (design g2 r2 `71ff8348…`, design (v) r5)
+
+**Deployment scope (S1, PM decision).** This behaviour is only in the G2 image. That image is used for owner
+…5805 on the development VM only, until G4 passes. No other owner and no production rollout. A G4 pass is
+not an approval for other owners or production; that is a separate user decision. This is an operational
+condition, not a code condition: every runner on the G2 image applies it to its own state volume.
+
+**What the runner does** (`backend/runner/dot_codex.py`):
+
+- **At each Native start,** before any Codex process or credential:
+  - If there is no workspace `.codex` and no damaged record, it makes an empty directory in
+    `/state/.placeholder-staging` (0700). It publishes that as `/state/workspace/.codex` (0755, uid 10001)
+    with `renameat2(RENAME_NOREPLACE)`, checks it, fsyncs, and records its identity in
+    `/state/dot-codex-placeholder.json` (0600).
+  - If the recorded placeholder is already there, it is matched.
+- **At start, at launch and before every turn,** `check_local` allows a workspace `.codex` only if it is
+  absent or exactly the recorded object: a directory, uid 10001, 0755, the same (dev, inode, mtime), and empty.
+  Any other `.codex` refuses, as before, with check name `local.workspace_dot_codex`.
+- **It never deletes or renames an existing workspace entry.** The only removal is its own staging copy after a
+  failed publish, and only if it is still the same empty directory.
+
+**Limits:**
+- The check is not atomic. A change is refused only if it is still there at a check and shows in the compared
+  terms.
+- An absent `.codex` with a valid record is allowed. The next start creates a new placeholder and logs
+  `replaced`.
+- The record is not a permanent object id: a reused inode with a restored mtime matches.
+- It relies on the trust premises T1–T3 and P3 of design (v). A sandboxed process that outlives its app-server
+  is not covered (G1-CLI C8: unmeasured).
+- The owner and the model see an empty `.codex` in the workspace root (U3, accepted).
+
+**Log lines** (names and numbers only; never paths, contents or exception text):
+
+```sh
+kubectl -n codex-runner logs <runner-pod> -c runner | grep runner_dot_codex_placeholder
+# runner_dot_codex_placeholder {"event": "created", "ino": 131300, "phase": "start"}
+# runner_dot_codex_placeholder {"event": "matched", "ino": 131300, "phase": "turn_pre"}
+# runner_dot_codex_placeholder {"event": "refused", "phase": "start", "reason": "not_runner_owned", "stage": "name_lookup"}
+```
+
+Each `refused` line is followed by the usual `runner_policy_check {"result": "refused", "check":
+"local.workspace_dot_codex"}`. `phase` is `start`, `launch` or `turn_pre`; a `turn_pre` line describes the
+state **before** that turn only.
+
+| reason | means | operator |
+| --- | --- | --- |
+| `not_runner_owned` | an unrecorded `.codex` was found: one that existed before (for example inode 131200 before E2), one left by a failure after publish, or one from elsewhere. **This is not proof that E2 did not run** | stop. Do not fix it on the spot. Report to back and PM; any rename follows the recovery procedure above, with owner consent |
+| `identity_mismatch`, `not_empty`, `not_a_directory` | the `.codex` is not the recorded empty object (replaced, written, mode or mtime changed, a link or a file) | the same: stop and report; never edit the record |
+| `record_invalid` | the record is damaged (a link, a FIFO, the wrong owner, mode, size or schema) | stop and report. The runner never overwrites it |
+| `workspace_unavailable`, `lookup_failed` | the workspace or the name lookup failed (`errno` says how) | report. A deployment or volume problem |
+| `staging_failed`, `staging_invalid`, `publish_failed`, `verify_failed`, `identity_mismatch` (stage `verify`), `publish_sync_failed`, `record_write_failed` (`when` = `before_replace` / `after_replace`) | the creation step failed at that stage; `staging_left: true` means an empty directory stayed in staging | report. The next start applies the table again (design g2 §3.1). An object published but not recorded refuses as `not_runner_owned` |
+
+**After a state volume is restored or copied (required operator step).** A restored or copied volume gives
+the workspace `.codex` a new inode. The first start then refuses with `identity_mismatch` (stage `check_open`,
+then `policy_refused`) and changes nothing on the volume. The check is not relaxed for it. Recovery:
+
+1. Confirm with the owner that the volume is the intended restore.
+2. Rename the copied `.codex` aside, exactly as in the recovery procedure above:
+   `mv -T /state/workspace/.codex /state/workspace/codex-dir-kept-<UTC>`, never a delete. Check first that the
+   new name does not exist.
+3. Leave the record file `dot-codex-placeholder.json` and the staging directory as they are. Do not edit them.
+4. Start again. A valid record with no `.codex` publishes a new placeholder and logs `created` with `replaced`.
+
+The runner's restore regression tests follow these steps (`backend/tests/test_runner_protocol.py`
+`start_after_restore`, used by the restore tests there and in `test_runner_auth.py`).
+
+**Rollback (U4, decided).** Revert the commit, or deploy the earlier image digest. The earlier runner refuses
+any workspace `.codex`, the placeholder included. So the owner is blocked until an operator renames the
+placeholder with the recovery procedure above (`mv -T … codex-dir-kept-<UTC>`).
+- The rename moves only `.codex`.
+- The record file and the staging directory may stay. The earlier code never reads them.
+- If the G2 image comes back, a valid record with an absent `.codex` creates a new placeholder (`replaced`).
+  The renamed directory is never accepted again.
 
 ## 7. Runner Pod and image (#68 order 4)
 

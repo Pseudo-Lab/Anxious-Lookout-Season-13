@@ -433,7 +433,9 @@ def test_other_server_requests_get_no_grant(native, turn):
 def local(tmp_path):
     value = Native.__new__(Native)
     value.codex_home, value.work = tmp_path / 'state' / 'codex', tmp_path / 'state' / 'workspace'
+    value.root = tmp_path / 'state'  # G2: the placeholder record and staging live in the state root
     value.codex_home.mkdir(parents=True); value.work.mkdir()
+    value.root.chmod(0o700)
     return value
 
 
@@ -447,6 +449,37 @@ def test_model_writable_policy_refuses(local, place):
     if place == 'dangling-link': (local.work / '.codex').symlink_to(local.work / 'missing')
     with pytest.raises(CodexFailure):
         local.check_local()
+
+
+def test_recorded_placeholder_passes_check_local(local):
+    """#68 G2: the runner's own recorded empty `.codex` is the only `.codex` check_local allows, at every phase."""
+    from runner import dot_codex
+    event = dot_codex.ensure_placeholder(local.root, local.work)
+    assert event['event'] == 'created' and (local.work / '.codex').is_dir()
+    for phase in ('start', 'launch', 'turn_pre'):
+        local.check_local(phase)
+
+
+@pytest.mark.parametrize('change', ['non-empty', 'mode', 'mtime', 'other-inode', 'link', 'file', 'record-gone'])
+def test_changed_placeholder_refuses_check_local(local, change, caplog):
+    import logging
+    from runner import dot_codex
+    dot_codex.ensure_placeholder(local.root, local.work)
+    target = local.work / '.codex'
+    if change == 'non-empty': (target / 'config.toml').write_text('')
+    if change == 'mode': target.chmod(0o700)
+    if change == 'mtime': os.utime(target, ns=(1, 1))
+    if change in ('other-inode', 'link', 'file'):
+        target.rename(local.work / 'kept')
+        if change == 'other-inode': target.mkdir(mode=0o755)
+        if change == 'link': target.symlink_to(local.work / 'kept')
+        if change == 'file': target.write_text('')
+    if change == 'record-gone': (local.root / dot_codex.RECORD).unlink()
+    with caplog.at_level(logging.WARNING, logger='uvicorn.error'):
+        with pytest.raises(CodexFailure):
+            local.check_local('turn_pre')
+    assert '"check": "local.workspace_dot_codex"' in caplog.text and str(local.work) not in caplog.text
+    assert str(local.root) not in caplog.text
 
 
 def test_launch_check_reads_applied_policy_and_maps_failures(local, monkeypatch):

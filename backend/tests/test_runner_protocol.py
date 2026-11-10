@@ -1,4 +1,6 @@
+import hashlib
 import json
+import os
 import queue
 import shutil
 import threading
@@ -8,8 +10,52 @@ import uuid
 import httpx
 import pytest
 
+from app.codex_policy import CodexFailure
 from app.research_tools import definitions
+from runner import dot_codex
 from runner.app import Native, Turn
+
+
+def state_snapshot(root):
+    """Every entry under a state root: kind and, for files, the content hash (no content kept)."""
+    entries = {}
+    for directory, names, files in os.walk(root):
+        for name in names + files:
+            path = os.path.join(directory, name)
+            key = os.path.relpath(path, root)
+            if os.path.islink(path):
+                entries[key] = ("link", os.readlink(path))
+            elif os.path.isdir(path):
+                entries[key] = ("dir",)
+            else:
+                entries[key] = ("file", hashlib.sha256(open(path, "rb").read()).hexdigest())
+    return entries
+
+
+def start_after_restore(restored_root, start):
+    """#68 G2 (design g2 r2 §4): a full-state copy gives the workspace `.codex` a new inode, so the restored runner
+    refuses before anything else (identity_mismatch -> policy_refused) and changes nothing. This follows the
+    procedure "After a state volume is restored or copied" in infra/hosting/m3/native-shell/README.md section 6:
+    the copied `.codex` is renamed aside (never deleted; the target name must not exist), the record file and staging
+    are left as they are, and the next start publishes a new placeholder (created, replaced). The check itself is
+    not relaxed, and the record is never rewritten here. Returns that started Native."""
+    work = restored_root / "workspace"
+    with pytest.raises(dot_codex.Refused) as mismatch:
+        dot_codex.check(str(work), str(restored_root))
+    assert mismatch.value.reason == "identity_mismatch"
+    before = state_snapshot(restored_root)
+    with pytest.raises(CodexFailure) as refused:
+        start()
+    assert refused.value.reason == "policy_refused"
+    assert state_snapshot(restored_root) == before  # The refusal kept the restored state exactly.
+    record = (restored_root / dot_codex.RECORD).read_bytes()
+    assert not os.path.lexists(work / "codex-dir-kept-restore")  # `mv -T` onto a new name only
+    os.rename(work / ".codex", work / "codex-dir-kept-restore")  # README section 6: rename aside, never delete.
+    assert (restored_root / dot_codex.RECORD).read_bytes() == record  # The record is left as it is.
+    started = start()
+    assert dot_codex.check(str(work), str(restored_root))["event"] == "matched"
+    assert (work / "codex-dir-kept-restore").is_dir()  # The copied directory stays where the operator put it.
+    return started
 
 
 def wait_idle(native, session):
@@ -90,7 +136,9 @@ def test_offline_native_protocol_tool_roundtrip_and_process_restart(tmp_path, mo
         restarted.close()
     restored_root = tmp_path / "restored-owner"
     shutil.copytree(root, restored_root)  # Quiesced full-state backup to a fresh fixture home.
-    restored = Native(restored_root, "gpt-6.1-sol", "/usr/local/bin/codex-fixture", "https://fixture.invalid/tools")
+    restored = start_after_restore(restored_root, lambda: Native(restored_root, "gpt-6.1-sol",
+                                                                 "/usr/local/bin/codex-fixture",
+                                                                 "https://fixture.invalid/tools"))
     try:
         assert restored.read(session)["record"] == continued["record"]
         restored.accept(session, body)  # An older request ID must remain deduplicated after restore.

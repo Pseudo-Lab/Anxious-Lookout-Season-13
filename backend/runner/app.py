@@ -27,6 +27,7 @@ from .binding import canonical_uuid, require_binding
 from .access import AccessAuth, SupplySocket
 from .service_access import ServiceAccessAuth
 from .broker_client import BrokerClient, BrokerPull
+from . import dot_codex
 from . import native_policy as policy
 from .native_policy import Decision
 from app.page_scope import Scope, POLICIES, tool_allowed, turn_prompt, shell_allowed
@@ -185,11 +186,14 @@ class Native:
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         # #68: the sandboxed native shell writes the workspace, its cwd. Codex must never read
         # model-written policy: a project `.codex` stays an untrusted (disabled) layer, checked
-        # through config/read, and CODEX_HOME config/rules or any `.codex` refuse (check_local).
+        # through config/read, and CODEX_HOME config/rules or any `.codex` other than the runner's own recorded
+        # empty placeholder refuse (check_local, dot_codex).
         home, codex_home, work = root / "home", root / "codex", root / "workspace"
         for path in (home, codex_home, work):
             path.mkdir(exist_ok=True, mode=0o700)
         self.codex_home, self.work = codex_home, work
+        # #68 G2 (design g2 r2): the runner-owned empty `.codex`, before any Codex process or credential.
+        dot_codex.ensure_placeholder(root, work)
         self.check_local()
         if not auth and (codex_home / "auth.json").exists():
             raise CodexFailure("policy_refused")
@@ -243,16 +247,17 @@ class Native:
         except Exception:
             raise RuntimeError("Native initialization or authentication is unavailable") from None
 
-    def check_local(self):
-        # Model-writable places Codex could read as policy are never present (#68).
+    def check_local(self, phase="start"):
+        # Model-writable places Codex could read as policy are never present (#68). The workspace `.codex` is
+        # absent or exactly the runner's recorded empty placeholder (G2, design g2 r2); any other refuses.
         policy.require(not os.path.lexists(self.codex_home / "config.toml"), "local.codex_home_config")
         policy.require(not os.path.lexists(self.codex_home / "rules"), "local.codex_home_rules")
-        policy.require(not os.path.lexists(self.work / ".codex"), "local.workspace_dot_codex")
+        dot_codex.check_placeholder(self.root, self.work, phase)
         policy.require(not any(os.path.lexists(path / ".codex") for path in self.work.parents), "local.parent_dot_codex")
 
-    def check_policy(self):
+    def check_policy(self, phase="launch"):
         """What this app-server process reports applied (#68). Every launch and every turn."""
-        self.check_local()
+        self.check_local(phase)
         for method, params, check in (("configRequirements/read", {}, policy.check_requirements),
                                       ("config/read", {"includeLayers": True, "cwd": str(self.work)},
                                        lambda result: policy.check_config(result, str(self.root)))):
@@ -692,7 +697,7 @@ class Native:
             if entry["thread"] in self.thread_web_modes and self.thread_web_modes[entry["thread"]] != web_mode:
                 self.reset_thread_tools()
             config = {"web_search": web_mode}
-            self.check_policy()  # Again per turn: nothing the last turn wrote may change the policy.
+            self.check_policy("turn_pre")  # Again per turn: nothing the last turn wrote may change the policy.
             turn = {"thread": entry["thread"], "turnId": None, "pendingTools": [], "approvalItems": set(),
                     "session": session, "request": entry["request"], "token": body.toolToken, "scope": body.scope, "timing": timing}
             if entry["thread"]:
