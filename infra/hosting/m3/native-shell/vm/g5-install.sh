@@ -1,6 +1,6 @@
 # guest, as root; stdin = one reviewed G5 file; $1 = its guest name; $2 = its sha256, only for g5-expected.json
 # (reviewed after G5-1d, so its hash is not in this file). Creates it new in /root/native68, root 0600; never
-# overwrites, never touches another file (g3-install.sh 5eef5c67… with the G5 names; deployment design r2 §3/§5).
+# overwrites, never touches another file (g3-install.sh 5eef5c67… with the G5 names; r1: the g5-start.py pin is r2).
 # G5: g5-switch.py and g5-start.py (G5-1c), g5-expected.json (G5-2 step 0). Used as installed: v6pre-turns.py,
 # v6-turns.py and g3-start.py (the base of g5-start.py), lib.sh; they must be at their pins before and after.
 # rc: 0 installed and verified; 2 usage; 3/4 refused before any change (pin, exists); 5 the received bytes or the
@@ -14,7 +14,7 @@ LIB=4cae0e470ae4f5862c52343570a6e3c94adb70122a58aad6a97f807a6eb82475
 G3START=f61f6e787bd9f5affa040b378be3fb0d51ca17114c754c84834397f8dda0a67b
 case "${1:-}" in
   g5-switch.py) E=61b229c6c79eba8e0b926c95997e08f804f9af7472700336bffdee049bba3934; [ $# = 1 ] || { echo "usage; nothing changed"; exit 2; } ;;
-  g5-start.py) E=2699219f271ca714066054826715822bf4150d613df550cf07d82c3555a19a9c; [ $# = 1 ] || { echo "usage; nothing changed"; exit 2; } ;;
+  g5-start.py) E=2856cd2962e0a95dbdc27440946ce9e6b671fab515dfddab8bc73608581d3920; [ $# = 1 ] || { echo "usage; nothing changed"; exit 2; } ;;
   g5-expected.json)
     [ $# = 2 ] || { echo "usage: g5-expected.json needs its reviewed sha256; nothing changed"; exit 2; }
     E=$2
