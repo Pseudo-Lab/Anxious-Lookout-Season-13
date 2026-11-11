@@ -157,6 +157,37 @@ def toml_basic_string(text):
     return '"' + ''.join(out) + '"'
 
 
+# #68 P-A: approval records. They describe what the runner's handler did with each approval request; they never
+# decide anything, and they hold no command, cwd, path, reason text, argument or token (design P-A r3).
+APPROVAL_KINDS = {"item/commandExecution/requestApproval": "command", "item/fileChange/requestApproval": "fileChange"}
+APPROVAL_STATE_LOCK = threading.Lock()  # guards the lazy creation: the reader thread and the turn thread both record
+
+
+def approval_hash(value):
+    """The first 12 hex of sha256 over the UTF-8 text of an id, or None when the id is not a string. The same function
+    hashes rollout call_ids for the VM judge."""
+    return hashlib.sha256(value.encode('utf-8')).hexdigest()[:12] if isinstance(value, str) else None
+
+
+def approval_rpc_hash(identity):
+    """A JSON-RPC id may be an integer or a string: its canonical JSON text is hashed (null only for a missing id)."""
+    if identity is None or isinstance(identity, bool) or not isinstance(identity, (int, str)):
+        return None
+    return approval_hash(json.dumps(identity))
+
+
+def approval_utc(stamp):
+    return time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(stamp)) + '.%03dZ' % int(stamp % 1 * 1000)
+
+
+def approval_refused(message):
+    """The sorted names of policy.COMMAND_REFUSED present and non-null in a command request; [] otherwise. Names only."""
+    params = message.get('params') if isinstance(message, dict) else None
+    if APPROVAL_KINDS.get(message.get('method')) != 'command' or not isinstance(params, dict):
+        return []
+    return sorted(name for name in policy.COMMAND_REFUSED if params.get(name) is not None)
+
+
 class Native:
     PROJECTION_VERSION = PROJECTION_VERSION
     external = False
@@ -300,7 +331,8 @@ class Native:
         The answer goes to this request's id only, and an item is decided once: a duplicate,
         a late request for a finished turn or anything not in the allow lists is declined.
         """
-        decision = Decision.DECLINE
+        seq = self.approval_dispatched(message, turn)  # #68 P-A record; never raises, never decides
+        decision, reason = Decision.DECLINE, 'error'
         try:
             params = message.get("params")
             if message.get("method") == "item/commandExecution/requestApproval":
@@ -311,12 +343,126 @@ class Native:
                 arguments = {}
             if isinstance(params, dict) and turn is not None and isinstance(params.get("itemId"), str):
                 turn.setdefault("approvalItems", set()).add(params["itemId"])
-            if (eligible and (turn["thread"], turn["turnId"]) not in self.completed
-                    and self.authorize_shell(turn, arguments)):
-                decision = Decision.ACCEPT
+            # The same evaluation order and short-circuit as before; the reason only names the branch taken.
+            reason = 'no_turn' if turn is None else 'not_eligible'
+            if eligible:
+                reason = 'completed_turn'
+                if (turn["thread"], turn["turnId"]) not in self.completed:
+                    reason = 'authorize_refused'
+                    if self.authorize_shell(turn, arguments):
+                        decision, reason = Decision.ACCEPT, 'accepted'
         except Exception:
-            decision = Decision.DECLINE
-        self.send(policy.answer(message["id"], decision))
+            decision, reason = Decision.DECLINE, 'error'
+        self.approval_decided(seq, message, decision, reason)
+        answer, sent, before = policy.answer(message["id"], decision), False, time.monotonic_ns()
+        try:
+            self.send(answer)
+            sent = True
+        finally:
+            self.approval_sent(seq, sent, before, time.monotonic_ns())
+
+    # --- #68 P-A approval records (logging only; every failure here is swallowed and shows as an incomplete record) --
+
+    def approval_state(self):
+        state = getattr(self, '_approval_records', None)
+        if state is None:
+            with APPROVAL_STATE_LOCK:
+                state = getattr(self, '_approval_records', None)
+                if state is None:
+                    state = self._approval_records = {'lock': threading.Lock(), 'seq': 0, 'arrived': {},
+                                                      'pending': set(), 'window': []}
+        return state
+
+    @staticmethod
+    def approval_log(prefix, record):
+        try:
+            logging.getLogger('uvicorn.error').info('%s %s', prefix, json.dumps(record, sort_keys=True))
+        except Exception:
+            pass
+
+    def approval_arrived(self, message, pending=False):
+        """Called by the stdout reader thread when an approval request line is read from Codex, before it enters the
+        queue (the design's arrival time; review round 1); with pending=True (the receive loop, when the request is
+        queued in pendingTools before the turn id is known) it only marks the request, never a new stamp."""
+        try:
+            state, key = self.approval_state(), json.dumps(message.get('id'), sort_keys=True)
+            with state['lock']:
+                if pending:
+                    state['pending'].add(key)
+                else:
+                    state['arrived'][key] = (approval_utc(time.time()), time.monotonic_ns())
+        except Exception:
+            pass
+
+    def approval_dispatched(self, message, turn):
+        try:
+            state, monotonic, stamp = self.approval_state(), time.monotonic_ns(), time.time()
+            key = json.dumps(message.get('id'), sort_keys=True)
+            with state['lock']:
+                state['seq'] += 1
+                seq = state['seq']
+                arrived = state['arrived'].pop(key, (None, None))
+                pending = key in state['pending']
+                state['pending'].discard(key)
+                state['window'].append(('dispatched', seq, turn is not None))
+            params = message.get('params') if isinstance(message.get('params'), dict) else {}
+            self.approval_log('runner_approval', {
+                'v': 1, 'seq': seq, 'stage': 'dispatched', 'kind': APPROVAL_KINDS.get(message.get('method'), 'other'),
+                'rpc': approval_rpc_hash(message.get('id')), 'item': approval_hash(params.get('itemId')),
+                'thread': approval_hash(params.get('threadId')), 'turn': approval_hash(params.get('turnId')),
+                'inTurn': turn is not None, 'pending': pending, 'arrived': arrived[0], 'arrivedM': arrived[1],
+                'm': monotonic, 't': approval_utc(stamp)})
+            return seq
+        except Exception:
+            return None
+
+    def approval_decided(self, seq, message, decision, reason):
+        try:
+            monotonic, stamp = time.monotonic_ns(), time.time()
+            with self.approval_state()['lock']:
+                self.approval_state()['window'].append(('decided', seq, None))
+            self.approval_log('runner_approval', {
+                'v': 1, 'seq': seq, 'stage': 'decided', 'decision': decision.value, 'reason': reason,
+                'refused': approval_refused(message), 'm': monotonic, 't': approval_utc(stamp)})
+        except Exception:
+            pass
+
+    def approval_sent(self, seq, ok, before, after):
+        try:
+            with self.approval_state()['lock']:
+                self.approval_state()['window'].append(('sent', seq, None))
+            self.approval_log('runner_approval', {'v': 1, 'seq': seq, 'stage': 'sent', 'ok': bool(ok), 'm0': before,
+                                                  'm1': after, 't': approval_utc(time.time())})
+        except Exception:
+            pass
+
+    def turn_released(self, entry):
+        """#68 P-A (review round 2): the turn's approval summary (snapshot, reset, line) is taken while the protocol
+        mutex is still held, so the next turn's records never fall into this turn's summary; then the mutex is
+        released, always (approval_summary never raises)."""
+        try:
+            self.approval_summary(entry.get("thread"), entry.get("turn_id"))
+        finally:
+            self.lock.release()
+
+    def approval_summary(self, thread, turn_id):
+        """One line per turn, in the turn's final block: the counts since the previous summary, then reset."""
+        try:
+            state = self.approval_state()
+            with state['lock']:
+                window, arrived_only = state['window'], len(state['arrived'])
+                state['window'], state['arrived'], state['pending'] = [], {}, set()
+            seqs = [seq for stage, seq, _ in window if stage == 'dispatched' and seq is not None]
+            self.approval_log('runner_approval_summary', {
+                'v': 1, 'thread': approval_hash(thread), 'turn': approval_hash(turn_id),
+                'dispatched': sum(stage == 'dispatched' for stage, _, _ in window),
+                'decided': sum(stage == 'decided' for stage, _, _ in window),
+                'sent': sum(stage == 'sent' for stage, _, _ in window), 'arrivedOnly': arrived_only,
+                'seqFirst': min(seqs) if seqs else None, 'seqLast': max(seqs) if seqs else None,
+                'outside': sum(stage == 'dispatched' and not in_turn for stage, _, in_turn in window),
+                't': approval_utc(time.time())})
+        except Exception:
+            pass
 
     def authorize_shell(self, turn, arguments):
         try:
@@ -503,7 +649,10 @@ class Native:
     def reader(self):
         try:
             for line in self.process.stdout:
-                self.messages.put(json.loads(line))
+                message = json.loads(line)
+                if isinstance(message, dict) and message.get("method") in APPROVAL_KINDS and "id" in message:
+                    self.approval_arrived(message)  # #68 P-A: stamped as read from Codex's stdout, before the queue
+                self.messages.put(message)
         except Exception:
             pass
         self.messages.put({"fatal": True})
@@ -576,6 +725,8 @@ class Native:
                     pending = turn.setdefault("pendingTools", [])
                     if len(pending) < 32:
                         pending.append(message)  # Wait for correlated turn/start response; never borrow a token early.
+                        if method in APPROVAL_KINDS:
+                            self.approval_arrived(message, pending=True)
                     else:
                         self.reply_server(message, None)
                 else:
@@ -805,7 +956,7 @@ class Native:
                         self.active_session = None
                         self.idle_since = time.monotonic()
             finally:
-                self.lock.release()
+                self.turn_released(entry)  # #68 P-A: the summary under the mutex, then the release
                 timing["totalMs"] = (time.monotonic() - started_at) * 1000
                 logging.getLogger("uvicorn.error").info("runner_turn_timing %s", json.dumps({
                     "requestId": str(body.requestId), "state": entry["state"],

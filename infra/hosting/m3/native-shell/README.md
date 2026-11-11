@@ -540,6 +540,33 @@ session-wide, rule-adding or network-amending decision; a unit test enforces thi
 Requests that arrive before the `turn/start` response wait (at most 32) and are decided once the turn
 id is known. A request outside a turn is declined.
 
+**Approval records (#68 P-A).** The runner writes what its handler did with each approval request, on
+the `uvicorn.error` logger at INFO (the container's stderr, like `runner_turn_timing`). Three lines per
+request share one `seq` (a gap-free counter that restarts with the process), plus one summary per turn,
+written in the turn's final block on the normal and the failed path:
+
+```
+runner_approval {"stage": "dispatched", "seq": 1, "kind": "command", "rpc": "<12 hex>", "item": "<12 hex>", "thread": "<12 hex>", "turn": "<12 hex>", "inTurn": true, "pending": false, "arrived": "<UTC ms>", "arrivedM": <monotonic ns>, "m": <monotonic ns>, "t": "<UTC ms>", "v": 1}
+runner_approval {"stage": "decided", "seq": 1, "decision": "accept", "reason": "accepted", "refused": [], "m": <ns>, "t": "...", "v": 1}
+runner_approval {"stage": "sent", "seq": 1, "ok": true, "m0": <ns before the write>, "m1": <ns after the flush>, "t": "...", "v": 1}
+runner_approval_summary {"thread": "<12 hex>", "turn": "<12 hex>", "dispatched": 1, "decided": 1, "sent": 1, "arrivedOnly": 0, "seqFirst": 1, "seqLast": 1, "outside": 0, "t": "...", "v": 1}
+```
+
+- Ids are the first 12 hex of sha256 (a JSON-RPC id over its JSON text). `reason` is one of
+  `accepted`, `not_eligible`, `completed_turn`, `authorize_refused`, `no_turn`, `error`, and names
+  the branch taken; it decides nothing. `refused` lists only the names of the refused request fields
+  present (`approvalId`, `additionalPermissions`, `networkApprovalContext`,
+  `proposedNetworkPolicyAmendments`), never their values. `arrived` is when the request was read in the
+  receive loop; `dispatched` is when the handler took it (later for a request that waited for the turn
+  id). `m*` are `CLOCK_MONOTONIC` values taken at the event, not the time the line was written.
+- Never recorded: command, cwd, paths, grant root, reason text, network context, arguments, tokens,
+  account data.
+- A logging failure never changes a decision; a missing line shows as an incomplete record.
+- What the records show: the runner received the request, computed this decision, and wrote the answer
+  to Codex's stdin. What they do not show: that Codex received it, that a process or file change
+  happened only after an accept, or that every command asked at all (a turn with no request is complete
+  too). Those need an exec observer (`vm/pa-observe.py`) or a file effect.
+
 **Re-verification triggers.** The VM evidence holds for one combination: runner image digest
 (Codex binaries and both `/etc/codex` files included), seccomp profile, SELinux module, bubblewrap
 package and Pod manifest. A change to any of them is re-verified on the VM before it reaches production.
