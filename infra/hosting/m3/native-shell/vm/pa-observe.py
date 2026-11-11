@@ -42,6 +42,20 @@ deleted it): every @t key is written in one form, `(uint64)<expr>` (BEGIN, paren
 reads and the delete), and $1 is compared only as `(uint64)$1` (cgroup and dst_id are u64). pid / tgid values are
 positive, so the cast keeps every value and the identity / reuse logic is unchanged. The precheck keeps every call's
 rc and stderr (capture_run; the r3 precheck used the base run(), which discarded stderr).
+
+r5 (design (b) r1 1c921ee0…, after pas rc 16: the K3 / K2 exec sessions were born inside $CG with no attach event and
+no recorded parent, so nothing attributed them): S / E events carry the process's own pid-namespace pid and that
+namespace's inode (task->thread_pid->numbers[level], levels 0-2; READY marks layout 5; the r4 layout still parses).
+R1 tuples carry the pid ns, read between two equal stat reads, and all R1 processes must agree (container_pidns). Each
+K starts with a shell-builtin self-report of its /proc/self/stat; exactly one well-formed report per K (parse_report),
+matched to exactly one node by own-namespace pid AND namespace inode AND start ticks AND window AND $CG AND uid AND file
+(anchor_session); its topmost ancestor by exact edges must be an exec-session root in the window (R2a). Any other root
+in a K window, an A-event (R2) root included, is a competing session (window_roots). K calls go through capture_k
+(outcome exited / capture-timeout / not-started; bytes limited while reading; drain deadline). The next K2 runs with
+its cwd inside its own T: an attempt under a corrected condition (H-K2a is a hypothesis). A delete only on a tracked pid.
+
+r6 (review r5 round 1): a K call whose capture is not whole — a reader error, an incomplete stream, readers not
+drained — is a reason (capture_problems); truncation alone is recorded, not a failure; endUtc on every path.
 """
 import hashlib
 import json
@@ -58,13 +72,23 @@ BPFTRACE = '/usr/bin/bpftrace'
 HZ = os.sysconf('SC_CLK_TCK') if hasattr(os, 'sysconf') else 100
 CAP_OUT, CAP_ERR, CAP_PRE = 8 << 20, 1 << 20, 64 << 10
 T_ATTACH, T_K4, T_K3, T_K2, T_DRAIN, T_STOP = 30, 60, 30, 60, 5, 30
+CAP_K, T_K_DRAIN = 64 << 10, 5  # r5 §3: bytes kept per K stream (read-time limit), the readers' drain deadline
+ANCHOR_FILE = {'K3': '/bin/true', 'K2': '/bin/sh'}  # r5 §2d: the reporting process's exec file per K
+RUNNER_UID = 10001
 EPS_NS = 1_000_000
 DAEMON = 'codex-daemon-10001'
 LAUNCHERS = ('bwrap', 'codex-linux-sandbox')
-K3_COMMAND = ['/bin/true']
+# r5 (design (b) r1 §2a): each K starts with a shell-builtin self-report of its own /proc/self/stat (no extra
+# process): its pid in its own pid namespace and its start ticks, matched against the observer's own-namespace fields.
+REPORT = 'read -r S </proc/self/stat && echo "K=$S" && '
+K3_SCRIPT = REPORT + 'exec /bin/true'
+K3_COMMAND = ['/bin/sh', '-c', K3_SCRIPT]
 # D-P2 r1 (#68 comment 2026-11-11): the TMPDIR form of `codex sandbox -- <command>` (the 0.160.1 CLI form).
-# The first stdout line names K2's own directory: only that exact directory is K2's (no /tmp/k2.* wildcard).
-K2_SCRIPT = ('T=$(mktemp -d /tmp/k2.XXXXXX) && echo "T=$T" && mkdir "$T/codex" "$T/tmp" && exec env -i HOME="$T" '
+# The stdout line `T=…` names K2's own directory: only that exact directory is K2's (no /tmp/k2.* wildcard).
+# r5 (design (b) r1 §4): the next K2 is an attempt under a corrected condition (H-K2a, a hypothesis): its cwd, the
+# native profile's write root, is inside its own T (r4 ran it in the image WORKDIR /app).
+K2_SCRIPT = (REPORT + 'T=$(mktemp -d /tmp/k2.XXXXXX) && echo "T=$T" && mkdir "$T/codex" "$T/tmp" "$T/w" && cd "$T/w" '
+             '&& exec env -i HOME="$T" '
              'CODEX_HOME="$T/codex" TMPDIR="$T/tmp" PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/codex sandbox '
              '-- /bin/true')
 K2_T = re.compile(r'T=/tmp/(k2\.[A-Za-z0-9]{6})')
@@ -76,7 +100,7 @@ TMP_UNVERIFIED = ('a create-then-delete between the two observations', 'a conten
 K2_COMMAND = ['/bin/sh', '-c', K2_SCRIPT]
 
 PROGRAM = r'''config = { perf_rb_pages = 256 }
-BEGIN { @t[(uint64)$2] = 1; printf("READY\t%llu\n", nsecs(monotonic)); }
+BEGIN { @t[(uint64)$2] = 1; printf("READY\t%llu\t5\n", nsecs(monotonic)); }
 kprobe:wake_up_new_task {
   $p = (struct task_struct *)arg0;
   if ($p->pid == $p->tgid && (@t[(uint64)curtask->tgid] || cgroup == (uint64)$1)) {
@@ -93,26 +117,40 @@ tracepoint:cgroup:cgroup_attach_task /args.dst_id == (uint64)$1/ {
   @n = count();
 }
 tracepoint:syscalls:sys_enter_execve /@t[(uint64)pid] || cgroup == (uint64)$1/ {
-  printf("S\t%llu\t%d\t%llu\t%llu\texecve\n", nsecs(monotonic), pid, curtask->group_leader->start_time,
-         curtask->group_leader->start_boottime);
+  $tp = curtask->group_leader->thread_pid;
+  $l = $tp->level;
+  $nr = $l == 0 ? $tp->numbers[0].nr : ($l == 1 ? $tp->numbers[1].nr : ($l == 2 ? $tp->numbers[2].nr : 0));
+  $ni = $l == 0 ? $tp->numbers[0].ns->ns.inum : ($l == 1 ? $tp->numbers[1].ns->ns.inum : ($l == 2 ? $tp->numbers[2].ns->ns.inum : 0));
+  printf("S\t%llu\t%d\t%llu\t%llu\t%u\t%u\t%u\texecve\n", nsecs(monotonic), pid, curtask->group_leader->start_time,
+         curtask->group_leader->start_boottime, $l, $nr, $ni);
   @n = count();
 }
 tracepoint:syscalls:sys_enter_execveat /@t[(uint64)pid] || cgroup == (uint64)$1/ {
-  printf("S\t%llu\t%d\t%llu\t%llu\texecveat\n", nsecs(monotonic), pid, curtask->group_leader->start_time,
-         curtask->group_leader->start_boottime);
+  $tp = curtask->group_leader->thread_pid;
+  $l = $tp->level;
+  $nr = $l == 0 ? $tp->numbers[0].nr : ($l == 1 ? $tp->numbers[1].nr : ($l == 2 ? $tp->numbers[2].nr : 0));
+  $ni = $l == 0 ? $tp->numbers[0].ns->ns.inum : ($l == 1 ? $tp->numbers[1].ns->ns.inum : ($l == 2 ? $tp->numbers[2].ns->ns.inum : 0));
+  printf("S\t%llu\t%d\t%llu\t%llu\t%u\t%u\t%u\texecveat\n", nsecs(monotonic), pid, curtask->group_leader->start_time,
+         curtask->group_leader->start_boottime, $l, $nr, $ni);
   @n = count();
 }
 tracepoint:sched:sched_process_exec /@t[(uint64)pid] || cgroup == (uint64)$1/ {
-  printf("E\t%llu\t%d\t%llu\t%llu\t%d\t%u\t%u\t%u\t%llu\t%s\t%s\n", nsecs(monotonic), pid,
+  $tp = curtask->group_leader->thread_pid;
+  $l = $tp->level;
+  $nr = $l == 0 ? $tp->numbers[0].nr : ($l == 1 ? $tp->numbers[1].nr : ($l == 2 ? $tp->numbers[2].nr : 0));
+  $ni = $l == 0 ? $tp->numbers[0].ns->ns.inum : ($l == 1 ? $tp->numbers[1].ns->ns.inum : ($l == 2 ? $tp->numbers[2].ns->ns.inum : 0));
+  printf("E\t%llu\t%d\t%llu\t%llu\t%d\t%u\t%u\t%u\t%llu\t%u\t%u\t%u\t%s\t%s\n", nsecs(monotonic), pid,
          curtask->group_leader->start_time, curtask->group_leader->start_boottime, uid,
          curtask->cred->user_ns->ns.inum, curtask->nsproxy->pid_ns_for_children->ns.inum,
-         curtask->nsproxy->mnt_ns->ns.inum, cgroup, comm, str(args.filename, 64));
+         curtask->nsproxy->mnt_ns->ns.inum, cgroup, $l, $nr, $ni, comm, str(args.filename, 64));
   @n = count();
 }
 tracepoint:sched:sched_process_exit /(@t[(uint64)pid] || cgroup == (uint64)$1) && tid == pid/ {
   printf("X\t%llu\t%d\t%llu\n", nsecs(monotonic), pid, curtask->group_leader->start_time);
   @n = count();
-  delete(@t[(uint64)pid]);  /* review round 1: a pid leaves the tracked set when its process exits (no reuse match) */
+  if (@t[(uint64)pid]) {
+    delete(@t[(uint64)pid]);  /* review round 1: a pid leaves the tracked set when its process exits; r5: only a tracked one */
+  }
 }
 END { printf("END\t%d\n", (int64)@n); clear(@t); clear(@n); }
 '''
@@ -173,6 +211,69 @@ def capture_run(argv, timeout):
         return 125, '', '[not started: %s]' % type(error).__name__
     return (done.returncode, done.stdout.decode('utf-8', 'replace')[:CAP_PRE].strip(),
             done.stderr.decode('utf-8', 'replace')[:CAP_PRE])
+
+
+def capture_k(argv, timeout, popen=subprocess.Popen, clock=time.monotonic_ns, cap=None, drain=None):
+    """One K call (r5, design (b) r1 §3): argv identity, start / end (monotonic, UTC) and an outcome — `exited` (with
+    the process's own rc, a real 124 / 125 included), `capture-timeout` (our deadline: the local `kubectl exec` client is
+    killed; the remote command's outcome is UNKNOWN) or `not-started`. stdout / stderr are read by two threads with the
+    byte limit applied while reading (the first `cap` bytes kept, the rest read, counted and discarded); the readers
+    have a drain deadline; partial streams are kept. Never retried."""
+    cap = CAP_K if cap is None else cap
+    drain = T_K_DRAIN if drain is None else drain
+    rec = {'argvSha256': hashlib.sha256(json.dumps(argv).encode()).hexdigest(), 'argv': list(argv),
+           'startM': clock(), 'startUtc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
+    boxes = {'stdout': {'bytes': 0, 'data': b'', 'done': False, 'error': None},
+             'stderr': {'bytes': 0, 'data': b'', 'done': False, 'error': None}}
+    try:
+        proc = popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception as error:
+        rec.update(outcome='not-started', rc=None, error=type(error).__name__, endM=clock(), drained=True,
+                   endUtc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+        rec.update({name: stream_record(box) for name, box in boxes.items()})
+        return rec
+
+    def reader(stream, box):
+        kept = bytearray()
+        try:
+            while True:
+                chunk = os.read(stream.fileno(), 65536)
+                if not chunk:
+                    break
+                box['bytes'] += len(chunk)
+                room = cap - len(kept)
+                if room > 0:
+                    kept += chunk[:room]
+                    box['data'] = bytes(kept)
+        except (OSError, ValueError) as error:
+            box['error'] = type(error).__name__
+        box['done'] = True
+    threads = [threading.Thread(target=reader, args=(getattr(proc, name), boxes[name]), daemon=True)
+               for name in ('stdout', 'stderr')]
+    for thread in threads:
+        thread.start()
+    try:
+        rc, outcome = proc.wait(max(1, timeout)), 'exited'
+    except subprocess.TimeoutExpired:
+        rc, outcome = None, 'capture-timeout'
+        try:
+            proc.kill()
+            proc.wait(5)
+        except Exception:
+            pass
+    rec['endM'], rec['endUtc'] = clock(), time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    limit = time.monotonic() + drain
+    for thread in threads:
+        thread.join(max(0, limit - time.monotonic()))
+    rec.update(outcome=outcome, rc=rc, drained=not any(thread.is_alive() for thread in threads))
+    rec.update({name: stream_record(box) for name, box in boxes.items()})
+    return rec
+
+
+def stream_record(box):
+    return {'bytes': box['bytes'], 'kept': len(box['data']), 'truncated': box['bytes'] > len(box['data']),
+            'complete': box['done'] and box['error'] is None, 'error': box['error'],
+            'text': box['data'].decode('utf-8', 'replace')}
 
 
 def precheck(capture=None):
@@ -239,15 +340,31 @@ def resolve_cgroup(container_id, root='/sys/fs/cgroup', depth=8):
     return found[0], os.lstat(found[0]).st_ino
 
 
-def proc_identity(pid, proc='/proc'):
-    """(pid, starttime ticks, user ns inode, mnt ns inode) of a running process, read-only."""
+def stat_ticks(pid, proc='/proc'):
     data = open('%s/%d/stat' % (proc, pid)).read()
-    ticks = int(data[data.rindex(')') + 2:].split()[19])
+    return int(data[data.rindex(')') + 2:].split()[19])
+
+
+def proc_identity(pid, proc='/proc'):
+    """(pid, starttime ticks, user ns inode, mnt ns inode, pid ns inode) of a running process, read-only. r5 (design
+    (b) r1 §2c): the pid ns is the authoritative container pid namespace of the anchor match; the namespace links are
+    read between two stat reads whose start ticks must be equal (a pid reused meanwhile is an ObserverError)."""
+    ticks = stat_ticks(pid, proc)
     ns = {}
-    for name in ('user', 'mnt'):
+    for name in ('user', 'mnt', 'pid'):
         link = os.readlink('%s/%d/ns/%s' % (proc, pid, name))
         ns[name] = int(re.fullmatch(r'%s:\[(\d+)\]' % name, link).group(1))
-    return pid, ticks, ns['user'], ns['mnt']
+    if stat_ticks(pid, proc) != ticks:
+        raise ObserverError(4, 'pid %d changed while its namespaces were read' % pid)
+    return pid, ticks, ns['user'], ns['mnt'], ns['pid']
+
+
+def container_pidns(r1):
+    """The one pid namespace all R1 processes report (r5 §2c); a missing field or a disagreement is ObserverError."""
+    found = {entry[4] if len(entry) > 4 else None for entry in r1}
+    if len(found) != 1 or None in found:
+        raise ObserverError(4, 'the R1 processes do not report one pid namespace (%s)' % sorted(map(str, found)))
+    return found.pop()
 
 
 def snapshot_r1(cg_path, proc='/proc'):
@@ -268,7 +385,8 @@ def time_namespace(r1, proc='/proc'):
     except OSError as error:
         raise ObserverError(4, 'the host time namespace is unreadable (errno %d)' % error.errno) from None
     runner = {}
-    for pid, ticks, _, _ in r1:
+    for entry in r1:
+        pid, ticks = entry[0], entry[1]
         try:
             link = os.readlink('%s/%d/ns/time' % (proc, pid))
             again = proc_identity(pid, proc)[1]
@@ -400,7 +518,7 @@ class Observer:
         self.evdir, self.cg_id, self.popen, self.clock, self.bpftrace, self.python = (
             evdir, cg_id, popen, clock, bpftrace, python)
         self.proc = self.driver = self.driver_id = None
-        self.lines, self.err_lines, self.windows, self.k4 = [], [], {}, None
+        self.lines, self.err_lines, self.windows, self.k4, self.kio = [], [], {}, None, {}
         self.capped, self.lost, self.end, self.exit_status, self.ready = False, False, None, None, None
         self.state = 'new'
         self.clock_window = None
@@ -517,14 +635,16 @@ class Observer:
         time.sleep(T_DRAIN)
         return self.k4
 
-    def run_window(self, name, argv, timeout, run):
-        """One K exec (K3 / K2): its monotonic window brackets the call; `run(argv, timeout) -> (rc, out)`."""
+    def run_window(self, name, argv, timeout, capture):
+        """One K exec (K3 / K2): its monotonic window brackets the call; `capture(argv, timeout)` returns the capture_k
+        record (r5 §3), kept in self.kio[name]; the window's rc is the exit code only when the outcome is `exited`."""
         start = self.clock()
-        rc, out = run(argv, timeout)
+        rec = capture(argv, timeout)
         end = self.clock()
-        self.windows[name] = (start, end, rc)
+        self.kio[name] = rec
+        self.windows[name] = (start, end, rec.get('rc') if rec.get('outcome') == 'exited' else None)
         time.sleep(T_DRAIN)
-        return rc
+        return rec
 
     def stop(self):
         """SIGINT to our own bpftrace (pid + start time checked), END expected, joined and flushed. Idempotent."""
@@ -558,13 +678,36 @@ class Observer:
 
 # --- pure judges --------------------------------------------------------------------------------------------------
 
+def layout_of(lines):
+    """5 when the READY line carries the r5 layout version, else 4 (the r3 / r4 programs); None without READY."""
+    for line in lines:
+        if line.startswith('READY\t'):
+            part = line.split('\t')
+            return 5 if len(part) == 3 and part[2] == '5' else 4
+    return None
+
+
 def parse(lines):
     """Event tuples from the program's tab-separated lines; anything else (stderr text, attach notes) is ignored here
-    and judged by clean_exit."""
-    events = []
+    and judged by clean_exit. r5: S and E carry level / own-namespace pid / namespace inode (layout 5, from READY);
+    the r4 layout is still parsed (old evidence) and has no such fields."""
+    events, v5 = [], layout_of(lines) == 5
     for line in lines:
         part = line.split('\t')
         try:
+            if v5 and part[0] == 'S' and len(part) == 9:
+                events.append({'k': 'S', 't': int(part[1]), 'id': (int(part[2]), int(part[3])), 'bst': int(part[4]),
+                               'level': int(part[5]), 'nspid': int(part[6]), 'nsinum': int(part[7]), 'call': part[8]})
+                continue
+            if v5 and part[0] == 'E' and len(part) >= 15:
+                events.append({'k': 'E', 't': int(part[1]), 'id': (int(part[2]), int(part[3])), 'bst': int(part[4]),
+                               'uid': int(part[5]), 'userns': int(part[6]), 'pidns': int(part[7]),
+                               'mntns': int(part[8]), 'cg': int(part[9]), 'level': int(part[10]),
+                               'nspid': int(part[11]), 'nsinum': int(part[12]), 'comm': part[13],
+                               'file': '\t'.join(part[14:])})
+                continue
+            if v5 and part[0] in ('S', 'E'):
+                continue
             if part[0] == 'F' and len(part) == 8:
                 events.append({'k': 'F', 't': int(part[1]), 'parent': (int(part[2]), int(part[3])),
                                'pbst': int(part[4]), 'child': (int(part[5]), int(part[6])), 'cbst': int(part[7])})
@@ -604,10 +747,11 @@ def clean_exit(summary, n_events):
     return reasons
 
 
-def lineage(events, r1, driver, windows, hz=HZ):
-    """Exact lineage. r1: [(pid, ticks, userns, mntns)]; driver: (pid, ticks); windows: {name: (start, end, rc)}.
-    Returns (nodes, parent_of, roots, unattributed): node = (pid, start_time); roots: {node: 'R0'|'R1'|'R2:<name>'}."""
-    r1_keys = {(pid, t) for pid, t, _, _ in r1}
+def lineage(events, r1, driver, windows, hz=HZ, anchors=None):
+    """Exact lineage. r1: [(pid, ticks, userns, mntns[, pidns])]; driver: (pid, ticks); windows: {name: (start, end,
+    rc)}; anchors (r5): {K name: its anchored session root}. Returns (nodes, parent_of, roots, unattributed): node =
+    (pid, start_time); roots: {node: 'R0'|'R1'|'R2:<name>'|'R2a:<name>'}."""
+    r1_keys = {(entry[0], entry[1]) for entry in r1}
     parent_of, roots, seen, exits = {}, {}, [], {}
     for event in events:
         if event['k'] == 'F':
@@ -633,6 +777,9 @@ def lineage(events, r1, driver, windows, hz=HZ):
             continue
         if nxt[0][1] not in parent_of:
             roots[nxt[0][1]] = 'R2:' + window[0]
+    for name, root in sorted((anchors or {}).items()):
+        if root is not None and root not in parent_of:
+            roots[root] = 'R2a:' + name
     nodes = {node for _, node, _ in seen}
     unattributed = []
     for node in sorted(nodes):
@@ -685,16 +832,110 @@ def judge_k4(events, k4, parent_of, roots):
     return reasons
 
 
-def judge_k3_k2(events, parent_of, roots, container_ns, windows):
-    """K3: one /bin/true exec under the K3 session root, in the container's user and mnt ns. K2: a /bin/true exec
-    under the K2 session root, descended from bwrap / codex-linux-sandbox, with user or mnt ns different."""
+def parse_report(rec):
+    """(report, None) or (None, reason): exactly one well-formed `K=<stat>` line in a completed K call's stdout (r5 §2a).
+    comm lies between the first '(' and the LAST ')'; starttime is stat field 22. A K call that did not exit, a
+    truncated or undrained stdout, no line, several lines or a malformed line is a reason (fail closed)."""
+    if not isinstance(rec, dict) or rec.get('outcome') != 'exited':
+        return None, 'no exited K call (%s)' % (rec.get('outcome') if isinstance(rec, dict) else None)
+    out = rec.get('stdout') or {}
+    if out.get('truncated') or not out.get('complete') or not rec.get('drained'):
+        return None, 'stdout truncated, incomplete or not drained'
+    lines = [line for line in (out.get('text') or '').split('\n') if line.startswith('K=')]
+    if len(lines) != 1:
+        return None, '%d self-report lines' % len(lines)
+    s = lines[0][2:]
+    i, j = s.find(' ('), s.rfind(')')
+    head = s[:i] if i > 0 else ''
+    rest = s[j + 2:].split() if j > i > 0 and s[j + 1:j + 2] == ' ' else []
+    if not head.isdigit() or len(rest) < 20 or not rest[19].isdigit():
+        return None, 'malformed self-report'
+    return {'nspid': int(head), 'comm': s[i + 2:j], 'starttime': int(rest[19])}, None
+
+
+def edges(events):
+    return {e['child']: e['parent'] for e in events if e['k'] == 'F'}
+
+
+def first_seen(events):
+    first = {}
+    for e in events:
+        for node in ((e['parent'], e['child']) if e['k'] == 'F' else (e['id'],) if 'id' in e else ()):
+            first[node] = min(first.get(node, e['t']), e['t'])
+    return first
+
+
+def anchor_session(events, report, name, window, cg, pidns, hz=HZ):
+    """(session root, anchored node, None) or (None, node or None, reason) — r5 §2d / §2e. The anchored node is the
+    unique node with an E event whose own-namespace pid == the reported pid, namespace inode == the R1 pid ns, start
+    ticks == the reported starttime, inside the window, in $CG, uid 10001, file ANCHOR_FILE[name]. Its topmost ancestor
+    by exact F edges must be first seen inside the window and first exec a /proc/self/fd/<n> file, uid 0, in $CG."""
+    start, end = window[0], window[1]
+    found = {e['id'] for e in events if e['k'] == 'E' and e.get('nspid') == report['nspid']
+             and e.get('nsinum') == pidns and ticks(e['bst'], hz) == report['starttime'] and start <= e['t'] <= end
+             and e['cg'] == cg and e['uid'] == RUNNER_UID and e['file'].rstrip('\x00') == ANCHOR_FILE[name]}
+    if len(found) != 1:
+        return None, None, '%s: %d anchor candidate node(s)' % (name, len(found))
+    node = found.pop()
+    chain = [node] + ancestors(node, edges(events))
+    top = chain[-1]
+    first = first_seen(events).get(top)
+    execs = sorted((e for e in events if e['k'] == 'E' and e['id'] == top), key=lambda e: e['t'])
+    if not (first is not None and start <= first <= end and execs
+            and re.fullmatch(r'/proc/self/fd/\d+', execs[0]['file'].rstrip('\x00'))
+            and execs[0]['uid'] == 0 and execs[0]['cg'] == cg):
+        return None, node, '%s: the anchored node does not reach an exec-session root in the window' % name
+    return top, node, None
+
+
+def window_roots(events, roots, windows, anchors):
+    """r5 §2e: inside each K window exactly one session root, the anchored one; any other non-R0 / R1 root first seen
+    in the window (an A-event R2 root included) is a competing session."""
+    reasons, first = [], first_seen(events)
+    for name in ('K3', 'K2'):
+        if name not in windows:
+            continue
+        start, end = windows[name][0], windows[name][1]
+        inside = [n for n, kind in roots.items() if kind not in ('R0', 'R1') and start <= first.get(n, -1) <= end]
+        others = [n for n in inside if n != anchors.get(name)]
+        if others:
+            reasons.append('%s: %d competing session root(s) in the window' % (name, len(others)))
+    return reasons
+
+
+def capture_problems(name, rec):
+    """r6 (review round 1 M1): a K call's capture must be whole — both readers finished (drained) and neither stream
+    with a read error or incomplete; truncation alone (more than CAP_K bytes) is recorded, not a failure (stdout
+    truncation already fails the self-report). A clean empty stream is fine. Never retried."""
+    if not isinstance(rec, dict):
+        return []
+    problems = [] if rec.get('drained', True) else ['%s capture not drained (a reader did not finish)' % name]
+    for stream in ('stdout', 'stderr'):
+        box = rec.get(stream)
+        if not isinstance(box, dict):
+            problems.append('%s %s capture missing' % (name, stream))
+        elif box.get('error'):
+            problems.append('%s %s capture failed (%s)' % (name, stream, box['error']))
+        elif not box.get('complete'):
+            problems.append('%s %s capture incomplete' % (name, stream))
+    return problems
+
+
+def judge_k3_k2(events, parent_of, roots, container_ns, windows, kio=None):
+    """K3: one /bin/true exec under the K3 anchored session root, in the container's user and mnt ns. K2: a /bin/true
+    exec under the K2 anchored session root, descended from bwrap / codex-linux-sandbox, with user or mnt ns different.
+    r5: the session roots are the anchored ones (R2a); every K call must have exited with rc 0."""
     reasons = []
     for name in ('K3', 'K2'):
+        rec = (kio or {}).get(name)
+        if isinstance(rec, dict) and rec.get('outcome') != 'exited':
+            reasons.append('%s outcome %s' % (name, rec.get('outcome')))
         if windows.get(name, (None, None, 1))[2] != 0:
             reasons.append('%s command rc %s' % (name, windows.get(name, (None, None, None))[2]))
+        reasons += capture_problems(name, rec)
     true = [e for e in events if e['k'] == 'E' and e['file'].rstrip('\x00') in ('/bin/true', '/usr/bin/true')]
-    k3 = [e for e in true if root_of(e['id'], parent_of, roots) == 'R2:K3']
-    k2 = [e for e in true if root_of(e['id'], parent_of, roots) == 'R2:K2']
+    k3 = [e for e in true if root_of(e['id'], parent_of, roots) == 'R2a:K3']
+    k2 = [e for e in true if root_of(e['id'], parent_of, roots) == 'R2a:K2']
     if len(k3) != 1 or (k3[0]['userns'], k3[0]['mntns']) != container_ns:
         reasons.append('K3: expected one /bin/true in the container ns, saw %d' % len(k3))
     execs = {e['id']: e for e in events if e['k'] == 'E'}
@@ -711,23 +952,52 @@ def judge_k3_k2(events, parent_of, roots, container_ns, windows):
     return reasons
 
 
-def validate(summary, lines, r1, driver, k4, windows, container_ns, tmp_problems, r1_after):
-    """The whole observer validation; returns (validated, reasons). Any reason -> not validated (rc 16)."""
+def validate(summary, lines, r1, driver, k4, windows, container_ns, tmp_problems, r1_after, kio=None, cg=None,
+             detail=None):
+    """The whole observer validation; returns (validated, reasons). Any reason -> not validated (rc 16). r5: the
+    output must be layout 5; each K's self-report is parsed and anchored (§2); `detail` (a dict, if given) receives
+    the parsed reports, the anchored nodes and session roots, and the R1 pid ns, so the decision can be inspected."""
     events = parse(lines)
+    detail = {} if detail is None else detail
+    pre, anchors = [], {}
+    if layout_of(lines) != 5:
+        pre.append('observer output is not the r5 layout (no own-namespace fields: no anchor possible)')
+    try:
+        pidns = container_pidns(r1)
+    except ObserverError as error:
+        pidns = None
+        pre.append(error.message)
+    detail.update(pidns=pidns, reports={}, anchored={}, sessionRoots={})
+    for name in ('K3', 'K2'):
+        report, why = parse_report((kio or {}).get(name))
+        detail['reports'][name] = report if report else why
+        if report is None:
+            pre.append('%s: self-report: %s' % (name, why))
+            continue
+        if pidns is None or name not in windows or cg is None:
+            pre.append('%s: no anchor (pid ns, window or cgroup missing)' % name)
+            continue
+        root, node, why = anchor_session(events, report, name, windows[name], cg, pidns)
+        detail['anchored'][name], detail['sessionRoots'][name] = node, root
+        if root is None:
+            pre.append(why)
+        else:
+            anchors[name] = root
     if summary.get('endSeen') and summary.get('endLine'):
         try:
             summary = dict(summary, endCount=int(summary['endLine'].split('\t')[1]))
         except (ValueError, IndexError):
             summary = dict(summary, endCount=-1)
-    reasons = clean_exit(summary, len(events))
-    nodes, parent_of, roots, unattributed = lineage(events, r1, driver, windows)
+    reasons = clean_exit(summary, len(events)) + pre
+    nodes, parent_of, roots, unattributed = lineage(events, r1, driver, windows, anchors=anchors)
     k_nodes = [n for n in unattributed]
     if k_nodes:
         reasons.append('%d unattributed node(s) (no exact edge, not R0 / R1 / R2)' % len(k_nodes))
     reasons += judge_k4(events, k4, parent_of, roots) if k4 else ['K4 did not run']
-    reasons += judge_k3_k2(events, parent_of, roots, container_ns, windows)
+    reasons += judge_k3_k2(events, parent_of, roots, container_ns, windows, kio)
+    reasons += window_roots(events, roots, windows, anchors)
     reasons += tmp_problems
-    if {(p, t) for p, t, _, _ in r1} - {(p, t) for p, t, _, _ in r1_after}:
+    if {(e[0], e[1]) for e in r1} - {(e[0], e[1]) for e in r1_after}:
         reasons.append('an R1 process (uvicorn / app-server) disappeared or changed between K3 and K2')
     reasons += window_processes(events, parent_of, roots, windows)
     return not reasons, reasons

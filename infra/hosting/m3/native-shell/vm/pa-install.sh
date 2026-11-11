@@ -7,6 +7,7 @@
 # temp file failed (temp removed, nothing installed); 7 after the move a lookup failed or a pin/metadata/temp check
 # did not hold: the partial state is kept as it is, nothing is retried, report it.
 # r2 (P-A r4): the r4 pins of pa-observe.py / pa-start.py; the installed r3 files are first kept by pa-keep.sh.
+# r3 (P-A r5, design (b) r1): the r5 pins; the installed r4 files are first kept by pa-keep.sh r2.
 set -u
 cd /root/native68 || exit 2
 BASE=6170fec826400589ef0ac4ed38a4fd070f2abe2625edf6e1c8bb2887f7898e73
@@ -17,8 +18,8 @@ G4TURN=0687f375444cb1b08ed08e88807e31249533bcf2959c42b7d741c7a9ef11cc43
 G4BTURN=9b90a66e8652d401a4f9e7a273aafc5262ed06374427dc1e53622433ca0cb736
 G5START=2856cd2962e0a95dbdc27440946ce9e6b671fab515dfddab8bc73608581d3920
 case "${1:-}" in
-  pa-observe.py) E=f00e8ff3be4a23600c1221589549aee93dc4641021f67f9ab254c0c07bd98f3d; [ $# = 1 ] || { echo "usage; nothing changed"; exit 2; } ;;
-  pa-start.py) E=35401391d18976dd0c16ac0b1ce509952f0819e891d79b49f8fbb12dc7929c87; [ $# = 1 ] || { echo "usage; nothing changed"; exit 2; } ;;
+  pa-observe.py) E=16024ba51a197ff121f322ec79575ae18582177817476a58a1179fbd4529cf3f; [ $# = 1 ] || { echo "usage; nothing changed"; exit 2; } ;;
+  pa-start.py) E=b8ce94897c8ac8411b7d708c36031b9c45dc5a43eb2e96126113501e85a4b3ea; [ $# = 1 ] || { echo "usage; nothing changed"; exit 2; } ;;
   *) echo "name not allowed; nothing changed"; exit 2 ;;
 esac
 N=$1

@@ -1,10 +1,13 @@
 """#68 P-A read-only post-check (g5-turn-post.py f8d27c4a…, committed 6cb7308, with the P-A stages; P-A design r3
 §3). Guest, root; once per stage; changes nothing:
 
-    ssh … 'sudo -n python3 -I -B - <stage> <sha256 of pa-expected.json>' < pa-post.py      # stage: pa-2 | pas
+    ssh … 'sudo -n python3 -I -B - <stage> <sha256 of pa-expected.json>' < pa-post.py      # stage: pa-2 | pas | pas2
 
 pa-2: after the pa-switch run (gen 13, no Pod; the binding on the P-A image and plan).
 pas:  after the pa-start pas unit ended (gen 14 idle_stopped, no Pod).
+pas2: r2 (design (b) r1 §6): after the pa-start pas2 unit ended (gen 15 idle_stopped, no Pod): exactly one pas2 run
+      with exit rc 0, its observer validated and its outputs present, AND the failed pas run still exactly as
+      preserved (its six files at their pins, nothing else in it).
 What changes against g5-turn-post.py (exactly these): the docstring; EXPECTED_FILE (pa-expected.json); STAGES
 (pa-2: 13, pas: 14; the b1 branch stays and is unreachable); the binding expectation's text (P-A plan and image); the
 version / usage / refusal texts; and preserved_pa (added): the g5t / g5r evidence still readable with exit rc 0 at
@@ -34,7 +37,16 @@ CODEX_HOME = STATE_ROOT + '/codex'
 EV = '/root/native68/evidence'
 EXPECTED_FILE = '/root/native68/pa-expected.json'
 K3S = '/usr/local/bin/k3s'
-STAGES = {'pa-2': 13, 'pas': 14}  # stage -> registry generation
+STAGES = {'pa-2': 13, 'pas': 14, 'pas2': 15}  # stage -> registry generation
+FAILED_RUN = 'pa-start-pas-20261111T123436Z'  # r2: the failed pas run (rc 16), preserved; its six file pins
+FAILED_PINS = {
+    'exit.json': '72dfc1a79b30556923f7f2dc9f636a85c7299cbf021130e8aecb070260399910',
+    'k4-pids.json': '3507403a21467ed1c36f4580519d099dac7167b303b4278a05c0771a26293687',
+    'observer.err': 'a2ec3d4074abc856eb968b8430ebecb32889ec207e53c66e48ba8337dfe43aff',
+    'observer.out': 'd139723f605053bd5ad9ed253d052703322fad2a79df8f72ae8870025437f455',
+    'out.txt': '6d735563928f00e52512ca163265b0f0330100a8c27e09b28af7fadbe74d33a9',
+    'run.json': 'c7753896b09586a0ad47ef8960cb0ac920c0fcba272beec8d5353f593f80944e',
+}
 KEPT_REF = {'dev': 1802, 'ino': 131205, 'type': 'file', 'uid': 10001, 'gid': 10001, 'mode': 0o600, 'nlink': 1, 'size': 54, 'mtime_ns': 1794342704373636030}
 KEPT_NAME = re.compile(r'config\.toml\.kept-\d{8}T\d{6}Z')
 LABEL = 'system_u:object_r:container_file_t:s0:c576,c788'  # the E2 value, reference only (g3-post r2)
@@ -145,7 +157,32 @@ def preserved_pa(ev, stage):
         out['pas observer validated'] = isinstance(observer, dict) and observer.get('state') == 'validated'
         out['pas observer output and K4 pids present'] = bool(name) and all(
             os.path.isfile(os.path.join(ev, name, f)) for f in ('observer.out', 'observer.err', 'k4-pids.json'))
+    if stage == 'pas2':
+        name = one(r'pa-start-pas2-\d{8}T\d{6}Z')
+        rec, end = (load(name, 'run.json'), load(name, 'exit.json')) if name else (None, None)
+        observer = (rec or {}).get('observer') if isinstance(rec, dict) else None
+        out['one pas2 run, exit rc 0'] = isinstance(end, dict) and end.get('rc') == 0
+        out['pas2 observer validated'] = isinstance(observer, dict) and observer.get('state') == 'validated'
+        out['pas2 observer output and K4 pids present'] = bool(name) and all(
+            os.path.isfile(os.path.join(ev, name, f)) for f in ('observer.out', 'observer.err', 'k4-pids.json'))
+        out['the failed pas run preserved (only it, six files at their pins)'] = failed_preserved(ev)
     return out
+
+
+def failed_preserved(ev):
+    """r2: exactly one pa-start-pas-* run, the failed one, holding exactly its six files, each at its pin."""
+    try:
+        runs = sorted(d for d in os.listdir(ev) if re.fullmatch(r'pa-start-pas-\d{8}T\d{6}Z', d))
+        names = sorted(os.listdir(os.path.join(ev, FAILED_RUN))) if runs == [FAILED_RUN] else None
+        if names != sorted(FAILED_PINS):
+            return False
+        for name, pin in FAILED_PINS.items():
+            with open(os.path.join(ev, FAILED_RUN, name), 'rb') as f:
+                if hashlib.sha256(f.read()).hexdigest() != pin:
+                    return False
+    except OSError:
+        return False
+    return True
 
 
 def utc(t):
@@ -359,7 +396,7 @@ def evaluate(stage, o, expected, ref):
 def main(argv):
     o = {'owner': OWNER, 'version': 'pa-post-r0', 'time': utc(datetime.datetime.now().timestamp())}
     if len(argv) != 3 or argv[1] not in STAGES or not HEX64.fullmatch(argv[2]):
-        print(json.dumps({'usage': 'pa-post.py pa-2|pas <sha256 of pa-expected.json>', 'pass': False}))
+        print(json.dumps({'usage': 'pa-post.py pa-2|pas|pas2 <sha256 of pa-expected.json>', 'pass': False}))
         return
     stage, o['stage'] = argv[1], argv[1]
     lookups_ok = True
