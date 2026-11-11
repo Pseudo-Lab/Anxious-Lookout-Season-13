@@ -28,6 +28,10 @@ monotonic clock would not be the observer's (P-A r3 §0, review round 1).
 
 /tmp verdict of a pass: pa-observe.TMP_VERDICT, recorded with pa-observe.TMP_UNVERIFIED. M1 was a partial
 pre-measurement, not a pass; the VM K2 is the first measurement of namespaces, launcher chain and success-path files.
+
+r4 (the r3 check stopped at the observer precheck with no message, PM diagnosis pa-diag baa6784e…): the precheck
+keeps every bpftrace call's rc and stderr; a refusal prints them to the log (rc 3, nothing done, no evidence directory
+yet), a pass is recorded in run.json (observerPrecheck). The rc 3 meaning is unchanged.
 """
 import hashlib
 import json
@@ -37,7 +41,7 @@ import time
 import types
 
 G5S_PATH, G5S_SHA = '/root/native68/g5-start.py', '2856cd2962e0a95dbdc27440946ce9e6b671fab515dfddab8bc73608581d3920'
-PAO_PATH, PAO_SHA = '/root/native68/pa-observe.py', '4e8db8b9c67295c6a003083e810d7a9d83690cb8351116205e40989eb10e63c2'
+PAO_PATH, PAO_SHA = '/root/native68/pa-observe.py', 'f00e8ff3be4a23600c1221589549aee93dc4641021f67f9ab254c0c07bd98f3d'
 EXPECTED_PATH = '/root/native68/pa-expected.json'
 GEN, ACTION = 14, 'pas'
 RES6_PIN = '51e7ae651e8dcb79213082362fef2bd6873c11f2000b9567719974c61b6eafeb'
@@ -160,7 +164,8 @@ def open_evidence_pa(action):
     P.record(ev, action=action, started=P.now_utc(), script=G5S.SCRIPT_SHA, g5s=G5S_SHA, observe=PAO_SHA,
              g3=G5S.G3_SHA, base=G3.BASE_SHA, v6=G3.V6_SHA, expected=G3.EXPECTED['sha'], image=P.RUNNER_REF,
              args={'g5t': ARGS['g5t'], 'g5r': ARGS['g5r']}, k2Command=OBS.K2_COMMAND,
-             k2Sha256=hashlib.sha256(OBS.K2_SCRIPT.encode()).hexdigest())
+             k2Sha256=hashlib.sha256(OBS.K2_SCRIPT.encode()).hexdigest(),
+             observerPrecheck=STATE['facts'].get('observerPrecheck'))
     P.say('evidence: %s (script %s, g5s %s, observe %s)' % (ev, G5S.SCRIPT_SHA[:8], G5S_SHA[:8], PAO_SHA[:8]))
     return ev
 
@@ -305,10 +310,14 @@ def main(argv):
         return 3
     P = G5S.P
     try:
-        STATE['facts']['observerPrecheck'] = OBS.precheck(P.run)
+        STATE['facts']['observerPrecheck'] = OBS.precheck()  # r4: its own capture, stderr kept
     except OBS.ObserverError as error:
         print('observer precheck: %s; nothing done' % error.message)
+        for entry in error.detail or []:  # r4: each call's rc and stderr, in order (no evidence directory yet)
+            print('observer precheck call: %s' % json.dumps(entry, sort_keys=True, ensure_ascii=False))
         return 3
+    for entry in STATE['facts']['observerPrecheck']['calls']:  # r4: a pass shows the same (warnings included)
+        print('observer precheck call: %s' % json.dumps(entry, sort_keys=True, ensure_ascii=False))
     if argv[1] == 'check':
         try:
             return G5S.check_g5()

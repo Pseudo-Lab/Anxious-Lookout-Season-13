@@ -35,7 +35,15 @@ verdict of a pass is exactly TMP_VERDICT below, with TMP_UNVERIFIED recorded bes
 container's own processes during the window are recorded and also block a pass (attribution unknown); the R1 roots
 being alive is a separate check and says nothing about such processes. K2 is a known execution for the observer
 only; it is not turn evidence and not evidence that a turn cannot bypass the policy.
+
+r4 (PM diagnosis pa-diag baa6784e…: the r3 program failed bpftrace v0.24.2's dry run with five `Argument mismatch for
+@t` errors: the map's key type came from its first write, `@t[$2]` (int64), and the `pid` builtin (uint64) read and
+deleted it): every @t key is written in one form, `(uint64)<expr>` (BEGIN, parent, child, attach, the four probe
+reads and the delete), and $1 is compared only as `(uint64)$1` (cgroup and dst_id are u64). pid / tgid values are
+positive, so the cast keeps every value and the identity / reuse logic is unchanged. The precheck keeps every call's
+rc and stderr (capture_run; the r3 precheck used the base run(), which discarded stderr).
 """
+import hashlib
 import json
 import os
 import queue
@@ -48,7 +56,7 @@ import time
 
 BPFTRACE = '/usr/bin/bpftrace'
 HZ = os.sysconf('SC_CLK_TCK') if hasattr(os, 'sysconf') else 100
-CAP_OUT, CAP_ERR = 8 << 20, 1 << 20
+CAP_OUT, CAP_ERR, CAP_PRE = 8 << 20, 1 << 20, 64 << 10
 T_ATTACH, T_K4, T_K3, T_K2, T_DRAIN, T_STOP = 30, 60, 30, 60, 5, 30
 EPS_NS = 1_000_000
 DAEMON = 'codex-daemon-10001'
@@ -68,43 +76,43 @@ TMP_UNVERIFIED = ('a create-then-delete between the two observations', 'a conten
 K2_COMMAND = ['/bin/sh', '-c', K2_SCRIPT]
 
 PROGRAM = r'''config = { perf_rb_pages = 256 }
-BEGIN { @t[$2] = 1; printf("READY\t%llu\n", nsecs(monotonic)); }
+BEGIN { @t[(uint64)$2] = 1; printf("READY\t%llu\n", nsecs(monotonic)); }
 kprobe:wake_up_new_task {
   $p = (struct task_struct *)arg0;
-  if ($p->pid == $p->tgid && (@t[curtask->tgid] || cgroup == $1)) {
-    @t[$p->tgid] = 1;
+  if ($p->pid == $p->tgid && (@t[(uint64)curtask->tgid] || cgroup == (uint64)$1)) {
+    @t[(uint64)$p->tgid] = 1;
     printf("F\t%llu\t%d\t%llu\t%llu\t%d\t%llu\t%llu\n", nsecs(monotonic), curtask->tgid,
            curtask->group_leader->start_time, curtask->group_leader->start_boottime, $p->tgid, $p->start_time,
            $p->start_boottime);
     @n = count();
   }
 }
-tracepoint:cgroup:cgroup_attach_task /args.dst_id == $1/ {
-  @t[args.pid] = 1;
+tracepoint:cgroup:cgroup_attach_task /args.dst_id == (uint64)$1/ {
+  @t[(uint64)args.pid] = 1;
   printf("A\t%llu\t%d\n", nsecs(monotonic), args.pid);
   @n = count();
 }
-tracepoint:syscalls:sys_enter_execve /@t[pid] || cgroup == $1/ {
+tracepoint:syscalls:sys_enter_execve /@t[(uint64)pid] || cgroup == (uint64)$1/ {
   printf("S\t%llu\t%d\t%llu\t%llu\texecve\n", nsecs(monotonic), pid, curtask->group_leader->start_time,
          curtask->group_leader->start_boottime);
   @n = count();
 }
-tracepoint:syscalls:sys_enter_execveat /@t[pid] || cgroup == $1/ {
+tracepoint:syscalls:sys_enter_execveat /@t[(uint64)pid] || cgroup == (uint64)$1/ {
   printf("S\t%llu\t%d\t%llu\t%llu\texecveat\n", nsecs(monotonic), pid, curtask->group_leader->start_time,
          curtask->group_leader->start_boottime);
   @n = count();
 }
-tracepoint:sched:sched_process_exec /@t[pid] || cgroup == $1/ {
+tracepoint:sched:sched_process_exec /@t[(uint64)pid] || cgroup == (uint64)$1/ {
   printf("E\t%llu\t%d\t%llu\t%llu\t%d\t%u\t%u\t%u\t%llu\t%s\t%s\n", nsecs(monotonic), pid,
          curtask->group_leader->start_time, curtask->group_leader->start_boottime, uid,
          curtask->cred->user_ns->ns.inum, curtask->nsproxy->pid_ns_for_children->ns.inum,
          curtask->nsproxy->mnt_ns->ns.inum, cgroup, comm, str(args.filename, 64));
   @n = count();
 }
-tracepoint:sched:sched_process_exit /(@t[pid] || cgroup == $1) && tid == pid/ {
+tracepoint:sched:sched_process_exit /(@t[(uint64)pid] || cgroup == (uint64)$1) && tid == pid/ {
   printf("X\t%llu\t%d\t%llu\n", nsecs(monotonic), pid, curtask->group_leader->start_time);
   @n = count();
-  delete(@t[pid]);  /* review round 1: a pid leaves the tracked set when its process exits (no reuse match) */
+  delete(@t[(uint64)pid]);  /* review round 1: a pid leaves the tracked set when its process exits (no reuse match) */
 }
 END { printf("END\t%d\n", (int64)@n); clear(@t); clear(@n); }
 '''
@@ -141,9 +149,9 @@ print(json.dumps({'statuses': codes}), flush=True)
 
 
 class ObserverError(Exception):
-    def __init__(self, code, message):
+    def __init__(self, code, message, detail=None):
         super().__init__(message)
-        self.code, self.message = code, message
+        self.code, self.message, self.detail = code, message, detail
 
 
 # --- static and precheck ----------------------------------------------------------------------------------------------
@@ -153,28 +161,54 @@ def bare_nsecs(program=PROGRAM):
     return [m.start() for m in re.finditer(r'\bnsecs\b(?!\(monotonic\))', program)]
 
 
-def precheck(run):
+def capture_run(argv, timeout):
+    """(rc, stdout, stderr) of one precheck call (r4: stderr kept, never discarded); each text capped at CAP_PRE
+    characters; 124 timeout, 125 not started."""
+    try:
+        done = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=max(1, timeout), check=False)
+    except subprocess.TimeoutExpired as expired:
+        return 124, '', (expired.stderr or b'').decode('utf-8', 'replace')[:CAP_PRE] + '\n[timeout]'
+    except Exception as error:
+        return 125, '', '[not started: %s]' % type(error).__name__
+    return (done.returncode, done.stdout.decode('utf-8', 'replace')[:CAP_PRE].strip(),
+            done.stderr.decode('utf-8', 'replace')[:CAP_PRE])
+
+
+def precheck(capture=None):
     """Read-only (rc 3 on any failure, nothing started): the installed version, BTF, the two probes with the needed
-    field, and a dry run of the exact program. `run(argv, timeout) -> (rc, out)` (the base run()). No fallback."""
-    facts = {}
-    rc, out = run([BPFTRACE, '--version'], 30)
+    field, and a dry run of the exact program. `capture(argv, timeout) -> (rc, stdout, stderr)` (capture_run). No
+    fallback. r4: every call's rc and stderr are kept in order (facts['calls'] on a pass, error.detail on a refusal),
+    so a refusal shows the compiler's own message (the r3 precheck used the base run(), which discarded stderr)."""
+    capture = capture or capture_run
+    calls = []
+    facts = {'calls': calls, 'programSha256': hashlib.sha256(PROGRAM.encode()).hexdigest()}
+
+    def call(name, argv, timeout):
+        rc, out, err = capture(argv, timeout)
+        calls.append({'call': name, 'rc': rc, 'stderr': err})
+        return rc, out
+
+    def refuse(message):
+        raise ObserverError(3, message, detail=calls)
+
+    rc, out = call('version', [BPFTRACE, '--version'], 30)
     if rc != 0 or not out.startswith('bpftrace v'):
-        raise ObserverError(3, 'bpftrace version lookup failed')
+        refuse('bpftrace version lookup failed')
     facts['version'] = out.split()[1]
     if bare_nsecs():
-        raise ObserverError(3, 'the program uses a bare nsecs')
+        refuse('the program uses a bare nsecs')
     if not os.path.isfile('/sys/kernel/btf/vmlinux'):
-        raise ObserverError(3, 'no kernel BTF (/sys/kernel/btf/vmlinux)')
-    rc, out = run([BPFTRACE, '-lv', 'tracepoint:cgroup:cgroup_attach_task'], 30)
+        refuse('no kernel BTF (/sys/kernel/btf/vmlinux)')
+    rc, out = call('dst_id', [BPFTRACE, '-lv', 'tracepoint:cgroup:cgroup_attach_task'], 30)
     if rc != 0 or not re.search(r'\bdst_id\b', out):
-        raise ObserverError(3, 'tracepoint cgroup_attach_task has no dst_id field')
-    rc, out = run([BPFTRACE, '-l', 'kprobe:wake_up_new_task'], 30)
+        refuse('tracepoint cgroup_attach_task has no dst_id field')
+    rc, out = call('kprobe', [BPFTRACE, '-l', 'kprobe:wake_up_new_task'], 30)
     if rc != 0 or 'kprobe:wake_up_new_task' not in out.split():
-        raise ObserverError(3, 'kprobe wake_up_new_task is not available')
-    rc, _ = run([BPFTRACE, '--dry-run', '-e', PROGRAM, '0', '0'], 60)
+        refuse('kprobe wake_up_new_task is not available')
+    rc, _ = call('dry-run', [BPFTRACE, '--dry-run', '-e', PROGRAM, '0', '0'], 60)
     if rc != 0:
-        raise ObserverError(3, 'the pinned program does not compile / attach in a dry run (nsecs(monotonic) '
-                               'unsupported or a probe missing); no fallback')
+        refuse('the pinned program does not compile / attach in a dry run (its stderr is in the detail); no fallback')
     facts['dryRun'] = 0
     return facts
 
