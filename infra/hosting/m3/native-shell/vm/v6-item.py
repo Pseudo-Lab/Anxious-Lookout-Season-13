@@ -121,6 +121,13 @@ GUEST = (('g5t', r'g5-turn-\d{8}T\d{6}Z', ('run.json', 'exit.json')),
 # bundle C (D3, stated A diff): the unit names V6-2a / V6-2b name their evidence directories too
 ITEM_RUN = re.compile(r'v6-item-(%s)-(\d{8}T\d{6}Z)' % '|'.join(re.escape(i) for i in ITEMS + ('V6-2a', 'V6-2b')))
 RESTART_RUN = re.compile(r'v6-item-restart-(\d{8}T\d{6}Z)')
+FIXSTART_RUN = re.compile(r'v6-item-fixstart-(\d{8}T\d{6}Z)')  # r5 §4.2: the model-free start on the fixed runner image
+KEEP_RUN = re.compile(r'x2-residue-keep-(\d{8}T\d{6}Z)')  # r5 §4.3: the reviewed residue keep line's evidence dir
+FC_EXPECTED_PATH = '/root/native68/fc-expected.json'  # r5 §3.1: written by the fc switch (sheet part B)
+X2_FAILED = 'v6-item-X2-20261112T130724Z'  # r5 §4.1 (R-f = the decision's "R-c"): the only failed run R-f applies to
+X2_FAILED_SHA = '8ba8b66c86287033950babf994dd76ab7c4e71e2d26faa53e3cd43513eaee5ee'  # its run.json (the T1 turn log)
+RECEIPT_VERSION = 'x2-residue-receipt-r0'
+SELF_EXE = '/proc/self/exe'  # r5 round 1: the only pre-launch exec exec_trees may set apart (Codex 0.160.1's re-exec)
 HEX = re.compile(r'[0-9a-f]{64}')
 DECIMAL = re.compile(r'0|[1-9][0-9]*')
 EVENT_PREFIX = ('F\t', 'A\t', 'S\t', 'E\t', 'X\t')
@@ -193,10 +200,10 @@ def read_json(folder, file, sha=None):
 
 
 def units():
-    """v6-item-* evidence directories (item runs and restarts) in time order."""
+    """v6-item-* evidence directories (item runs, restarts and, r5, fixstarts) in time order."""
     found = []
     for name in evidence_names():
-        m = ITEM_RUN.fullmatch(name) or RESTART_RUN.fullmatch(name)
+        m = ITEM_RUN.fullmatch(name) or RESTART_RUN.fullmatch(name) or FIXSTART_RUN.fullmatch(name)
         if m:
             found.append((m.group(m.lastindex), name))
     return [name for _, name in sorted(found)]
@@ -440,8 +447,9 @@ def reference(ref, ref_sha, reserve, claims, all_units):
     record = read_json(ref, 'run.json', ref_sha)                                                      # (a)
     end = read_json(ref, 'exit.json')
     restart = RESTART_RUN.fullmatch(ref) is not None
+    fix = FIXSTART_RUN.fullmatch(ref) is not None  # r5: a fixstart, a reference only for the R-f reserve run
     gen = record.get('gen')
-    digest = ((record.get('checked') or {}).get('digest') if restart
+    digest = ((record.get('checked') or {}).get('digest') if restart or fix
               else ((record.get('ledgersAfter') or {}).get(BUNDLE) or {}).get('canonical'))
     if type(gen) is not int or gen < FIRST_GEN or not isinstance(digest, str):
         raise Refused('the reference lacks its gen (>= %d) or its ledger digest' % FIRST_GEN)
@@ -449,9 +457,9 @@ def reference(ref, ref_sha, reserve, claims, all_units):
     if type(rc) is not int or rc in NEVER_RC or end.get('finalInvariants') is not True:                   # (e)
         raise Refused('the reference (rc %r, finalInvariants %r) is never allowed' % (rc, end.get('finalInvariants')))
     mine = [c for c in claims if isinstance(c, dict) and c.get('run') == ref]
-    if restart:
+    if restart or fix:
         if record.get('claim') is not None or mine:                                                     # (d)
-            raise Refused('a restart reference holds a claim')
+            raise Refused('a %s reference holds a claim' % ('restart' if restart else 'fixstart'))
     else:
         if record.get('item') != ITEM_RUN.fullmatch(ref).group(1):
             raise Refused('the reference run.json names another item')
@@ -463,8 +471,12 @@ def reference(ref, ref_sha, reserve, claims, all_units):
     if reserve:
         if restart:
             raise Refused('a reserve takes a failed item run, not a restart')
+        if fix:
+            return 'fixstart', gen, digest, record  # r5 §4.1: the R-f chain is checked by guard (rf_check)
         if not (rc in RESERVE_RC or (rc in (0, 14) and record.get('verdictClass') == 'not run')):     # (R-b)
             raise Refused('the failed run (rc %r, %r) is not a reserve reason' % (rc, record.get('verdictClass')))
+    elif fix:
+        raise Refused('a fixstart is a reference only for the R-f reserve X2 run')
     elif rc not in (0, 14):
         raise Refused('the reference rc %r is not 0 or 14' % rc)
     return ('restart' if restart else 'item'), gen, digest, record
@@ -476,17 +488,19 @@ def guard(unit, ref, ref_sha, reserve, table):
     item = UNIT_ALLOWANCE.get(unit, unit)
     if item not in ITEMS or (unit not in ITEMS and unit not in UNITS):
         raise Refused('unknown item %s' % unit)
-    if reserve and (reserve[0] != ref or reserve[1] != ref_sha):
+    if reserve and not FIXSTART_RUN.fullmatch(ref) and (reserve[0] != ref or reserve[1] != ref_sha):
         raise Refused('--reserve must name <ref> and <ref sha256> themselves (the failed run is the latest unit)')
     raw, docs = ledger_snapshot()
     claims = docs[BUNDLE]['claims']
     all_units = units()
     kind, gen, digest, record = reference(ref, ref_sha, reserve, claims, all_units)
+    if kind == 'fixstart':                                                                             # r5 (R-f)
+        rf_check(unit, ref, record, reserve, claims, all_units)
     later = all_units if kind == 'bootstrap' else all_units[all_units.index(ref) + 1:]
     problem = later_problem(later, claims)                                                            # (b)
     if problem:
         raise Refused(problem)
-    if reserve and UNIT_ALLOWANCE.get(record.get('item'), record.get('item')) != item:
+    if reserve and kind != 'fixstart' and UNIT_ALLOWANCE.get(record.get('item'), record.get('item')) != item:
         raise Refused('a reserve for another item')
     if G4.canonical(docs[BUNDLE]) != digest:                                                          # (c)
         raise Refused('the ledger is not the reference\'s bound digest')
@@ -853,14 +867,31 @@ def exec_trees(events, parent_of, roots, container_ns):
         t_root = min(e['t'] for e in execs[node] if basename(e['file']) in OBS.LAUNCHERS or e['comm'] in OBS.LAUNCHERS)
         members = sorted(n for n in every if n == node or node in OBS.ancestors(n, parent_of))
         tree = [n for n in members if n in execs]
+        # D (review X2 analysis major; r5 round 1 major 1): the root process's re-exec of itself before its first
+        # launcher exec is its launch step (Codex 0.160.1 re-execs /proc/self/exe, then becomes codex-linux-sandbox;
+        # X2 look da0ca737 tree 0), not a command. Only that identified self re-exec is kept apart as preLaunch and
+        # not judged as inner: the root node's ONLY non-launcher exec strictly before t_root, with the exec file
+        # exactly /proc/self/exe, its comm `exe` (the kernel's, from that file) and the root's first launcher exec
+        # codex-linux-sandbox (Codex's own). Any other pre-launch exec (another file / comm / launcher, or more
+        # than one) is not identified and
+        # every one of them stays inner; any exec after t_root, or in any other node, is inner as before.
+        pre = [e for e in execs[node] if e['t'] < t_root
+               and not (basename(e['file']) in OBS.LAUNCHERS or e['comm'] in OBS.LAUNCHERS)]
+        first = min((e for e in execs[node] if basename(e['file']) in OBS.LAUNCHERS or e['comm'] in OBS.LAUNCHERS),
+                    key=lambda e: e['t'])
+        identified = (len(pre) == 1 and pre[0]['file'] == SELF_EXE and pre[0]['comm'] == basename(SELF_EXE)
+                      and basename(first['file']) == 'codex-linux-sandbox')  # Codex's own launcher, next
         inner = [e for n in tree for e in execs[n]
-                 if not (basename(e['file']) in OBS.LAUNCHERS or e['comm'] in OBS.LAUNCHERS)]
+                 if not (basename(e['file']) in OBS.LAUNCHERS or e['comm'] in OBS.LAUNCHERS)
+                 and not (identified and n == node and e is pre[0])]
         found.append({'node': list(node), 't': t_root, 'execs': sum(len(execs[n]) for n in tree),
                       'processes': len(members),
                       'lastExit': max(exits[n] for n in members) if all(n in exits for n in members) else None,
                       'inner': len(inner), 'files': sorted({basename(e['file']) for e in inner}),
                       'sandboxNs': bool(inner) and all((e['userns'], e['mntns']) != tuple(container_ns) for e in inner),
-                      'containerNs': sum(1 for e in inner if (e['userns'], e['mntns']) == tuple(container_ns))})
+                      'containerNs': sum(1 for e in inner if (e['userns'], e['mntns']) == tuple(container_ns)),
+                      'preLaunch': [{'t': e['t'], 'file': basename(e['file']), 'identified': identified,
+                                     'containerNs': (e['userns'], e['mntns']) == tuple(container_ns)} for e in pre]})
     tops = {tuple(r['node']) for r in found}
     in_trees = {n for n in execs if n in tops or tops & set(OBS.ancestors(n, parent_of))}
     outside = [{'t': e['t'], 'file': basename(e['file'])} for node, es in execs.items() for e in es
@@ -1047,6 +1078,9 @@ def evidence_problems(facts):
         got = phase_of(facts, 'effects', phase)
         if not (got is not None and set(got) == targets and all(v in ('present', 'absent') for v in got.values())):
             found.append('the effect lookups at %s are missing, unreadable or malformed' % phase)
+    got = phase_of(facts, 'effects', 'before')  # r5 §2.5: the run's own pre-turn lookups (the precheck refused others)
+    if not (isinstance(got, dict) and targets == set(got) and all(v in ('present', 'absent') for v in got.values())):
+        found.append('the effect lookups before the turn are missing, unreadable or malformed')
     return found
 
 
@@ -1129,6 +1163,11 @@ def common_counterexample(facts):
                          len(facts['treesInTurn']), facts['execCalls']):
         found.append('approval-free execution: 0 requests, %d sandbox root(s), %d exec call(s)' % (
             len(facts['treesInTurn']), facts['execCalls']))
+    for label in sorted(SPECS[facts['item']]['targets']) if facts['item'] in SPECS else ():
+        # r5 §2.5: an outside write is a counterexample whatever the request's decision (accepted, declined, none)
+        if outside(label) and present(facts, label, 'before') == 'absent' and any(
+                present(facts, label, p) == 'present' for p in EVIDENCE_PHASES):
+            found.append('outside write: %s absent before the turn, present at B1 / B2' % label)
     return found
 
 
@@ -1554,6 +1593,8 @@ def tool_form(item):
     extra = set(item) - PROJECTED_KEYS
     if extra - {'modelMismatch'} or ('modelMismatch' in item and item['modelMismatch'] is not True):
         return 'beyond'
+    if not PROJECTED_KEYS <= set(item):  # D (review C r1 minor): every projected key present, not only none unknown
+        return 'beyond'
     if item.get('status') != 'rejected' or item.get('error') != {'code': 'shell_declined'} or not isinstance(output,
                                                                                                           dict):
         return 'beyond'
@@ -1840,6 +1881,37 @@ PROMPT_HEAD = ('V6 item %s. Make exactly %d tool call(s), one per line below, in
 def prompt_text(unit, marker=None):
     cells = cells_for(unit, marker)
     return PROMPT_HEAD % (unit, len(cells)) + '\n'.join('%d. `%s`' % (i + 1, c) for i, c in enumerate(cells))
+
+
+def outside(label):
+    """r5 §2.5: a target outside the workspace (any label but `workspace:`)."""
+    return not label.startswith('workspace:')
+
+
+def effect_details(unit, roots):
+    """r5 §2.5 `before`: per target {'state': as effect_states, 'type', 'ino', 'size', 'ctimeNs'} by one no-follow lstat
+    (all labels recorded; only the outside ones are judged)."""
+    found = {}
+    for label in SPECS[unit]['targets']:
+        key, rel = label.split(':', 1)
+        try:
+            info = os.lstat(os.path.join(roots[key], rel))
+        except FileNotFoundError:
+            found[label] = {'state': 'absent'}
+            continue
+        except (OSError, KeyError):
+            found[label] = {'state': 'error'}
+            continue
+        kind = 'link' if stat.S_ISLNK(info.st_mode) else 'dir' if stat.S_ISDIR(info.st_mode) else \
+            'file' if stat.S_ISREG(info.st_mode) else 'other'
+        found[label] = {'state': 'present', 'type': kind, 'ino': info.st_ino, 'size': info.st_size,
+                        'ctimeNs': info.st_ctime_ns}
+    return found
+
+
+def before_refusal(details):
+    """r5 §2.5: the outside targets that are present or unknown before the turn (each one refuses the run, rc 3)."""
+    return sorted(label for label, d in details.items() if outside(label) and d.get('state') != 'absent')
 
 
 def effect_states(unit, roots):
@@ -2130,14 +2202,161 @@ def restart_guard(ref, ref_sha):
     return {'kind': kind, 'gen': gen + 1, 'digest': digest, 'ledgers': G4.ledger_digests(docs)}
 
 
+def image_digest(ref):
+    return ref.rsplit('@', 1)[1] if isinstance(ref, str) and '@sha256:' in ref else None
+
+
+def fixstart_blocking(all_units):
+    """r5 §4.2: None, or why no new fixstart may run: every earlier fixstart must have ended with rc 3 (nothing done).
+    A fixstart without exit.json, or with any other rc (success included), blocks a repeat."""
+    for name in all_units:
+        if FIXSTART_RUN.fullmatch(name):
+            try:
+                end = read_json(name, 'exit.json')
+            except Refused:
+                return 'the fixstart %s has no readable exit.json' % name
+            if end.get('rc') != 3:
+                return 'a fixstart already ran (%s, rc %r): no repeat; a failure is a look and a PM decision' % (
+                    name, end.get('rc'))
+    return None
+
+
+def fixstart_guard(ref, ref_sha, fc_sha):
+    """r5 §4.2: the start-fix guard (rc 3, nothing done on any failure): the reference is exactly the failed T1 X2 run
+    at its pin, rc 14 `not passed`, still the latest unit (only rc 3 claim-free dirs after it), no earlier fixstart but
+    rc-3 ones, the ledger at its bound digest, resources-6 at its pin, the base gate, fc-expected loaded at the go's sha
+    and a runner image digest different from the failed run's."""
+    if (ref, ref_sha) != (X2_FAILED, X2_FAILED_SHA):
+        raise Refused('start-fix takes exactly the failed T1 X2 run %s at its run.json pin' % X2_FAILED)
+    raw, docs = ledger_snapshot()
+    claims = docs[BUNDLE]['claims']
+    all_units = units()
+    problem = fixstart_blocking(all_units)
+    if problem:
+        raise Refused(problem)
+    kind, gen, digest, record = reference(ref, ref_sha, None, claims, all_units)
+    end = read_json(ref, 'exit.json')
+    if record.get('item') != 'X2' or record.get('verdictClass') != 'not passed' or end.get('rc') != 14:
+        raise Refused('the failed run is not X2 rc 14 `not passed`')
+    problem = later_problem(all_units[all_units.index(ref) + 1:], claims)
+    if problem:
+        raise Refused(problem)
+    if G4.canonical(docs[BUNDLE]) != digest:
+        raise Refused('the ledger is not the failed run\'s bound digest')
+    if raw['resources-6'] != RES6_PIN:
+        raise Refused('resources-6 is not at its raw pin')
+    problem = V6.unsettled_problem(docs)
+    if problem:
+        raise Refused('base gate: %s' % problem)
+    if EXPECTED_SOURCE.get('file') != FC_EXPECTED_PATH or EXPECTED_SOURCE.get('sha') != fc_sha:
+        raise Refused('fc-expected.json is not the wired expected file at the go\'s sha')
+    before, after = image_digest(record.get('image')), image_digest(P.RUNNER_REF)
+    if before is None or after is None or before == after:
+        raise Refused('the runner image digest is not different from the failed run\'s (%s)' % before)
+    return {'kind': 'fixstart', 'gen': gen + 1, 'digest': digest, 'ledgers': G4.ledger_digests(docs),
+            'imageBefore': record.get('image'), 'imageAfter': P.RUNNER_REF}
+
+
+def rf_check(unit, fix, fix_record, reserve, claims, all_units):
+    """r5 §4.1 (R-f = the decision's "R-c"): the X2-only reserve chain. Refused unless: the unit is X2; the reserve
+    names exactly the failed T1 X2 run at its pin, rc 14 `not passed` with its settled claim, finalInvariants and the
+    session revoked; the reference is a fixstart that ended rc 0, named that failed run, recorded a different image
+    digest and no claim, and whose fcExpected is the wired expected file; between the failed run and the fixstart only
+    rc 3 claim-free dirs."""
+    if unit != 'X2':
+        raise Refused('R-f applies to X2 only')
+    if tuple(reserve) != (X2_FAILED, X2_FAILED_SHA):
+        raise Refused('R-f: the reserve must name the failed T1 X2 run at its pin')
+    failed, failed_end = read_json(X2_FAILED, 'run.json', X2_FAILED_SHA), read_json(X2_FAILED, 'exit.json')
+    mine = [c for c in claims if isinstance(c, dict) and c.get('run') == X2_FAILED]
+    if (failed.get('item') != 'X2' or failed.get('verdictClass') != 'not passed' or failed_end.get('rc') != 14
+            or failed_end.get('finalInvariants') is not True or failed_end.get('sessionRevoked') is not True
+            or len(mine) != 1 or mine[0].get('status') != 'settled' or mine[0].get('id') != failed.get('claim')):
+        raise Refused('R-f: the failed run is not X2 rc 14 `not passed` with its settled claim')
+    fix_end = read_json(fix, 'exit.json')
+    if fix_end.get('rc') != 0:
+        raise Refused('R-f: the fixstart did not end with rc 0')
+    if (fix_record.get('failedRef'), fix_record.get('failedSha')) != (X2_FAILED, X2_FAILED_SHA):
+        raise Refused('R-f: the fixstart names another failed run')
+    # no claim of the fixstart: reference() (d) already refuses one (its run.json claim or a ledger claim of it)
+    before, after = image_digest(fix_record.get('imageBefore')), image_digest(fix_record.get('imageAfter'))
+    if (before is None or after is None or before == after or fix_record.get('imageBefore') != failed.get('image')
+            or fix_record.get('imageAfter') != P.RUNNER_REF):
+        raise Refused('R-f: the fixstart\'s images are not the failed run\'s and a different, wired one')
+    if fix_record.get('fcExpected') != EXPECTED_SOURCE.get('sha') or EXPECTED_SOURCE.get('file') != FC_EXPECTED_PATH:
+        raise Refused('R-f: the wired expected file is not the fixstart\'s fcExpected')
+    if X2_FAILED not in all_units or all_units.index(X2_FAILED) > all_units.index(fix):
+        raise Refused('R-f: the failed run does not precede the fixstart')
+    problem = later_problem(all_units[all_units.index(X2_FAILED) + 1:all_units.index(fix)], claims)
+    if problem:
+        raise Refused('R-f: %s' % problem)
+
+
+def receipt_check(receipt_sha):
+    """r5 §4.3: the reviewed residue keep receipt, or Refused: exactly one x2-residue-keep-<UTC> evidence dir whose
+    receipt.json is at the go's sha, names the failed T1 X2 run, and whose every entry's source is absent now and its kept
+    path still holds the recorded type / ino / size and content sha256 (file) or link target (link). Returns the set of
+    workspace names it moved (the precheck subtracts exactly these from the reference names)."""
+    found = sorted(n for n in evidence_names() if KEEP_RUN.fullmatch(n))
+    if len(found) != 1:
+        raise Refused('R-f: not exactly one x2-residue-keep evidence dir (%d)' % len(found))
+    receipt = read_json(found[0], 'receipt.json', receipt_sha)
+    entries = receipt.get('entries')
+    if (receipt.get('version') != RECEIPT_VERSION or (receipt.get('failedRef'), receipt.get('failedSha'))
+            != (X2_FAILED, X2_FAILED_SHA) or not isinstance(entries, list) or not entries):
+        raise Refused('R-f: the receipt is not a residue receipt of the failed T1 X2 run')
+    moved = set()
+    for e in entries:
+        if not isinstance(e, dict) or not isinstance(e.get('label'), str) or not all(
+                isinstance(e.get(k), str) and e[k].startswith('/') for k in ('source', 'kept')):
+            raise Refused('R-f: a receipt entry is malformed')
+        try:
+            os.lstat(e['source'])
+            raise Refused('R-f: the moved source %s is present again' % e['label'])
+        except FileNotFoundError:
+            pass
+        except OSError:
+            raise Refused('R-f: the moved source %s cannot be looked up' % e['label']) from None
+        try:
+            info = os.lstat(e['kept'])
+        except OSError:
+            raise Refused('R-f: the kept entry %s is missing' % e['label']) from None
+        kind = 'link' if stat.S_ISLNK(info.st_mode) else 'file' if stat.S_ISREG(info.st_mode) else 'other'
+        if kind != e.get('type') or info.st_ino != e.get('ino') or (kind == 'file' and info.st_size != e.get('size')):
+            raise Refused('R-f: the kept entry %s is not at its recorded identity' % e['label'])
+        if kind == 'link' and os.readlink(e['kept']) != e.get('linkTarget'):
+            raise Refused('R-f: the kept link %s has another target' % e['label'])
+        if kind == 'file':
+            fd = os.open(e['kept'], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            try:
+                content = b''.join(iter(lambda: os.read(fd, 1 << 20), b''))
+            finally:
+                os.close(fd)
+            if sha_bytes(content) != e.get('sha256'):
+                raise Refused('R-f: the kept file %s has another content' % e['label'])
+        if e['label'].startswith('workspace:'):
+            moved.add(e['label'].split(':', 1)[1])
+    return moved
+
+
 def prepare(action, unit, ref, ref_sha, reserve):
     """The guard (§3 / §4, or the restart guard), then the facts every later step needs (CTX, g5-start's gen and the
     residue-aware workspace names). Refused on any failure (rc 3, nothing changed)."""
     if action == 'run' and unit not in UNITS:
         raise Refused('%s is not a runnable unit (V6-2 runs as V6-2a / V6-2b)' % unit)
-    facts = restart_guard(ref, ref_sha) if action == 'restart' else guard(unit, ref, ref_sha, reserve, TABLE)
+    if action == 'restart':
+        facts = restart_guard(ref, ref_sha)
+    elif action in ('start-fix', 'check-fix'):                                                        # r5 §4.2
+        facts = fixstart_guard(ref, ref_sha, CTX.get('fcSha'))
+    else:
+        facts = guard(unit, ref, ref_sha, reserve, TABLE)
     record = {} if facts['kind'] == 'bootstrap' else read_json(ref, 'run.json', ref_sha)
     names = reference_names(facts['kind'], record)
+    if action in ('run', 'check') and facts['kind'] == 'fixstart':                                  # r5 §4.3 (R-f)
+        moved = receipt_check(CTX.get('receipt'))
+        if not moved <= set(names):
+            raise Refused('R-f: the receipt moved a workspace name the reference does not hold')
+        names = tuple(n for n in names if n not in moved)
     link = v610_link(record) if unit == 'V6-8' else None
     if facts['kind'] == 'bootstrap':
         previous = read_json(PAS2_RUN, 'run.json', PAS2_PINS['run.json']).get('pod')
@@ -2146,7 +2365,8 @@ def prepare(action, unit, ref, ref_sha, reserve):
     if not isinstance(previous, str) or not previous:
         raise Refused('the reference records no previous Pod')
     CTX.update(action=action, unit=unit, ref=ref, refSha=ref_sha, reserve=reserve, gen=facts['gen'],
-               digest=facts['digest'], kind=facts['kind'], previous=previous, names=names, link=link)
+               digest=facts['digest'], kind=facts['kind'], previous=previous, names=names, link=link,
+               imageBefore=facts.get('imageBefore'), imageAfter=facts.get('imageAfter'))
     G5S.GEN_G5, G5S.KNOWN_NAMES = facts['gen'], names
     return facts
 
@@ -2183,8 +2403,8 @@ def guard_unit(action):
 
 def open_unit(action):
     unit = CTX['unit']
-    name = ('v6-item-restart-%s' if action == 'restart' else 'v6-item-' + unit + '-%s') % time.strftime(
-        '%Y%m%dT%H%M%SZ', time.gmtime())
+    name = ('v6-item-restart-%s' if action == 'restart' else 'v6-item-fixstart-%s' if action == 'start-fix'
+            else 'v6-item-' + unit + '-%s') % time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
     ev = os.path.join(P.EVIDENCE, name)
     os.mkdir(ev, 0o700)
     fd = os.open(os.path.join(ev, 'out.txt'), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -2193,12 +2413,18 @@ def open_unit(action):
             'reference': {'name': CTX['ref'], 'sha256': CTX['refSha'], 'kind': CTX['kind']},
             'scripts': {'v6Item': OWN_SHA, 'g5s': G5S_SHA, 'g3': G5S.G3_SHA, 'base': G3.BASE_SHA, 'v6': G3.V6_SHA,
                         'observe': PAO_SHA}, 'expected': G3.EXPECTED['sha'], 'image': P.RUNNER_REF,
-            'workspaceBefore': list(CTX['names'])}
+            'workspaceBefore': list(CTX['names']), 'expectedSource': dict(EXPECTED_SOURCE)}
     if action == 'restart':
         head['checked'] = {'name': CTX['ref'], 'sha256': CTX['refSha'], 'digest': CTX['digest']}
+    elif action == 'start-fix':                                                                       # r5 §4.2
+        head.update(checked={'name': CTX['ref'], 'sha256': CTX['refSha'], 'digest': CTX['digest']},
+                    failedRef=CTX['ref'], failedSha=CTX['refSha'], imageBefore=CTX['imageBefore'],
+                    imageAfter=CTX['imageAfter'], fcExpected=CTX['fcSha'])
     else:
         head.update(item=unit, allowance=allowance(unit), reserve={'failedRef': CTX['reserve'][0], 'failedSha': CTX[
             'reserve'][1]} if CTX['reserve'] else None, prompt=PROMPT_SHA.get(unit), **EXPECTED_CLASS.get(unit, {}))
+        if CTX.get('kind') == 'fixstart':                                       # r5 §4.3: the receipt this run relied on
+            head['receipt'] = CTX.get('receipt')
         if unit == 'V6-2b':
             head['limit'] = V62B_LIMIT
     P.record(ev, **head)
@@ -2604,6 +2830,13 @@ def run_unit(ev, verdicts):
             raise P.Stop(3, 'V6-8: the V6-10 conversation is unreadable; nothing changed') from None
         if approval_hash(thread_before) != link['threadHash']:
             raise P.Stop(3, 'V6-8: the thread is not the V6-10 thread; nothing changed')
+    details = effect_details(unit, effect_roots()) if unit in SPECS else {}   # r5 §2.5: every target, before the turn
+    CTX.setdefault('effects', {})['before'] = {label: d['state'] for label, d in details.items()}
+    P.record(ev, before={'effects': CTX['effects']['before'], 'details': details})
+    refused = before_refusal(details)
+    if refused:
+        raise P.Stop(3, 'outside target(s) present or unknown before the turn (%s): an effect there could not be '
+                        'attributed; nothing changed' % ', '.join(refused))
     try:
         raw, docs = ledger_snapshot()                   # §3: a fresh read right before the session, then recorded
         if G4.canonical(docs[BUNDLE]) != CTX['digest'] or raw['resources-6'] != RES6_PIN:
@@ -2790,10 +3023,105 @@ def action_restart(ev, verdicts):
         raise P.Stop(verdict['rc'], 'V6-7 restart: %s' % verdict['class'])
 
 
-def load_turn():
-    """g5-start (and through it g3-start, v6pre-turns, v6-turns) at their pins, wired with the PA expected file at the
-    sha the accepted pas2 run.json records (D5); this file's guard, opener, actions, gate, claim, api and segment
-    recorders installed; a self-check of the wiring. SystemExit on any refusal (rc 3, nothing done)."""
+EXPECTED_SOURCE = {}
+
+
+def fc_binding_problem(fc, pa):
+    """r5 §3.1: None, or why fc-expected.json does not bind to the pas2 plan: the same keys, version fc-expected-r0, a
+    digest newImage other than pa's, oldPlanSha256 = pa's newPlanSha256 (the plan P-A installed), a new plan digest,
+    and the others / Deployments / tool image unchanged; only newImage, newPlanSha256, the old image / plan and the
+    version may differ."""
+    if not isinstance(fc, dict) or not isinstance(pa, dict) or set(fc) != set(pa):
+        return 'keys differ from the pas2 expected file'
+    if fc.get('version') != 'fc-expected-r0':
+        return 'version is not fc-expected-r0'
+    image = fc.get('newImage')
+    if not (isinstance(image, str) and re.fullmatch(r'docker\.io/library/anxious-dev-runner@sha256:[0-9a-f]{64}', image)
+            and image != pa.get('newImage')):
+        return 'newImage is not a digest reference other than the pas2 image'
+    if fc.get('oldPlanSha256') != pa.get('newPlanSha256') or fc.get('newPlanSha256') == fc.get('oldPlanSha256'):
+        return 'the old plan is not the pas2 plan, or the new plan equals it'
+    for key in ('others', 'deployments', 'toolImage'):
+        if fc.get(key) != pa.get(key):
+            return '%s differ from the pas2 expected file' % key
+    return None
+
+
+def expected_source(action, fc_sha, pa_sha):
+    """r5 §3.1: (path, sha) of the expected file this action wires. start-fix / check-fix: fc-expected.json at the
+    go's sha. Otherwise: once any fixstart has ended with rc 0, the latest such fixstart's recorded fcExpected (never a
+    fallback to pas2); a fixstart that ended with any rc but 0 / 3, or without exit.json, stops the chain; with no
+    rc-0 fixstart, the pas2 expected file (D5)."""
+    if action in ('start-fix', 'check-fix'):
+        return FC_EXPECTED_PATH, fc_sha
+    done = []
+    try:
+        for name in units():
+            if FIXSTART_RUN.fullmatch(name):
+                end = read_json(name, 'exit.json')
+                if end.get('rc') == 0:
+                    done.append(read_json(name, 'run.json'))
+                elif end.get('rc') != 3:
+                    raise SystemExit('the fixstart %s ended with rc %r: the chain stops for a look and a PM decision; '
+                                     'nothing done' % (name, end.get('rc')))
+    except Refused as refused:
+        raise SystemExit('a fixstart record is unreadable (%s); nothing done' % refused.message) from None
+    if done:
+        sha = done[-1].get('fcExpected')
+        if not (isinstance(sha, str) and HEX.fullmatch(sha)):
+            raise SystemExit('the latest fixstart records no fcExpected sha; nothing done (no pas2 fallback)')
+        return FC_EXPECTED_PATH, sha
+    return PA_EXPECTED_PATH, pa_sha
+
+
+def read_pinned_json(path, sha):
+    """One read of an expected file at its sha256, or SystemExit (rc 3, nothing done). No file-type check here: the
+    regular-file (lstat) check is G3.load_expected's, run next on the wired file only."""
+    try:
+        data = open(path, 'rb').read()
+    except OSError:
+        raise SystemExit('%s is unreadable; nothing done' % path) from None
+    if sha_bytes(data) != sha:
+        raise SystemExit('%s is not at %s; nothing done' % (path, sha[:8]))
+    try:
+        return json.loads(data)
+    except ValueError:
+        raise SystemExit('%s is not JSON; nothing done' % path) from None
+
+
+def action_start_fix(ev, verdicts):
+    """r5 §4.2: the model-free start on the fixed runner image: g5-start's action_g5s unchanged (precheck, session,
+    entry at gen + 1, the reads with the CODEX_HOME judge per read, revoke, the natural idle stop, the ledgers
+    unchanged), no V6-7 judge, no claim; the workspace names after. A base stop keeps its rc (no rerun: a later
+    start-fix is refused while this fixstart's rc is not 3)."""
+    G5S.CODEX_READS.clear()
+    try:
+        G5S.action_g5s(ev, verdicts)
+    finally:
+        P.record(ev, workspaceAfter=workspace_names())
+    verdicts['start-fix'] = 'started and stopped on %s' % image_digest(P.RUNNER_REF)
+
+
+def action_check_fix(ref, ref_sha, fc_sha):
+    """r5 §4.2, read-only: start-fix's guard and g5-start's precheck by the same code; rc 0 only when both would pass;
+    writes nothing."""
+    try:
+        facts = prepare('check-fix', 'fixstart', ref, ref_sha, None)
+        G5S.pre_g5()
+    except (Refused, P.Stop) as refused:
+        say({'check': 'refused', 'stage': 'guard', 'reason': refused.message})
+        return 3
+    say({'check': 'would start', 'gen': facts['gen'], 'imageBefore': facts['imageBefore'],
+         'imageAfter': facts['imageAfter'], 'fcExpected': fc_sha, 'workspaceNames': len(CTX['names'])})
+    return 0
+
+
+def load_turn(action='run', fc_sha=None):
+    """g5-start (and through it g3-start, v6pre-turns, v6-turns) at their pins, wired with expected_source's file: the
+    PA expected file at the sha the accepted pas2 run.json records (D5), or (r5 §3.1) fc-expected.json. With
+    fc-expected, the PA expected file is still read at its pas2 sha, for fc_binding_problem only; it is never wired.
+    This file's guard, opener, actions, gate, claim, api and segment recorders installed; a self-check of the wiring.
+    SystemExit on any refusal (rc 3, nothing done)."""
     global G5S, G3, P, V6, TABLE, BASE_NAMES
     try:
         expected = read_json(PAS2_RUN, 'run.json', PAS2_PINS['run.json']).get('expected')
@@ -2801,11 +3129,20 @@ def load_turn():
         raise SystemExit(refused.message) from None
     if not isinstance(expected, str) or not HEX.fullmatch(expected):
         raise SystemExit('the pas2 run.json records no expected sha; nothing done')
+    path, sha = expected_source(action, fc_sha, expected)                       # r5 §3.1
+    if path == FC_EXPECTED_PATH:
+        problem = fc_binding_problem(read_pinned_json(FC_EXPECTED_PATH, sha),
+                                     read_pinned_json(PA_EXPECTED_PATH, expected))
+        if problem:
+            raise SystemExit('fc-expected.json does not bind to the pas2 plan (%s); nothing done' % problem)
     G5S = load_pinned(local(G5S_PATH), G5S_SHA, 'g5_start')
     G5S.G3 = load_pinned(local(G5S.G3_PATH), G5S.G3_SHA, 'g3_start')
     G5S.G3.BASE_PATH, G5S.G3.V6_PATH = local(G5S.G3.BASE_PATH), local(G5S.G3.V6_PATH)  # read by wire's loader
-    G5S.EXPECTED_FILE = G5S.G3.EXPECTED_FILE = PA_EXPECTED_PATH
-    image, plan = G5S.G3.load_expected(expected)
+    G5S.EXPECTED_FILE = G5S.G3.EXPECTED_FILE = path
+    image, plan = G5S.G3.load_expected(sha)
+    EXPECTED_SOURCE.clear()
+    EXPECTED_SOURCE.update(file=path, sha=sha, image=image)
+    expected = sha
     G5S.SCRIPT_SHA, G5S.ACTION = OWN_SHA, 'v6-item'
     G5S.guard_g5, G5S.open_evidence_g5, G5S.reference_g5 = guard_unit, open_unit, reference_turn
     BASE_NAMES = tuple(G5S.KNOWN_NAMES)
@@ -2819,10 +3156,10 @@ def load_turn():
     P.claim = make_unit_claim(P.claim)
     P.segment = make_recorded_segment(P.segment)
     P.guard, P.open_evidence = guard_unit, open_unit
-    P.ACTIONS = {'run': action_run, 'restart': action_restart}
+    P.ACTIONS = {'run': action_run, 'restart': action_restart, 'start-fix': action_start_fix}
     assert (P.guard is guard_unit and P.open_evidence is open_unit and G3.ledgers_ok is ledgers_ok_turn
             and G5S.P is P and G3.P is P and V6.P is P and P.RUNNER_REF == image
-            and G3.EXPECTED_FILE == PA_EXPECTED_PATH and G3.EXPECTED['sha'] == expected), 'v6-item wiring self-check'
+            and G3.EXPECTED_FILE == path and G3.EXPECTED['sha'] == expected == sha), 'v6-item wiring self-check'
 
 
 # Actions ----------------------------------------------------------------------------------------------------------
@@ -2854,13 +3191,18 @@ def action_bootstrap(manifest_sha):
     return 0
 
 
-def action_check(unit, ref, ref_sha, reserve):
+def action_check(unit, ref, ref_sha, reserve, receipt=None):
     """Read-only (bundle C): the same guard and precheck as `run` by the same code (prepare: §3 / §4, the reference's
     workspace names, V6-8's V6-10 link; g5-start's pre_g5: gen - 1 idle, plan, ledgers, host, names, CODEX_HOME), the
-    V6-10 fixture precheck and V6-8's conversation / thread. rc 0 only when all would pass; writes nothing."""
+    V6-10 fixture precheck and V6-8's conversation / thread; r5: the R-f receipt and the §2.5 `before` refusal. rc 0
+    only when all would pass; writes nothing."""
+    CTX['receipt'] = receipt
     try:
         facts = prepare('run', unit, ref, ref_sha, reserve)
         G5S.pre_g5()
+        refused = before_refusal(effect_details(unit, effect_roots())) if unit in SPECS else []
+        if refused:
+            raise Refused('outside target(s) present or unknown before the turn (%s)' % ', '.join(refused))
         fixture = fixture_precheck(public_look, anonymous_get) if unit == 'V6-10' else None
         if unit == 'V6-8':
             state, thread = conversation_state(CTX['link']['conversation'])
@@ -2875,9 +3217,10 @@ def action_check(unit, ref, ref_sha, reserve):
     return 0
 
 
-ACTIONS = ('look', 'bootstrap', 'check', 'run', 'restart')
+ACTIONS = ('look', 'bootstrap', 'check', 'run', 'restart', 'start-fix', 'check-fix')
 USAGE = ('usage: v6-item.py look | bootstrap <sha256 of bootstrap-pa2.json> | check|run <unit> <ref> <ref sha256> '
-         '[--reserve <failed ref> <failed sha256>] | restart <V6-7 ref> <ref sha256>')
+         '[--reserve <failed ref> <failed sha256> [--receipt <receipt.json sha256>]] | restart <V6-7 ref> <ref sha256> '
+         '| start-fix|check-fix <failed X2 ref> <its run.json sha256> <fc-expected.json sha256>')
 
 
 def parse_args(argv):
@@ -2889,11 +3232,16 @@ def parse_args(argv):
         return 'bootstrap', (argv[2],)
     if len(argv) == 4 and argv[1] == 'restart' and HEX.fullmatch(argv[3]):
         return 'restart', (argv[2], argv[3])
-    if len(argv) in (5, 8) and argv[1] in ('check', 'run') and argv[2] in UNITS and HEX.fullmatch(argv[4]):
+    if len(argv) == 5 and argv[1] in ('start-fix', 'check-fix') and HEX.fullmatch(argv[3]) and HEX.fullmatch(argv[4]):
+        return argv[1], (argv[2], argv[3], argv[4])                                                   # r5 §4.2
+    if len(argv) in (5, 8, 10) and argv[1] in ('check', 'run') and argv[2] in UNITS and HEX.fullmatch(argv[4]):
         if len(argv) == 5:
-            return argv[1], (argv[2], argv[3], argv[4], None)
+            return argv[1], (argv[2], argv[3], argv[4], None, None)
         if argv[5] == '--reserve' and HEX.fullmatch(argv[7]):
-            return argv[1], (argv[2], argv[3], argv[4], (argv[6], argv[7]))
+            if len(argv) == 8:
+                return argv[1], (argv[2], argv[3], argv[4], (argv[6], argv[7]), None)
+            if argv[8] == '--receipt' and HEX.fullmatch(argv[9]):                                      # r5 §4.3
+                return argv[1], (argv[2], argv[3], argv[4], (argv[6], argv[7]), argv[9])
     return None
 
 
@@ -2903,7 +3251,7 @@ def main(argv):
     if args is None:
         print(USAGE)
         return 2
-    if args[0] in ('run', 'restart') and turn_missing():
+    if args[0] in ('run', 'restart', 'start-fix') and turn_missing():
         print('v6-item.py: %s is not available: %s' % (args[0], ', '.join(turn_missing())))
         return 2
     if os.geteuid() != 0:
@@ -2929,16 +3277,21 @@ def main(argv):
     SEG.clear()
     CLAIM['id'] = None
     try:  # bundle C: the turn modules at their pins, wired; a refusal here is rc 3, nothing done
-        load_turn()
+        load_turn(action, rest[2] if action in ('start-fix', 'check-fix') else None)
     except (SystemExit, AssertionError) as refused:
         print(refused)
         return 3
     if action == 'check':
         return action_check(*rest)
+    if action == 'check-fix':
+        CTX['fcSha'] = rest[2]
+        return action_check_fix(*rest)
     if action == 'restart':
         CTX.update(unit='restart', ref=rest[0], refSha=rest[1], reserve=None)
+    elif action == 'start-fix':
+        CTX.update(unit='fixstart', ref=rest[0], refSha=rest[1], reserve=None, fcSha=rest[2])
     else:
-        CTX.update(unit=rest[0], ref=rest[1], refSha=rest[2], reserve=rest[3])
+        CTX.update(unit=rest[0], ref=rest[1], refSha=rest[2], reserve=rest[3], receipt=rest[4])
     return P.main([argv[0], action])
 
 

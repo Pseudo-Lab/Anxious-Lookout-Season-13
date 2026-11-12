@@ -1,7 +1,7 @@
 # guest, as root; stdin = one reviewed v6-item file; $1 = its guest name. Creates it new in /root/native68, root
 # 0600; never overwrites, never touches another file (pa-doc-install.sh 0fcbed66…, committed 7da3bbb, with the v6-item
-# names and bases). r2 (bundle C): v6-item.py is the bundle C file, pinned here (the bundle A file must first be kept
-# by v6-item-keep.sh; this script refuses while v6-item.py exists); bootstrap-pa2.json as before (its sha256 is $2,
+# names and bases). r3 (change D, design r5): v6-item.py is the change D file, pinned here (the C r1 file must first be kept
+# by v6-item-keep.sh r2; this script refuses while v6-item.py exists); bootstrap-pa2.json as before (its sha256 is $2,
 # from review's approval of the manifest). The bases v6-item.py loads (g4b-turn.py, g4-turn.py, v6pre-turns.py,
 # v6-turns.py, pa-observe.py r6, and r2: g5-start.py, g3-start.py) and pa-doc-content.json must be at their pins
 # before and after.
@@ -19,7 +19,7 @@ CONTENT=c5e66f195ab916dacab7b3c8d739bd8d3ef6a27a693d01cfcdfa36129d3f0eac
 G5START=2856cd2962e0a95dbdc27440946ce9e6b671fab515dfddab8bc73608581d3920
 G3START=f61f6e787bd9f5affa040b378be3fb0d51ca17114c754c84834397f8dda0a67b
 case "${1:-}" in
-  v6-item.py) E=7ef21595c7f7f0fe423f41ee0bf085351b18acc9002b054cef623607f39eb203; [ $# = 1 ] || { echo "usage; nothing changed"; exit 2; } ;;
+  v6-item.py) E=77b1a3919c9246706449c2c76d863e83da4dbe3401b2c90a5293bea25db07af5; [ $# = 1 ] || { echo "usage; nothing changed"; exit 2; } ;;
   bootstrap-pa2.json) [ $# = 2 ] && printf '%s\n' "$2" | grep -qx '[0-9a-f]\{64\}' || { echo "usage: bootstrap-pa2.json <reviewed sha256>; nothing changed"; exit 2; }; E=$2 ;;
   *) echo "name not allowed; nothing changed"; exit 2 ;;
 esac
