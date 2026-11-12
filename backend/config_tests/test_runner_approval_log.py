@@ -197,7 +197,13 @@ def test_l4_reasons_match_the_existing_decision_cases(native, turn, records):
     assert {line['reason'] for line in by_stage(records(), 'decided')} <= REASONS
 
 
-def test_l4_file_change_rules_and_reasons(native, turn, records):
+def test_l4_file_change_rules_and_reasons(native, turn, records, monkeypatch):
+    # #68 X2 (stated diff): an accepted file change needs its item/started changes inside the workspace
+    monkeypatch.setattr(policy, 'lstat', lambda path: (_ for _ in ()).throw(FileNotFoundError(path)) if path != WORK
+                        else Path('/').lstat())
+    native.file_change_started({'threadId': 'thread', 'turnId': 'turn', 'item': {
+        'type': 'fileChange', 'id': 'patch-1', 'status': 'inProgress',
+        'changes': [{'path': WORK + '/notes.md', 'kind': {'type': 'add'}, 'diff': '+x\n'}]}}, turn)
     native.reply_approval(file_change(), turn)
     native.reply_approval(file_change(itemId='patch-2', grantRoot='/state'), turn)
     assert decisions(native) == [('request-patch-1', 'accept'), ('request-patch-2', 'decline')]

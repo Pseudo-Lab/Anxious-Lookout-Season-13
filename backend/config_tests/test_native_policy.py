@@ -303,6 +303,37 @@ def file_change(**changes):
     return {'id': 'request-' + value['itemId'], 'method': 'item/fileChange/requestApproval', 'params': value}
 
 
+# #68 X2: the fileChange item/started notification (0.160.1 v2: FileUpdateChange {path, kind, diff}) ---------------
+def started_message(item='patch-1', changes='default', thread='thread', turn_id='turn', **extra):
+    body = dict({'type': 'fileChange', 'id': item, 'status': 'inProgress',
+                 'changes': changes if not (isinstance(changes, str) and changes == 'default') else [
+                     {'path': WORK + '/notes.md', 'kind': {'type': 'add'}, 'diff': '+x\n'}]}, **extra)
+    return {'method': 'item/started', 'params': {'threadId': thread, 'turnId': turn_id, 'startedAtMs': 1,
+                                                 'item': body}}
+
+
+def started(native, turn, **kw):
+    native.file_change_started(started_message(**kw)['params'], turn)
+
+
+@pytest.fixture
+def tree(monkeypatch):
+    """The runner's own view of the workspace: WORK a directory; `tree` maps paths below it to 'dir' / 'file' /
+    'link' (anything else absent); 'error' raises a lookup failure."""
+    entries = {WORK: 'dir'}
+    modes = {'dir': 0o040755, 'file': 0o100644, 'link': 0o120777}
+
+    def fake(path):
+        kind = entries.get(path)
+        if kind is None:
+            raise FileNotFoundError(path)
+        if kind == 'error':
+            raise PermissionError(path)
+        return os.stat_result((modes[kind], 1, 1, 1, 0, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(policy, 'lstat', fake)
+    return entries
+
+
 @pytest.fixture
 def native():
     value = Native.__new__(Native)
@@ -385,7 +416,8 @@ def test_late_request_for_finished_turn_is_declined(native, turn):
     assert native.authorized == []
 
 
-def test_file_change_has_its_own_rules(native, turn):
+def test_file_change_has_its_own_rules(native, turn, tree):
+    started(native, turn)  # #68 X2 (stated diff): the item's changes come first
     native.reply_approval(file_change(), turn)
     assert native.sent[-1] == {'id': 'request-patch-1', 'result': {'decision': 'accept'}}
     assert native.authorized == [('turn', {})]
@@ -396,9 +428,10 @@ def test_file_change_has_its_own_rules(native, turn):
     assert len(native.authorized) == 1
 
 
-def test_requests_before_turn_start_response_wait_then_bind(native, turn):
+def test_requests_before_turn_start_response_wait_then_bind(native, turn, tree):
     turn['turnId'] = None
     native.messages.put(command())
+    native.messages.put(started_message())  # #68 X2 (stated diff): item/started precedes its approval (0.160.1)
     native.messages.put(file_change())
     native.messages.put({'id': 7, 'result': {'turn': {'id': 'turn'}}})
     started = native.rpc('turn/start', {'threadId': 'thread', 'input': []}, turn)
@@ -534,3 +567,172 @@ def test_local_refusals_name_the_place(local, caplog):
         with pytest.raises(CodexFailure):
             local.check_local()
     assert '"check": "local.workspace_dot_codex"' in caplog.text and str(local.work) not in caplog.text
+
+
+# --- #68 X2: file changes are decided from their item/started paths ------------------------------------------------
+def patch_decision(native, turn, changes, item='patch-1'):
+    started(native, turn, item=item, changes=changes)
+    native.reply_approval(file_change(itemId=item), turn)
+    return decision(native, 'request-' + item)
+
+
+def change(path, kind='add', move=None):
+    return {'path': path, 'kind': {'type': kind, **({'move_path': move} if kind == 'update' else {})}, 'diff': 'x'}
+
+
+@pytest.mark.parametrize('path', ['/state/codex/v6-x2-a', '/state/v6-x2-c', '/state/v6-x2-d', '/control/v6-x2-b'])
+def test_x2_the_written_outside_paths_are_declined_before_any_permission_check(native, turn, tree, path):
+    """The T1 X2 cells 1 / 3 / 4 (and 2): Codex sends them absolute and lexically normalised (`../v6-x2-d` from the
+    workspace is /state/v6-x2-d); accepted, 0.160.1 granted their parent directories (look da0ca737)."""
+    assert patch_decision(native, turn, [change(path)]) == ['decline'] and native.authorized == []
+
+
+@pytest.mark.parametrize('kinds', [{WORK + '/v6-x2-link': 'link'},
+                                   {WORK + '/sub': 'link'},
+                                   {WORK + '/sub': 'file'},
+                                   {WORK + '/sub': 'dir', WORK + '/sub/v6-x2-e': 'link'},
+                                   {WORK + '/sub': 'error'}])
+def test_a_link_a_file_on_the_way_or_a_failed_lookup_is_declined(native, turn, tree, kinds):
+    tree.update(kinds)
+    target = WORK + '/v6-x2-link/v6-x2-e' if WORK + '/v6-x2-link' in kinds else WORK + '/sub/v6-x2-e'
+    assert patch_decision(native, turn, [change(target)]) == ['decline'] and native.authorized == []
+
+
+def test_a_workspace_that_is_not_a_directory_declines(native, turn, tree):
+    tree[WORK] = 'link'
+    assert patch_decision(native, turn, [change(WORK + '/notes.md')]) == ['decline']
+
+
+@pytest.mark.parametrize('path', [WORK + '/.codex/config.toml', WORK + '/.git/config', WORK + '/.agents/x',
+                                  WORK + '/.aws/credentials', WORK + '/sub/.git/x', WORK + '/.codex'])
+def test_codex_read_only_project_subpaths_are_declined(native, turn, tree, path):
+    """0.160.1 makes .git / .agents / .codex / .aws read-only project-root subpaths (permissions.rs:860-863), so a
+    patch there would be granted its parent too; declined (any depth, conservatively)."""
+    assert patch_decision(native, turn, [change(path)]) == ['decline']
+
+
+@pytest.mark.parametrize('path', [WORK, WORK + '/', WORK + '/a/../b', WORK + '/./b', WORK + '//b', 'notes.md',
+                                  '/state/workspacex/b', '/state/workspacexb', WORK + '/b\x00', WORK + '/b\ufffd', 7, None])
+def test_paths_that_are_not_plainly_inside_are_declined(native, turn, tree, path):
+    assert patch_decision(native, turn, [{'path': path, 'kind': {'type': 'add'}, 'diff': 'x'}]) == ['decline']
+
+
+def test_a_move_is_judged_on_both_sides(native, turn, tree):
+    assert patch_decision(native, turn, [change(WORK + '/a.md', 'update', '/state/codex/a.md')]) == ['decline']
+    assert patch_decision(native, turn, [change('/state/a.md', 'update', WORK + '/a.md')], 'patch-2') == ['decline']
+    assert patch_decision(native, turn, [change(WORK + '/a.md', 'update', WORK + '/b/a.md')], 'patch-3') == ['accept']
+
+
+def test_one_outside_change_declines_the_whole_patch(native, turn, tree):
+    changes = [change(WORK + '/a.md'), change(WORK + '/b.md', 'delete'), change('/state/v6-x2-c')]
+    assert patch_decision(native, turn, changes) == ['decline'] and native.authorized == []
+
+
+@pytest.mark.parametrize('changes', [[], None, {'path': WORK + '/a'}, [{'path': WORK + '/a', 'diff': 'x'}],
+                                     [{'path': WORK + '/a', 'kind': {'type': 'rename'}, 'diff': 'x'}],
+                                     [{'path': WORK + '/a', 'kind': {'type': 'add', 'move_path': None}, 'diff': 'x'}],
+                                     [{'path': WORK + '/a', 'kind': {'type': 'update', 'move_path': 3}, 'diff': 'x'}],
+                                     [{'path': WORK + '/a', 'kind': {'type': 'update', 'movePath': WORK + '/b'},
+                                       'diff': 'x'}],
+                                     [{'path': WORK + '/a', 'kind': {'type': ['add']}, 'diff': 'x'}],
+                                     [{'path': WORK + '/a', 'kind': {}, 'diff': 'x'}],
+                                     [{'path': WORK + '/a', 'kind': 'add', 'diff': 'x'}],
+                                     ['x']])
+def test_malformed_changes_are_declined(native, turn, tree, changes):
+    assert patch_decision(native, turn, changes) == ['decline']
+
+
+@pytest.mark.parametrize('change_', [
+    {'path': WORK + '/a', 'kind': {'type': 'add'}},                                   # diff missing
+    {'path': WORK + '/a', 'kind': {'type': 'add'}, 'diff': None},                     # diff not a string
+    {'path': WORK + '/a', 'kind': {'type': 'add'}, 'diff': b'x'},
+    {'path': WORK + '/a', 'kind': {'type': 'add'}, 'diff': 'x', 'extra': 1},          # an extra top-level key
+    {'path': WORK + '/a', 'kind': {'type': 'add'}, 'diff': 'x', 'move_path': '/state/x'},
+    {'kind': {'type': 'add'}, 'diff': 'x'},                                           # path missing
+])
+def test_the_change_shape_is_exactly_path_kind_diff(native, turn, tree, change_):
+    """Strict: the pinned 0.160.1 FileUpdateChange is exactly {path, kind, diff} with string path / diff; any other
+    top-level shape is declined even when its paths are inside, and the well-formed control is accepted."""
+    assert policy.change_paths([change_]) is None  # declined by the shape rule itself, not by an exception
+    assert patch_decision(native, turn, [change_]) == ['decline'] and native.authorized == []
+    assert patch_decision(native, turn, [change(WORK + '/a')], 'patch-2') == ['accept']
+
+
+@pytest.mark.parametrize('kind', [{'type': ['add']}, {'type': {'add': 1}}, {'type': None}, {}])
+def test_change_paths_returns_none_without_raising_for_a_non_string_kind_type(kind):
+    """r1 raised TypeError for an unhashable type (caught by reply_approval as decline / reason error); r2 declines
+    it as not eligible without an exception."""
+    assert policy.change_paths([{'path': WORK + '/a', 'kind': kind, 'diff': 'x'}]) is None
+
+
+def test_an_update_may_carry_a_null_move_path(native, turn, tree):
+    """0.160.1 serialises update {type, move_path: null} for an in-place update; accepted like an absent move_path."""
+    shape = {'path': WORK + '/a', 'kind': {'type': 'update', 'move_path': None}, 'diff': 'x'}
+    assert patch_decision(native, turn, [shape]) == ['accept']
+
+
+def test_inside_changes_are_accepted_through_the_permission_check(native, turn, tree):
+    tree.update({WORK + '/drafts': 'dir', WORK + '/drafts/a.md': 'file'})
+    changes = [change(WORK + '/drafts/a.md', 'update'), change(WORK + '/drafts/new/b.md'),
+               change(WORK + '/old.md', 'delete')]
+    assert patch_decision(native, turn, changes) == ['accept'] and native.authorized == [('turn', {})]
+
+
+def test_an_approval_without_its_item_is_declined(native, turn, tree):
+    native.reply_approval(file_change(), turn)
+    assert decision(native, 'request-patch-1') == ['decline'] and native.authorized == []
+
+
+@pytest.mark.parametrize('kw', [{'thread': 'other'}, {'turn_id': 'previous'}])
+def test_an_item_of_another_thread_or_turn_does_not_count(native, turn, tree, kw):
+    started(native, turn, **kw)
+    native.reply_approval(file_change(), turn)
+    assert decision(native, 'request-patch-1') == ['decline']
+    if 'thread' in kw:  # another thread's item is never kept at all
+        assert 'patch-1' not in turn.get('fileChanges', {})
+
+
+def test_a_second_item_started_for_the_same_item_declines_it(native, turn, tree):
+    started(native, turn)
+    started(native, turn, changes=[change(WORK + '/other.md')])
+    native.reply_approval(file_change(), turn)
+    assert decision(native, 'request-patch-1') == ['decline']
+
+
+def test_the_retry_after_a_sandbox_denial_is_declined(native, turn, tree):
+    """0.160.1 sends a second approval request with the same itemId after a sandbox denial (orchestrator.rs:415-448);
+    an item is decided once (bound), so the retry is declined."""
+    assert patch_decision(native, turn, [change(WORK + '/a.md')]) == ['accept']
+    again = file_change(); again['id'] = 'request-retry'
+    native.reply_approval(again, turn)
+    assert decision(native, 'request-retry') == ['decline'] and len(native.authorized) == 1
+
+
+def test_beyond_the_kept_items_an_approval_is_declined(native, turn, tree, monkeypatch):
+    monkeypatch.setattr(policy, 'FILE_CHANGE_ITEMS', 2)
+    for i in range(3):
+        started(native, turn, item='patch-%d' % i)
+    for i in range(3):
+        native.reply_approval(file_change(itemId='patch-%d' % i), turn)
+    assert [decision(native, 'request-patch-%d' % i) for i in range(3)] == [['accept'], ['accept'], ['decline']]
+
+
+def test_item_started_is_kept_through_receive_while_the_turn_id_is_pending(native, turn, tree):
+    turn['turnId'] = None
+    native.messages.put(started_message())
+    native.messages.put({'method': 'item/started', 'params': {'threadId': 'thread', 'turnId': 'turn',
+                                                             'item': {'type': 'agentMessage', 'id': 'm'}}})
+    native.receive(turn)
+    native.receive(turn)
+    assert set(turn['fileChanges']) == {'patch-1'} and turn['fileChanges']['patch-1']['turnId'] == 'turn'
+    native.messages.put(started_message(item='patch-9'))
+    native.receive(None)  # outside a turn nothing is kept
+    assert 'patch-9' not in turn['fileChanges']
+
+
+def test_a_kept_item_is_a_copy(native, turn, tree):
+    message = started_message()
+    native.file_change_started(message['params'], turn)
+    message['params']['item']['changes'][0]['path'] = '/state/codex/x'
+    native.reply_approval(file_change(), turn)
+    assert decision(native, 'request-patch-1') == ['accept']

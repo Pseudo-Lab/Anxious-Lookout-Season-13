@@ -20,8 +20,23 @@ and bubblewrap masks a denied ancestor after every read bind, so `thread/start` 
 profile's read roots: `:minimal` and the workspace only, compared exactly by `check_config`, with the cwd and
 workspace roots compared by `check_thread`. The remaining deny entries keep the unsandboxed retry off.
 Recheck all of this before moving the Codex pin (native-shell/README.md "Codex version").
+
+File changes (#68 X2, look da0ca737…): in 0.160.1 an ACCEPTED file change is itself a write grant. For every patch
+path the turn profile cannot write, Codex adds that path's parent directory as a writable path for that patch
+(core/src/tools/handlers/apply_patch.rs:240-289, 549-589; runtimes/apply_patch.rs:87-112). Only the profile's deny
+entries still win (sandboxing/src/policy_transforms.rs:161-194). The writability check and the parent grant are
+lexical (protocol/src/permissions.rs:1007-1049). The approval request carries no paths. Its `item/started` fileChange
+item (same itemId, the same verified action) is emitted and awaited before the approval request
+(handlers/apply_patch.rs:580 before :593). So the runner keeps each item's changes and accepts a file change only
+when every path, and every move destination, is lexically inside the workspace and outside Codex's read-only
+project-root subpaths (.git .agents .codex .aws, protocol/src/permissions.rs:40-43, 860-863). Such a patch gets no
+grant and runs with the turn profile alone. A link component the runner can see, an unknown, duplicate or malformed
+item, or anything else it cannot decide is declined. A link created after the decision cannot widen the sandbox:
+no grant was made, and bwrap binds only the workspace writable.
 """
 import enum
+import os
+import stat
 from pathlib import PurePosixPath
 
 from app.codex_policy import CodexFailure
@@ -229,7 +244,76 @@ def command_eligible(params, turn, work):
             and inside(params.get('cwd'), work) and bound(params, turn))
 
 
-def file_change_eligible(params, turn):
-    """item/fileChange/requestApproval: no `kind`; `grantRoot` asks for extra write access."""
-    return (isinstance(params, dict) and set(params) <= FILE_FIELDS and params.get('grantRoot') is None
-            and bound(params, turn))
+PROTECTED_NAMES = ('.git', '.agents', '.codex', '.aws')  # Codex 0.160.1 read-only project-root subpaths
+CHANGE_KINDS = {'add': {'type'}, 'delete': {'type'}, 'update': {'type', 'move_path'}}
+CHANGE_KEYS = frozenset({'path', 'kind', 'diff'})  # FileUpdateChange, exactly
+FILE_CHANGE_ITEMS = 256  # kept per turn; beyond it an item is not kept, so its approval is declined
+lstat = os.lstat  # the runner's own view of the workspace (the same Pod filesystem); replaced in tests
+
+
+def change_paths(changes):
+    """Every path a fileChange item's changes write: each `path`, and an update's `move_path` destination.
+    None (declined) unless the changes are a non-empty list of exactly the pinned 0.160.1 v2 FileUpdateChange shape:
+    the keys path / kind / diff and nothing else, path and diff strings, kind {type} for add / delete or
+    {type[, move_path]} for update (app-server-protocol v2/item.rs:1140-1145; PatchChangeKind.ts:5). Any other key or
+    form is declined (strict, fail-closed: a shape this rule was not written for is not judged)."""
+    if not isinstance(changes, list) or not changes:
+        return None
+    paths = []
+    for change in changes:
+        kind = change.get('kind') if isinstance(change, dict) else None
+        if (not isinstance(change, dict) or set(change) != CHANGE_KEYS or not isinstance(change['path'], str)
+                or not isinstance(change['diff'], str) or not isinstance(kind, dict)
+                or not isinstance(kind.get('type'), str) or kind['type'] not in CHANGE_KINDS
+                or not set(kind) <= CHANGE_KINDS[kind['type']]):
+            return None
+        paths.append(change['path'])
+        move = kind.get('move_path')
+        if move is not None:
+            if not isinstance(move, str):
+                return None
+            paths.append(move)
+    return paths
+
+
+def writable_path(path, work):
+    """True only for a path Codex grants nothing extra for and the runner sees no link on the way to.
+    The path must be absolute and strictly under `work`, with no empty, '.' or '..' component, no NUL or U+FFFD
+    (a lossy, non-UTF-8 name) and no component named like a protected subpath. Every existing component from
+    `work` down must be a real directory (the last one may be any non-link). A failed lookup declines."""
+    if not isinstance(path, str) or not path.startswith(work + '/') or '\x00' in path or '\ufffd' in path:
+        return False
+    parts = path[len(work) + 1:].split('/')
+    if any(part in ('', '.', '..') or part in PROTECTED_NAMES for part in parts):
+        return False
+    current = work
+    try:
+        info = lstat(current)
+        if not stat.S_ISDIR(info.st_mode):
+            return False
+        for index, part in enumerate(parts):
+            current = current + '/' + part
+            try:
+                info = lstat(current)
+            except FileNotFoundError:
+                return True  # nothing below exists yet: the patch creates it, no link on the way
+            if stat.S_ISLNK(info.st_mode) or (index < len(parts) - 1 and not stat.S_ISDIR(info.st_mode)):
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def file_change_eligible(params, turn, work):
+    """item/fileChange/requestApproval: no `kind`; `grantRoot` asks for extra write access. #68 X2: accepted only
+    when this turn's item/started kept exactly one fileChange item for this itemId (same thread and turn), its
+    changes are well-formed, and every path written is a writable_path."""
+    if not (isinstance(params, dict) and set(params) <= FILE_FIELDS and params.get('grantRoot') is None
+            and bound(params, turn)):
+        return False
+    item = (turn.get('fileChanges') or {}).get(params['itemId'])
+    if (not isinstance(item, dict) or item.get('conflict') or item.get('threadId') != params.get('threadId')
+            or item.get('turnId') != params.get('turnId')):
+        return False
+    paths = change_paths(item.get('changes'))
+    return paths is not None and all(writable_path(path, work) for path in paths)

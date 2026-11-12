@@ -339,7 +339,7 @@ class Native:
                 eligible = policy.command_eligible(params, turn, str(self.work))
                 arguments = {"command": params["command"], "cwd": params["cwd"]} if eligible else None
             else:
-                eligible = policy.file_change_eligible(params, turn)
+                eligible = policy.file_change_eligible(params, turn, str(self.work))
                 arguments = {}
             if isinstance(params, dict) and turn is not None and isinstance(params.get("itemId"), str):
                 turn.setdefault("approvalItems", set()).add(params["itemId"])
@@ -692,6 +692,8 @@ class Native:
                 raise CodexFailure("auth_revoked")
         if message.get("method") in {"turn/started", "turn/updated"}:
             self.ensure_model(message.get("params", {}).get("turn", {}))
+        if message.get("method") == "item/started" and turn:
+            self.file_change_started(message.get("params"), turn)
         if message.get("method") == "turn/completed":
             params = message.get("params", {})
             self.ensure_model(params.get("turn", {}))
@@ -737,6 +739,31 @@ class Native:
                 # No hidden shell/file permission grants or host credential refresh.
                 self.send({"id": message["id"], "error": {"code": -32601, "message": "Interactive capability is unavailable"}})
         return message
+
+    @staticmethod
+    def file_change_started(params, turn):
+        """#68 X2: keep a fileChange item's changes for its approval (native_policy.file_change_eligible). In 0.160.1
+        the item/started notification of a patch is sent before its approval request, with the same itemId and the
+        same verified action. Kept only for this turn's thread. A second item/started for the same id marks the item
+        as a conflict, so its approval is declined. Beyond policy.FILE_CHANGE_ITEMS items nothing more is kept (declined).
+        Never raises."""
+        try:
+            item = params.get("item") if isinstance(params, dict) else None
+            if not isinstance(item, dict) or item.get("type") != "fileChange" or params.get("threadId") != turn["thread"]:
+                return
+            identity = item.get("id")
+            if not isinstance(identity, str) or not identity:
+                return
+            kept = turn.setdefault("fileChanges", {})
+            if identity in kept:
+                kept[identity]["conflict"] = True
+                return
+            if len(kept) >= policy.FILE_CHANGE_ITEMS:
+                return
+            kept[identity] = {"threadId": params.get("threadId"), "turnId": params.get("turnId"),
+                              "changes": json.loads(json.dumps(item.get("changes")))}
+        except Exception:
+            pass
 
     def reply_tool(self, message, turn):
         started = time.monotonic()
