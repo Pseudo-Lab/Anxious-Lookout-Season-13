@@ -17,7 +17,8 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MutableHeaders
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -30,6 +31,7 @@ from .service_access import ServiceAccessAuth
 from .broker_client import BrokerClient, BrokerPull
 from . import dot_codex
 from . import native_policy as policy
+from . import stream as streams
 from .native_policy import Decision
 from app.page_scope import Scope, POLICIES, tool_allowed, turn_prompt, shell_allowed
 
@@ -48,6 +50,11 @@ class Turn(BaseModel):
     @classmethod
     def valid_scope(cls, value):
         return Scope.model_validate(value).model_dump(mode="json", exclude_none=True) if value is not None else None
+
+
+class Interrupt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    requestId: uuid.UUID
 
 
 class IdleCheck(BaseModel):
@@ -162,6 +169,8 @@ def toml_basic_string(text):
 # decide anything, and they hold no command, cwd, path, reason text, argument or token (design P-A r3).
 APPROVAL_KINDS = {"item/commandExecution/requestApproval": "command", "item/fileChange/requestApproval": "fileChange"}
 APPROVAL_STATE_LOCK = threading.Lock()  # guards the lazy creation: the reader thread and the turn thread both record
+# #90: the native notifications the stream buffer reads (backend/runner/stream.py).
+STREAM_METHODS = {"item/started", "item/completed", "item/agentMessage/delta", "item/commandExecution/outputDelta"}
 
 
 def approval_hash(value):
@@ -276,6 +285,9 @@ class Native:
             if entry.get("state") == "running":
                 entry["state"] = "failed"
         self.save()
+        # #90: the in-memory stream buffer. Nothing in it is durable or decides a turn.
+        self.stream = streams.Hub(auth, queue_size=lambda: self.messages.qsize(), work=self.work)
+        self.interrupt_request = None
 
     def launch_process(self):
         self.process = subprocess.Popen(self.command,
@@ -333,6 +345,8 @@ class Native:
         a late request for a finished turn or anything not in the allow lists is declined.
         """
         seq = self.approval_dispatched(message, turn)  # #68 P-A record; never raises, never decides
+        if turn is not None:
+            self.stream_note(message, "requested")  # #90 item.status approval; never raises, never decides
         decision, reason = Decision.DECLINE, 'error'
         try:
             params = message.get("params")
@@ -361,6 +375,8 @@ class Native:
             sent = True
         finally:
             self.approval_sent(seq, sent, before, time.monotonic_ns())
+            if turn is not None:
+                self.stream_note(message, "decided")
 
     # --- #68 P-A approval records (logging only; every failure here is swallowed and shows as an incomplete record) --
 
@@ -565,13 +581,59 @@ class Native:
             if entry.get("projectionVersion") != self.PROJECTION_VERSION or not isinstance(actual, str) or not re.fullmatch(r"[0-9a-f]{64}", actual) or not hmac.compare_digest(expected, actual):
                 raise CodexFailure("policy_refused")
 
-    def store_record(self, session, entry, response, verified_turn_id=None):
+    def store_record(self, session, entry, response, verified_turn_id=None, display_only=None):
         # Polling verifies under this same lock. Publish record and MAC as one
         # state change, including when a worker projects its completed turn.
         with self.state_lock:
-            self._store_record(session, entry, response, verified_turn_id)
+            self._store_record(session, entry, response, verified_turn_id, display_only)
 
-    def _store_record(self, session, entry, response, verified_turn_id):
+    DISPLAY_ONLY_TURN_LIMIT = 512 * 1024
+    DISPLAY_ONLY_LIMIT = 2 * 1024 * 1024
+
+    def merge_display_only(self, record, previous_record, display_only, mismatches):
+        """#90 (design r1 §4, r2 Q3, r3): the partial answer of a user-stopped turn that Codex did not record. Signed
+        with the record (projectionMac), carried over every later projection (thread/read, next turn, restart), and
+        dropped when Codex records the same item id (native wins, D4) or the turn is model-quarantined. Display only:
+        it is not in the Codex thread, so it is never part of a resumed model context."""
+        kept = {turn_id: list(items) for turn_id, items in (previous_record.get("displayOnly") or {}).items()}
+        dropped = list(previous_record.get("displayOnlyDropped") or [])
+        if display_only and display_only[1]:
+            turn_id, items = display_only
+            accepted, size = [], 0
+            for item in items:
+                text = item["text"]
+                while len(text.encode("utf-8", "surrogatepass")) + size > self.DISPLAY_ONLY_TURN_LIMIT and text:
+                    text = text[: len(text) // 2]
+                size += len(text.encode("utf-8", "surrogatepass"))
+                accepted.append({"id": item["id"], "type": "agentMessage", "text": text, "partial": True, "displayOnly": True})
+            kept[turn_id] = accepted
+        turns = {turn.get("id"): turn for turn in record["turns"]}
+        result = {}
+        for turn_id, items in kept.items():
+            if turn_id in mismatches:
+                continue
+            native = {item.get("id") for item in (turns[turn_id].get("items", []) if turn_id in turns else [])}
+            remaining = [item for item in items if item.get("id") not in native]
+            if remaining:
+                result[turn_id] = remaining
+        order = {turn_id: index for index, turn_id in enumerate(turns)}
+
+        def size_of(items):
+            return sum(len(item.get("text", "").encode("utf-8", "surrogatepass")) for item in items)
+        while result and sum(size_of(items) for items in result.values()) > self.DISPLAY_ONLY_LIMIT:
+            oldest = min(result, key=lambda turn_id: order.get(turn_id, -1))
+            del result[oldest]
+            dropped.append(oldest)
+        if self.auth:
+            result = self.auth.sanitize(result)
+        record.pop("displayOnly", None)
+        record.pop("displayOnlyDropped", None)
+        if result:
+            record["displayOnly"] = result
+        if dropped:
+            record["displayOnlyDropped"] = dropped[-1000:]
+
+    def _store_record(self, session, entry, response, verified_turn_id, display_only=None):
         record = self.record(response)
         mismatches = entry.setdefault("modelMismatchTurns", [])
         for previous in entry.get("record", {}).get("turns", []):
@@ -602,6 +664,7 @@ class Native:
             if turn.get("id") in mismatches:
                 turn["modelMismatch"] = True
                 turn["items"] = [{**item, "modelMismatch": True} for item in turn.get("items", []) if item.get("type") != "agentMessage"]
+        self.merge_display_only(record, previous_record, display_only, mismatches)
         self.publish_record(session, entry, record)
 
     def publish_record(self, session, entry, record):
@@ -658,9 +721,29 @@ class Native:
             pass
         self.messages.put({"fatal": True})
 
+    def write_lock(self):
+        """#90: an interrupt is sent from a request thread while the turn thread writes; one line at a time."""
+        lock = getattr(self, '_write_lock', None)
+        if lock is None:
+            with APPROVAL_STATE_LOCK:
+                lock = getattr(self, '_write_lock', None)
+                if lock is None:
+                    lock = self._write_lock = threading.RLock()
+        return lock
+
     def send(self, body):
-        self.process.stdin.write(json.dumps(body, ensure_ascii=True) + "\n")
-        self.process.stdin.flush()
+        with self.write_lock():
+            self.process.stdin.write(json.dumps(body, ensure_ascii=True) + "\n")
+            self.process.stdin.flush()
+
+    def stream_hub(self):
+        """#90: the turn's stream buffer, or None (tests that build Native without __init__)."""
+        return getattr(self, 'stream', None)
+
+    def stream_note(self, message, approval=None):
+        hub = self.stream_hub()
+        if hub is not None:
+            hub.note(message, approval)  # never raises; a failure stops the stream, never the turn
 
     def receive(self, turn=None):
         timeout = 120
@@ -680,13 +763,19 @@ class Native:
             raise RuntimeError("Codex process stopped")
         if message.get("method") == "model/rerouted":
             self.block_model()
+            hub = self.stream_hub()
+            if hub is not None:
+                hub.discard("model_unavailable")  # the record drops this turn's agentMessage; the stream does too
             params = message.get("params", {})
             entry = self.mapping.get(self.active_session)
             if turn and entry and params.get("threadId") == turn["thread"] and not turn.get("turnId"):
                 entry["turn_id"] = params.get("turnId")
-            self.next_id += 1
-            self.send({"id": self.next_id - 1, "method": "turn/interrupt", "params": {"threadId": params.get("threadId"), "turnId": params.get("turnId")}})
+            with self.write_lock():
+                self.next_id += 1
+                self.send({"id": self.next_id - 1, "method": "turn/interrupt", "params": {"threadId": params.get("threadId"), "turnId": params.get("turnId")}})
             raise CodexFailure("model_unavailable")
+        if message.get("method") in STREAM_METHODS and turn:
+            self.stream_note(message)
         if message.get("method") == "account/updated" and self.auth:
             if message.get("params", {}).get("authMode") not in ({'chatgptAuthTokens'} if self.external else {'chatgpt'}):
                 self.blocked_reason = "auth_revoked"
@@ -811,8 +900,9 @@ class Native:
     def rpc(self, method, params, turn=None):
         if self.external:
             self.auth.check(budget=False)
-        identity, self.next_id = self.next_id, self.next_id + 1
-        self.send({"id": identity, "method": method, "params": params})
+        with self.write_lock():  # #90: id allocation and the line, atomic against an interrupt
+            identity, self.next_id = self.next_id, self.next_id + 1
+            self.send({"id": identity, "method": method, "params": params})
         while True:
             result = self.receive(turn)
             if result.get("id") == identity and "method" not in result:
@@ -883,6 +973,29 @@ class Native:
                     self.active_session = None
                 raise RuntimeError("Could not start the reserved turn") from None
 
+    def interrupt(self, session, request):
+        """#90 Stop: only this session's running request. Idempotent; the turn ends through turn/completed."""
+        with self.state_lock:
+            entry = self.mapping.get(session)
+            if (self.closing or self.active_session != session or entry is None or entry.get("request") != request
+                    or entry.get("state") != "running"):
+                return "not_running"
+            self.interrupt_request = (session, request)
+        self.send_interrupt(session, entry)
+        return "interrupting"
+
+    def send_interrupt(self, session, entry):
+        """turn/interrupt once the turn id is known (a stop before turn/start answered waits for it)."""
+        if getattr(self, "interrupt_request", None) != (session, entry.get("request")):
+            return
+        with self.write_lock():
+            if not entry.get("turn_id") or not entry.get("thread") or entry.get("interruptSent"):
+                return
+            entry["interruptSent"] = True
+            self.next_id += 1
+            self.send({"id": self.next_id - 1, "method": "turn/interrupt",
+                       "params": {"threadId": entry["thread"], "turnId": entry["turn_id"]}})
+
     def run_turn(self, session, body):
         started_at = time.monotonic()
         timing = {"toolCalls": 0, "toolMs": 0.0}
@@ -890,6 +1003,9 @@ class Native:
         acquired_at = time.monotonic()
         timing["queueMs"] = (acquired_at - started_at) * 1000
         entry = self.mapping[session]
+        hub = self.stream_hub()
+        if hub is not None:
+            hub.begin(session, entry["request"])
         try:
             self.check_binding()
             kind = (body.scope or {}).get("page", {}).get("kind")
@@ -918,6 +1034,8 @@ class Native:
             turn['thread'] = entry['thread']
             if self.auth:
                 self.auth.secrets.add(body.toolToken)
+            if hub is not None:
+                hub.bind(thread=entry["thread"])
             # Catalog stays thread-persistent; request mode is enforced by both
             # callback boundaries, while page data is only a compact hint.
             content = turn_prompt(body.text, body.scope)
@@ -932,6 +1050,10 @@ class Native:
                 self.blocked_reason = "policy_refused"
                 raise CodexFailure("policy_refused")
             turn["turnId"] = turn_id
+            if hub is not None:
+                hub.bind(turn_id=turn_id)
+                hub.verified()  # the pinned model answered turn/start: structural events may leave
+            self.send_interrupt(session, entry)  # #90: a stop that arrived before the turn id
             for message in turn.pop("pendingTools"):
                 self.reply_server(message, turn)
             entry["turn_id"] = turn_id
@@ -941,17 +1063,26 @@ class Native:
                 self.receive(turn)
             completed = self.completed.pop(key)
             timing["nativeMs"] = (time.monotonic() - model_started_at) * 1000
-            entry["state"] = "idle" if completed.get("status") == "completed" and not self.blocked_reason else "failed"
+            status = completed.get("status")
+            # #90: a user stop (this request's interrupt) ends the turn normally; any other interruption is a failure.
+            interrupted = status == "interrupted" and getattr(self, "interrupt_request", None) == (session, entry["request"])
+            entry["state"] = "idle" if (status == "completed" or interrupted) and not self.blocked_reason else "failed"
+            entry["turnStatus"] = "interrupted" if interrupted and entry["state"] == "idle" else (
+                "completed" if entry["state"] == "idle" else "failed")
             if entry["state"] == "failed":
                 entry["error"] = ERRORS.get(error_reason(completed.get("error")), "codex_failed")
                 if self.external and error_reason(completed.get('error')) in {'auth_revoked', 'auth_expired', 'provider_rate_limited'}:
                     self.blocked_reason = error_reason(completed.get('error'))
                     self.auth.block(self.blocked_reason)
-            elif not self.fixture:
+            elif not self.fixture and status == "completed":
                 self.real_verified = True
+            display_only = None
+            if entry["turnStatus"] == "interrupted" and hub is not None:
+                display_only = (turn_id, hub.partial_items())  # sanitized; kept only if Codex did not record it
             history_started_at = time.monotonic()
             self.store_record(session, entry, self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"],
-                              verified_turn_id=turn_id if entry["state"] == "idle" else None)
+                              verified_turn_id=turn_id if entry["state"] == "idle" and status == "completed" else None,
+                              display_only=display_only)
             timing["historyMs"] = (time.monotonic() - history_started_at) * 1000
         except Exception as failure:
             entry["state"] = "failed"
@@ -961,9 +1092,10 @@ class Native:
                 # Stop only this owned turn; never dispatch a retry after auth refusal.
                 if entry.get('thread') and entry.get('turn_id'):
                     try:
-                        self.next_id += 1
-                        self.send({'id': self.next_id-1, 'method': 'turn/interrupt',
-                                   'params': {'threadId': entry['thread'], 'turnId': entry['turn_id']}})
+                        with self.write_lock():
+                            self.next_id += 1
+                            self.send({'id': self.next_id-1, 'method': 'turn/interrupt',
+                                       'params': {'threadId': entry['thread'], 'turnId': entry['turn_id']}})
                     except Exception:
                         pass
             if isinstance(failure, CodexFailure) and failure.reason in {"auth_revoked", "auth_expired", "model_unavailable", "policy_refused"}:
@@ -985,6 +1117,12 @@ class Native:
                         self.idle_since = time.monotonic()
             finally:
                 self.turn_released(entry)  # #68 P-A: the summary under the mutex, then the release
+                if hub is not None:
+                    try:  # #90: after the record is stored and saved, the stream's last event
+                        hub.complete(entry["state"], entry.get("turnStatus", "failed" if entry["state"] == "failed" else "completed"),
+                                     entry.get("error") if entry["state"] == "failed" else None)
+                    except Exception:
+                        pass
                 timing["totalMs"] = (time.monotonic() - started_at) * 1000
                 logging.getLogger("uvicorn.error").info("runner_turn_timing %s", json.dumps({
                     "requestId": str(body.requestId), "state": entry["state"],
@@ -1015,13 +1153,21 @@ class Native:
         with self.state_lock:
             entry = self.mapping[session]
             state = "running" if self.active_session == session else entry["state"]
+            record = {"turns": entry["record"].get("turns", [])}
+            for key in ("displayOnly", "displayOnlyDropped"):  # #90: signed with the record
+                if key in entry["record"]:
+                    record[key] = entry["record"][key]
+            extra = {"turnStatus": entry["turnStatus"]} if state != "running" and entry.get("turnStatus") else {}
             return {"requestId": entry["request"], "threadId": entry.get("thread"), "turnId": entry.get("turn_id"), "state": state,
-                    "record": {"turns": entry["record"].get("turns", [])}, "errorCode": entry.get("error"), "model": MODEL}
+                    "record": record, "errorCode": entry.get("error"), "model": MODEL, **extra}
 
     def close(self):
         if self.closed:
             return getattr(self, 'clean_shutdown', False)
         self.closing = True
+        hub = self.stream_hub()
+        if hub is not None:
+            hub.close()  # #90: open streams end now, not at their next heartbeat
         active_at_start = self.active_session is not None
         alive_at_start = self.process.poll() is None
         forced = False
@@ -1065,6 +1211,41 @@ class Native:
                         pass
             self.closed = True
         return self.clean_shutdown
+
+
+def end_streams_on_signal(app):
+    """#90: uvicorn waits for every open response before the lifespan shutdown closes native, and the Pod command
+    (policy-pinned, runner_kube.py) sets no graceful timeout. An open event stream would hold a SIGTERM until SIGKILL,
+    skipping the clean native close. Chain SIGTERM/SIGINT: end the streams, then uvicorn's own handler. Returns the
+    restore function. Outside the main thread (TestClient) nothing is installed."""
+    import signal
+    installed = []
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        previous = signal.getsignal(sig)
+        if not callable(previous):
+            continue
+
+        def handler(signum, frame, previous=previous):
+            try:
+                native = app.state.native
+                hub = native.stream_hub() if native is not None else None
+                if hub is not None:
+                    hub.close()
+            finally:
+                previous(signum, frame)
+        try:
+            signal.signal(sig, handler)
+        except ValueError:
+            return lambda: None
+        installed.append((sig, previous))
+
+    def restore():
+        for sig, previous in installed:
+            try:
+                signal.signal(sig, previous)
+            except ValueError:
+                pass
+    return restore
 
 
 def create_app():
@@ -1156,9 +1337,11 @@ def create_app():
                 app.state.auth_failure = failure.reason if isinstance(failure, CodexFailure) else "unavailable"
                 if auth:
                     auth.close()
+            restore = end_streams_on_signal(app)
             try:
                 yield
             finally:
+                restore()
                 with lifecycle_lock:
                     app.state.stopping = True
                 if supply:
@@ -1330,5 +1513,44 @@ def create_app():
     def read(identity: uuid.UUID):
         with lifecycle_lock:
             return read_locked(identity)
+
+    @app.post("/sessions/{identity}/interrupt")
+    def interrupt(identity: uuid.UUID, body: Interrupt):
+        # #90 Stop. Not under lifecycle_lock's turn admission: it only flags this request and writes one line.
+        with lifecycle_lock:
+            if app.state.stopping:
+                return JSONResponse({"ownerId": owner, "error": "codex_runner_stopped"}, status_code=503)
+            native = app.state.native
+            if not native:
+                return JSONResponse({"ownerId": owner, "error": str(CodexFailure(app.state.auth_failure))}, status_code=503)
+        result = native.interrupt(str(identity), str(body.requestId))
+        return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, "sessionId": str(identity),
+                "requestId": str(body.requestId), "state": result}
+
+    @app.get("/sessions/{identity}/events")
+    async def events(identity: uuid.UUID, request: Request, after: str | None = None):
+        """#90 SSE: hello, then the session's turn events (design r2 M2 / r3). Never holds lifecycle_lock."""
+        native = app.state.native
+        if app.state.stopping:
+            return JSONResponse({"ownerId": owner, "error": "codex_runner_stopped"}, status_code=503)
+        if not native or native.stream_hub() is None:
+            return JSONResponse({"ownerId": owner, "error": str(CodexFailure(app.state.auth_failure or "unavailable"))}, status_code=503)
+        try:
+            cursor = streams.parse_cursor(after if after is not None else request.headers.get("last-event-id"))
+        except ValueError:
+            return JSONResponse({"ownerId": owner, "error": "invalid_cursor"}, status_code=400)
+        hub, session = native.stream_hub(), str(identity)
+
+        def open_subscription():  # takes threading locks: off the event loop
+            with native.state_lock:
+                entry = dict(native.mapping.get(session) or {})
+            subscription, initial = hub.subscribe(session, cursor)
+            return subscription, initial, hub.hello(session, entry)
+        subscription, initial, hello = await run_in_threadpool(open_subscription)
+        if subscription is None:
+            return JSONResponse({"ownerId": owner, "error": "stream_limit"}, status_code=429)
+        hello = {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, **hello}
+        return StreamingResponse(streams.stream(hub, subscription, initial, hello, lambda: app.state.stopping),
+                                 media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     return app

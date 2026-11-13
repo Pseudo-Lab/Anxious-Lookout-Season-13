@@ -1,0 +1,838 @@
+"""#90 runner side of the chat stream: an in-memory, bounded event buffer per turn (design r3, issue #90).
+
+Nothing here writes a file or a database, and nothing here decides a turn: every failure stops the stream for the
+turn (`stream.stopped`) and the record path (`thread/read` -> signed projection) stays the source of truth.
+
+Text (agentMessage deltas, command output, the command summary) leaves this module only through the holdback in
+`Holdback.plan` (design r3 B1): the cut never moves right of `len(raw) - (L - 1)`, where L is the longest recorded
+literal, and a detected range that crosses the cut pulls the cut back to its start. Text events are emitted only when
+RUNNER_STREAM_TEXT=true (default false until the B1 review gate and the VM checks).
+"""
+import asyncio
+import json
+import os
+import threading
+import time
+from collections import deque
+
+MARKER = "[redacted]"
+
+# Design r2 M1/M3 and r3: one budget per turn for everything this module retains.
+TURN_BUDGET = 2 * 1024 * 1024
+MAX_ITEMS = 256
+MAX_EVENTS = 2000
+MAX_EVENT_BYTES = 1024 * 1024
+TEXT_LIMIT = 512 * 1024          # agentMessage text kept per turn (UTF-8 bytes, sanitized)
+OUTPUT_ITEM_LIMIT = 16 * 1024    # command output streamed per item
+OUTPUT_TURN_LIMIT = 128 * 1024   # command output streamed per turn
+DELTA_LIMIT = 64 * 1024          # one native delta
+SUMMARY_LIMIT = 2 * 1024         # serialized command summary
+ITEM_ID_LIMIT = 128
+STRUCTURE_DATA_LIMIT = 4 * 1024
+DELTA_DATA_LIMIT = 8 * 1024
+SNAPSHOT_DATA_LIMIT = 64 * 1024
+TEXT_CHUNK = 4 * 1024            # text per item.delta before serialization
+BUCKET_CAPACITY, BUCKET_RATE = 20.0, 10.0
+TEXT_TICK, OUTPUT_TICK = 0.1, 0.5
+GRACE_SECONDS = 120
+MAX_SUBSCRIBERS = 6
+SNAPSHOTS_PER_TURN = 2
+CONNECTION_TURN_BYTES = 6 * 1024 * 1024
+HEARTBEAT_SECONDS = 15
+SAMPLE_SECONDS, SAMPLE_RING = 1.0, 600
+
+STREAMED_KINDS = {"agentMessage", "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall"}
+STATUS_VALUES = {"inProgress", "completed", "failed", "declined", "approval", "interrupted"}
+
+
+def text_enabled():
+    value = os.environ.get("RUNNER_STREAM_TEXT", "false")
+    if value not in {"true", "false"}:
+        raise RuntimeError("RUNNER_STREAM_TEXT must be true or false")
+    return value == "true"
+
+
+def trace_enabled():
+    return os.environ.get("STREAM_TRACE", "false") == "true"
+
+
+def parse_cursor(value):
+    """`<requestId>:<seq>` (the SSE id) or None. Anything else is ValueError (400 at both endpoints)."""
+    if value is None or value == "":
+        return None
+    if len(value) > 80 or value.count(":") != 1:
+        raise ValueError("invalid cursor")
+    request, seq = value.split(":")
+    import uuid
+    if str(uuid.UUID(request)) != request or not seq.isdigit() or len(seq) > 12:
+        raise ValueError("invalid cursor")
+    return request, int(seq)
+
+
+def utf8(value):
+    return len(value.encode("utf-8", "surrogatepass"))
+
+
+def data_bytes(data):
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "surrogatepass")
+
+
+def frame(kind, data, event_id=None):
+    head = ("id: " + event_id + "\n" if event_id else "") + "event: " + kind + "\ndata: "
+    return head.encode() + data_bytes(data) + b"\n\n"
+
+
+class SanitizeUnavailable(Exception):
+    pass
+
+
+class Sanitizer:
+    """The runner auth's projection journal, read for the holdback. `auth=None` (fixture/test runner) has no recorded
+    literals. Any failure is SanitizeUnavailable: the caller stops text for the turn (fail-closed)."""
+
+    def __init__(self, auth):
+        self.auth = auth
+
+    def generation(self):
+        """(journal identity, literal count, L). Computed before and after a plan; a change discards the plan."""
+        if self.auth is None:
+            return (None, 0, 1)
+        for _ in range(3):  # `secrets` can change size while another thread installs a credential
+            try:
+                self.auth.refresh_projection_secrets()  # current secrets enter the journal first
+                journal = self.auth.journal
+                count, longest = journal.generation()
+                current = max((len(value) for value in list(self.auth.secrets) if isinstance(value, str)), default=0)
+                return (id(journal), count, max(longest, current, 1))
+            except RuntimeError:
+                continue
+            except Exception:
+                break
+        raise SanitizeUnavailable()
+
+    def spans(self, value):
+        if self.auth is None or not value:
+            return []
+        try:
+            return self.auth.journal.spans(value)
+        except Exception:
+            raise SanitizeUnavailable() from None
+
+    def whole(self, value):
+        """A complete string (command summary, final text): the same as the record's sanitize."""
+        if self.auth is None:
+            return value
+        try:
+            return self.auth.sanitize(value)
+        except Exception:
+            raise SanitizeUnavailable() from None
+
+
+class Holdback:
+    """One item's unemitted raw text (design r3 B1). Pure: `plan` reads, `commit` applies."""
+
+    def __init__(self):
+        self.raw = ""        # raw[e:] of the design; everything before was emitted (sanitized)
+        self.joined = False  # the last emission ended with a marker whose range ended exactly at e
+        self.version = 0     # commits so far: a plan made before another commit is stale
+
+    def feed(self, text):
+        self.raw += text
+
+    @staticmethod
+    def plan(window, spans, longest, final, joined):
+        """(emitted text, consumed raw chars, joined after). `spans` are the merged ranges of `window`."""
+        c0 = len(window) if final else max(0, len(window) - (max(longest, 1) - 1))
+        cut = c0
+        for start, end in spans:
+            if start < c0 < end:
+                cut = start  # never right: the crossing range waits whole
+                break
+        parts, previous, last_end = [], 0, None
+        for start, end in spans:
+            if end > cut:
+                break
+            parts.append(window[previous:start])
+            if not (start == 0 and joined):
+                parts.append(MARKER)  # a range touching the previous emission's marker merges into it
+            previous, last_end = end, end
+        parts.append(window[previous:cut])
+        if cut == 0:
+            return "", 0, joined
+        return "".join(parts), cut, last_end == cut
+
+    def reset(self):
+        """Drop the unemitted text (discard, fail-closed). Any plan made before is stale."""
+        self.raw, self.joined = "", False
+        self.version += 1
+
+    def commit(self, consumed, joined, window_length):
+        # Only appends happen while a plan runs, so raw[:window_length] is still the planned window.
+        self.raw = self.raw[consumed:] if consumed else self.raw
+        self.version += 1
+        self.joined = joined if consumed else self.joined
+
+
+class Item:
+    def __init__(self, identity, kind):
+        self.identity, self.kind = identity, kind
+        self.status = "inProgress"
+        self.summary = {}
+        self.text = Holdback()
+        self.output = Holdback()
+        self.text_out = []          # emitted sanitized agentMessage text (snapshot / display-only source)
+        self.text_bytes = 0
+        self.unsent = ""            # sanitized text not yet in an event (rate limit)
+        self.output_tail = ""       # last OUTPUT_ITEM_LIMIT bytes of sanitized output (snapshot)
+        self.output_sent = 0
+        self.output_dropped = 0
+        self.output_unsent = ""
+        self.completed = False
+        self.meta_bytes = 0
+
+
+class Turn:
+    def __init__(self, session, request):
+        self.session, self.request = session, request
+        self.thread = None
+        self.turn_id = None
+        self.verified = False
+        self.pre = []               # structural events before the model check passed
+        self.seq = 0
+        self.events = deque()       # (seq, frame bytes)
+        self.event_bytes = 0
+        self.floor = 0              # events with seq <= floor are gone (snapshot instead)
+        self.items, self.order = {}, []
+        self.state = "running"
+        self.result = None
+        self.stopped = None
+        self.discarded = False
+        self.completed_at = None
+        self.tokens, self.refilled = BUCKET_CAPACITY, time.monotonic()
+        self.next_output = 0.0
+        self.raw_bytes = 0
+        self.started_at = time.monotonic()
+        self.stats = {"deltaIn": {}, "eventsOut": 0, "eventBytes": 0, "flushes": 0, "compactions": 0,
+                      "firstDeltaMs": None, "firstEventMs": None, "holdbackPeakChars": 0, "legacyL": 0,
+                      "bufferPeakBytes": 0, "outputDroppedBytes": 0, "subscribersPeak": 0, "staleFlushes": 0}
+        self.samples = deque(maxlen=SAMPLE_RING)
+        self.peaks = {"rssKb": 0, "messagesQueue": 0, "flushLagMs": 0}
+        self.snapshot_cache = None  # (seq, [frames], bytes)
+
+    def retained(self):
+        items = sum(item.meta_bytes + item.text_bytes + utf8(item.unsent) + utf8(item.output_tail)
+                    + utf8(item.output_unsent) + utf8(item.text.raw) + utf8(item.output.raw) for item in self.items.values())
+        snapshot = self.snapshot_cache[2] if self.snapshot_cache else 0
+        return self.event_bytes + items + snapshot
+
+
+class Subscription:
+    def __init__(self, hub, session):
+        self.hub, self.session = hub, session
+        self.request, self.cursor = None, 0
+        self.pending = deque()
+        self.snapshots = {}
+        self.sent = {}
+        self.closed = None
+        self.loop = None
+        self.wake = None
+
+    def notify(self):
+        if self.loop is not None and self.wake is not None:
+            try:
+                self.loop.call_soon_threadsafe(self.wake.set)
+            except RuntimeError:
+                pass
+
+
+class Hub:
+    """Per Native. `lock` is held only for appends and short copies; sanitize runs outside it (design r3 M1)."""
+
+    def __init__(self, auth, queue_size=None, work=None, background=True):
+        self.sanitizer = Sanitizer(auth)
+        self.queue_size = queue_size or (lambda: 0)
+        self.work = work
+        self.lock = threading.RLock()
+        self.active = None
+        self.previous = {}           # session -> completed Turn in grace
+        self.subscribers = set()
+        self.text = text_enabled()
+        self.wakeup = threading.Event()
+        self.closed = False
+        self.thread = None
+        self.background = background  # tests drive flush() themselves
+        # One flush at a time (flusher thread vs the turn thread's final pass): a plan is committed by the pass that made it.
+        self.flush_lock = threading.Lock()
+
+    # --- turn lifecycle (turn thread) -----------------------------------------------------------------------------
+
+    def begin(self, session, request):
+        with self.lock:
+            self.active = Turn(session, request)
+            self.ensure_flusher()
+        self.wakeup.set()
+
+    def bind(self, thread=None, turn_id=None):
+        with self.lock:
+            turn = self.active
+            if turn is not None:
+                turn.thread = thread or turn.thread
+                turn.turn_id = turn_id or turn.turn_id
+
+    def verified(self):
+        """turn/start answered with the pinned model: structural events may leave the buffer."""
+        with self.lock:
+            turn = self.active
+            if turn is None or turn.verified or turn.discarded:
+                return
+            turn.verified = True
+            self.append(turn, "turn.started", {})
+            for kind, data in turn.pre:
+                self.append(turn, kind, data)
+            turn.pre = []
+
+    def discard(self, reason):
+        with self.lock:
+            turn = self.active
+            if turn is None or turn.discarded:
+                return
+            turn.discarded = True
+            for item in turn.items.values():
+                item.text.reset()
+                item.unsent, item.text_out, item.text_bytes = "", [], 0
+            if turn.verified:
+                self.append(turn, "turn.discard", {"reason": reason})
+
+    def stop(self, turn, reason):
+        """Stops streamed text and new item events for the turn; turn events continue. Caller holds the lock."""
+        if turn.stopped is None:
+            turn.stopped = reason
+            if turn.verified:
+                self.append(turn, "stream.stopped", {"reason": reason})
+
+    def complete(self, state, turn_status, error_code):
+        """After the record is stored and saved: the turn's last event."""
+        turn = self.active
+        if turn is None:
+            return
+        self.flush(turn, final=True)
+        with self.lock:
+            if not turn.verified:
+                turn.verified = True
+                self.append(turn, "turn.started", {})
+            turn.state = "completed"
+            turn.result = {"state": state, "turnStatus": turn_status, "errorCode": error_code}
+            self.append(turn, "turn.completed", dict(turn.result))
+            turn.completed_at = time.monotonic()
+            self.previous[turn.session] = turn
+            self.active = None
+        self.log_summary(turn)
+
+    # --- native notifications (turn thread, O(1) work) ------------------------------------------------------------
+
+    def note(self, message, approval=False):
+        try:
+            self._note(message, approval)
+        except Exception:
+            with self.lock:
+                if self.active is not None:
+                    self.stop(self.active, "internal")
+
+    def _note(self, message, approval):
+        method, params = message.get("method"), message.get("params")
+        if not isinstance(params, dict):
+            return
+        with self.lock:
+            turn = self.active
+            if turn is None or turn.discarded or params.get("threadId") != turn.thread:
+                return
+            if turn.turn_id is not None and params.get("turnId") not in (None, turn.turn_id):
+                return
+            if approval:
+                item = turn.items.get(params.get("itemId"))
+                if item is None or item.completed:
+                    return
+                item.status = "approval" if approval == "requested" else "inProgress"
+                if turn.stopped is None and not hasattr(item, "summary_raw"):  # else sent after its item.started
+                    self.structural(turn, "item.status", {"itemId": item.identity, "status": item.status})
+                return
+            if method in {"item/started", "item/completed"}:
+                raw = params.get("item")
+                if not isinstance(raw, dict) or raw.get("type") not in STREAMED_KINDS:
+                    return
+                identity = raw.get("id")
+                if not isinstance(identity, str) or not 1 <= len(identity) <= ITEM_ID_LIMIT:
+                    return
+                item = turn.items.get(identity)
+                if method == "item/started" and item is None:
+                    if turn.stopped is not None:
+                        return
+                    if len(turn.items) >= MAX_ITEMS:
+                        self.stop(turn, "budget")
+                        return
+                    item = turn.items[identity] = Item(identity, raw["type"])
+                    turn.order.append(identity)
+                    if raw["type"] == "commandExecution" and isinstance(raw.get("command"), str):
+                        item.summary_raw = raw["command"]  # sanitized whole by the flusher before any event
+                    if raw["type"] == "fileChange" and isinstance(raw.get("changes"), list):
+                        item.summary = {"changes": len(raw["changes"])}
+                    item.meta_bytes = 256 + utf8(identity)
+                    if self.over_budget(turn):
+                        return
+                    if not hasattr(item, "summary_raw"):
+                        self.structural(turn, "item.started", {"itemId": identity, "kind": item.kind, **item.summary})
+                elif method == "item/completed" and item is not None:
+                    status = raw.get("status") if raw.get("status") in STATUS_VALUES else "completed"
+                    item.status, item.completed = status, True
+                    if item.kind == "agentMessage" and not item.text.raw and not item.text_out and isinstance(raw.get("text"), str):
+                        # No deltas were seen (or none arrive for this kind): the completed text goes through the
+                        # same holdback, final.
+                        self.feed(turn, item, raw["text"], output=False)
+                self.wakeup.set()
+                return
+            delta = params.get("delta")
+            if method not in {"item/agentMessage/delta", "item/commandExecution/outputDelta"} or not isinstance(delta, str):
+                return
+            item = turn.items.get(params.get("itemId"))
+            if item is None:
+                return
+            self.feed(turn, item, delta, output=method != "item/agentMessage/delta")
+
+    def feed(self, turn, item, delta, output):
+        stats = turn.stats["deltaIn"].setdefault(item.kind, {"count": 0, "bytes": 0})
+        size = utf8(delta)
+        stats["count"] += 1
+        stats["bytes"] += size
+        if turn.stats["firstDeltaMs"] is None:
+            turn.stats["firstDeltaMs"] = round((time.monotonic() - turn.started_at) * 1000, 3)
+        if turn.stopped is not None:
+            return
+        if size > DELTA_LIMIT:  # checked before the append (design r3 M1)
+            self.stop(turn, "budget")
+            return
+        if turn.retained() + size > TURN_BUDGET:
+            self.stop(turn, "budget")
+            return
+        (item.output if output else item.text).feed(delta)
+        turn.raw_bytes += size
+
+    def over_budget(self, turn):
+        if turn.retained() > TURN_BUDGET:
+            self.stop(turn, "budget")
+            return True
+        return False
+
+    # --- events (lock held) ---------------------------------------------------------------------------------------
+
+    def structural(self, turn, kind, data):
+        if turn.verified:
+            self.append(turn, kind, data)
+        else:
+            turn.pre.append((kind, data))
+
+    def append(self, turn, kind, data):
+        data = {"requestId": turn.request, **data}
+        body = data_bytes(data)
+        limit = DELTA_DATA_LIMIT if kind in {"item.delta", "item.output"} else STRUCTURE_DATA_LIMIT
+        if len(body) > limit:
+            raise ValueError("stream event over its size limit")
+        turn.seq += 1
+        encoded = frame(kind, data, turn.request + ":" + str(turn.seq))
+        turn.events.append((turn.seq, encoded))
+        turn.event_bytes += len(encoded)
+        turn.stats["eventsOut"] += 1
+        turn.stats["eventBytes"] += len(encoded)
+        if turn.stats["firstEventMs"] is None and kind == "item.delta":
+            turn.stats["firstEventMs"] = round((time.monotonic() - turn.started_at) * 1000, 3)
+        turn.snapshot_cache = None
+        while len(turn.events) > MAX_EVENTS or turn.event_bytes > MAX_EVENT_BYTES:
+            seq, old = turn.events.popleft()
+            turn.event_bytes -= len(old)
+            turn.floor = seq
+            turn.stats["compactions"] += 1
+        turn.stats["bufferPeakBytes"] = max(turn.stats["bufferPeakBytes"], turn.retained())
+        for subscription in list(self.subscribers):
+            subscription.notify()
+
+    # --- flusher (own thread; sanitize outside the lock) ----------------------------------------------------------
+
+    def ensure_flusher(self):
+        if self.background and (self.thread is None or not self.thread.is_alive()):
+            self.thread = threading.Thread(target=self.run, daemon=True)
+            self.thread.start()
+
+    def run(self):
+        next_sample = 0.0
+        while not self.closed:
+            self.wakeup.wait(TEXT_TICK)
+            self.wakeup.clear()
+            turn = self.active
+            if turn is not None:
+                started = time.monotonic()
+                try:
+                    self.flush(turn, final=False)
+                except Exception:
+                    with self.lock:
+                        self.stop(turn, "internal")
+                if time.monotonic() >= next_sample:
+                    next_sample = time.monotonic() + SAMPLE_SECONDS
+                    self.sample(turn, (time.monotonic() - started) * 1000)
+            self.expire()
+
+    def sample(self, turn, lag_ms):
+        rss = 0
+        try:
+            with open("/proc/self/status") as status:
+                for line in status:
+                    if line.startswith("VmRSS:"):
+                        rss = int(line.split()[1])
+        except (OSError, ValueError):
+            pass
+        try:
+            queued = int(self.queue_size())
+        except Exception:
+            queued = -1
+        value = {"rssKb": rss, "messagesQueue": queued, "flushLagMs": round(lag_ms, 3),
+                 "bufferBytes": turn.retained()}
+        turn.samples.append(value)
+        for key in ("rssKb", "messagesQueue", "flushLagMs"):
+            turn.peaks[key] = max(turn.peaks[key], value[key])
+
+    def expire(self):
+        now = time.monotonic()
+        with self.lock:
+            for session, turn in list(self.previous.items()):
+                if now - turn.completed_at > GRACE_SECONDS:
+                    del self.previous[session]
+
+    def flush(self, turn, final):
+        with self.flush_lock:
+            self._flush(turn, final)
+
+    def _flush(self, turn, final):
+        """One pass over the turn's items. `final` sanitizes every remaining raw char (item or turn end)."""
+        turn.stats["flushes"] += 1
+        with self.lock:
+            if turn.discarded:
+                return
+            work = [(item, item.text.raw, item.output.raw, getattr(item, "summary_raw", None), item.text.version, item.output.version)
+                    for item in (turn.items[name] for name in turn.order)
+                    if item.text.raw or item.output.raw or hasattr(item, "summary_raw")]
+        if not work:
+            self.emit_pending(turn, final)
+            return
+        try:
+            before = self.sanitizer.generation()
+            plans = []
+            for item, text, output, summary, text_version, output_version in work:
+                done = final or item.completed
+                text_plan = Holdback.plan(text, self.sanitizer.spans(text), before[2], done, item.text.joined) if text else None
+                output_plan = Holdback.plan(output, self.sanitizer.spans(output), before[2], done, item.output.joined) if output else None
+                summary_text = self.sanitizer.whole(summary) if summary is not None else None
+                plans.append((item, text, output, text_plan, output_plan, summary_text, text_version, output_version))
+            after = self.sanitizer.generation()
+        except SanitizeUnavailable:
+            with self.lock:
+                self.stop(turn, "sanitize")
+                for item, *_ in work:
+                    item.text.reset()
+                    item.output.reset()
+                    if hasattr(item, "summary_raw"):
+                        del item.summary_raw
+            return
+        with self.lock:
+            turn.stats["legacyL"] = max(turn.stats["legacyL"], before[2])
+            if before != after:
+                turn.stats["staleFlushes"] += 1  # a literal was observed meanwhile: plan again next tick
+                if not final:
+                    return
+            for item, text, output, text_plan, output_plan, summary_text, text_version, output_version in plans:
+                if summary_text is not None:
+                    summary = {"command": self.clip(summary_text)} if self.text else {}
+                    del item.summary_raw
+                    item.summary = summary
+                    if turn.stopped is None and not turn.discarded:
+                        self.structural(turn, "item.started", {"itemId": item.identity, "kind": item.kind, **summary})
+                        if item.status == "approval":
+                            self.structural(turn, "item.status", {"itemId": item.identity, "status": "approval"})
+                if text_plan is not None and item.text.version == text_version and before == after:
+                    emitted, consumed, joined = text_plan
+                    item.text.commit(consumed, joined, len(text))
+                    if emitted:
+                        self.keep_text(turn, item, emitted)
+                if output_plan is not None and item.output.version == output_version and before == after:
+                    emitted, consumed, joined = output_plan
+                    item.output.commit(consumed, joined, len(output))
+                    if emitted:
+                        self.keep_output(turn, item, emitted)
+                turn.stats["holdbackPeakChars"] = max(turn.stats["holdbackPeakChars"], len(item.text.raw), len(item.output.raw))
+            if final and before != after:
+                # The journal moved during the last pass: fail closed rather than emit an unchecked tail.
+                self.stop(turn, "sanitize")
+        self.emit_pending(turn, final)
+
+    @staticmethod
+    def clip(text):
+        """A sanitized summary cut so that its serialized form stays within SUMMARY_LIMIT."""
+        while len(data_bytes(text)) > SUMMARY_LIMIT:
+            text = text[: max(0, len(text) - max(1, (len(data_bytes(text)) - SUMMARY_LIMIT) // 6 + 1))]
+        return text
+
+    def keep_text(self, turn, item, emitted):
+        size = utf8(emitted)
+        total = sum(other.text_bytes for other in turn.items.values())
+        if total + size > TEXT_LIMIT:
+            self.stop(turn, "budget")
+            return
+        item.text_out.append(emitted)
+        item.text_bytes += size
+        if self.text and turn.stopped is None:
+            item.unsent += emitted
+        self.over_budget(turn)
+
+    def keep_output(self, turn, item, emitted):
+        size = utf8(emitted)
+        item.output_tail = (item.output_tail + emitted)[-OUTPUT_ITEM_LIMIT:]
+        streamed = sum(other.output_sent + utf8(other.output_unsent) for other in turn.items.values())
+        if not self.text or turn.stopped is not None or item.output_sent + utf8(item.output_unsent) + size > OUTPUT_ITEM_LIMIT \
+                or streamed + size > OUTPUT_TURN_LIMIT:
+            item.output_dropped += size
+            turn.stats["outputDroppedBytes"] += size
+            return
+        item.output_unsent += emitted
+
+    def take_token(self, turn):
+        now = time.monotonic()
+        turn.tokens = min(BUCKET_CAPACITY, turn.tokens + (now - turn.refilled) * BUCKET_RATE)
+        turn.refilled = now
+        if turn.tokens >= 1:
+            turn.tokens -= 1
+            return True
+        return False
+
+    def emit_pending(self, turn, final):
+        with self.lock:
+            if not turn.verified or turn.discarded:
+                return
+            for name in turn.order:
+                item = turn.items[name]
+                while item.unsent and turn.stopped is None and (final or self.take_token(turn)):
+                    chunk = item.unsent[:TEXT_CHUNK]
+                    while len(data_bytes({"requestId": turn.request, "itemId": name, "text": chunk})) > DELTA_DATA_LIMIT:
+                        chunk = chunk[: len(chunk) // 2]
+                    item.unsent = item.unsent[len(chunk):]
+                    self.append(turn, "item.delta", {"itemId": name, "text": chunk})
+                if item.output_unsent and turn.stopped is None and (final or time.monotonic() >= turn.next_output) \
+                        and (final or self.take_token(turn)):
+                    chunk = item.output_unsent[-TEXT_CHUNK:]
+                    dropped = utf8(item.output_unsent) - utf8(chunk)
+                    item.output_dropped += dropped
+                    while len(data_bytes({"requestId": turn.request, "itemId": name, "text": chunk, "truncated": True,
+                                          "droppedBytes": item.output_dropped})) > DELTA_DATA_LIMIT:
+                        chunk = chunk[len(chunk) // 2:]
+                    item.output_sent += utf8(chunk)
+                    item.output_unsent = ""
+                    turn.next_output = time.monotonic() + OUTPUT_TICK
+                    self.append(turn, "item.output", {"itemId": name, "text": chunk,
+                                                      "truncated": item.output_dropped > 0,
+                                                      "droppedBytes": item.output_dropped})
+                if item.completed and not item.text.raw and not item.output.raw and not item.unsent \
+                        and not getattr(item, "completed_sent", False) and turn.stopped is None:
+                    item.completed_sent = True
+                    self.append(turn, "item.completed", {"itemId": name, "status": item.status})
+
+    # --- display-only partial text (design r1 §4, r2 Q3) ----------------------------------------------------------
+
+    def partial_items(self):
+        """The sanitized agentMessage text of the active turn, after a final pass: [{id, type, text}]."""
+        turn = self.active
+        if turn is None or turn.discarded:
+            return []
+        self.flush(turn, final=True)
+        with self.lock:
+            if turn.stopped == "sanitize":
+                return []
+            return [{"id": item.identity, "type": "agentMessage", "text": "".join(item.text_out)}
+                    for item in (turn.items[name] for name in turn.order)
+                    if item.kind == "agentMessage" and item.text_out]
+
+    # --- subscribers ----------------------------------------------------------------------------------------------
+
+    def subscribe(self, session, after):
+        """Design r2 M2 table. Returns (subscription, initial frames); the snapshot and the cursor are set atomically."""
+        with self.lock:
+            if len(self.subscribers) >= MAX_SUBSCRIBERS:
+                return None, []
+            subscription = Subscription(self, session)
+            self.subscribers.add(subscription)
+            if self.active is not None:
+                self.active.stats["subscribersPeak"] = max(self.active.stats["subscribersPeak"], len(self.subscribers))
+            frames = self.position(subscription, after)
+            return subscription, frames
+
+    def unsubscribe(self, subscription):
+        with self.lock:
+            self.subscribers.discard(subscription)
+
+    def turn_for(self, session):
+        if self.active is not None and self.active.session == session:
+            return self.active
+        return None
+
+    def position(self, subscription, after):
+        session = subscription.session
+        active = self.turn_for(session)
+        previous = self.previous.get(session)
+        request, seq = after if after else (None, None)
+        if active is not None:
+            if request == active.request and active.floor <= seq <= active.seq:
+                return self.follow(subscription, active, seq)
+            return self.snapshot(subscription, active)
+        if previous is not None and request == previous.request:
+            if previous.floor <= seq <= previous.seq:
+                return self.follow(subscription, previous, seq)
+            return self.snapshot(subscription, previous)
+        if request is not None:
+            return [frame("sync", {"reason": "expired"})]
+        last = previous.request if previous is not None else None
+        return [frame("idle", {"requestId": last, "turnState": previous.state if previous else None})]
+
+    def follow(self, subscription, turn, seq):
+        subscription.request, subscription.cursor = turn.request, seq
+        return []
+
+    def snapshot(self, subscription, turn):
+        count = subscription.snapshots.get(turn.request, 0)
+        if count >= SNAPSHOTS_PER_TURN:
+            subscription.closed = "overflow"
+            return [frame("sync", {"reason": "overflow"})]
+        subscription.snapshots[turn.request] = count + 1
+        subscription.request, subscription.cursor = turn.request, turn.seq
+        if turn.snapshot_cache is not None and turn.snapshot_cache[0] == turn.seq:
+            return list(turn.snapshot_cache[1])
+        frames = [frame("snapshot.begin", {"requestId": turn.request, "turnState": turn.state, "seq": turn.seq,
+                                           **({"stopped": turn.stopped} if turn.stopped else {})})]
+        if not turn.discarded:
+            for name in turn.order:
+                item = turn.items[name]
+                if hasattr(item, "summary_raw"):
+                    continue
+                base = {"requestId": turn.request, "itemId": name, "kind": item.kind, "status": item.status, **item.summary}
+                frames.append(frame("snapshot.item", base))
+                if self.text and turn.stopped is None:
+                    text = "".join(item.text_out)[: max(0, len("".join(item.text_out)) - len(item.unsent))] if item.unsent else "".join(item.text_out)
+                    for piece in self.pieces(turn, name, text, "text"):
+                        frames.append(piece)
+                    if item.output_tail:
+                        frames.append(frame("snapshot.item", {"requestId": turn.request, "itemId": name,
+                                                              "output": {"tail": item.output_tail[-TEXT_CHUNK:],
+                                                                         "truncated": item.output_dropped > 0,
+                                                                         "droppedBytes": item.output_dropped}}))
+        if turn.result is not None:
+            frames.append(frame("turn.completed", {"requestId": turn.request, **turn.result}))
+        frames.append(frame("snapshot.end", {"requestId": turn.request, "seq": turn.seq}, turn.request + ":" + str(turn.seq)))
+        turn.snapshot_cache = (turn.seq, frames, sum(len(part) for part in frames))
+        return list(frames)
+
+    @staticmethod
+    def pieces(turn, name, text, field):
+        """`text` as snapshot.item frames each within SNAPSHOT_DATA_LIMIT (serialized)."""
+        result, rest = [], text
+        while rest:
+            chunk = rest[: SNAPSHOT_DATA_LIMIT // 4]
+            while len(data_bytes({"requestId": turn.request, "itemId": name, field: chunk})) > SNAPSHOT_DATA_LIMIT:
+                chunk = chunk[: len(chunk) // 2]
+            result.append(frame("snapshot.item", {"requestId": turn.request, "itemId": name, field: chunk}))
+            rest = rest[len(chunk):]
+        return result
+
+    def read(self, subscription):
+        """[(seq or None, frame)] after the subscription's cursor; follows into the session's next turn."""
+        with self.lock:
+            if subscription.closed:
+                return []
+            turn = self.turn_for(subscription.session)
+            current = None
+            for candidate in (turn, self.previous.get(subscription.session)):
+                if candidate is not None and candidate.request == subscription.request:
+                    current = candidate
+            finished = (current is not None and current is not turn and current.state == "completed"
+                        and subscription.cursor >= current.seq)
+            if current is None or finished:
+                if turn is None or turn is current:
+                    return []
+                # A new turn of this session started since: from its first event, or a snapshot once compacted.
+                if turn.floor == 0:
+                    subscription.request, subscription.cursor = turn.request, 0
+                    current = turn
+                else:
+                    return [(None, encoded) for encoded in self.snapshot(subscription, turn)]
+            if subscription.cursor < current.floor:
+                return [(None, encoded) for encoded in self.snapshot(subscription, current)]
+            frames = []
+            for seq, encoded in current.events:
+                if seq > subscription.cursor:
+                    frames.append((seq, encoded))
+                    subscription.cursor = seq
+            return frames
+
+    def hello(self, session, mapping_entry):
+        with self.lock:
+            active = self.turn_for(session)
+            last = mapping_entry.get("request") if mapping_entry else None
+            return {"sessionId": session, "activeRequestId": active.request if active else None,
+                    "lastRequestId": None if active else last}
+
+    def close(self):
+        """Drain/shutdown: every open stream ends now (it does not wait for its heartbeat)."""
+        self.closed = True
+        self.wakeup.set()
+        with self.lock:
+            for subscription in list(self.subscribers):
+                subscription.closed = subscription.closed or "stopping"
+                subscription.notify()
+
+    # --- metrics --------------------------------------------------------------------------------------------------
+
+    def log_summary(self, turn):
+        try:
+            import logging
+            logging.getLogger("uvicorn.error").info("runner_stream_summary %s", json.dumps({
+                "requestId": turn.request, "text": self.text, "stopped": turn.stopped, "discarded": turn.discarded,
+                **turn.stats, "retainedBytes": turn.retained(), "rawBytes": turn.raw_bytes, "items": len(turn.items),
+                "peaks": turn.peaks, "samples": len(turn.samples)}, sort_keys=True))
+        except Exception:
+            pass
+
+
+async def stream(hub, subscription, initial, hello, stopping):
+    """The SSE body: hello, the initial frames, then events as they are appended; a heartbeat every 15 s."""
+    subscription.loop, subscription.wake = asyncio.get_running_loop(), asyncio.Event()
+    trace = trace_enabled()
+    try:
+        yield frame("hello", hello)
+        for encoded in initial:
+            yield encoded
+        while subscription.closed is None and not stopping():
+            frames = hub.read(subscription)
+            if not frames:
+                try:
+                    await asyncio.wait_for(subscription.wake.wait(), HEARTBEAT_SECONDS)
+                except asyncio.TimeoutError:
+                    yield b": hb\n\n"
+                subscription.wake.clear()
+                continue
+            for seq, encoded in frames:
+                key = subscription.request
+                sent = subscription.sent.get(key, 0) + len(encoded)
+                if sent > CONNECTION_TURN_BYTES:  # checked before the frame goes out
+                    yield frame("sync", {"reason": "overflow"})
+                    return
+                subscription.sent[key] = sent
+                if trace and seq is not None:  # payload-free: seq and send time only (design r2 M5)
+                    yield (": t " + str(seq) + " " + str(int(time.time() * 1000)) + "\n").encode()
+                yield encoded
+            if subscription.closed:  # an overflow snapshot refusal already carried its sync frame
+                return
+    finally:
+        hub.unsubscribe(subscription)
