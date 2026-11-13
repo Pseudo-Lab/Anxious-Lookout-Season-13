@@ -172,8 +172,10 @@ def import_setup(tmp_path, archive_bytes=(b"runner", b"runtime")):
     return script, tmp_path / "state.json", evidence
 
 
-def run_import(script, state):
+def run_import(script, state, stamp="20261114T000000Z"):
     env = {**__import__("os").environ, "FAKE_STATE": str(state)}
+    # Fixed evidence timestamps (review b8caf3e minor): the evidence name is per second.
+    script = script.replace("stamp=$(date -u +%Y%m%dT%H%M%SZ)", "stamp=" + stamp)
     result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=env, timeout=60)
     return result.returncode, result.stdout
 
@@ -194,7 +196,7 @@ def test_import_both_chains_and_digest_references(tmp_path):
                          "docker.io/library/anxious-dev-runtime@" + RUNTIME_DIGEST}
     files = list(evidence.iterdir())
     assert len(files) == 1 and files[0].read_text().splitlines()[-1] == "result rc=0"
-    code, out = run_import(script, state)  # a second run: already present with the host IDs, no new import
+    code, out = run_import(script, state, "20261114T000001Z")  # a second run: present with the host IDs, no import
     assert code == 0 and out.count("skip import of") == 2
 
 
@@ -234,7 +236,7 @@ def expected_doc(module, **changes):
     recorded_api = "docker.io/library/anxious-dev-runtime@sha256:" + "3" * 64
     doc = {"version": module.VERSION, "newImage": module.NEW_PREFIX + "a" * 64, "oldImageId": "sha256:" + "4" * 64,
            "oldPlanSha256": "5" * 64, "newPlanSha256": "6" * 64, "toolImage": "sha256:" + "7" * 64,
-           "newApiImage": module.API_PREFIX + "b" * 64,
+           "newApiImage": module.API_PREFIX + "b" * 64, "apiTemplateSha256": "d" * 64,
            "others": {o: {"state": "s", "generation": 1, "revision": 4, "planSha256": "8" * 64,
                           "image": "docker.io/library/anxious-dev-runner@sha256:" + "9" * 64} for o in module.OTHERS},
            "deployments": {
@@ -275,13 +277,15 @@ def test_switch_api_patch_moves_only_the_api_container_image():
     module = switch()
     doc = expected_doc(module)
     old, new = doc["deployments"]["api"]["images"]["api"], doc["newApiImage"]
-    forward = module.api_patch(doc, "forward")
+    forward = module.api_patch(doc, "forward", "10")
     assert forward == [{"op": "test", "path": "/metadata/uid", "value": module.API[2]},
+                       {"op": "test", "path": "/metadata/resourceVersion", "value": "10"},
+                       {"op": "test", "path": "/spec/replicas", "value": 0},
                        {"op": "test", "path": "/spec/template/spec/containers/0/name", "value": "api"},
                        {"op": "test", "path": "/spec/template/spec/containers/0/image", "value": old},
                        {"op": "replace", "path": "/spec/template/spec/containers/0/image", "value": new}]
-    reverse = module.api_patch(doc, "reverse")
-    assert reverse[2]["value"] == new and reverse[3]["value"] == old
+    reverse = module.api_patch(doc, "reverse", "11")
+    assert reverse[4]["value"] == new and reverse[5]["value"] == old
     assert not any("initContainers" in op["path"] or "env" in op["path"] for op in forward + reverse)
 
 
@@ -315,8 +319,112 @@ def test_switch_unchanged_functions_are_pa_switch_byte_for_byte():
                 if isinstance(node, ast.FunctionDef)}
     old, new = functions(PA / "pa-switch.py"), functions(VM / "i90-switch.py")
     changed = {"rows", "check_owners", "tag_digest", "images_ok", "survey", "expected_problem", "load_expected",
-               "precheck", "prepare", "tool", "start", "undo", "main", "final"}
-    added = {"pins_missing", "undo_actions", "wanted", "api_state", "api_patch", "api_image"}
+               "precheck", "prepare", "tool", "start", "undo", "main", "final", "reopen_checks"}
+    added = {"pins_missing", "undo_actions", "wanted", "api_state", "api_patch", "api_image", "api_template_sha",
+             "api_state_of"}
     assert set(new) == set(old) | added
     for name in sorted(set(old) - changed):
         assert new[name] == old[name], name
+
+
+def test_import_same_second_evidence_name_refuses(tmp_path):
+    script, state, _ = import_setup(tmp_path)
+    assert run_import(script, state, "20261114T000000Z")[0] == 0
+    code, out = run_import(script, state, "20261114T000000Z")  # the evidence file exists: never overwritten
+    assert code == 3 and "cannot create" in out
+
+
+def api_deployment(module, doc, image=None, replicas=0, version="10"):
+    return {"metadata": {"uid": module.API[2], "resourceVersion": version},
+            "spec": {"replicas": replicas, "template": {"metadata": {"labels": {"app": "hosting-api"}}, "spec": {
+                "containers": [{"name": "api", "image": image or doc["deployments"]["api"]["images"]["api"],
+                                "env": [{"name": module.ALLOW_ENV, "value": module.OWNER},
+                                        {"name": "DATABASE_URL", "value": "postgresql://secret@db/x"}]}],
+                "initContainers": [{"name": "runner-pool-input",
+                                    "image": doc["deployments"]["api"]["images"]["runner-pool-input"]}]}}},
+            "status": {"replicas": replicas}}
+
+
+def test_api_template_hash_fixes_everything_but_the_api_image():
+    module = switch()
+    doc = expected_doc(module)
+    old = api_deployment(module, doc)
+    new = api_deployment(module, doc, image=doc["newApiImage"])
+    doc["apiTemplateSha256"] = module.api_template_sha(old)
+    assert module.api_template_sha(new) == doc["apiTemplateSha256"]
+    assert module.api_state_of(old, doc, 8) == "old" and module.api_state_of(new, doc, 8) == "new"
+    for damage in ("flag", "init-command", "volume", "annotation", "env-value"):
+        drifted = api_deployment(module, doc)
+        pod = drifted["spec"]["template"]
+        if damage == "flag":
+            pod["spec"]["containers"][0]["env"].append({"name": "RESEARCH_STREAM_ENABLE", "value": "true"})
+        elif damage == "init-command":
+            pod["spec"]["initContainers"][0]["command"] = ["unexpected"]
+        elif damage == "volume":
+            pod["spec"]["volumes"] = [{"name": "unexpected", "emptyDir": {}}]
+        elif damage == "annotation":
+            pod["metadata"]["annotations"] = {"kubectl.kubernetes.io/restartedAt": "now"}
+        else:
+            pod["spec"]["containers"][0]["env"][1]["value"] = "postgresql://other@db/x"
+        assert module.api_state_of(drifted, doc, 8) == "other", damage
+    assert "secret" not in doc["apiTemplateSha256"]  # a hash, never the env value
+
+
+def test_api_patch_tests_replicas_and_resource_version():
+    module = switch()
+    ops = module.api_patch(expected_doc(module), "forward", "10")
+    assert {"op": "test", "path": "/spec/replicas", "value": 0} in ops
+    assert {"op": "test", "path": "/metadata/resourceVersion", "value": "10"} in ops
+    assert [op["op"] for op in ops] == ["test"] * 5 + ["replace"]
+
+
+def apply_json_patch(document, ops):
+    """A minimal RFC 6902 test/replace applier (what the API server does for these ops)."""
+    import copy
+    candidate = copy.deepcopy(document)
+    for op in ops:
+        parts = op["path"].strip("/").split("/")
+        node = candidate
+        for name in parts[:-1]:
+            node = node[int(name)] if isinstance(node, list) else node[name]
+        key = int(parts[-1]) if isinstance(node, list) else parts[-1]
+        if op["op"] == "test" and node[key] != op["value"]:
+            return None
+        if op["op"] == "replace":
+            node[key] = op["value"]
+    return candidate
+
+
+@pytest.mark.parametrize("race", ["none", "scaled-up", "edited"])
+def test_api_image_refuses_a_change_between_read_and_patch(monkeypatch, race):
+    import copy
+    module = switch()
+    doc = expected_doc(module)
+    live = api_deployment(module, doc)
+    doc["apiTemplateSha256"] = module.api_template_sha(live)  # the pre-read passes: the race is after it
+    monkeypatch.setattr(module, "deployment", lambda *a: (module.API[2], live["spec"]["replicas"], 0,
+                                                         live["status"]["replicas"], copy.deepcopy(live)))
+    monkeypatch.setattr(module, "change", lambda *a: None)
+    patched = []
+
+    def request(cmd, *args):
+        if race == "scaled-up":
+            live["spec"]["replicas"] = 1
+            live["metadata"]["resourceVersion"] = "11"
+        elif race == "edited":  # another writer, replicas still 0
+            live["metadata"]["resourceVersion"] = "11"
+        result = apply_json_patch(live, json.loads(cmd[-1]))
+        if result is None:
+            return 1, ""
+        live.clear()
+        live.update(result)
+        patched.append(True)
+        return 0, ""
+    monkeypatch.setattr(module, "run", request)
+    if race == "none":
+        module.api_image(doc, "forward", 6)
+        assert patched and live["spec"]["template"]["spec"]["containers"][0]["image"] == doc["newApiImage"]
+    else:
+        with pytest.raises(module.Stop):
+            module.api_image(doc, "forward", 6)
+        assert not patched

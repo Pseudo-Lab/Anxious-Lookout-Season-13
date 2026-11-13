@@ -14,12 +14,15 @@ so review can check them against that file):
   GENERATION / REVISION (29 / 116, P0 look), OLD_REF (…5805's current plan.image, from `survey`), NEW_TAG / NEW_ID
   (the runner tag and host id, stage A build), API_TAG / API_ID (the runtime tag and host id, stage A build), and the
   LEDGERS hashes (from `survey`, which prints them);
-- **the api image step** (new): the expected file adds `newApiImage` (the runtime digest reference, stage B). In the
-  window, after the binding apply, `api_image()` changes only `spec.template.spec.containers[0].image` of api (named
-  `api`) from the recorded image to newApiImage by a JSON patch that first tests the Deployment UID, the container
-  name and the old image (kubectl patch --type=json). The init container `runner-pool-input`, env, replicas and every
-  other field are not touched. `wanted()` gives the api template the checks expect: the recorded one before the
-  change, the recorded one with newApiImage after it;
+- **the api image step** (new): the expected file adds `newApiImage` (the runtime digest reference, stage B) and
+  `apiTemplateSha256` (the whole api pod template's sha256 with only the api image blanked; printed by `survey`, never
+  the template itself, which holds env values). In the window, after the binding apply, `api_image()` changes only
+  `spec.template.spec.containers[0].image` of api (named `api`) by a JSON patch (kubectl patch --type=json) that first
+  tests the Deployment UID, the resourceVersion read just before, replicas 0, the container name and the old image;
+  then api must still be at 0 and its template exactly the new one. The init container `runner-pool-input`, env,
+  replicas and every other field are not touched. `api_state_of()` is 'old' / 'new' only when the template hash
+  matches and the images are the recorded / new ones, else 'other' (review b8caf3e); precheck, start, reopen_checks
+  and final use it besides `template_of`. `wanted()` gives the uid/images/allow the checks expect;
 - **the undo** reverts both: the binding branch as before, and the api image back to the recorded image when the
   template is the new one (`api_state()`: old / new / other; other = FREEZE). 'undo not needed' only when both are old.
 Everything else is pa-switch.py: the survey, i90-expected.json written by back from the survey output only and
@@ -204,8 +207,10 @@ def expected_problem(doc):
     """None, or why the expected file is refused (shape and cross-field rules)."""
     try:
         if set(doc) != {'version', 'newImage', 'oldImageId', 'oldPlanSha256', 'newPlanSha256', 'others',
-                        'deployments', 'toolImage', 'newApiImage'} or doc['version'] != VERSION:
+                        'deployments', 'toolImage', 'newApiImage', 'apiTemplateSha256'} or doc['version'] != VERSION:
             return 'keys or version'
+        if not (isinstance(doc['apiTemplateSha256'], str) and HEX64.fullmatch(doc['apiTemplateSha256'])):
+            return 'apiTemplateSha256 is not a sha256'
         api_new = doc['newApiImage']
         if not (isinstance(api_new, str) and api_new.startswith(API_PREFIX)
                 and HEX64.fullmatch(api_new[len(API_PREFIX):])):
@@ -532,11 +537,15 @@ def survey():
             json.dumps({k: row[k] for k in ('outbox', 'entries', 'stops', 'admissions')}, sort_keys=True), row['proof']))
     plan = by[OWNER]['plan']
     deployments = {}
+    api_sha = None
     for spec in (CTRL, API):
         uid, want, ready, current, d = deployment(spec, 3)
         deployments[spec[1]] = template_of(spec, d, 3)
+        if spec is API:
+            api_sha = api_template_sha(d)
         say('  %s uid %s replicas %d/%d ready %d template %s' % (spec[1], uid, current, want, ready,
                                                                 json.dumps(deployments[spec[1]], sort_keys=True)))
+    say('  api pod template sha256 without the api image (apiTemplateSha256): %s' % api_sha)
     count, roles = clients(3)
     say('  client sessions on hosting %d (%s); /api/health 200 %s; ledgers at their pins %s; tool image %s'
         % (count, roles or 'none', health(), ledgers_ok(), tool_image() or 'absent'))
@@ -547,6 +556,7 @@ def survey():
         say('  host quiet: False (%s)' % stop.message)
     candidate = {'version': VERSION, 'newImage': image, 'oldImageId': ids['old'], 'oldPlanSha256': digest(plan),
                  'newPlanSha256': digest(dict(plan, image=image)), 'toolImage': tool_image(), 'newApiImage': api_image_ref,
+                 'apiTemplateSha256': api_sha,
                  'others': {o: {'state': by[o]['state'], 'generation': by[o]['generation'],
                                 'revision': by[o]['revision'], 'planSha256': digest(by[o]['plan']),
                                 'image': by[o]['plan'].get('image')} for o in OTHERS},
@@ -576,7 +586,8 @@ def precheck(expected, readonly):
         if uid != spec[2] or want != 1 or ready != 1:
             raise Stop(3, 'precheck: %s is uid=%s replicas=%d ready=%d (want %s 1/1)' % (spec[1], uid, want, ready,
                                                                                           spec[2]))
-        if template_of(spec, d, 3) != expected['deployments'][spec[1]]:
+        if template_of(spec, d, 3) != expected['deployments'][spec[1]] \
+                or (spec is API and api_state_of(d, expected, 3) != 'old'):
             raise Stop(3, 'precheck: %s template is not the recorded one' % spec[1])
         templates[spec[1]] = d
     by = check_owners(expected, 3, 'precheck', 'old')
@@ -831,9 +842,26 @@ def wanted(spec, expected, api):
     return dict(row, images=dict(row['images'], **{API_CONTAINER: expected['newApiImage']}))
 
 
-def api_state(expected, code):
-    """'old' / 'new' / 'other' for the api Deployment template (UID, images incl. the init container, allowlist)."""
-    _, _, _, _, d = deployment(API, code)
+def api_template_sha(d):
+    """sha256 of the api pod template (spec.template, canonical JSON) with only containers[0].image blanked: every
+    other field (env incl. the stream flag, init container, volumes, labels, annotations) is fixed by it. Only this
+    hash is printed or recorded, never the template (it holds env values). None if the shape is not api's."""
+    try:
+        template = json.loads(json.dumps(d['spec']['template']))
+        container = template['spec']['containers'][0]
+        if container.get('name') != API_CONTAINER:
+            return None
+        container['image'] = ''
+        return hashlib.sha256(json.dumps(template, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    except Exception:
+        return None
+
+
+def api_state_of(d, expected, code):
+    """'old' / 'new' / 'other' for one api Deployment object: the whole template except the api image must hash to the
+    recorded apiTemplateSha256 (review b8caf3e), and UID/images/allowlist must be the wanted ones."""
+    if api_template_sha(d) != expected['apiTemplateSha256']:
+        return 'other'
     got = template_of(API, d, code)
     for state in ('old', 'new'):
         if got == wanted(API, expected, state):
@@ -841,33 +869,50 @@ def api_state(expected, code):
     return 'other'
 
 
-def api_patch(expected, direction):
-    """The JSON patch (kubectl --type=json) that moves only containers[0].image of api, after testing the UID, the
-    container name and the current image. 'forward': recorded -> newApiImage; 'reverse': back."""
+def api_state(expected, code):
+    _, _, _, _, d = deployment(API, code)
+    return api_state_of(d, expected, code)
+
+
+def api_patch(expected, direction, resource_version):
+    """The JSON patch (kubectl --type=json) that moves only containers[0].image of api. It first tests the UID, the
+    resourceVersion just read (nothing changed since that read), replicas 0 (the window), the container name and the
+    current image. 'forward': recorded -> newApiImage; 'reverse': back."""
     old = expected['deployments'][API[1]]['images'][API_CONTAINER]
     new = expected['newApiImage']
     source, target = (old, new) if direction == 'forward' else (new, old)
     path = '/spec/template/spec/containers/0'
     return [{'op': 'test', 'path': '/metadata/uid', 'value': API[2]},
+            {'op': 'test', 'path': '/metadata/resourceVersion', 'value': resource_version},
+            {'op': 'test', 'path': '/spec/replicas', 'value': 0},
             {'op': 'test', 'path': path + '/name', 'value': API_CONTAINER},
             {'op': 'test', 'path': path + '/image', 'value': source},
             {'op': 'replace', 'path': path + '/image', 'value': target}]
 
 
 def api_image(expected, direction, code):
-    """Inside the window (api at 0): one image-only patch, then the template must be exactly the wanted one."""
+    """Inside the window (api at 0): one image-only patch, conditional on the object read just before (UID,
+    resourceVersion, replicas 0, name, image), then the template must be exactly the wanted one and api still at 0."""
     want = 'new' if direction == 'forward' else 'old'
-    _, replicas, _, current, _ = deployment(API, code)
+    have = 'old' if direction == 'forward' else 'new'
+    _, replicas, _, current, d = deployment(API, code)
     if (replicas, current) != (0, 0):
         raise Stop(code, 'api image %s: api is not at 0' % direction)
+    if api_state_of(d, expected, code) != have:
+        raise Stop(8, 'api image %s: the api template is not the %s one before the patch' % (direction, have))
+    version = (d.get('metadata') or {}).get('resourceVersion')
+    if not isinstance(version, str) or not version:
+        raise Stop(code, 'api image %s: no resourceVersion' % direction)
     change('api-image-' + direction, 'pending')
     rc, _ = run([K3S, 'kubectl', '-n', API[0], 'patch', 'deployment', API[1], '--type=json', '-p',
-                 json.dumps(api_patch(expected, direction))], 60)
-    state = api_state(expected, 8)
+                 json.dumps(api_patch(expected, direction, version))], 60)
+    _, replicas, _, current, d = deployment(API, 8)
+    state = api_state_of(d, expected, 8)
     change('api-image-' + direction, 'done' if rc == 0 and state == want else 'uncertain')
-    say('api image %s: patch rc %d; api template now %s' % (direction, rc, state))
-    if state == 'other':
-        raise Stop(8, 'api image %s: the api template is neither the recorded nor the new one' % direction)
+    say('api image %s: patch rc %d; api template now %s; replicas %d/%d' % (direction, rc, state, replicas, current))
+    if state == 'other' or (replicas, current) != (0, 0):
+        raise Stop(8, 'api image %s: the api template is neither the recorded nor the new one, or api left 0'
+                   % direction)
     if rc != 0 or state != want:
         raise Stop(code, 'api image %s did not complete (template %s)' % (direction, state))
 
@@ -881,7 +926,8 @@ def start(spec, expected, code, where, api='old'):
     if run([K3S, 'kubectl', '-n', spec[0], 'rollout', 'status', 'deployment/' + spec[1], '--timeout=180s'], 210)[0]:
         raise Stop(code, '%s: %s rollout did not finish' % (where, spec[1]))
     uid, replicas, ready, _, d = deployment(spec, code)
-    if uid != spec[2] or replicas != 1 or ready != 1 or template_of(spec, d, code) != wanted(spec, expected, api):
+    if uid != spec[2] or replicas != 1 or ready != 1 or template_of(spec, d, code) != wanted(spec, expected, api) \
+            or (spec is API and api_state_of(d, expected, code) != api):
         raise Stop(code, '%s: %s is not 1/1 on its wanted template' % (where, spec[1]))
     out = kubectl(['-n', spec[0], 'get', 'pods', '-l', spec[3], '-o', 'json'], code, '%s Pod lookup failed' % spec[1])
     try:
@@ -926,7 +972,8 @@ def reopen_checks(expected, where):
         raise Stop(7, '%s: a fence differs from the window start' % where)
     for spec in (API, CTRL):
         _, want, _, current, d = deployment(spec, 7)
-        if template_of(spec, d, 7) != expected['deployments'][spec[1]] or (want, current) != (0, 0):
+        if template_of(spec, d, 7) != expected['deployments'][spec[1]] or (want, current) != (0, 0) \
+                or (spec is API and api_state_of(d, expected, 7) != 'old'):
             raise Stop(7, '%s: %s is not on its recorded template at 0' % (where, spec[1]))
 
 
@@ -1097,7 +1144,8 @@ def final(expected):
     """Everything was verified step by step; a difference now is an outside change: rc 8, never an undo."""
     for spec in (API, CTRL):
         _, want, ready, _, d = deployment(spec, 8)
-        if template_of(spec, d, 8) != wanted(spec, expected, 'new') or (want, ready) != (1, 1):
+        if template_of(spec, d, 8) != wanted(spec, expected, 'new') or (want, ready) != (1, 1) \
+                or (spec is API and api_state_of(d, expected, 8) != 'new'):
             raise Stop(8, 'final: %s is not as wanted at 1/1' % spec[1])
     by = check_owners(expected, 8, 'final', 'new')
     if any(fence_of(by[o]) != RUN['before'][o] for o in OWNERS):
