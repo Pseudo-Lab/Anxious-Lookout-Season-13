@@ -395,7 +395,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                 row.pending_text = None
         if store.db.is_modified(row):
             # #90 M5: refresh UPDATEs counted apart (fallback polling vs the stream path, which writes nothing).
-            logging.getLogger("hosting").info("conversation_refresh_write %s", json.dumps({"state": row.state}))
+            logging.getLogger("uvicorn.error").info("conversation_refresh_write %s", json.dumps({"state": row.state}))
         store.db.flush()
 
     def launch(owner, identity, request_id, token):
@@ -606,7 +606,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
 
         def closed():
             release()  # also when the body never started (early disconnect)
-            logging.getLogger("hosting").info("api_stream_summary %s", json.dumps(
+            logging.getLogger("uvicorn.error").info("api_stream_summary %s", json.dumps(
                 {"session": str(identity), **stats}, sort_keys=True))
         # Raced against the API shutdown event: a response stuck sending to a slow browser still ends on SIGTERM
         # (review 8debb4f); the body generator is then closed (upstream reader cancelled) and the slot released.
