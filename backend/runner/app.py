@@ -18,6 +18,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.datastructures import MutableHeaders
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.codex_policy import MODEL, CodexFailure, ERRORS, error_reason
@@ -1170,23 +1171,40 @@ def create_app():
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
-    @app.middleware("http")
-    async def authenticate(request: Request, call_next):
-        if not hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + token):
-            return JSONResponse({"error": "unauthenticated"}, status_code=401)
-        if state_id and not hmac.compare_digest(request.headers.get("x-runner-state-id", ""), state_id):
-            return JSONResponse({"ownerId": owner, "error": "codex_policy_refused"}, status_code=503)
-        if state_id:
-            try:
-                require_binding(root, owner, state_id)
-            except CodexFailure:
-                if app.state.native:
-                    app.state.native.blocked_reason = "policy_refused"
-                    app.state.native.binding_failed = True
-                return JSONResponse({"ownerId": owner, "error": "codex_policy_refused"}, status_code=503)
-        result = await call_next(request)
-        result.headers["Cache-Control"] = "no-store"
-        return result
+    class Authenticate:
+        """Plain ASGI (#90): a BaseHTTPMiddleware would sit between the event stream and the API. The checks and
+        responses are the former `authenticate` unchanged (config_tests/test_transport_middleware.py)."""
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                return await self.app(scope, receive, send)
+            request = Request(scope)
+            refused = None
+            if not hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + token):
+                refused = JSONResponse({"error": "unauthenticated"}, status_code=401)
+            elif state_id and not hmac.compare_digest(request.headers.get("x-runner-state-id", ""), state_id):
+                refused = JSONResponse({"ownerId": owner, "error": "codex_policy_refused"}, status_code=503)
+            elif state_id:
+                try:
+                    require_binding(root, owner, state_id)
+                except CodexFailure:
+                    if app.state.native:
+                        app.state.native.blocked_reason = "policy_refused"
+                        app.state.native.binding_failed = True
+                    refused = JSONResponse({"ownerId": owner, "error": "codex_policy_refused"}, status_code=503)
+            if refused is not None:
+                return await refused(scope, receive, send)
+
+            async def send_no_store(message):
+                if message["type"] == "http.response.start":
+                    MutableHeaders(scope=message)["Cache-Control"] = "no-store"
+                await send(message)
+
+            await self.app(scope, receive, send_no_store)
+
+    app.add_middleware(Authenticate)
 
     @app.exception_handler(Exception)
     async def unavailable(request, exc):

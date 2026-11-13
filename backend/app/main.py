@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException
 
 from .database import check_ready, database
@@ -82,45 +83,60 @@ def create_app(settings=None):
     app.state.user_runner_runtime = load(engine, app.state.user_runner_account) if app.state.user_runners_enabled else None
     prefix = settings.base_path + "/api"
 
-    @app.middleware("http")
-    async def auth_transport(request, call_next):
-        # Mock transport is confined to APP_ENV=test. Never let a public HTTP
-        # callback issue a real app session merely because configured origin is HTTPS.
-        is_auth = request.url.path.startswith((prefix + "/auth/", prefix + "/research/", prefix + "/admin/", prefix + "/media/"))
-        needs_protection = settings.oauth_mode == "github" or bool(request.cookies.get(SESSION_COOKIE))
-        if is_auth and needs_protection and settings.oauth_mode != "mock":
-            protocol = request.url.scheme
-            if settings.trusted_proxy_cidrs:
+    class AuthTransport:
+        """Plain ASGI (#90): a BaseHTTPMiddleware would sit between a streaming response and the client.
+        The checks and headers are the former `auth_transport` unchanged (config_tests/test_transport_middleware.py)."""
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                return await self.app(scope, receive, send)
+            request = Request(scope)
+            # Mock transport is confined to APP_ENV=test. Never let a public HTTP
+            # callback issue a real app session merely because configured origin is HTTPS.
+            is_auth = request.url.path.startswith((prefix + "/auth/", prefix + "/research/", prefix + "/admin/", prefix + "/media/"))
+            needs_protection = settings.oauth_mode == "github" or bool(request.cookies.get(SESSION_COOKIE))
+            if is_auth and needs_protection and settings.oauth_mode != "mock":
+                protocol = request.url.scheme
+                if settings.trusted_proxy_cidrs:
+                    try:
+                        peer = ipaddress.ip_address(request.client.host)
+                        trusted = any(peer in ipaddress.ip_network(cidr) for cidr in settings.trusted_proxy_cidrs)
+                    except ValueError:
+                        trusted = False
+                    if trusted:
+                        protocol = request.headers.get("x-forwarded-proto", "")
                 try:
-                    peer = ipaddress.ip_address(request.client.host)
-                    trusted = any(peer in ipaddress.ip_network(cidr) for cidr in settings.trusted_proxy_cidrs)
+                    actual = urlsplit(protocol + "://" + request.headers.get("host", ""))
+                    expected = urlsplit(settings.origin)
+                    default_port = 443 if expected.scheme == "https" else 80
+                    matches = (actual.scheme == expected.scheme and actual.hostname == expected.hostname
+                               and (actual.port or default_port) == (expected.port or default_port)
+                               and not any((actual.path, actual.query, actual.fragment, actual.username, actual.password)))
                 except ValueError:
-                    trusted = False
-                if trusted:
-                    protocol = request.headers.get("x-forwarded-proto", "")
-            try:
-                actual = urlsplit(protocol + "://" + request.headers.get("host", ""))
-                expected = urlsplit(settings.origin)
-                default_port = 443 if expected.scheme == "https" else 80
-                matches = (actual.scheme == expected.scheme and actual.hostname == expected.hostname
-                           and (actual.port or default_port) == (expected.port or default_port)
-                           and not any((actual.path, actual.query, actual.fragment, actual.username, actual.password)))
-            except ValueError:
-                matches = False
-            if not matches:
-                if request.url.path.endswith(("/github/start", "/github/callback")):
-                    return callback_failure("server_error")
-                return error("not_ready", "Service is not ready", 503)
-        response = await call_next(request)
-        public_posts = settings.base_path + '/api/public/posts'
-        cacheable_path = (request.url.path == public_posts or request.url.path.startswith(public_posts + '/')
-                          or request.url.path == settings.base_path + '/api/public/post-tags'
-                          or request.url.path.startswith(settings.base_path + '/api/media/post-images/'))
-        if not (request.method == 'GET' and cacheable_path and response.status_code in {200, 304}):
-            response.headers['Cache-Control'] = 'no-store'
-        else:
-            response.headers.setdefault('Cache-Control', 'no-store')
-        return response
+                    matches = False
+                if not matches:
+                    if request.url.path.endswith(("/github/start", "/github/callback")):
+                        return await callback_failure("server_error")(scope, receive, send)
+                    return await error("not_ready", "Service is not ready", 503)(scope, receive, send)
+            public_posts = settings.base_path + '/api/public/posts'
+            cacheable_path = (request.url.path == public_posts or request.url.path.startswith(public_posts + '/')
+                              or request.url.path == settings.base_path + '/api/public/post-tags'
+                              or request.url.path.startswith(settings.base_path + '/api/media/post-images/'))
+
+            async def send_with_cache_policy(message):
+                if message["type"] == "http.response.start":
+                    headers = MutableHeaders(scope=message)
+                    if not (request.method == 'GET' and cacheable_path and message["status"] in {200, 304}):
+                        headers['Cache-Control'] = 'no-store'
+                    else:
+                        headers.setdefault('Cache-Control', 'no-store')
+                await send(message)
+
+            await self.app(scope, receive, send_with_cache_policy)
+
+    app.add_middleware(AuthTransport)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
