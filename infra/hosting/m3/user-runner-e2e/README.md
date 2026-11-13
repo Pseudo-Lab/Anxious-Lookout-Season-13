@@ -4,7 +4,7 @@
 API internal listener (`m2-hosting/app=hosting-api` 8081) and `world` 443. The switch from the
 previous `toEntities: all` policy, with `40-runner-network-transition.json` as the intermediate
 step, is [RUNNER-NETWORK.md](RUNNER-NETWORK.md). Its step E applies
-`50-runner-subresources-vap.json`, which keeps exec, attach, port-forward and ephemeral containers
+`50-runner-subresources-vap.json`, which keeps exec, attach, port-forward, proxy and ephemeral containers
 on codex-runner Pods to `system:masters`. The notices below are history.
 
 # Network transition notice (2026-10-16)

@@ -35,9 +35,11 @@ def test_policy_matches_only_the_runner_access_subresources():
     assert match['matchPolicy'] == 'Equivalent' and match['namespaceSelector'] == NAMESPACE
     assert match['resourceRules'] == [
         {'apiGroups': [''], 'apiVersions': ['v1'], 'operations': ['CONNECT'],
-         'resources': ['pods/exec', 'pods/attach', 'pods/portforward'], 'scope': 'Namespaced'},
+         'resources': ['pods/exec', 'pods/attach', 'pods/portforward', 'pods/proxy'], 'scope': 'Namespaced'},
         {'apiGroups': [''], 'apiVersions': ['v1'], 'operations': ['UPDATE'],
          'resources': ['pods/ephemeralcontainers'], 'scope': 'Namespaced'}]
+    # pods/proxy (PM decision 2026-11-14): the API server's HTTP proxy to a runner port is the same
+    # access class as port-forward; nothing in the repository uses it.
     # Plain pods (create/delete by runner-controller, get by the API and broker) are never matched.
     assert not any(r for rule in match['resourceRules'] for r in rule['resources'] if '/' not in r)
 

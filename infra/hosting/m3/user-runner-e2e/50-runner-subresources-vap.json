@@ -14,7 +14,7 @@
           "resourceRules": [
             {
               "apiGroups": [""], "apiVersions": ["v1"], "operations": ["CONNECT"],
-              "resources": ["pods/exec", "pods/attach", "pods/portforward"], "scope": "Namespaced"
+              "resources": ["pods/exec", "pods/attach", "pods/portforward", "pods/proxy"], "scope": "Namespaced"
             },
             {
               "apiGroups": [""], "apiVersions": ["v1"], "operations": ["UPDATE"],
@@ -25,7 +25,7 @@
         "validations": [
           {
             "expression": "has(request.userInfo.groups) && 'system:masters' in request.userInfo.groups",
-            "message": "runner-subresources: exec, attach, port-forward and ephemeral containers on codex-runner Pods are for cluster administrators only (#62)",
+            "message": "runner-subresources: exec, attach, port-forward, proxy and ephemeral containers on codex-runner Pods are for cluster administrators only (#62)",
             "reason": "Forbidden"
           }
         ]

@@ -153,7 +153,8 @@ Rollback:
 ## Step E: runner subresource VAP (requirement 6a)
 
 `50-runner-subresources-vap.json` holds ValidatingAdmissionPolicy `runner-subresources` and its binding (`Deny`). It covers Pods in codex-runner only, matched by `kubernetes.io/metadata.name`:
-- **Refused:** `pods/exec`, `pods/attach`, `pods/portforward` (CONNECT) and `pods/ephemeralcontainers` (UPDATE), unless the requester is in `system:masters`.
+- **Refused:** `pods/exec`, `pods/attach`, `pods/portforward`, `pods/proxy` (CONNECT) and `pods/ephemeralcontainers` (UPDATE), unless the requester is in `system:masters`.
+  - `pods/proxy` was added by PM decision on 2026-11-14. It is the API server's HTTP proxy to a Pod port, the same access class as port-forward, and nothing in the repository uses it.
 - **Effect today:** none for any service account. On 2026-11-14, `kubectl auth can-i … --subresource` showed that no non-admin service account has these rights. The policy guards against later RBAC drift.
 - **Operators keep their access:** `system:masters` (`k3s kubectl` on the node) still passes, so review and operator scripts that `kubectl exec` into runner Pods keep working.
 - **Untouched:** plain Pod create, delete and get (runner-controller, API, broker) are not matched.
@@ -167,8 +168,12 @@ The API server needs no restart.
 **VM proof.** Each check needs the exact output and rc.
 
 Test identity:
-- A temporary ServiceAccount `vap-probe` in a scratch namespace.
-- A Role in codex-runner granting it `get` on `pods` and `create` on `pods/exec`, `pods/attach`, `pods/portforward`, plus `patch` on `pods/ephemeralcontainers`.
+- A temporary ServiceAccount `vap-probe` in a scratch namespace. On the development VM, reuse the empty `issue62-probe` namespace left from steps B–C (kept because of the metrics APIService fault).
+- A Role in codex-runner granting it:
+  - `get` on `pods`;
+  - `create` on `pods/exec`, `pods/attach`, `pods/portforward`;
+  - `get` and `create` on `pods/proxy`;
+  - `patch` on `pods/ephemeralcontainers`.
 - Use it with `--as=system:serviceaccount:<scratch>:vap-probe` from the admin kubeconfig. Impersonation does not add `system:masters`.
 - Target: one runner Pod. The exec runs `true` only and reads no user data.
 
@@ -177,12 +182,13 @@ Test identity:
 | E0 | before the binding | `vap-probe`: `kubectl exec <runner> -c runner -- true` | rc 0. Proves RBAC allows it, so a later refusal is the policy's |
 | E1 | after | `vap-probe`: same exec | refused, message starts `runner-subresources:`. **Proves CONNECT matching on k3s v1.36** |
 | E2 | after | `vap-probe`: `kubectl attach <runner> -c runner` (short timeout) and `kubectl port-forward pod/<runner> :8080` | refused, same message |
+| E2p | before and after | `vap-probe`: `kubectl get --raw /api/v1/namespaces/codex-runner/pods/<runner>:8080/proxy/healthz` | **before:** passes admission, so any answer is the proxy's own, typically an error. The runner CNP admits only the API and the controller on 8080, so the API server's connection is expected to fail; record what it is. **After:** refused with the `runner-subresources:` message. Admission refusal is not a network result: this row does not claim anything about that path's network policy |
 | E3 | after | `vap-probe`: `kubectl debug <runner> --image=<runner image> --target=runner -- true` (ephemeral container) | refused, same message. No ephemeral container added (check `spec.ephemeralContainers` stays absent) |
 | E4 | after | admin (`system:masters`): `kubectl exec <runner> -c runner -- true` | rc 0 |
 | E5 | after | plain operations: the runner-controller creates and deletes a runner Pod (stop and re-entry); the API reads Pods | unchanged; no `runner-subresources` refusal in either log |
 | E6 | after | a Pod in another namespace: admin and `vap-probe` (with a Role there) exec | not matched by the policy |
 
-Afterwards, delete the temporary Role, RoleBinding, ServiceAccount and the scratch namespace. Delete the namespace only while the metrics APIService is Available (PARITY metrics row).
+Afterwards, delete the temporary Role, RoleBinding and ServiceAccount. Delete the scratch namespace only while the metrics APIService is Available (PARITY metrics row); otherwise leave it empty, as `issue62-probe` is now.
 
 Rollback: delete the binding `runner-subresources`, then the policy. With the binding gone, the policy has no effect.
 
