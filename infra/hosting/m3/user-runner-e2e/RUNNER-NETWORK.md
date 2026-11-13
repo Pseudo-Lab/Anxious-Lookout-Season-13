@@ -152,8 +152,33 @@ Rollback:
 
 ## Production
 
-- Same steps and checks, after:
-  - the user's read-only inventory (#62 step 0, items 1–6) is on the issue;
-  - this procedure's VM results are approved.
-- If production has other in-cluster clients of the API or PostgreSQL (for example `codex-trial`), the m2-hosting allowlists change first, in source.
+Production does the same steps and checks, after two things:
+- this procedure's VM results are approved;
+- the production read-only looks are on #62. Round 1 (2026-11-14) is there; round 2 covers the routes, ConfigMaps, codex-trial workloads and the other apps.
+
+**Production's public routing is not `render.sh`'s.** It comes from the #7 root HTTPS package (`infra/hosting/m3/https_prepare.py`, `ROOT-HTTPS-P1.md`):
+- IngressRoute `hosting-root-https-v1` on `websecure` with TLS. Its API rule already excludes `(Path(/api/internal) || PathPrefix(/api/internal/))`, and the Middleware `hosting-root-encoding-v1` rejects encoded `/`, `\`, NUL, `;`, `%`, `?` and `#` (400).
+- `hosting` on `web`, which P1 replaced with a GET/HEAD-only redirect to HTTPS. Round 2 confirms the live spec.
+- The API reads the immutable ConfigMap `hosting-root-https-v1`, not `hosting-config`.
+
+So on production:
+
+- **Never apply the `render.sh` output as a whole.** It would replace the P1 routes and ConfigMap reference. Apply only the #62 objects:
+  - Service `api-internal`;
+  - the three m2-hosting CNPs;
+  - the api Deployment image (it must also add `containerPort` 8081 `internal`);
+  - the runner-controller image;
+  - the runner CNP.
+  The step boundaries are the same. Each object comes from the render output, compared with the live object before apply.
+- **Step A's IngressRoute change does not apply.** The live HTTPS route already closes `/api/internal`. The check is that the public `/api/internal` forms (including the encoded ones in `route_probe.py`) answer 404 or 400 through `https://` and `http://`.
+- **Switch flag.** `hosting-root-https-v1` is immutable, so when a transition is needed, step A sets `API_INTERNAL_CALLBACK_ON_PUBLIC=true` as an `env` entry on the api Deployment (`env` overrides `envFrom`), and step D removes it.
+- **No transition if no runner Pod.** Production had **no runner Pod** on 2026-11-14. If that is still true at the switch, and the new runner-controller is running before any Pod is created, no Pod has the 8080 env. Then:
+  - the flag stays `false`;
+  - `hosting-api-ingress` is applied without the transition rule;
+  - the runner CNP goes straight to `40-runner-network.json`.
+  Steps A–D collapse into A, B, C with the final forms. Re-check the Pod count (with its rc) right before choosing.
+- **codex-trial (#7) and the other namespaces.**
+  - Repository evidence: no codex-trial workload uses m2-hosting's database (`infra/codex-trial/check_inputs.py` refuses an m2-hosting DSN). The #7 access-web runner's callback to the m2-hosting API ran through `hosting-access-web-link-v1`, deleted in #13 C.
+  - The #62 policies therefore admit no codex-trial source, and any codex-trial Pod is refused at the API and PostgreSQL.
+  - Round 2 confirms whether any codex-trial or other-app workload is running and mentions `m2-hosting`. Any that does needs a decision before the switch, not an allowlist entry by default.
 - Production takes no release of this source outside the switch (PARITY "Render output and the live node").

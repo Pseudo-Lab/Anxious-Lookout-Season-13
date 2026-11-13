@@ -88,6 +88,8 @@ Create these only after target/diff/baseline/rollback review. Secret file modes/
 - **Probes are exec,** so no other host ingress is needed. `kubectl exec postgres-0 -- pg_dump` backups do not use the network.
 - **Name history.** The pre-#13 objects `hosting-boundary` and `hosting-access-web-link-v1` stay retired, and `postboot-check.sh` still requires them to be absent. History is in [DEFAULT-ALLOW.md](../k3s/DEFAULT-ALLOW.md).
 - **Switch procedure:** `m3/user-runner-e2e/RUNNER-NETWORK.md`.
+- **Production routing differs.** Production's public routes and API ConfigMap come from the #7 root HTTPS package (`m3/https_prepare.py`), not from this renderer. The P1 HTTPS route already excludes `/api/internal`, with an encoded-character middleware. Never apply this renderer's output to production as a whole; #62 applies only its own objects there (PARITY "m2-hosting public routing").
+- **No codex-trial source is admitted.** The `codex-trial` namespace (#7, production only) has its own database. Its old callback link to this API was deleted in #13 C.
 - Real provider URLs are hardcoded. DNS FQDN enforcement is not claimed (#70). Tenant labels/materials-api/agent-manager labels are not reused.
 
 ## Data persistence and rollback
