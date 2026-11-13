@@ -287,6 +287,26 @@ t chain-through-forced 0 retire-e4-final 'creds 0 && echo "$out" | grep -q "same
 build; after_e3; st=$(cat /root/issue72/evidence/e1/stopped-at); { ev $st forced true 100:120 100:150; ev $((now-1800)) scheduled true 100:150 100:200; } > /mock/events
 t event-in-stop-second-before-record 0 retire-e4-final 'creds 0'
 build; after_e3; { ev $((now-3600)) scheduled true 100:150 100:200; ev $((now+3600)) forced true 100:200 100:200; } > /mock/events; t future-event 3 retire-e4-final "$refused"
+# #74 production (2026-11-13): Codex's app-server refreshes auth.json on its own (backend/broker/credentials.py), in
+# place (same inode, later mtime) and without a broker event. On the node the only event's `before` was such a rewrite,
+# 0.7 s before the broker's scheduled refresh: E1 185100484:1793436345776637182 -> before 185100484:1794375139610541995
+# -> after = current 185100484:1794375140306545910. Same inode throughout: no device login.
+build; after_e3; ev $((now-3600)) scheduled true 100:170 100:200 > /mock/events
+t prod-inplace-rewrite-before-refresh 0 retire-e4-final 'creds 0 && nodb && [ -e /mock/sa-deleted ] && echo "$out" | grep -q "same login session since E1"'
+build; after_e3; ev $((now-3600)) scheduled true 100:150 100:180 > /mock/events
+t inplace-rewrite-after-last-event 0 retire-e4-final 'creds 0 && [ -e /mock/sa-deleted ]'
+build; after_e3; { ev $((now-7200)) forced true 100:160 100:170; ev $((now-3600)) scheduled true 100:180 100:200; } > /mock/events
+t inplace-rewrites-between-events 0 retire-e4-final 'creds 0'
+# Still refused: another inode (a replaced file) anywhere in the chain, or an mtime that goes backwards.
+build; after_e3; ev $((now-3600)) scheduled true 300:170 300:200 > /mock/events
+MOCK_IDENT=300:200 t new-inode-before-refresh 3 retire-e4-final "$refused"; unset MOCK_IDENT
+build; after_e3; ev $((now-3600)) scheduled true 100:150 100:200 > /mock/events
+MOCK_IDENT=300:210 t new-inode-after-last-event 3 retire-e4-final "$refused"; unset MOCK_IDENT
+build; after_e3; ev $((now-3600)) scheduled true 100:140 100:200 > /mock/events; t mtime-backwards-before 3 retire-e4-final "$refused"
+build; after_e3; ev $((now-3600)) scheduled true 100:150 100:200 > /mock/events
+MOCK_IDENT=100:190 t current-older-than-chain 3 retire-e4-final "$refused"; unset MOCK_IDENT
+build; after_e3; ev $((now-3600)) scheduled true 100:170 - > /mock/events
+MOCK_IDENT=- t file-absent-after 3 retire-e4-final 'creds 5 && nodb && [ ! -e /mock/sa-deleted ]'; unset MOCK_IDENT
 build; after_e3; { ev $((now-3600)) scheduled true 100:150 100:200; echo '{"at": 1, "event": "refresh", "kind": "scheduled", "ok": true, "before": "1:1", "after": "1:1", "token": "SECRET-x"}'; } > /mock/events
 t extra-field 3 retire-e4-final "$refused"
 build; after_e3; { ev $((now-3600)) scheduled true 100:150 100:200; echo 'not json'; } > /mock/events; t malformed-line 3 retire-e4-final "$refused"
