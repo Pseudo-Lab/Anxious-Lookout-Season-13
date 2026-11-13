@@ -58,17 +58,34 @@ Create these only after target/diff/baseline/rollback review. Secret file modes/
      bash infra/hosting/render-migration.sh > /tmp/m2-auth-migration.yaml
    ```
 
-3. Review resource list/diff and server dry-run in the approved namespace sequence before real apply. New namespace m2-hosting, new m2-postgres-retain StorageClass, SA, ConfigMap, PostgreSQL StatefulSet/PVC/headless Service, web/API Deployments/Services and owned IngressRoute only. No CiliumNetworkPolicy is rendered (#54); see the network note below. Default StorageClass and existing PVs/namespaces/apps remain untouched. Establish policies before workload exposure and observe policy realization. Do not interpret absent namespace/Secret/PVC prerequisites as a completed server dry-run.
+3. Review resource list/diff and server dry-run in the approved namespace sequence before real apply. New namespace m2-hosting, new m2-postgres-retain StorageClass, SA, ConfigMap, PostgreSQL StatefulSet/PVC/headless Service, web/API Deployments/Services (plus `api-internal`), the three m2-hosting ingress CiliumNetworkPolicies (#62) and owned IngressRoute only; see the network note below. Default StorageClass and existing PVs/namespaces/apps remain untouched. Establish policies before workload exposure and observe policy realization. Do not interpret absent namespace/Secret/PVC prerequisites as a completed server dry-run.
 4. On explicit application authorization, create dedicated namespace/retaining storage/policy/config/secrets, start PG, wait for ready/volume ownership, run explicit **auth-alembic-0001** Job, then web/API rollout. Cluster-scoped Namespace/StorageClass bootstrap is separate from the namespaced SA; wait for authorized namespace creation before namespaced server dry-runs. Check actual role login/schema as well as pg_isready. No automatic API-startup migrations or DB resets. Request budgets/surge are initial values; measure them on this node.
-5. IngressRoute selects only the actual numeric public IPv4 Host from mandatory M2_PUBLIC_ORIGIN. Existing hostless `/android-agent` resource is not edited: the web rule excludes both `/android-agent` and `/android-agent/`. API matcher is exact `/api` or `/api/` prefix; `/apis` goes to web. Dashboard/TLS/hostless root fallback are not added. Browser uses the actual public origin. Host matching ignores port, so verify existing entrypoint/ServiceLB external port matches the exact AUTH_ORIGIN; actual auth separately enforces Host/protocol/port. Verify unspecified Host/IP cannot expose M2 root/API and compare original existing routes.
+5. IngressRoute selects only the actual numeric public IPv4 Host from mandatory M2_PUBLIC_ORIGIN. Existing hostless `/android-agent` resource is not edited: the web rule excludes both `/android-agent` and `/android-agent/`. API matcher is exact `/api` or `/api/` prefix except `/api/internal/` (#62: not routed at all); `/apis` goes to web. Dashboard/TLS/hostless root fallback are not added. Browser uses the actual public origin. Host matching ignores port, so verify existing entrypoint/ServiceLB external port matches the exact AUTH_ORIGIN; actual auth separately enforces Host/protocol/port. Verify unspecified Host/IP cannot expose M2 root/API and compare original existing routes.
 6. Validate status/versions/web assets/content-type/cache/real 404, role/DB behavior, resource/restart readings and M1 authorized-source controls + policy drop evidence for denials. Ready alone or timeout without evidence is insufficient.
 
-**Network policy:** `render.sh` emits no CiliumNetworkPolicy (#54).
-- The original scoped `hosting-boundary` CNP restricted API egress, kept web/PG without egress and admitted PG ingress only from hosting-api/ops.
-- The live node deleted it in the issue #13 default-allow transition (decision C, [DEFAULT-ALLOW.md](../k3s/DEFAULT-ALLOW.md)). m2-hosting endpoints now have no selecting policy and use Cilium default allow, and the host-network runner workers reach PostgreSQL at its Pod IP.
-- The renderer matches that state. Applying the current output to the live node changes no policy object: none is created, and `kubectl apply` does not delete objects absent from its input. `infra/k3s/host/postboot-check.sh` already requires both CNPs to be absent.
-- Reintroducing a hosting policy is a new issue, and must keep the worker database route. [PARITY.md](../k3s/PARITY.md) classifies the policy state as "must match".
-- Real provider URLs are hardcoded. DNS FQDN enforcement is not claimed because the Cilium L7 proxy is off. Tenant labels/materials-api/agent-manager labels are not reused.
+**Network policy (#62):** `render.sh` emits three ingress-only CiliumNetworkPolicies. Egress from m2-hosting stays default allow.
+
+| CNP | Selects | Ingress allowed |
+| --- | --- | --- |
+| `hosting-api-ingress` | `app=hosting-api` | 8080 from the kube-system Traefik Pod (`app.kubernetes.io/name=traefik`); 8081 from codex-runner `anxious.io/managed=user-runner` Pods. With `M2_RUNNER_CALLBACK_TRANSITION=true`, also 8080 from those runner Pods |
+| `hosting-web-ingress` | `app=hosting-web` | 8080 from Traefik |
+| `hosting-postgres-ingress` | `app=hosting-postgres` | 5432 from `app=hosting-api`, `app=hosting-ops` (migration Jobs), runner-control `app=runner-controller`, and the `host` entity |
+
+- **API listeners.** The API process (`python -m app.serve`) listens on both ports:
+  - public 8080 (Service `api`, Traefik);
+  - internal 8081 (Service `api-internal`), which serves only `POST /api/internal/research/tools`.
+- **`/api/internal/` is never public.**
+  - The IngressRoute does not route `/api/internal/`, so Traefik answers 404.
+  - The public listener also answers 404 for that prefix, unless `API_INTERNAL_CALLBACK_ON_PUBLIC=true`. The renderer sets that value from `M2_RUNNER_CALLBACK_TRANSITION` (default `false`), and it is `true` only during the #62 runner switch.
+- **`AUTH_TRUSTED_PROXY_CIDRS` stays the Pod CIDR.** Because `hosting-api-ingress` admits only Traefik to 8080, in effect it trusts Traefik alone.
+- **The `host` entry on 5432 is for the host `issue16-controller`.** That controller runs with `--network=host` and does storage preparation until #63. It reaches the postgres Pod IP from the node.
+  - On this single node, `host` means this node only: `remote-node` is not admitted.
+  - `host` also covers hostNetwork Pods.
+  - Remove the entry with #63 ([PARITY.md](../k3s/PARITY.md)).
+- **Probes are exec,** so no other host ingress is needed. `kubectl exec postgres-0 -- pg_dump` backups do not use the network.
+- **Name history.** The pre-#13 objects `hosting-boundary` and `hosting-access-web-link-v1` stay retired, and `postboot-check.sh` still requires them to be absent. History is in [DEFAULT-ALLOW.md](../k3s/DEFAULT-ALLOW.md).
+- **Switch procedure:** `m3/user-runner-e2e/RUNNER-NETWORK.md`.
+- Real provider URLs are hardcoded. DNS FQDN enforcement is not claimed (#70). Tenant labels/materials-api/agent-manager labels are not reused.
 
 ## Data persistence and rollback
 

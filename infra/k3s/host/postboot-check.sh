@@ -59,6 +59,8 @@ check resource_absent cnp -n m2-hosting hosting-boundary hosting-access-web-link
 # Presence only. Compare retained specs with the private pre-transition snapshot manually.
 check /usr/local/bin/k3s kubectl -n codex-runner get cnp runner-callback-draft -o name
 check /usr/local/bin/k3s kubectl -n codex-runner get networkpolicy runner-default-deny -o name
+# #62: m2-hosting ingress policies (render.sh). A node not yet switched to #62 fails here by design.
+check /usr/local/bin/k3s kubectl -n m2-hosting get cnp hosting-api-ingress hosting-web-ingress hosting-postgres-ingress -o name
 rule='rule family="ipv4" source address="10.42.0.0/16" port port="6443" protocol="tcp" accept'
 check firewall-cmd --zone=public --query-rich-rule="$rule"
 check firewall-cmd --permanent --zone=public --query-rich-rule="$rule"

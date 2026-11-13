@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from app.runner_controller import Identity
-from app.runner_kube import KubePods, Plan, Reference, LABEL
+from app.runner_kube import KubePods, Plan, Reference, LABEL, CALLBACK_URL, LEGACY_CALLBACK_URL
 from runner.lifecycle import Refused
 
 
@@ -239,6 +239,72 @@ def test_only_internal_callback_http_is_allowed(plan):
                   'http://api.m2-hosting.svc.cluster.local:8080/admin',
                   'http://api.m2-hosting.svc.cluster.local:6443/api/internal/research/tools'):
         with pytest.raises(Refused): replace(plan, callback=value)
+
+
+def callback_env(manifest):
+    env = {e['name']: e.get('value') for e in manifest['spec']['containers'][0]['env']}
+    return env['RESEARCH_TOOL_CALLBACK_URL']
+
+
+def test_internal_listener_callback_is_the_only_8081_form(plan):
+    assert replace(plan, callback=CALLBACK_URL).callback == CALLBACK_URL
+    for value in ('http://api.m2-hosting.svc.cluster.local:8081/api/internal/research/tools',
+                  'http://api-internal.m2-hosting.svc.cluster.local:8081/admin',
+                  'http://api-internal.foreign.svc.cluster.local:8081/api/internal/research/tools'):
+        with pytest.raises(Refused): replace(plan, callback=value)
+
+
+def test_stored_8080_callback_renders_the_internal_listener(plan):
+    legacy = replace(plan, callback=LEGACY_CALLBACK_URL)
+    assert callback_env(legacy.manifest('isolated')) == CALLBACK_URL
+    assert callback_env(legacy.manifest('isolated', legacy_callback=True)) == LEGACY_CALLBACK_URL
+    # Any other stored callback is rendered as stored.
+    assert callback_env(plan.manifest('isolated')) == plan.callback
+    assert callback_env(plan.manifest('isolated', legacy_callback=True)) == plan.callback
+    assert callback_env(replace(plan, callback=CALLBACK_URL).manifest('isolated')) == CALLBACK_URL
+
+
+def kube_port(plan, server):
+    return KubePods('https://kube.invalid', 'isolated', 'k'*40, None, [plan], _transport=httpx.MockTransport(server))
+
+
+def set_callback(pod, value):
+    for item in pod['spec']['containers'][0]['env']:
+        if item['name'] == 'RESEARCH_TOOL_CALLBACK_URL':
+            item['value'] = value
+
+
+def test_pre_62_pod_is_recognised_for_a_stored_8080_plan(plan):
+    legacy = replace(plan, callback=LEGACY_CALLBACK_URL)
+    server = Server(legacy)
+    port = kube_port(legacy, server)
+    created = port.create_once(legacy.identity)
+    assert callback_env(server.pod) == CALLBACK_URL
+    set_callback(server.pod, LEGACY_CALLBACK_URL)
+    assert port.lookup(legacy.identity) == created
+    port.close()
+
+
+@pytest.mark.parametrize('value', ['http://api.m2-hosting.svc.cluster.local:8080/api/internal/research/other',
+                                   'http://foreign.invalid/tools', None])
+def test_other_callback_env_still_refused(plan, value):
+    legacy = replace(plan, callback=LEGACY_CALLBACK_URL)
+    server = Server(legacy)
+    port = kube_port(legacy, server)
+    port.create_once(legacy.identity)
+    if value is None:  # the legacy value with a second difference is not the pre-#62 Pod
+        set_callback(server.pod, LEGACY_CALLBACK_URL)
+        server.pod['spec']['containers'][0]['image'] = 'foreign:latest'
+    else:
+        set_callback(server.pod, value)
+    with pytest.raises(Refused): port.lookup(legacy.identity)
+    port.close()
+
+
+def test_legacy_env_refused_for_a_plan_not_stored_with_8080(plan, port, server):
+    port.create_once(plan.identity)
+    set_callback(server.pod, LEGACY_CALLBACK_URL)
+    with pytest.raises(Refused): port.lookup(plan.identity)
 
 
 def test_delete_accepts_asynchronous_api_response(plan):

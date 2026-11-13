@@ -30,6 +30,12 @@ GRACE_SECONDS = 20
 # #60: runner pulls operator access with a short-lived token bound to its Pod.
 BROKER_URL = 'http://codex-broker.codex-broker.svc:8080'
 BROKER_AUDIENCE = 'codex-broker'
+# #62: tool callbacks go to the API's internal listener (8081; by policy only runner Pods reach
+# it). Published bindings are immutable and keep the 8080 URL they were published with, so a Pod
+# for such a plan gets CALLBACK_URL in its place. A Pod created before #62 (env still the 8080
+# URL) is recognised until it ends, so the switch needs no runner drain.
+CALLBACK_URL = 'http://api-internal.m2-hosting.svc.cluster.local:8081/api/internal/research/tools'
+LEGACY_CALLBACK_URL = 'http://api.m2-hosting.svc.cluster.local:8080/api/internal/research/tools'
 
 
 def name(value):
@@ -76,11 +82,17 @@ class Plan:
         internal = (parsed.scheme == 'http' and parsed.hostname is not None
                     and re.fullmatch(r'[a-z0-9-]+\.[a-z0-9-]+\.svc\.cluster\.local', parsed.hostname)
                     and parsed.port == 8080 and parsed.path == '/api/internal/research/tools')
-        require((parsed.scheme == 'https' or internal) and parsed.hostname and not parsed.username and not parsed.password
-                and not parsed.query and not parsed.fragment)
+        require((parsed.scheme == 'https' or internal or self.callback == CALLBACK_URL) and parsed.hostname
+                and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment)
         name(self.service_account)
 
-    def manifest(self, namespace):
+    def pod_callback(self, legacy=False):
+        """The callback a Pod gets: the stored 8080 URL maps to the internal listener (#62)."""
+        if self.callback == LEGACY_CALLBACK_URL and not legacy:
+            return CALLBACK_URL
+        return self.callback
+
+    def manifest(self, namespace, *, legacy_callback=False):
         identity = self.identity
         labels = {LABEL+'owner': str(identity.owner), LABEL+'state': str(identity.state_id),
                   LABEL+'generation': str(identity.generation), LABEL+'managed': 'user-runner'}
@@ -89,7 +101,7 @@ class Plan:
                'CODEX_MODEL': 'gpt-6.1-sol',
                'CODEX_AUTH_MODE': 'access-service', 'CODEX_EXECUTION_SCOPE': 'operator-access-service',
                'CODEX_ACCESS_CONTROL_DIR': '/control', 'CODEX_OPERATOR_ACCOUNT_FILE': '/control/operator-account',
-               'RESEARCH_TOOL_CALLBACK_URL': self.callback, 'BROKER_URL': BROKER_URL,
+               'RESEARCH_TOOL_CALLBACK_URL': self.pod_callback(legacy_callback), 'BROKER_URL': BROKER_URL,
                'BROKER_TOKEN_FILE': '/run/codex-broker/token'}
         manifest = {'apiVersion': 'v1', 'kind': 'Pod',
                 'metadata': {'name': identity.name, 'namespace': namespace, 'labels': labels},
@@ -265,7 +277,11 @@ class KubePods:
                 container.pop('terminationMessagePolicy')
             if container.get('resources') == {}:
                 container.pop('resources')
-        require(actual == expected)
+        # A pre-#62 Pod differs from the current render only in the callback env value.
+        accepted = [expected]
+        if plan.callback == LEGACY_CALLBACK_URL:
+            accepted.append(plan.manifest(self.namespace, legacy_callback=True)['spec'])
+        require(actual in accepted)
         self._references(plan)
         return Pod(plan.identity, uid)
 

@@ -19,6 +19,15 @@ with httpx.Client(base_url="http://gateway:8080", timeout=3, trust_env=False) as
             response = client.get(path, headers={"Host": host})
             assert response.status_code == 200, (host, path, response.status_code)
             assert response.json() == {"service": service, "path": path}
+        # #62: the runner callback is never routed publicly (no router matches: Traefik's 404,
+        # or 400 for encoded separators); a near name still goes to the API.
+        for path in ("/api/internal/research/tools", "/api/internal/", "/api/%69nternal/research/tools"):
+            response = client.post(path, headers={"Host": host})
+            assert response.status_code == 404 and "service" not in response.text, (host, path, response.status_code)
+        for path in ("/api/internal%2Fresearch/tools", "/api%2Finternal/research/tools"):
+            response = client.post(path, headers={"Host": host})
+            assert response.status_code in {400, 404} and "service" not in response.text, (host, path, response.status_code)
+        assert client.get("/api/internalx", headers={"Host": host}).json() == {"service": "api", "path": "/api/internalx"}
     for host in ("93.184.216.35", "m2.invalid"):
         assert client.get("/", headers={"Host": host}).status_code == 404
         assert client.get("/api/health", headers={"Host": host}).status_code == 404

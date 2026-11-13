@@ -1,5 +1,12 @@
 # Issue #13: default-allow transition (decision C)
 
+> **Partly superseded by #62 (2026-11-14).** m2-hosting gets ingress policy again:
+> - the renderer emits `hosting-api-ingress`, `hosting-web-ingress` and `hosting-postgres-ingress`;
+> - the runner CNP's `toEntities: all` egress is replaced by an allowlist;
+> - see `infra/hosting/README.md` "Network policy (#62)" and `infra/hosting/m3/user-runner-e2e/RUNNER-NETWORK.md`.
+>
+> The new objects use new names. The two policies this procedure deleted (`hosting-boundary`, `hosting-access-web-link-v1`) stay deleted. The rollback below would restore them, so it no longer applies to a node switched to #62.
+
 > **Existing node only.** This procedure is the record of the live node's transition. Do not run it on a new node:
 > - Its variables (`k`, `snapshot`, `cidr_rule`) are defined only in step 0, so step 3 alone fails under `set -u` with `cidr_rule: unbound variable`.
 > - Step 0 itself queries CNPs, ipsets and sync units that a new node never had.

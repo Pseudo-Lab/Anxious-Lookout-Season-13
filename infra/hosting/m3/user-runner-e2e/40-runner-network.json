@@ -32,7 +32,24 @@
         }}],
         "toPorts": [{"ports": [{"port": "8080", "protocol": "TCP"}]}]
       },
-      {"toEntities": ["all"]}
+      {
+        "toEndpoints": [{"matchLabels": {
+          "k8s:io.kubernetes.pod.namespace": "kube-system",
+          "k8s:k8s-app": "kube-dns"
+        }}],
+        "toPorts": [{"ports": [{"port": "53", "protocol": "UDP"}, {"port": "53", "protocol": "TCP"}]}]
+      },
+      {
+        "toEndpoints": [{"matchLabels": {
+          "k8s:io.kubernetes.pod.namespace": "m2-hosting",
+          "k8s:app": "hosting-api"
+        }}],
+        "toPorts": [{"ports": [{"port": "8081", "protocol": "TCP"}]}]
+      },
+      {
+        "toEntities": ["world"],
+        "toPorts": [{"ports": [{"port": "443", "protocol": "TCP"}]}]
+      }
     ],
     "egressDeny": [
       {"toEndpoints": [

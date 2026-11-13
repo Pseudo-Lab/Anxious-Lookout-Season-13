@@ -1,3 +1,10 @@
+# Runner network narrowing (#62, 2026-11-14)
+
+`40-runner-network.json` now allows runner egress only to codex-broker 8080, kube-dns 53, the
+API internal listener (`m2-hosting/app=hosting-api` 8081) and `world` 443. The switch from the
+previous `toEntities: all` policy, with `40-runner-network-transition.json` as the intermediate
+step, is [RUNNER-NETWORK.md](RUNNER-NETWORK.md). The notices below are history.
+
 # Network transition notice (2026-10-16)
 
 After the image repair, the runner DNS/provider fix is

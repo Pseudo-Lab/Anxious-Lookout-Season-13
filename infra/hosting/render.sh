@@ -18,6 +18,11 @@ done
 [[ "$ip_a" != 172 || "$ip_b" -lt 16 || "$ip_b" -gt 31 ]] || exit 1
 [[ "$ip_a" != 100 || "$ip_b" -lt 64 || "$ip_b" -gt 127 ]] || exit 1
 [[ "$ip_a" != 198 || ( "$ip_b" != 18 && "$ip_b" != 19 ) ]] || exit 1
+# #62 runner callback switch: true only while runner Pods created before #62 (callback env on the
+# public 8080 listener) may still run. It lets those Pods reach 8080 (policy) and the public listener
+# serve /api/internal/ (API flag). Traefik never routes /api/internal/ either way.
+M2_RUNNER_CALLBACK_TRANSITION=${M2_RUNNER_CALLBACK_TRANSITION:-false}
+[[ "$M2_RUNNER_CALLBACK_TRANSITION" == true || "$M2_RUNNER_CALLBACK_TRANSITION" == false ]] || { echo 'M2_RUNNER_CALLBACK_TRANSITION must be true or false' >&2; exit 1; }
 for image in "$WEB_IMAGE" "$API_IMAGE"; do
   [[ "$image" =~ ^[a-zA-Z0-9._/:-]+@sha256:[0-9a-f]{64}$ ]] || { echo 'Digest-qualified image required' >&2; exit 1; }
 done
@@ -60,10 +65,12 @@ data:
   OAUTH_MODE: disabled
   APP_BASE_PATH: ""
   GITHUB_CLIENT_ID: ""
-  # Whole Pod CIDR: since the issue #13 default-allow transition no policy limits API
-  # ingress to Traefik, so any Pod that reaches the API is trusted here (narrowing is #56).
-  # Traefik must overwrite forwarded proto.
+  # Whole Pod CIDR, but since #62 the CNP hosting-api-ingress admits only the Traefik Pod to the
+  # public listener 8080, so in effect this trusts Traefik alone (its Pod IP is not fixed, hence
+  # the CIDR). The internal listener 8081 serves only the tool callback, which reads no forwarded
+  # header. Traefik must overwrite forwarded proto.
   AUTH_TRUSTED_PROXY_CIDRS: "10.42.0.0/16"
+  API_INTERNAL_CALLBACK_ON_PUBLIC: "$M2_RUNNER_CALLBACK_TRANSITION"
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -180,7 +187,7 @@ spec:
         - name: $app
           image: $image
           imagePullPolicy: IfNotPresent
-          ports: [{name: http, containerPort: 8080}]
+          ports: [{name: http, containerPort: 8080}$( [[ "$app" == api ]] && printf ', {name: internal, containerPort: 8081}' )]
           resources:
             requests: {cpu: $cpu, memory: $memory}
             limits: {cpu: $limit_cpu, memory: $limit_memory}
@@ -258,7 +265,68 @@ YAML
 }
 deployment api "$API_IMAGE" 50m 96Mi 250m 256Mi
 deployment web "$WEB_IMAGE" 100m 128Mi 500m 512Mi
+transition_rule=
+if [[ "$M2_RUNNER_CALLBACK_TRANSITION" == true ]]; then
+  transition_rule='
+    # #62 switch only: runner Pods created before #62 call back on 8080.
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": codex-runner, "k8s:anxious.io/managed": user-runner}}]
+      toPorts: [{ports: [{port: "8080", protocol: TCP}]}]'
+fi
 cat <<YAML
+---
+# #62: the runner tool callback listener. Runner Pods only (CNP below and runner-callback-draft).
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-internal
+  namespace: m2-hosting
+spec:
+  selector: {app: hosting-api}
+  ports: [{name: internal, port: 8081, targetPort: internal}]
+---
+# #62 (#56): ingress only; egress stays default allow. Probes are exec, so no host ingress.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: hosting-api-ingress
+  namespace: m2-hosting
+spec:
+  endpointSelector: {matchLabels: {app: hosting-api}}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s:app.kubernetes.io/name": traefik}}]
+      toPorts: [{ports: [{port: "8080", protocol: TCP}]}]
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": codex-runner, "k8s:anxious.io/managed": user-runner}}]
+      toPorts: [{ports: [{port: "8081", protocol: TCP}]}]$transition_rule
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: hosting-web-ingress
+  namespace: m2-hosting
+spec:
+  endpointSelector: {matchLabels: {app: hosting-web}}
+  ingress:
+    - fromEndpoints: [{matchLabels: {"k8s:io.kubernetes.pod.namespace": kube-system, "k8s:app.kubernetes.io/name": traefik}}]
+      toPorts: [{ports: [{port: "8080", protocol: TCP}]}]
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: hosting-postgres-ingress
+  namespace: m2-hosting
+spec:
+  endpointSelector: {matchLabels: {app: hosting-postgres}}
+  ingress:
+    - fromEndpoints:
+        - {matchLabels: {"k8s:io.kubernetes.pod.namespace": m2-hosting, "k8s:app": hosting-api}}
+        - {matchLabels: {"k8s:io.kubernetes.pod.namespace": m2-hosting, "k8s:app": hosting-ops}}
+        - {matchLabels: {"k8s:io.kubernetes.pod.namespace": runner-control, "k8s:app": runner-controller}}
+      toPorts: [{ports: [{port: "5432", protocol: TCP}]}]
+    # The host issue16-controller (--network=host; storage preparation until #63) reaches the
+    # postgres Pod IP from the node. host is this node only (single node; remote-node is not
+    # admitted) and also covers hostNetwork Pods. Remove with #63 (PARITY).
+    - fromEntities: [host]
+      toPorts: [{ports: [{port: "5432", protocol: TCP}]}]
 ---
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
@@ -268,7 +336,8 @@ metadata:
 spec:
   entryPoints: [web]
   routes:
-    - match: Host(\`$public_ipv4\`) && (Path(\`/api\`) || PathPrefix(\`/api/\`))
+    # #62: never route the runner callback (/api/internal/) publicly; no route means Traefik's 404.
+    - match: Host(\`$public_ipv4\`) && (Path(\`/api\`) || PathPrefix(\`/api/\`)) && !PathPrefix(\`/api/internal/\`)
       kind: Rule
       priority: 20
       services: [{name: api, port: 8080}]
