@@ -27,6 +27,9 @@ for n in $CRED_ENTRIES; do echo "$n" | grep -qE '^[A-Za-z0-9._-]+$' || refuse 'b
 #    must form one unbroken chain from that identity to the current one: a device login replaces auth.json without
 #    an event, so it breaks the chain and E4 refuses, whatever was recorded before it. At least one link must be
 #    kind "scheduled" with ok true ("forced" follows a runner 401). Malformed lines or future times refuse.
+#    #74 (production 2026-11-13): Codex's app-server also refreshes on its own, rewriting auth.json in place (same
+#    inode, later mtime) with no broker event. So between links, and after the last one, the file may move to a later
+#    mtime of the SAME inode; any other inode, an absent file or an mtime that goes backwards still breaks the chain.
 [ -f "$E1" ] && [ ! -L "$E1" ] || refuse 'E1 record missing'
 stopped=$(cat "$E1" 2>/dev/null) && echo "$stopped" | grep -qE '^[0-9]{10}$' || refuse 'E1 record unreadable'
 S=$(dirname "$E1")/session
@@ -57,13 +60,21 @@ for line in sys.stdin.read().splitlines():
 # Events in the stop second that already ended at the recorded identity happened before E1 read it.
 while links and links[0]["after"] == chain and links[0]["before"] != chain:
     links.pop(0)
+def same_file(older, newer):
+    # #74: the app-server rewrites auth.json in place (same inode, later or equal mtime) without an event.
+    if older == newer:
+        return True
+    if "-" in (older, newer):
+        return False
+    (i0, m0), (i1, m1) = (tuple(int(x) for x in v.split(":")) for v in (older, newer))
+    return i0 == i1 and m1 >= m0
 seen = []
 for e in links:
-    assert e["before"] == chain  # a break: auth.json was replaced by something other than a broker refresh
+    assert same_file(chain, e["before"])  # a break: auth.json was replaced by something other than a refresh
     chain = e["after"]
     if e["kind"] == "scheduled" and e["ok"]:
         seen.append(e["at"])
-assert chain == current and seen  # unbroken to the current file, with a scheduled refresh in it
+assert same_file(chain, current) and seen  # unbroken to the current file, with a scheduled refresh in it
 print(max(seen))
 ' "$stopped" "$now" "$session" "$current" 2>/dev/null) \
   || refuse 'no scheduled refresh in the same login session since E1 (a login, a gap or a malformed event record)'
