@@ -99,6 +99,13 @@ Checks:
   - runner-controller reconciliation;
   - the host `issue16-controller` DB connection, if its timer runs on the VM;
   - a migration-style `app=hosting-ops` Job connects (or the next scheduled one; do not run a migration just for this).
+- **B-host: node to postgres through the `postgres-preparer` ClusterIP.** This is how production's host preparer connects (round 2 look; Service from #68).
+  - With `hosting-postgres-ingress` applied, run a plain TCP connect from the node's host network to `10.43.0.68:5432`, for example `timeout 5 bash -c '</dev/tcp/10.43.0.68/5432'`. It opens and closes one connection, sends no credentials and reads no DSN file.
+  - Pass needs both:
+    - rc 0;
+    - a monitor `policy-verdict` for that flow, ingress to the postgres endpoint on 5432, allowed, from identity `host` (reserved, 1).
+  - This proves that the kube-proxy DNAT path keeps the `host` identity. Steps A–D on the VM only reached the Pod IP directly, and the VM preparer timer was inactive.
+  - Control: the same connect from the scratch probe Pod is dropped (`Policy denied`).
 - **Existing DB connections:** take `pg_stat_activity` `backend_start` and `client_addr` per connection before and after the apply. Read it with `kubectl exec postgres-0 -- psql`, no DSN files. Record whether the API's pooled connections survive. If they are cut, record that the pool reconnects (`/readyz`, one authenticated request).
 - Negative, from a probe Pod in a scratch namespace (not codex-runner or m2-hosting):
   - API 8080 and 8081;
@@ -200,8 +207,8 @@ Production does the same steps and checks, after two things:
 
 **Production's public routing is not `render.sh`'s.** It comes from the #7 root HTTPS package (`infra/hosting/m3/https_prepare.py`, `ROOT-HTTPS-P1.md`):
 - IngressRoute `hosting-root-https-v1` on `websecure` with TLS. Its API rule already excludes `(Path(/api/internal) || PathPrefix(/api/internal/))`, and the Middleware `hosting-root-encoding-v1` rejects encoded `/`, `\`, NUL, `;`, `%`, `?` and `#` (400).
-- `hosting` on `web`, which P1 replaced with a GET/HEAD-only redirect to HTTPS. Round 2 confirms the live spec.
-- The API reads the immutable ConfigMap `hosting-root-https-v1`, not `hosting-config`.
+- `hosting` on `web`: GET/HEAD only, with the HTTPS redirect, `/api` excluded (round 2 look).
+- The api Deployment sets its env directly, with no `envFrom` (round 2 look). The ConfigMaps in m2-hosting, including `hosting-config`, are not read through `envFrom`.
 
 So on production:
 
@@ -214,14 +221,21 @@ So on production:
   - the step E VAP and binding (round 1 look: production has no VAP).
   The step boundaries are the same. Each object comes from the render output, compared with the live object before apply.
 - **Step A's IngressRoute change does not apply.** The live HTTPS route already closes `/api/internal`. The check is that the public `/api/internal` forms (including the encoded ones in `route_probe.py`) answer 404 or 400 through `https://` and `http://`.
-- **Switch flag.** `hosting-root-https-v1` is immutable, so when a transition is needed, step A sets `API_INTERNAL_CALLBACK_ON_PUBLIC=true` as an `env` entry on the api Deployment (`env` overrides `envFrom`), and step D removes it.
+- **Switch flag.** The api Deployment's env is set directly, so the flag is an env patch, as on the VM. When a transition is needed, step A adds `API_INTERNAL_CALLBACK_ON_PUBLIC=true` to the existing env entries (all kept), and step D removes it. A ConfigMap is never applied for this.
+- **Right after step B: preparer connection check.**
+  - Run row B-host on production: a TCP connect from the node to the `postgres-preparer` ClusterIP:5432, plus the monitor verdict.
+  - Then watch the next `issue16-controller.service` runs (the timer fires every 15 s): `systemctl show -p Result,ExecMainStatus,ExecMainExitTimestamp` should give success / 0 for at least two runs after the apply.
+  - If either fails, roll back step B (delete the three CNPs) and stop.
 - **No transition if no runner Pod.** Production had **no runner Pod** on 2026-11-14. If that is still true at the switch, and the new runner-controller is running before any Pod is created, no Pod has the 8080 env. Then:
   - the flag stays `false`;
   - `hosting-api-ingress` is applied without the transition rule;
   - the runner CNP goes straight to `40-runner-network.json`.
   Steps A–D collapse into A, B, C with the final forms. Re-check the Pod count (with its rc) right before choosing.
 - **codex-trial (#7) and the other namespaces.**
-  - Repository evidence: no codex-trial workload uses m2-hosting's database (`infra/codex-trial/check_inputs.py` refuses an m2-hosting DSN). The #7 access-web runner's callback to the m2-hosting API ran through `hosting-access-web-link-v1`, deleted in #13 C.
-  - The #62 policies therefore admit no codex-trial source, and any codex-trial Pod is refused at the API and PostgreSQL.
-  - Round 2 confirms whether any codex-trial or other-app workload is running and mentions `m2-hosting`. Any that does needs a decision before the switch, not an allowlist entry by default.
+  - Round 2: `android-agent-download`, `devday-reports` and `platform-system` do not mention m2-hosting.
+  - codex-trial runs Deployment `access-web-runner-v1`. No #62 policy admits it. The reasons are in PARITY, under "Why no #62 policy admits a codex-trial source":
+    - its database is its own;
+    - it calls the API only during a turn the API sent it;
+    - the API sends it none while `CODEX_USER_RUNNERS_ENABLE=true`.
+  - **Before the switch:** the user confirms that flag value on the live api Deployment and whether `CODEX_RUNNERS_FILE` is set. If user runners are off, the access-web runner may still be in use, and PM decides before the switch.
 - Production takes no release of this source outside the switch (PARITY "Render output and the live node").
