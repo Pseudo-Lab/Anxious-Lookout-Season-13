@@ -123,6 +123,11 @@ ITEM_RUN = re.compile(r'v6-item-(%s)-(\d{8}T\d{6}Z)' % '|'.join(re.escape(i) for
 RESTART_RUN = re.compile(r'v6-item-restart-(\d{8}T\d{6}Z)')
 FIXSTART_RUN = re.compile(r'v6-item-fixstart-(\d{8}T\d{6}Z)')  # r5 §4.2: the model-free start on the fixed runner image
 KEEP_RUN = re.compile(r'x2-residue-keep-(\d{8}T\d{6}Z)')  # r5 §4.3: the reviewed residue keep line's evidence dir
+REJUDGE_RUN = re.compile(r'v6-item-rejudge-(\d{8}T\d{6}Z)')  # r5 r4 (decision D): the one read-only rejudge of T5
+# r5 r4: the recorded T5 V6-8 run (name, run.json sha256) the rejudge applies to (filled from its accepted log)
+REJUDGE_TARGET = ('v6-item-V6-8-20261112T231316Z', 'a101c98ea0513a922442eca8b6dd60543cefb2d61e64afe08df5bacce0dcc181')
+REJUDGE_VERSION = 'v6-item-rejudge-r0'
+REJUDGE_NEXT = 'V6-1'  # r5 r5 (review E r1 major 1): the only unit a rejudge is the reference of (T6)
 FC_EXPECTED_PATH = '/root/native68/fc-expected.json'  # r5 §3.1: written by the fc switch (sheet part B)
 X2_FAILED = 'v6-item-X2-20261112T130724Z'  # r5 §4.1 (R-f = the decision's "R-c"): the only failed run R-f applies to
 X2_FAILED_SHA = '8ba8b66c86287033950babf994dd76ab7c4e71e2d26faa53e3cd43513eaee5ee'  # its run.json (the T1 turn log)
@@ -200,10 +205,11 @@ def read_json(folder, file, sha=None):
 
 
 def units():
-    """v6-item-* evidence directories (item runs, restarts and, r5, fixstarts) in time order."""
+    """v6-item-* evidence directories (item runs, restarts and, r5, fixstarts; r5 r4, the rejudge) in time order."""
     found = []
     for name in evidence_names():
-        m = ITEM_RUN.fullmatch(name) or RESTART_RUN.fullmatch(name) or FIXSTART_RUN.fullmatch(name)
+        m = (ITEM_RUN.fullmatch(name) or RESTART_RUN.fullmatch(name) or FIXSTART_RUN.fullmatch(name)
+             or REJUDGE_RUN.fullmatch(name))
         if m:
             found.append((m.group(m.lastindex), name))
     return [name for _, name in sorted(found)]
@@ -444,6 +450,8 @@ def reference(ref, ref_sha, reserve, claims, all_units):
         return 'bootstrap', boot['gen'], boot['digest'], {}
     if ref not in all_units:
         raise Refused('the reference %s is not a v6-item unit' % ref)
+    if REJUDGE_RUN.fullmatch(ref):                                                                # r5 r4 (decision D)
+        return rejudge_reference(ref, ref_sha, reserve, claims, all_units)
     record = read_json(ref, 'run.json', ref_sha)                                                      # (a)
     end = read_json(ref, 'exit.json')
     restart = RESTART_RUN.fullmatch(ref) is not None
@@ -494,6 +502,8 @@ def guard(unit, ref, ref_sha, reserve, table):
     claims = docs[BUNDLE]['claims']
     all_units = units()
     kind, gen, digest, record = reference(ref, ref_sha, reserve, claims, all_units)
+    if kind == 'rejudge' and unit != REJUDGE_NEXT:                                                   # r5 r5 (§4.1b)
+        raise Refused('a rejudge is the reference of %s (T6) only, not of %s' % (REJUDGE_NEXT, unit))
     if kind == 'fixstart':                                                                             # r5 (R-f)
         rf_check(unit, ref, record, reserve, claims, all_units)
     later = all_units if kind == 'bootstrap' else all_units[all_units.index(ref) + 1:]
@@ -1711,8 +1721,30 @@ DECLINED_ERRORS = {'command': 'exec_command failed: CreateProcess { message: "Re
 DECLINED_FORMS = {k: (DECLINED_HEADER, 'Script error:\n' + v) for k, v in DECLINED_ERRORS.items()}
 # Rollout items that can carry prior content into a resumed turn other than the paired tool items
 # (session/rollout_reconstruction.rs:400-470; models.rs:1227-1253): of unknown provenance for the context judgement.
+# r5 r4 (user decision D): `world_state` is no longer one of them when it is a known settings snapshot (below).
 COMPACTION_TYPES = frozenset({'compacted', 'compaction', 'compaction_summary', 'context_compaction',
-                              'context_compacted', 'inter_agent_communication', 'retained_context', 'world_state'})
+                              'context_compacted', 'inter_agent_communication', 'retained_context'})
+# r5 r4 (decision D; design §2.3a): a 0.160.1 `world_state` rollout item is "persisted comparison state used to resume
+# model-visible world-state diffing" (protocol.rs WorldStateItem {full, state}); resume does not add it to the model
+# history (session/rollout_reconstruction.rs ~466, `RolloutItem::WorldState(_) => {}`), it only rebuilds the diff
+# baseline (~487-501); the model-visible part is written separately as ordinary messages (session/mod.rs ~3700-3720).
+# Its sections are settings / instruction fragments (context/world_state/mod.rs; ext/skills, ext/git-attribution).
+# A world_state is of KNOWN provenance only in exactly this form: payload keys {full, state}, `full` a bool, `state`
+# an object whose section names are all in WORLD_STATE_SECTIONS: the 16 sections measured on this VM (look
+# 9e19b1f7, V6-10's full snapshot; the same set in T1 / R-X2). Anything else (another section, another shape) is still
+# counted as unknown provenance. WORLD_STATE_RULE False reproduces the r5 r3 judgement exactly (rejudge's old side).
+WORLD_STATE_SECTIONS = frozenset({
+    'agents_md', 'apps_instructions', 'collaboration_mode', 'context_window_guidance', 'environments',
+    'environments_instructions', 'git_attribution', 'host_skills', 'managed_developer_instructions', 'model',
+    'multi_agent_mode', 'permissions', 'persistent_mode', 'plugins_instructions', 'realtime', 'skills'
+})
+WORLD_STATE_RULE = True
+
+
+def world_state_known(payload):
+    """r5 r4: True only for a world_state payload of exactly the known form (see WORLD_STATE_SECTIONS)."""
+    return (isinstance(payload, dict) and set(payload) == {'full', 'state'} and type(payload['full']) is bool
+            and isinstance(payload['state'], dict) and set(payload['state']) <= WORLD_STATE_SECTIONS)
 
 
 def declined_output(kind, output):
@@ -1728,17 +1760,29 @@ def declined_output(kind, output):
             and header.fullmatch(output[0]['text']) is not None and output[1]['text'] == error)
 
 
-def context_of(events, bounds, calls):
+def context_of(events, bounds, calls, rule=None):
     """V6-8's rollout context: every line before its turn segment. calls = [[hash12 of V6-10's outer call id, kind]].
     Each call needs exactly one custom_tool_call_output; its text is judged against the pinned declined form. A
-    compaction item, an unreadable line, or a call output of another call id is of unknown provenance."""
+    compaction item, an unreadable line, or a call output of another call id is of unknown provenance.
+    r5 r4: rule (default WORLD_STATE_RULE) True: a world_state of the known form is counted apart (`worldState`, of
+    known provenance); any other world_state is still `compacted`. rule False: every world_state is `compacted` and no
+    `worldState` key exists, exactly the r5 r3 result (the rejudge reproduces the recorded context with it)."""
+    rule = WORLD_STATE_RULE if rule is None else rule
     ctx = {'outputs': {}, 'unknown': 0, 'compacted': 0, 'unreadable': 0}
+    if rule:
+        ctx['worldState'] = 0
     wanted = {c[0]: c[1] for c in calls}
     texts = {h: [] for h in wanted}
     for event in events[:bounds[0]]:
         kind, sub, payload = P.event_type(event)
         if kind == '<unreadable line>':
             ctx['unreadable'] += 1
+        elif kind == 'world_state' or sub == 'world_state':                                       # r5 r4
+            whole = event.get('payload') if isinstance(event, dict) else None
+            if rule and world_state_known(whole):
+                ctx['worldState'] += 1
+            else:
+                ctx['compacted'] += 1
         elif kind in COMPACTION_TYPES or sub in COMPACTION_TYPES:
             ctx['compacted'] += 1
         elif kind == 'response_item' and sub == 'custom_tool_call_output':
@@ -2350,7 +2394,8 @@ def prepare(action, unit, ref, ref_sha, reserve):
         facts = fixstart_guard(ref, ref_sha, CTX.get('fcSha'))
     else:
         facts = guard(unit, ref, ref_sha, reserve, TABLE)
-    record = {} if facts['kind'] == 'bootstrap' else read_json(ref, 'run.json', ref_sha)
+    record = ({} if facts['kind'] == 'bootstrap' else evidence_json_nb(ref, 'run.json', ref_sha)
+              if facts['kind'] == 'rejudge' else read_json(ref, 'run.json', ref_sha))                  # r5 r5
     names = reference_names(facts['kind'], record)
     if action in ('run', 'check') and facts['kind'] == 'fixstart':                                  # r5 §4.3 (R-f)
         moved = receipt_check(CTX.get('receipt'))
@@ -3217,10 +3262,266 @@ def action_check(unit, ref, ref_sha, reserve, receipt=None):
     return 0
 
 
-ACTIONS = ('look', 'bootstrap', 'check', 'run', 'restart', 'start-fix', 'check-fix')
+# r5 r4 (user decision D, design §4.1b): the one read-only rejudge of the recorded T5 V6-8 run ---------------------
+def rejudge_reference(ref, ref_sha, reserve, claims, all_units):
+    """A rejudge evidence dir as T6's reference (guard: unit REJUDGE_NEXT only): exactly the rejudge of
+    REJUDGE_TARGET, at its pin, that ended rc 0 with a new verdict `pass` and no problem; the recorded T5 run unchanged
+    at its pin, directly before it, rc 14 / finalInvariants / revoked, its one claim settled; the bound digest is T5's
+    ledgersAfter (the rejudge changes no ledger). Anything else is refused: no other rc 14 run and no other evidence is
+    accepted. r5 r5: every read through evidence_json_nb (no link, no FIFO, the same file opened as looked at)."""
+    if reserve:
+        raise Refused('a rejudge is never a reserve reference')
+    record = evidence_json_nb(ref, 'run.json', ref_sha)
+    end = evidence_json_nb(ref, 'exit.json')
+    target = record.get('target') if isinstance(record.get('target'), dict) else {}
+    if (record.get('action'), record.get('version'), target.get('name'), target.get('sha256')) != (
+            'rejudge', REJUDGE_VERSION) + REJUDGE_TARGET:
+        raise Refused('the reference is not the rejudge of the recorded T5 run')
+    new = record.get('verdictNew') if isinstance(record.get('verdictNew'), dict) else {}
+    if end.get('rc') != 0 or new.get('class') != 'pass' or record.get('verdictClass') != 'pass' or record.get(
+            'problems') != []:
+        raise Refused('the rejudge did not end rc 0 with a pass and no problem')
+    index = all_units.index(ref)
+    if index == 0 or all_units[index - 1] != REJUDGE_TARGET[0]:
+        raise Refused('the recorded T5 run is not the unit right before the rejudge')
+    original = evidence_json_nb(REJUDGE_TARGET[0], 'run.json', REJUDGE_TARGET[1])
+    oend = evidence_json_nb(REJUDGE_TARGET[0], 'exit.json')
+    if (oend.get('rc'), oend.get('finalInvariants'), oend.get('sessionRevoked')) != (14, True, True):
+        raise Refused('the recorded T5 run did not end rc 14 with final invariants and its session revoked')
+    mine = [c for c in claims if isinstance(c, dict) and c.get('run') == REJUDGE_TARGET[0]]
+    if len(mine) != 1 or mine[0].get('id') != original.get('claim') or mine[0].get('status') != 'settled':
+        raise Refused('the recorded T5 claim is not exactly one and settled')
+    gen = original.get('gen')
+    digest = ((original.get('ledgersAfter') or {}).get(BUNDLE) or {}).get('canonical')
+    if (type(gen) is not int or not isinstance(digest, str) or record.get('gen') != gen
+            or ((record.get('ledgersAfter') or {}).get(BUNDLE) or {}).get('canonical') != digest):
+        raise Refused('the rejudge does not carry the recorded T5 gen / ledger digest')
+    return 'rejudge', gen, digest, record
+
+
+def read_regular_nb(path, limit=1 << 26, dir_fd=None):
+    """r5 r4: a file that a container could have replaced (the rollout on the native PV): lstat a regular file, open
+    O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, fstat the same regular file (dev, ino), size cap; Refused
+    otherwise. Never blocks, never follows a link (memory guest-file-reads-never-block). r5 r5: dir_fd, a directory
+    opened without following a link (evidence_bytes_nb)."""
+    try:
+        st = os.lstat(path, dir_fd=dir_fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise Refused('%s is not a regular file (not opened)' % path)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+    except OSError as error:
+        raise Refused('%s is unreadable (%s)' % (path, type(error).__name__)) from None
+    try:
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode) or (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino) or fst.st_size > limit:
+            raise Refused('%s: the opened file is not the regular file looked at, or too large' % path)
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b''.join(chunks)
+    finally:
+        os.close(fd)
+
+
+def evidence_bytes_nb(folder, file):
+    """r5 r5 (review E r1 major 2): the bytes of evidence/<folder>/<file> for the rejudge's own reads (the T5 run and
+    the rejudge dir, as input and as T6's reference): <folder> opened O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK, then <file>
+    relative to it by read_regular_nb (lstat regular, O_NOFOLLOW | O_NONBLOCK, fstat the same dev / ino). A link
+    (folder or file), a FIFO or a file replaced between the lstat and the open is Refused."""
+    try:
+        dfd = os.open(os.path.join(P.EVIDENCE, folder),
+                      os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as error:
+        raise Refused('%s is not a directory opened without following a link (%s)' % (
+            folder, type(error).__name__)) from None
+    try:
+        return read_regular_nb(file, dir_fd=dfd)
+    except Refused as refused:
+        raise Refused('%s/%s' % (folder, refused.message)) from None
+    finally:
+        os.close(dfd)
+
+
+def evidence_json_nb(folder, file, sha=None):
+    """r5 r5: read_json through evidence_bytes_nb; a matching hash never replaces its checks."""
+    data = evidence_bytes_nb(folder, file)
+    if sha is not None and sha_bytes(data) != sha:
+        raise Refused('%s/%s is not at its pin' % (folder, file))
+    try:
+        value = json.loads(data)
+    except ValueError:
+        raise Refused('%s/%s is not JSON' % (folder, file)) from None
+    if not isinstance(value, dict):
+        raise Refused('%s/%s is not a JSON object' % (folder, file))
+    return value
+
+
+def rejudge_inputs(run, run_sha, rollout_sha):
+    """Everything the rejudge reads, checked; Refused (rc 3, nothing written) on any difference. The history input is
+    the judge's own: evaluation.facts.history (never the top-level `history`, which is add_read's progress record)."""
+    if (run, run_sha) != REJUDGE_TARGET:
+        raise Refused('the rejudge applies to the recorded T5 V6-8 run at its pin only')
+    if not HEX.fullmatch(rollout_sha or ''):
+        raise Refused('the rollout sha256 is not 64 hex')
+    if any(REJUDGE_RUN.fullmatch(n) for n in evidence_names()):
+        raise Refused('a rejudge evidence dir already exists (the rejudge runs once)')
+    all_units = units()
+    if not all_units or all_units[-1] != run:
+        raise Refused('the recorded T5 run is not the latest unit')
+    record = evidence_json_nb(run, 'run.json', run_sha)
+    end = evidence_json_nb(run, 'exit.json')
+    if record.get('item') != 'V6-8' or (end.get('rc'), end.get('finalInvariants'), end.get('sessionRevoked')) != (
+            14, True, True):
+        raise Refused('the recorded T5 run is not V6-8 ending rc 14 with final invariants and revoked')
+    evaluation = record.get('evaluation') if isinstance(record.get('evaluation'), dict) else {}
+    facts = evaluation.get('facts') if isinstance(evaluation.get('facts'), dict) else None
+    verdict = evaluation.get('verdict') if isinstance(evaluation.get('verdict'), dict) else None
+    if facts is None or verdict is None or verdict.get('class') != 'unverified':
+        raise Refused('the recorded evaluation is missing or not unverified')
+    history = facts.get('history')
+    calls = ((history or {}).get('v610') or {}).get('calls') if isinstance(history, dict) else None
+    if not (isinstance(calls, list) and calls and all(isinstance(c, list) and len(c) == 2 for c in calls)):
+        raise Refused('evaluation.facts.history.v610.calls is missing or malformed')
+    if not isinstance(facts.get('context'), dict):
+        raise Refused('evaluation.facts.context is missing')
+    raw, docs = ledger_snapshot()
+    claims = [c for c in docs[BUNDLE]['claims'] if isinstance(c, dict) and c.get('run') == run]
+    if len(claims) != 1 or claims[0].get('id') != record.get('claim') or claims[0].get('status') != 'settled':
+        raise Refused('the recorded T5 claim is not exactly one and settled')
+    digest = ((record.get('ledgersAfter') or {}).get(BUNDLE) or {}).get('canonical')
+    if G4.canonical(docs[BUNDLE]) != digest or raw['resources-6'] != RES6_PIN:
+        raise Refused('the ledgers changed since the recorded T5 run')
+    thread, turn = claims[0].get('thread'), claims[0].get('turn')
+    try:
+        path = P.rollout_path(thread) if isinstance(thread, str) else None
+    except Exception as error:
+        raise Refused('the rollout lookup failed (%s)' % type(error).__name__) from None
+    if not path:
+        raise Refused('no rollout for the recorded thread')
+    data = read_regular_nb(path)
+    if sha_bytes(data) != rollout_sha:
+        raise Refused('the rollout is not at its pin')
+    events = []
+    for line in data.splitlines():
+        try:
+            events.append(json.loads(line))
+        except ValueError:
+            events.append({'type': '<unreadable line>'})
+    bounds = P.segment(events, turn)
+    if bounds is None:
+        raise Refused('the recorded turn segment is not in the rollout')
+    return {'run': run, 'runSha': run_sha, 'record': record, 'facts': facts, 'verdict': verdict, 'calls': calls,
+            'events': events, 'bounds': bounds, 'rollout': {'sha256': rollout_sha, 'events': len(events),
+                                                            'segment': list(bounds)}, 'claim': claims[0].get('id')}
+
+
+def minus(items, removed):
+    """items without one occurrence of each removed item (a multiset difference), or None when one is missing."""
+    rest = list(items)
+    for r in removed:
+        if r not in rest:
+            return None
+        rest.remove(r)
+    return rest
+
+
+def rejudge_compute(pre):
+    """The differential rejudge (pure): the recorded T5 verdict with ONLY its context part judged again under the r5
+    r4 world_state rule. Checks first that the pinned rollout and the code reproduce the recorded context (r5 r3 rule)
+    and that the recorded history (evaluation.facts.history) reproduces the recorded history parts; every other part of
+    the verdict is carried over. Any difference other than the world_state count is a problem (rc 7)."""
+    facts, verdict, calls = pre['facts'], pre['verdict'], pre['calls']
+    problems = []
+    old = context_of(pre['events'], pre['bounds'], calls, rule=False)
+    new = context_of(pre['events'], pre['bounds'], calls, rule=True)
+    if old != facts['context']:
+        problems.append('the recorded context is not reproduced from the pinned rollout (r5 r3 rule)')
+    leaks_h, insufficient_h, parts_h = history_judgement(facts.get('history'))
+    unverified = list(verdict.get('unverified') or [])
+    if list(parts_h) + ['UI re-injection (front)'] != unverified:
+        problems.append('the recorded history does not reproduce the verdict\'s unverified parts')
+    counter, insufficient = list(verdict.get('counterexample') or []), list(verdict.get('insufficient') or [])
+    if minus(counter, leaks_h) is None or minus(insufficient, insufficient_h) is None:
+        problems.append('the recorded history judgement is not in the verdict')
+    leaks0, insufficient0 = context_judgement(old)
+    leaks1, insufficient1 = context_judgement(new)
+    counter_rest, insufficient_rest = minus(counter, leaks0), minus(insufficient, insufficient0)
+    if counter_rest is None or insufficient_rest is None:
+        problems.append('the recorded context judgement is not in the verdict')
+        counter_rest, insufficient_rest = counter, insufficient
+    for key in sorted(set(old) | set(new)):
+        if key not in ('compacted', 'worldState') and old.get(key) != new.get(key):
+            problems.append('context %s differs between the two rules' % key)
+    if old.get('compacted', 0) - new.get('compacted', 0) != new.get('worldState', 0) or leaks0 != leaks1:
+        problems.append('the two rules differ by more than the world_state count')
+    verdict_new = conclude('V6-8', verdict.get('attempt'), insufficient_rest + insufficient1,
+                           list(verdict.get('differs') or []), counter_rest + leaks1, False,
+                           {'context': new, 'historyParts': list(parts_h)}, tuple(unverified))
+    differences = [{'field': k, 'old': verdict.get(k), 'new': verdict_new.get(k)}
+                   for k in ('class', 'rc', 'attempt', 'insufficient', 'differs', 'counterexample', 'unverified')
+                   if verdict.get(k) != verdict_new.get(k)]
+    rc = 7 if problems else 0 if verdict_new['class'] == 'pass' else 14
+    return {'contextOld': old, 'contextNew': new, 'verdictNew': verdict_new, 'differences': differences,
+            'problems': problems, 'rc': rc}
+
+
+def write_rejudge(pre, result):
+    """The new evidence dir (O_EXCL by mkdir) with run.json and exit.json; nothing else is written or changed."""
+    name = 'v6-item-rejudge-' + time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+    ev = os.path.join(P.EVIDENCE, name)
+    os.mkdir(ev, 0o700)
+    record = pre['record']
+    P.record(ev, action='rejudge', version=REJUDGE_VERSION, started=P.now_utc(), item='V6-8',
+             target={'name': pre['run'], 'sha256': pre['runSha']}, rollout=pre['rollout'], claim=pre['claim'],
+             gen=record.get('gen'), pod=record.get('pod'), workspaceAfter=record.get('workspaceAfter'),
+             ledgersAfter=record.get('ledgersAfter'), scripts={'v6Item': OWN_SHA},
+             rule={'worldStateSections': sorted(WORLD_STATE_SECTIONS), 'compactionTypes': sorted(COMPACTION_TYPES)},
+             contextOld=result['contextOld'], contextNew=result['contextNew'], verdictOld=pre['verdict'],
+             verdictNew=result['verdictNew'], differences=result['differences'], problems=result['problems'],
+             verdictClass=result['verdictNew']['class'])
+    P.durable_json(os.path.join(ev, 'exit.json'), {'rc': result['rc'], 'finished': P.now_utc()})
+    return name
+
+
+def action_rejudge(run, run_sha, rollout_sha):
+    """r5 r4: read-only on everything but its own new evidence dir; no session, Pod, model, claim or ledger change.
+    rc 0: the new verdict is pass (prints `unit`, `run.json`, `post complete`); 14: another class (recorded, no
+    reference line); 7: a problem (an unexpected difference; recorded, no reference line); 3: refused, nothing
+    written; the base lock is held throughout."""
+    try:
+        lock = P.take_lock()
+    except Exception as error:
+        say({'rejudge': 'refused', 'reason': getattr(error, 'message', type(error).__name__)})
+        return 3
+    try:
+        try:
+            pre = rejudge_inputs(run, run_sha, rollout_sha)
+        except Refused as refused:
+            say({'rejudge': 'refused', 'reason': refused.message})
+            return 3
+        result = rejudge_compute(pre)
+        name = write_rejudge(pre, result)
+        say({'rejudge': name, 'rc': result['rc'], 'class': result['verdictNew']['class'],
+             'differences': result['differences'], 'problems': result['problems'],
+             'contextOld': result['contextOld'], 'contextNew': result['contextNew']})
+        if result['rc'] == 0:  # r5 r5 (review E r1 minor): reference lines on a pass only; the JSON line names the dir
+            data = evidence_bytes_nb(name, 'run.json')
+            print('unit %s' % name)
+            print('run.json %s' % sha_bytes(data))
+            print('post complete')
+        return result['rc']
+    finally:
+        os.close(lock)
+
+
+ACTIONS = ('look', 'bootstrap', 'check', 'run', 'restart', 'start-fix', 'check-fix', 'rejudge')
 USAGE = ('usage: v6-item.py look | bootstrap <sha256 of bootstrap-pa2.json> | check|run <unit> <ref> <ref sha256> '
          '[--reserve <failed ref> <failed sha256> [--receipt <receipt.json sha256>]] | restart <V6-7 ref> <ref sha256> '
-         '| start-fix|check-fix <failed X2 ref> <its run.json sha256> <fc-expected.json sha256>')
+         '| start-fix|check-fix <failed X2 ref> <its run.json sha256> <fc-expected.json sha256> '
+         '| rejudge <the recorded T5 V6-8 run> <its run.json sha256> <its rollout sha256>')
 
 
 def parse_args(argv):
@@ -3234,6 +3535,8 @@ def parse_args(argv):
         return 'restart', (argv[2], argv[3])
     if len(argv) == 5 and argv[1] in ('start-fix', 'check-fix') and HEX.fullmatch(argv[3]) and HEX.fullmatch(argv[4]):
         return argv[1], (argv[2], argv[3], argv[4])                                                   # r5 §4.2
+    if len(argv) == 5 and argv[1] == 'rejudge' and HEX.fullmatch(argv[3]) and HEX.fullmatch(argv[4]):
+        return 'rejudge', (argv[2], argv[3], argv[4])                                                 # r5 r4
     if len(argv) in (5, 8, 10) and argv[1] in ('check', 'run') and argv[2] in UNITS and HEX.fullmatch(argv[4]):
         if len(argv) == 5:
             return argv[1], (argv[2], argv[3], argv[4], None, None)
@@ -3273,6 +3576,8 @@ def main(argv):
     if action == 'bootstrap':
         return action_bootstrap(*rest)
     OWN_SHA = sha_bytes(open(os.path.abspath(__file__), 'rb').read())
+    if action == 'rejudge':                                                                           # r5 r4
+        return action_rejudge(*rest)
     CTX.clear()
     SEG.clear()
     CLAIM['id'] = None
