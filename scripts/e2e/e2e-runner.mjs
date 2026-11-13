@@ -6,6 +6,8 @@
 // - 전송 버튼만 잠금, 초안 입력 가능·유지, 자동 전송 없음, 접수 전 거절 코드는 미확인 보관 없음
 // - 이전 API(404/405)·403·500·codexRunner false·자격 전환·계정 전환의 늦은 응답·연구 권한 상실
 // - #89 대화 반응성(N21): 즉시 말풍선·생각 중·말풍선 연속성·자동 스크롤·이용 가능 상태 재조회
+// - #89 Enter 보내기(N22): Enter 보내기·Shift+Enter 줄바꿈·IME 조합 중 Enter 미전송·연타 한 번 전송
+// - #89 접수 뒤 첫 조회 실패 복구(N23): 보내는 중 유지·조회만 재시도·완료 기록 복구
 import { chromium } from "playwright";
 
 const ORIGIN = process.env.ORIGIN ?? "http://127.0.0.1:8080";
@@ -772,6 +774,106 @@ await step("N21", async () => {
   const t1 = Date.now();
   check("N21. idle stop noticed by slow recheck while panel open", await appears(chat.getByText("환경이 쉬는 중"), 60000), `${Math.round((Date.now() - t1) / 1000)}s`);
   await setMock("runnerAll=ready&pendingInput=0");
+});
+
+// N22. #89 Enter 보내기: Enter = 보내기(한 번), Shift+Enter = 줄바꿈, IME 조합 중 Enter는 보내지 않음(확정 뒤 Enter가 전체 문구를 한 번 보냄).
+await step("N22", async () => {
+  await setMock("runnerAll=ready&codex=fixture&turnMs=1500");
+  // N21 끝의 쉬는 중 표시를 지금 상태(ready)로 갱신한다.
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await chat.getByText("환경이 쉬는 중").first().waitFor({ state: "hidden", timeout: 5000 });
+  const input = chat.getByLabel("메시지");
+  const sentTexts = [];
+  await page.route("**/api/research/sessions/*/messages", async (route) => {
+    sentTexts.push(route.request().postDataJSON()?.text);
+    return route.continue();
+  });
+  check("N22. desktop browser treats Enter as send", await page.evaluate(() => window.matchMedia("(any-pointer: fine)").matches));
+  // Enter = 보내기
+  await input.fill("엔터 질문");
+  await input.press("Enter");
+  await chat.getByText("모의 응답: 엔터 질문").waitFor({ timeout: 10000 });
+  check("N22. Enter sends once", JSON.stringify(sentTexts) === JSON.stringify(["엔터 질문"]), JSON.stringify(sentTexts));
+  await input.and(chat.locator(":enabled")).waitFor({ timeout: 10000 });
+  // Shift+Enter = 줄바꿈
+  await input.fill("첫 줄");
+  await input.press("Shift+Enter");
+  await input.pressSequentially("둘째 줄");
+  await page.waitForTimeout(300);
+  check("N22. Shift+Enter inserts a newline", (await input.inputValue()) === "첫 줄\n둘째 줄", JSON.stringify(await input.inputValue()));
+  check("N22. Shift+Enter does not send", sentTexts.length === 1, JSON.stringify(sentTexts));
+  // IME 조합 중 Enter: 조합 확정용 keydown(isComposing, Safari식 keyCode 229)은 보내지 않는다.
+  await input.fill("조합 중 질문");
+  await input.evaluate((ta) => {
+    ta.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", isComposing: true, bubbles: true, cancelable: true }));
+    ta.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "문" }));
+    const safari = new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true });
+    Object.defineProperty(safari, "keyCode", { get: () => 229 });
+    ta.dispatchEvent(safari);
+  });
+  await page.waitForTimeout(800);
+  check("N22. Enter during IME composition does not send", sentTexts.length === 1, JSON.stringify(sentTexts));
+  check("N22. composition Enter keeps the text", (await input.inputValue()) === "조합 중 질문", JSON.stringify(await input.inputValue()));
+  // 확정 뒤 Enter(연타 포함)는 전체 문구를 한 번만 보낸다.
+  await input.evaluate((ta) => {
+    for (let i = 0; i < 2; i++) ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+  });
+  await chat.getByText("모의 응답: 조합 중 질문").waitFor({ timeout: 10000 });
+  check("N22. Enter after composition sends full text exactly once", JSON.stringify(sentTexts.slice(1)) === JSON.stringify(["조합 중 질문"]), JSON.stringify(sentTexts));
+  await page.unroute("**/api/research/sessions/*/messages");
+  await setMock("turnMs=2500");
+});
+
+// N23. #89 review: 접수(202) 뒤 첫 대화 조회가 일시 실패(503)해도 보내는 중을 유지하고 조회만 다시 해 실행 중 → 완료 기록으로 복구한다.
+await step("N23", async () => {
+  await setMock("runnerAll=ready&codex=fixture&turnMs=4000");
+  const input = chat.getByLabel("메시지");
+  await input.and(chat.locator(":enabled")).waitFor({ timeout: 10000 });
+  const posts = [];
+  let failNextGet = false;
+  const gets = [];
+  await page.route("**/api/research/sessions/*/messages", async (route) => {
+    posts.push(route.request().method());
+    const r = await route.fetch();
+    failNextGet = true;
+    return route.fulfill({ response: r });
+  });
+  await page.route("**/api/research/sessions/*", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    if (failNextGet) {
+      failNextGet = false;
+      gets.push(503);
+      return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "unavailable", message: "Unavailable" } }) });
+    }
+    gets.push(200);
+    return route.continue();
+  });
+  await input.evaluate((ta) => {
+    window.__taLog = [];
+    new MutationObserver(() => window.__taLog.push(ta.disabled)).observe(ta, { attributes: true, attributeFilter: ["disabled"] });
+  });
+  const text = "조회 실패 뒤 복구 질문";
+  await input.fill(text);
+  await sendBtn().click();
+  const bubble = chat.locator("li[data-role=user]", { hasText: text });
+  await bubble.first().waitFor();
+  await bubble.first().evaluate((el) => (window.__bubble = el));
+  // 첫 GET 503 직후: 말풍선·생각 중 유지, 입력 잠금 유지
+  for (let i = 0; i < 40 && !gets.includes(503); i++) await sleep(50);
+  await page.waitForTimeout(400);
+  check("N23. first GET after 202 failed (503)", gets[0] === 503, JSON.stringify(gets));
+  check("N23. bubble kept after failed GET", await page.evaluate(() => window.__bubble.isConnected));
+  check("N23. thinking kept after failed GET", await chat.locator("[data-chat-thinking]").isVisible());
+  check("N23. input stays locked after failed GET", await input.isDisabled());
+  await chat.getByText(`모의 응답: ${text}`).waitFor({ timeout: 20000 });
+  check("N23. recovered to the final record", (await bubble.count()) === 1 && (await page.evaluate(() => window.__bubble.isConnected)));
+  check("N23. GET retried, POST not resent", posts.length === 1 && gets.filter((g) => g === 200).length >= 1, `${posts.length} ${JSON.stringify(gets)}`);
+  const log = await page.evaluate(() => window.__taLog);
+  check("N23. input locked once, unlocked once", JSON.stringify(log) === "[true,false]", JSON.stringify(log));
+  await page.unroute("**/api/research/sessions/*/messages");
+  await page.unroute("**/api/research/sessions/*");
+  await setMock("turnMs=2500");
 });
 
 // N13. 연구 권한 상실(같은 계정 commenter로 변경): 준비 POST·상태 조회 없음, 기존 권한 안내

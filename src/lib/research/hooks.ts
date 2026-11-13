@@ -42,11 +42,12 @@ export function useLoad<T>(key: string, loader: () => Promise<FetchResult<T>>) {
     };
   }, [key]);
 
-  const reload = useCallback(async () => {
+  // 다시 불러오고 반영한 응답을 돌려준다(더 나중 요청에 밀렸거나 key가 바뀌어 버린 응답이면 null).
+  const reloadResult = useCallback(async (): Promise<FetchResult<T> | null> => {
     const mine = ++seq.current;
     const forKey = keyRef.current;
     const result = await loaderRef.current();
-    if (mine !== seq.current || forKey !== keyRef.current) return;
+    if (mine !== seq.current || forKey !== keyRef.current) return null;
     setState((prev) => {
       // 일시적 실패(네트워크·timeout·비JSON·5xx)만 마지막 데이터를 유지한다.
       // 401/403/404 같은 확정 응답은 그대로 반영해 권한이 없어진 데이터를 계속 보여주지 않는다.
@@ -55,7 +56,11 @@ export function useLoad<T>(key: string, loader: () => Promise<FetchResult<T>>) {
       }
       return { key: forKey, result, refreshFailure: null };
     });
+    return result;
   }, []);
+  const reload = useCallback(async () => {
+    await reloadResult();
+  }, [reloadResult]);
 
   const setResult = useCallback((result: FetchResult<T>) => {
     // 진행 중인 reload 응답이 이 결과를 덮어쓰지 않게 한다.
@@ -65,7 +70,7 @@ export function useLoad<T>(key: string, loader: () => Promise<FetchResult<T>>) {
 
   // 다른 key의 결과는 보여주지 않는다.
   const current = state && state.key === key ? state : null;
-  return { result: current?.result ?? null, refreshFailure: current?.refreshFailure ?? null, reload, setResult };
+  return { result: current?.result ?? null, refreshFailure: current?.refreshFailure ?? null, reload, reloadResult, setResult };
 }
 
 /**

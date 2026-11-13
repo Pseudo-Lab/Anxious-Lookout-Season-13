@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import type { FetchFailure } from "@/lib/api/client";
@@ -16,7 +16,7 @@ import {
 import { storeGeneration } from "@/lib/research/pendingStore";
 import { clearDraft, loadDraft, saveDraft } from "@/lib/research/chatState";
 import { useAuth } from "@/hooks/useAuth";
-import type { PageDescriptor, SessionDetail, SessionItem, ToolCallItem } from "@/lib/research/types";
+import type { PageDescriptor, SessionDetail, SessionItem, SessionSummary, ToolCallItem } from "@/lib/research/types";
 import { describePage, kindText, pageUnresolved, sameDescriptor, scopeLabel, useRegisteredPage } from "@/lib/research/pageContext";
 import { own } from "@/lib/research/own";
 import { BASE_PATH } from "@/lib/constants";
@@ -64,6 +64,9 @@ import SafeMarkdown from "@/components/research/SafeMarkdown";
 import { SESSION_STATE_LABELS } from "@/components/research/ItemLists";
 
 const POLL_MS = 2000;
+// 접수된 전송을 확인하는 대화 조회가 일시 실패했을 때의 재조회 간격(늘려 가며 최대값까지).
+const CONFIRM_RETRY_MS = 2000;
+const CONFIRM_RETRY_MAX_MS = 15000;
 // 이만큼 실행 중이면 결과 확인 중일 수 있다는 중립 안내를 보인다(서버 timeout·실패 판정이 아니다).
 const SLOW_RUNNING_MS = 30000;
 // 접수 종료 시각 뒤에도 서버가 아직 이용 가능이라고 답할 때의 재확인 간격(시계 차이·일시 조회 실패 대비)
@@ -432,8 +435,9 @@ function Composer({
   onRecheck: () => void;
   // 보내기 시작. local은 화면이 먼저 그릴 내 말풍선이다(결과 미확인 재전송은 서버에 이미 있을 수 있어 그리지 않는다).
   onSending: (local: LocalSend | null) => void;
-  // 보내기 요청이 끝남. 대화를 다시 불러온 뒤에 끝난다(그사이 입력창이 열렸다 닫히지 않게).
-  onSent: (ok: boolean) => Promise<void>;
+  // 보내기 요청이 끝남(접수되면 서버가 돌려준 요약, 아니면 null). 접수가 대화 조회로 확인된 뒤에 끝난다
+  // (그사이 입력창이 열렸다 닫히거나 말풍선이 사라지지 않게).
+  onSent: (accepted: SessionSummary | null) => Promise<void>;
   onJump: () => void;
 }) {
   const { csrfToken, refresh } = useAuth();
@@ -464,6 +468,9 @@ function Composer({
   }, []);
   const [failure, setFailure] = useState<FetchFailure | null>(null);
   const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
+  // Composer는 브라우저에서만 그려지므로 바로 읽는다(대화창은 ssr:false).
+  const [enterSends] = useState(() => window.matchMedia("(any-pointer: fine)").matches);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // 보낸 뒤 응답이 끝나면 입력창으로 포커스를 돌려줄지(정밀 포인터 환경만. 모바일 가상 키보드를 갑자기 띄우지 않는다).
   const refocus = useRef(false);
@@ -482,7 +489,8 @@ function Composer({
   async function submit(e: FormEvent) {
     e.preventDefault();
     const body = text.trim();
-    if (!body || busy || awaiting || blocked) return;
+    // inFlight: 같은 순간 두 번 들어온 보내기(Enter 연타·키 반복·두 번 누르기)는 busy가 그려지기 전이라도 한 번만 보낸다.
+    if (!body || busy || inFlight.current || awaiting || blocked) return;
     // 공개 글의 범위(postId)를 확정하기 전에는 새 질문을 보내지 않는다. 결과 미확인 재전송은 처음 보낸 범위 그대로라 허용한다.
     if (unresolved && !(pending !== null && pending.text === body)) return;
     if (!csrfToken) {
@@ -497,6 +505,7 @@ function Composer({
     guard.knownKeys.add(request.key);
     savePendingSend(accountId, session.id, request, guard);
     setPending(request);
+    inFlight.current = true;
     setBusy(true);
     refocus.current = window.matchMedia("(pointer: fine)").matches;
     // 보낸 내용은 입력창에서 바로 말풍선으로 옮긴다(#89). 저장된 초안은 결과를 알 때까지 그대로 두고, 실패하면 입력을 되돌린다.
@@ -532,8 +541,20 @@ function Composer({
       setFailure(res.failure);
       if (res.failure.kind === "http" && (res.failure.status === 401 || res.failure.code === "csrf_invalid")) void refresh();
     }
-    await onSent(res.ok);
+    await onSent(res.ok ? res.data : null);
+    inFlight.current = false;
     setBusy(false);
+  }
+
+  // Enter = 보내기, Shift+Enter = 줄바꿈(#89). 한글 등 IME 조합 중의 Enter(isComposing, Safari는 조합 끝 직후 keyCode 229)는
+  // 조합 확정용이라 보내지 않는다(마지막 글자 누락·두 번 전송 방지). 확정 뒤의 Enter가 한 번 보낸다.
+  // 정밀 포인터가 없는 터치 환경은 화면 키보드의 Enter를 줄바꿈으로 두고 보내기 버튼으로 보낸다.
+  function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key !== "Enter" || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+    if (!enterSends) return;
+    e.preventDefault();
+    e.currentTarget.form?.requestSubmit();
   }
 
   const retrying = pending !== null && pending.text === text.trim();
@@ -602,9 +623,12 @@ function Composer({
           ref={inputRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onKeyDown={onKeyDown}
           rows={3}
           disabled={awaiting}
-          placeholder={awaiting ? "Codex가 응답하는 중입니다..." : "이어서 질문하기"}
+          placeholder={
+            awaiting ? "Codex가 응답하는 중입니다..." : enterSends ? "이어서 질문하기 (Enter 보내기 · Shift+Enter 줄바꿈)" : "이어서 질문하기"
+          }
           aria-label="메시지"
           className="block max-h-[40vh] w-full resize-y rounded-lg border border-stone-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100 disabled:bg-stone-50"
         />
@@ -626,7 +650,7 @@ function Composer({
 /** 대화 하나. 공통 대화창이 그리며 상세 조회·진행 중 확인·Codex 상태 확인은 여기 한 곳에서만 한다. */
 export default function SessionView({ id, onArchived }: { id: string; onArchived: (id: string) => void }) {
   const { user } = useAuth();
-  const { result, refreshFailure, reload } = useLoad(`session:${id}`, () => getSession(id));
+  const { result, refreshFailure, reload, reloadResult } = useLoad(`session:${id}`, () => getSession(id));
   const { run, busy } = useMutation();
   const [archiveFailure, setArchiveFailure] = useState<FetchFailure | null>(null);
   const running = result?.ok === true && result.data.state === "running";
@@ -715,6 +739,24 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
   // 자동 스크롤: 바닥에 있을 때만 따라간다. 위로 올려 읽는 중이면 "최신으로" 버튼을 보인다.
   const contentRef = useRef<HTMLDivElement>(null);
   const { atBottom, stick } = useStickToBottom(contentRef, { enabled: loaded, live: awaiting, count: entries.length + (awaiting ? 1 : 0) });
+
+  // 접수(202)된 전송은 대화 조회가 그 버전 이상을 보여 줄 때까지 보내는 중으로 둔다. 조회가 일시 실패(네트워크·5xx)하면
+  // 이전 idle 기록이 남아 polling도 시작되지 않으므로, 조회만 늘려 가는 간격으로 다시 한다(POST는 다시 보내지 않는다).
+  // 확정 실패(401·403·404 등)는 useLoad가 그대로 보이므로 멈춘다. 화면을 떠나면 멈춘다.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  const confirmAccepted = async (version: number) => {
+    for (let attempt = 0; alive.current; attempt++) {
+      const r = await reloadResult();
+      if (r && (r.ok ? r.data.version >= version : !isUncertain(r.failure))) return;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(CONFIRM_RETRY_MS * 2 ** attempt, CONFIRM_RETRY_MAX_MS)));
+    }
+  };
 
   const [announced, setAnnounced] = useState<{ status: ChatStatus; text: string }>({ status, text: "" });
   if (announced.status !== status) setAnnounced({ status, text: announcement(announced.status, status, announced.text) });
@@ -819,12 +861,13 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
             // 보내면 바닥으로 가서 새 말풍선과 "생각 중"을 보인다.
             stick();
           }}
-          onSent={async (ok) => {
+          onSent={async (accepted) => {
             // 보내지 못했으면 먼저 그린 말풍선을 바로 거둔다(입력은 Composer가 되돌린다). 입력 잠금은 다시 불러올 때까지 둔다.
-            if (!ok) setSend({ local: null });
+            if (!accepted) setSend({ local: null });
             // 실패면 거절 사유(만료·한도·차단·환경 꺼짐)가, 성공이어도 runner 상태(idle 정지 등)가 바뀌었을 수 있다.
             void reloadCodex();
-            await reload();
+            if (accepted) await confirmAccepted(accepted.version);
+            else await reload();
             setSend(null);
           }}
           onJump={stick}
