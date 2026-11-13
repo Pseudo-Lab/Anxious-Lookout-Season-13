@@ -647,3 +647,17 @@ def test_unsubscribe_releases_an_undrained_snapshot(text_on):
     view = subscription.view
     hub.unsubscribe(subscription)
     assert view.cancelled and list(view) == [] and request not in hub.views and subscription.pending is None
+
+
+def test_hub_close_sets_each_stream_stop_event():
+    """Drain/SIGTERM: Hub.close ends the HTTP response itself (StoppableStreamingResponse waits on this event)."""
+    import asyncio
+
+    async def main():
+        hub = Hub(None, background=False)
+        subscription, _ = hub.subscribe(SESSION, None)
+        subscription.loop, subscription.stop_event = asyncio.get_running_loop(), asyncio.Event()
+        hub.close()
+        await asyncio.wait_for(subscription.stop_event.wait(), 1)
+        return subscription.closed
+    assert asyncio.run(main()) == "stopping"

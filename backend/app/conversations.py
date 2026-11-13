@@ -611,15 +611,15 @@ def register_conversations(app, authorized, sessions, settings, response, write,
             finally:
                 release()
 
-        class Stream(StreamingResponse):
-            async def __call__(self, scope, receive, send):
-                try:
-                    await super().__call__(scope, receive, send)
-                finally:
-                    release()  # also when the body never started (early disconnect)
-                    logging.getLogger("hosting").info("api_stream_summary %s", json.dumps(
-                        {"session": str(identity), **stats}, sort_keys=True))
-        return Stream(body(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
+        def closed():
+            release()  # also when the body never started (early disconnect)
+            logging.getLogger("hosting").info("api_stream_summary %s", json.dumps(
+                {"session": str(identity), **stats}, sort_keys=True))
+        # Raced against the API shutdown event: a response stuck sending to a slow browser still ends on SIGTERM
+        # (review 8debb4f); the body generator is then closed (upstream reader cancelled) and the slot released.
+        from runner.stream import StoppableStreamingResponse
+        return StoppableStreamingResponse(body(), getattr(app.state, "chat_stream_shutdown", None), on_close=closed,
+                                          media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     @app.post(prefix + "/sessions/{identity}/interrupt")
     def interrupt(identity: uuid.UUID, body: dict, request: Request):

@@ -1553,7 +1553,14 @@ def create_app():
         if subscription is None:
             return JSONResponse({"ownerId": owner, "error": "stream_limit"}, status_code=429)
         hello = {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, **hello}
-        return StreamingResponse(streams.stream(hub, subscription, initial, hello, lambda: app.state.stopping),
-                                 media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
+        # The response itself ends on drain/SIGTERM (Hub.close -> Subscription.stop), even mid-send to a slow reader.
+        import asyncio
+        subscription.loop, subscription.stop_event = asyncio.get_running_loop(), asyncio.Event()
+        if subscription.closed or app.state.stopping:
+            subscription.stop_event.set()
+        return streams.StoppableStreamingResponse(
+            streams.stream(hub, subscription, initial, hello, lambda: app.state.stopping), subscription.stop_event,
+            on_close=lambda: hub.unsubscribe(subscription),
+            media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     return app

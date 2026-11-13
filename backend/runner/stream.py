@@ -30,6 +30,7 @@ SUMMARY_LIMIT = 2 * 1024         # serialized command summary
 SUMMARY_RAW_LIMIT = 16 * 1024    # raw command chars kept for the summary (a longer command keeps a safe prefix only)
 STATUS_EVENTS_PER_ITEM = 4
 SNAPSHOT_TEXT_SLICE = 8192       # chars per snapshot text frame (bounded working space while a snapshot is sent)
+STREAM_ABORT_MARK = "anxious.stream_abort_on_shutdown"  # scope["state"] key read by app.serve.StreamAwareH11
 ITEM_ID_LIMIT = 128
 STRUCTURE_DATA_LIMIT = 4 * 1024
 DELTA_DATA_LIMIT = 8 * 1024
@@ -275,6 +276,59 @@ class Subscription:
                 self.loop.call_soon_threadsafe(self.wake.set)
             except RuntimeError:
                 pass
+
+    def stop(self):
+        """Shutdown/drain: ends the HTTP response itself, even one stuck sending to a slow reader (review 8debb4f)."""
+        stop_event = getattr(self, "stop_event", None)
+        if self.loop is not None and stop_event is not None:
+            try:
+                self.loop.call_soon_threadsafe(stop_event.set)
+            except RuntimeError:
+                pass
+
+
+class StoppableStreamingResponse:
+    """A StreamingResponse raced against `stop_event` (review 8debb4f). The body generator can be suspended inside
+    ASGI send (backpressure from a reader that stopped reading) where no flag of its own is ever seen; on the event
+    the whole response task is cancelled, then the body generator is closed so its own cleanup runs, then
+    `on_close`. Used by the runner's /events and the API relay; other responses are untouched."""
+
+    def __new__(cls, content, stop_event, on_close=None, **kwargs):
+        from starlette.responses import StreamingResponse
+
+        class Racing(StreamingResponse):
+            async def __call__(self, scope, receive, send):
+                # Marks the connection for app.serve.StreamAwareH11: at server shutdown it is aborted instead of
+                # flushed (a reader that stopped reading would hold a graceful close forever). Other responses: none.
+                if isinstance(scope.get("state"), dict):
+                    scope["state"][STREAM_ABORT_MARK] = True
+                task = asyncio.ensure_future(StreamingResponse.__call__(self, scope, receive, send))
+                stopper = asyncio.ensure_future(stop_event.wait()) if stop_event is not None else None
+                try:
+                    waiting = {task} | ({stopper} if stopper is not None else set())
+                    done, _ = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+                    if task in done:
+                        task.result()
+                    else:
+                        task.cancel()
+                        try:
+                            await task
+                        except BaseException:
+                            pass
+                finally:
+                    if stopper is not None:
+                        stopper.cancel()
+                    if not task.done():
+                        task.cancel()
+                    closer = getattr(self.body_iterator, "aclose", None)
+                    if closer is not None:
+                        try:
+                            await closer()
+                        except BaseException:
+                            pass
+                    if on_close is not None:
+                        on_close()
+        return Racing(content, **kwargs)
 
 
 class Hub:
@@ -919,6 +973,7 @@ class Hub:
         with self.lock:
             for subscription in list(self.subscribers):
                 subscription.closed = subscription.closed or "stopping"
+                subscription.stop()
                 subscription.notify()
 
     # --- metrics --------------------------------------------------------------------------------------------------

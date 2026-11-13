@@ -19,6 +19,9 @@ CONNECT_SECONDS, HELLO_SECONDS, READ_SECONDS = 5.0, 5.0, 45.0
 HEARTBEAT_SECONDS, REVALIDATE_SECONDS, STATUS_RETRY_SECONDS = 15.0, 60.0, 5.0
 NOT_READY_LIMIT_SECONDS = 600.0
 LAUNCH_WAIT_SECONDS, REBIND_ATTEMPTS = 30.0, 3
+# A browser that takes no frame for this long is cut: the relay stops reading the runner, so the runner's send never
+# stays blocked past its Pod grace (20 s, runner_kube.GRACE_SECONDS).
+STALL_SECONDS = 10.0
 TURN_EVENTS = {"snapshot.begin", "snapshot.item", "snapshot.end", "turn.started", "turn.completed", "turn.discard",
                "item.started", "item.status", "item.delta", "item.output", "item.completed", "stream.stopped"}
 OTHER_EVENTS = {"hello", "idle", "sync"}
@@ -133,6 +136,7 @@ class Relay:
         self.last_id = None
         self.last_status = None
         self.launch_deadline = None  # set while the DB names a running turn the runner has not shown; kept across reconnects
+        self.stalled = False
         self.stats = stats if stats is not None else {}
         self.trace = trace_enabled()
         self.revalidate_at = time.monotonic() + REVALIDATE_SECONDS
@@ -179,9 +183,9 @@ class Relay:
                 finally:
                     await upstream.aclose()  # cancels and awaits the reader task now, not at garbage collection
                 reason = ended[1] if ended else "end"
-                if reason in {"mismatch", "gone", "shutdown"}:
-                    if reason == "mismatch":
-                        yield frame("sync", {"reason": "mismatch"})
+                if reason in {"mismatch", "gone", "shutdown", "stalled"}:
+                    if reason in {"mismatch", "stalled"}:
+                        yield frame("sync", {"reason": "mismatch" if reason == "mismatch" else "overflow"})
                     self.stats["reason"] = reason
                     return
                 if reason == "rebind":
@@ -258,7 +262,11 @@ class Relay:
                         return
                     async for chunk in response.aiter_raw():
                         for item in parser.feed(chunk):
-                            await queue.put(item)
+                            try:  # the browser stopped taking frames: stop reading the runner, close (review 8debb4f)
+                                await asyncio.wait_for(queue.put(item), STALL_SECONDS)
+                            except asyncio.TimeoutError:
+                                self.stalled = True
+                                return
                 await queue.put(("end", "end"))
             except Mismatch:
                 await queue.put(("end", "mismatch"))
@@ -285,6 +293,9 @@ class Relay:
                 return waiting and not seen_bound and self.launch_deadline is not None \
                     and time.monotonic() > self.launch_deadline
             while True:
+                if self.stalled and task.done() and queue.empty():
+                    yield ("end", "stalled")  # the reader gave up on a stalled browser and closed the runner side
+                    return
                 if launch_overdue():
                     # The DB says R_bind runs and the runner never showed it within the window (also across
                     # reconnects), whatever else the runner sends meanwhile (review d319fcb): count a rebind
@@ -301,6 +312,9 @@ class Relay:
                     yield status
                     last_send = time.monotonic()
                 if item is None:
+                    if self.stalled and task.done() and queue.empty():
+                        yield ("end", "stalled")  # the reader gave up on a stalled browser and closed the runner side
+                        return
                     if launch_overdue():
                         continue  # the deadline check at the loop top, before any heartbeat
                     yield b": hb\n\n"
