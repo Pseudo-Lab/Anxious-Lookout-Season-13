@@ -2,8 +2,12 @@
 
 8080 is the public listener (Traefik only, by policy). 8081 is the internal listener for the
 runner tool callback (runner Pods only, by policy) and serves nothing else. The public listener
-does not serve /api/internal/ unless API_INTERNAL_CALLBACK_ON_PUBLIC=true, which exists only for
-the switch of runner Pods created before #62 (their callback env is the 8080 URL).
+does not serve the /api/internal prefix unless API_INTERNAL_CALLBACK_ON_PUBLIC=true, which exists
+only for the switch of runner Pods created before #62 (their callback env is the 8080 URL).
+Even then a request that carries any proxy header is refused: Traefik always adds
+X-Forwarded-For, X-Real-Ip and X-Forwarded-Server (measured with the pinned Traefik 3.7.8), and a
+runner callback sends none. The prefix has no trailing slash because uvicorn decodes %2F, %5C and
+%00 into the path that the app routes on, while Traefik matches them undecoded (#62 review).
 
 Both listeners keep uvicorn's --no-proxy-headers behaviour. Plain `uvicorn app.main:create_app`
 (compose stacks, tests) is unchanged: the gate below applies only to this entry.
@@ -16,6 +20,9 @@ PUBLIC_PORT = 8080
 INTERNAL_PORT = 8081
 FLAG = 'API_INTERNAL_CALLBACK_ON_PUBLIC'
 NOT_FOUND = json.dumps({'error': {'code': 'not_found', 'message': 'Not found'}}).encode()
+# Any of these means the request came through a proxy (Traefik), never from a runner Pod.
+PROXY_HEADERS = {b'forwarded', b'x-forwarded-for', b'x-forwarded-host', b'x-forwarded-port',
+                 b'x-forwarded-proto', b'x-forwarded-server', b'x-real-ip'}
 
 
 def public_internal():
@@ -25,14 +32,16 @@ def public_internal():
     return value == 'true'
 
 
-def allowed(port, path, base_path, legacy_public):
-    """Whether a request path may reach the app on the listener with this local port."""
+def allowed(port, path, base_path, legacy_public, proxied):
+    """Whether a request may reach the app on the listener with this local port."""
     internal = base_path + '/api/internal'
     callback = internal + '/research/tools'
     if port == INTERNAL_PORT:
         return path == callback
     if port == PUBLIC_PORT:
-        return legacy_public or not (path == internal or path.startswith(internal + '/'))
+        if path.startswith(internal):
+            return legacy_public and not proxied and path == callback
+        return True
     return False
 
 
@@ -42,7 +51,8 @@ def gate(app, base_path, legacy_public):
         if kind in {'http', 'websocket'}:
             server = scope.get('server') or (None, None)
             # uvicorn sets server from the accepted socket's local address, not from headers.
-            if not allowed(server[1], scope['path'], base_path, legacy_public):
+            proxied = any(name.lower() in PROXY_HEADERS for name, _ in scope.get('headers', ()))
+            if not allowed(server[1], scope['path'], base_path, legacy_public, proxied):
                 if kind == 'websocket':
                     await send({'type': 'websocket.close', 'code': 1008})
                     return

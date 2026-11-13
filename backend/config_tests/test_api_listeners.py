@@ -26,33 +26,41 @@ async def echo(scope, receive, send):
     await send({'type': 'http.response.body', 'body': body})
 
 
-@pytest.mark.parametrize('port,path,legacy,expected', [
-    (8081, CALLBACK, False, True),
-    (8081, CALLBACK + '/', False, False),
-    (8081, '/api/research/sessions', False, False),
-    (8081, '/healthz', False, False),
-    (8081, '/api/internal/other', False, False),
-    (8081, '/api/auth/github/start', True, False),
-    (8080, CALLBACK, False, False),
-    (8080, '/api/internal', False, False),
-    (8080, '/api/internal/', False, False),
-    (8080, '/api/internal/anything', False, False),
-    (8080, CALLBACK, True, True),
-    (8080, '/api/internalx', False, True),
-    (8080, '/api/research/sessions', False, True),
-    (8080, '/healthz', False, True),
-    (8080, '/readyz', False, True),
-    (None, '/healthz', False, False),
-    (9999, '/healthz', True, False)])
-def test_gate_table(port, path, legacy, expected):
-    assert serve.allowed(port, path, '', legacy) is expected
+@pytest.mark.parametrize('port,path,legacy,proxied,expected', [
+    (8081, CALLBACK, False, False, True),
+    (8081, CALLBACK, False, True, True),  # policy limits 8081 to runner Pods; headers do not matter
+    (8081, CALLBACK + '/', False, False, False),
+    (8081, '/api/research/sessions', False, False, False),
+    (8081, '/healthz', False, False, False),
+    (8081, '/api/internal/other', False, False, False),
+    (8081, '/api/auth/github/start', True, False, False),
+    (8080, CALLBACK, False, False, False),
+    (8080, '/api/internal', False, False, False),
+    (8080, '/api/internal/', False, False, False),
+    (8080, '/api/internal/anything', False, False, False),
+    (8080, '/api/internalx', False, False, False),
+    (8080, '/api/internal\x00/research/tools', False, False, False),
+    (8080, CALLBACK, True, False, True),  # switch window: a pre-#62 runner calls back on 8080
+    (8080, CALLBACK, True, True, False),  # ... but never through a proxy
+    (8080, '/api/internal/other', True, False, False),
+    (8080, '/api/internal', True, False, False),
+    (8080, '/api/interna', False, False, True),
+    (8080, '/api/INTERNAL/research/tools', False, True, True),  # no such route; the app answers 404
+    (8080, '/api/research/sessions', False, True, True),
+    (8080, '/healthz', False, False, True),
+    (8080, '/readyz', False, False, True),
+    (None, '/healthz', False, False, False),
+    (9999, '/healthz', True, False, False)])
+def test_gate_table(port, path, legacy, proxied, expected):
+    assert serve.allowed(port, path, '', legacy, proxied) is expected
 
 
 def test_base_path_is_part_of_the_internal_prefix():
-    assert serve.allowed(8081, '/base' + CALLBACK, '/base', False)
-    assert not serve.allowed(8081, CALLBACK, '/base', False)
-    assert not serve.allowed(8080, '/base' + CALLBACK, '/base', False)
-    assert serve.allowed(8080, CALLBACK, '/base', False)  # not the base path's internal route
+    assert serve.allowed(8081, '/base' + CALLBACK, '/base', False, False)
+    assert not serve.allowed(8081, CALLBACK, '/base', False, False)
+    assert not serve.allowed(8080, '/base' + CALLBACK, '/base', True, True)
+    assert serve.allowed(8080, '/base' + CALLBACK, '/base', True, False)
+    assert serve.allowed(8080, CALLBACK, '/base', False, False)  # not the base path's internal route
 
 
 @pytest.mark.parametrize('value,expected', [(None, False), ('false', False), ('true', True)])
@@ -71,9 +79,9 @@ def test_flag_refuses_other_values(monkeypatch, value):
         serve.public_internal()
 
 
-@pytest.fixture(scope='module')
-def listeners():
-    server = uvicorn.Server(uvicorn.Config(serve.gate(echo, '', False), access_log=False,
+@pytest.fixture(scope='module', params=[False, True], ids=['steady', 'switch'])
+def listeners(request):
+    server = uvicorn.Server(uvicorn.Config(serve.gate(echo, '', request.param), access_log=False,
                                            proxy_headers=False, log_level='warning'))
     sockets = [serve.listener(serve.PUBLIC_PORT), serve.listener(serve.INTERNAL_PORT)]
     thread = threading.Thread(target=server.run, kwargs={'sockets': sockets}, daemon=True)
@@ -82,7 +90,7 @@ def listeners():
     while not server.started:
         assert time.monotonic() < deadline and thread.is_alive()
         time.sleep(0.05)
-    yield
+    yield request.param
     server.should_exit = True
     thread.join(10)
     for sock in sockets:
@@ -106,12 +114,41 @@ def test_internal_socket_serves_only_the_callback(listeners):
         assert (status, cache) == (404, 'no-store') and json.loads(body)['error']['code'] == 'not_found'
 
 
+# What the pinned Traefik 3.7.8 adds to every proxied request (measured, #62 review round).
+TRAEFIK = {'X-Forwarded-For': '10.42.0.5', 'X-Real-Ip': '10.42.0.5', 'X-Forwarded-Server': 'traefik-0',
+           'X-Forwarded-Host': '192.88.99.1', 'X-Forwarded-Port': '80', 'X-Forwarded-Proto': 'http'}
+# Raw forms Traefik forwards undecoded. uvicorn decodes the first group into exactly the callback
+# path, the second into other paths under the internal prefix.
+TO_CALLBACK = ('/api/%69nternal/research/tools', '/api/internal%2Fresearch/tools', '/api/internal%2fresearch%2ftools',
+               '/api%2Finternal%2Fresearch%2Ftools')
+UNDER_PREFIX = ('/api/internal%5Cresearch/tools', '/api/internal%00/research/tools',
+                '/api/internal%252Fresearch/tools', '/api/internal;x/research/tools')
+ENCODED = TO_CALLBACK + UNDER_PREFIX
+
+
 def test_public_socket_refuses_internal_paths(listeners):
     status, _, body = call(8080, '/api/research/sessions')
     assert status == 200 and json.loads(body)['port'] == 8080
-    for path in (CALLBACK, '/api/internal', '/api/%69nternal/research/tools', '/api/internal%2Fresearch/tools'):
+    for path in ('/api/internal', '/api/internal/', '/api/internalx') + UNDER_PREFIX:
         status, cache, _ = call(8080, path)
         assert (status, cache) == (404, 'no-store'), path
+    # Only in the switch window, and only unproxied (a pre-#62 runner Pod; policy admits no one else
+    # besides Traefik, whose requests always carry proxy headers).
+    for path in (CALLBACK,) + TO_CALLBACK:
+        status, _, body = call(8080, path)
+        assert status == (200 if listeners else 404), path
+        if listeners:
+            assert json.loads(body) == {'path': CALLBACK, 'port': 8080}
+
+
+def test_proxied_request_never_reaches_the_callback_on_public(listeners):
+    for name, value in TRAEFIK.items():
+        for path in (CALLBACK,) + ENCODED:
+            status, cache, _ = call(8080, path, headers={name: value})
+            assert (status, cache) == (404, 'no-store'), (name, path)
+    # forwarded header names are case-insensitive on the wire
+    status, _, _ = call(8080, CALLBACK, headers={'x-real-ip': '10.42.0.5'})
+    assert status == 404
 
 
 def test_headers_cannot_choose_the_listener(listeners):

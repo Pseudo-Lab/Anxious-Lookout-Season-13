@@ -20,7 +20,7 @@ done
 [[ "$ip_a" != 198 || ( "$ip_b" != 18 && "$ip_b" != 19 ) ]] || exit 1
 # #62 runner callback switch: true only while runner Pods created before #62 (callback env on the
 # public 8080 listener) may still run. It lets those Pods reach 8080 (policy) and the public listener
-# serve /api/internal/ (API flag). Traefik never routes /api/internal/ either way.
+# serve the callback to unproxied requests (API flag). Traefik never routes /api/internal* either way.
 M2_RUNNER_CALLBACK_TRANSITION=${M2_RUNNER_CALLBACK_TRANSITION:-false}
 [[ "$M2_RUNNER_CALLBACK_TRANSITION" == true || "$M2_RUNNER_CALLBACK_TRANSITION" == false ]] || { echo 'M2_RUNNER_CALLBACK_TRANSITION must be true or false' >&2; exit 1; }
 for image in "$WEB_IMAGE" "$API_IMAGE"; do
@@ -336,8 +336,10 @@ metadata:
 spec:
   entryPoints: [web]
   routes:
-    # #62: never route the runner callback (/api/internal/) publicly; no route means Traefik's 404.
-    - match: Host(\`$public_ipv4\`) && (Path(\`/api\`) || PathPrefix(\`/api/\`)) && !PathPrefix(\`/api/internal/\`)
+    # #62: never route the runner callback prefix publicly; no route means Traefik's 404. No trailing
+    # slash: Traefik matches %2F/%5C/%3B/%00 undecoded (/api/internal%2F... is not under /api/internal/),
+    # while the API decodes them. The shared kube-system entrypoint is not changed for this.
+    - match: Host(\`$public_ipv4\`) && (Path(\`/api\`) || PathPrefix(\`/api/\`)) && !PathPrefix(\`/api/internal\`)
       kind: Rule
       priority: 20
       services: [{name: api, port: 8080}]

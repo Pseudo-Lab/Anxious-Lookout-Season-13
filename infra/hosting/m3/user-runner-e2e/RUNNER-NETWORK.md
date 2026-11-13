@@ -13,9 +13,9 @@ The development VM goes first; review runs it. Production follows the same order
 
 | Object | Before | After |
 | --- | --- | --- |
-| API process | `uvicorn app.main:create_app`, port 8080 | `python -m app.serve`, public 8080 + internal 8081. 8081 serves only `POST /api/internal/research/tools`. 8080 answers 404 under `/api/internal/` unless `API_INTERNAL_CALLBACK_ON_PUBLIC=true` |
+| API process | `uvicorn app.main:create_app`, port 8080 | `python -m app.serve`, public 8080 + internal 8081. 8081 serves only `POST /api/internal/research/tools`. 8080 answers 404 under the decoded `/api/internal` prefix. With `API_INTERNAL_CALLBACK_ON_PUBLIC=true`, the exact callback path is served only to requests with no proxy header |
 | Service `m2-hosting/api-internal` | absent | 8081 → `hosting-api` |
-| IngressRoute `hosting` | routes all of `/api/` | excludes `/api/internal/` |
+| IngressRoute `hosting` | routes all of `/api/` | excludes `PathPrefix(/api/internal)`, which also covers the encoded forms Traefik matches undecoded |
 | CNPs `hosting-{api,web,postgres}-ingress` | absent (default allow) | ingress only, see `infra/hosting/README.md` |
 | CNP `codex-runner/runner-callback-draft` | egress broker 8080 + `toEntities: all` | `40-runner-network.json`: broker 8080, kube-dns 53, `hosting-api` 8081, `world` 443 |
 | runner Pod env `RESEARCH_TOOL_CALLBACK_URL` | `http://api.m2-hosting.svc.cluster.local:8080/…` | `http://api-internal.m2-hosting.svc.cluster.local:8081/…`, rendered by the controller (`runner_kube.CALLBACK_URL`). Stored binding plans are not changed |
@@ -74,7 +74,13 @@ Also record `cilium-dbg endpoint list`: policy enforcement ingress/egress for th
 Checks:
 - An existing runner (if any) still completes a tool callback.
 - A runner Pod created after step A has the 8081 env and completes a tool callback.
-- `/api/internal/research/tools` through Traefik (public origin, `curl --resolve` as in DEV-VM.md) answers 404 from Traefik with no API access log hit.
+- Through Traefik (public origin, `curl --resolve` as in DEV-VM.md), Traefik answers 404 with no API hit for:
+  - `/api/internal/research/tools`;
+  - the encoded forms in `backend/tests/route_probe.py` (`%2F`, `%5C`, `%3B`, `%00`, `%252F` after `internal`).
+  This holds while the flag is `true`.
+- From inside the API Pod over loopback, with the flag `true`:
+  - a POST to `http://127.0.0.1:8080/api/internal/research/tools` carrying `X-Forwarded-For` answers 404;
+  - the same POST without proxy headers reaches the route: the route's own 401 or 422 (no token, or an invalid body) is the expected answer, not the gate's 404.
 - `/api/research/...` through Traefik still works.
 
 Rollback:
@@ -136,7 +142,7 @@ Rollback: apply the saved live spec.
 Checks:
 - From a runner Pod, `hosting-api` 8080: drop record.
 - 8081 callback in a runner turn: success.
-- The public listener itself answers 404 under `/api/internal/`. Check it with a POST to `http://127.0.0.1:8080/api/internal/research/tools` from inside the API Pod (`kubectl exec … -c api -- python -I -c`; loopback, so no policy is involved). This holds even if a public route were added by mistake later. Traefik already answers 404.
+- The public listener itself answers 404 under `/api/internal`, now with or without proxy headers. Check it with a POST to `http://127.0.0.1:8080/api/internal/research/tools` from inside the API Pod (`kubectl exec … -c api -- python -I -c`; loopback, so no policy is involved). This holds even if a public route were added by mistake later. Traefik already answers 404.
 
 Rollback:
 1. Re-apply the transition runner CNP.
