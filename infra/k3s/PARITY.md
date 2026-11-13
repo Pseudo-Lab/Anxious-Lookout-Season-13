@@ -76,7 +76,7 @@ Issue [#54](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/54). 
 - **The current API sends it no turns once `CODEX_USER_RUNNERS_ENABLE=true`.**
   - `runner_for` (`backend/app/conversations.py`) uses the static `CODEX_RUNNERS_FILE` map only when user runners are disabled.
   - With user runners on, a non-selected owner is refused before reaching it, and a selected owner gets its codex-runner Pod.
-  - Production's value must be confirmed by the user before the switch (#62 thread; requested 2026-11-14, pending).
+  - Production's value is confirmed: the user's read-only look on 2026-11-14 (rc 0 0, #62 thread) showed `CODEX_USER_RUNNERS_ENABLE='true'` set directly in the api env (no `valueFrom`), and no `CODEX_RUNNERS_FILE` in that env. `CODEX_RUNNERS_FILE` remains only in ConfigMaps the api does not read (`hosting-access-web-v1..v3`, `hosting-root-https-v1`).
 - **Effect of #62.** If the flag is `true`, nothing that works today breaks. The running Pod would be refused at the API and PostgreSQL if it tried; it does not try.
 - **Not an allowlist question.** Retiring the namespace and its Deployment is a separate user decision.
 

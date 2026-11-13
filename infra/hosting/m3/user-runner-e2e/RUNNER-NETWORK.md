@@ -237,5 +237,6 @@ So on production:
     - its database is its own;
     - it calls the API only during a turn the API sent it;
     - the API sends it none while `CODEX_USER_RUNNERS_ENABLE=true`.
-  - **Before the switch:** the user confirms that flag value on the live api Deployment and whether `CODEX_RUNNERS_FILE` is set. If user runners are off, the access-web runner may still be in use, and PM decides before the switch.
+  - **Confirmed on 2026-11-14** (user's read-only look, #62 thread): the live api env has `CODEX_USER_RUNNERS_ENABLE='true'` and no `CODEX_RUNNERS_FILE`.
+  - Re-run that one-line look right before the switch. If it changed (user runners off, or `CODEX_RUNNERS_FILE` set), the access-web runner may be in use, and PM decides before going on.
 - Production takes no release of this source outside the switch (PARITY "Render output and the live node").
