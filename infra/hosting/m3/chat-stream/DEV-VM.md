@@ -2,7 +2,7 @@
 
 Issue: https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/90.
 
-- **Source**: the approved SHA `27973daa1fd200f4d22c97a7307e837e75b4d310` (review approved, design r3, contract v1.1).
+- **Source**: `IMAGE_SHA`, the reviewed code commit given in the review/PM message. It is not `27973da`: the API evidence-log fix and P5-0 (default off) come after it. Design r3, contract v1.1.
 - **Roles**: back writes this file; review checks it and its hash; PM runs the commands in its session.
 - **On error**: a nonzero rc is reported, never re-run.
 - **Turn budget**: phases P0–P4 use **no Codex turn**. P5 needs the user's turn budget first and is not run before that.
@@ -22,14 +22,25 @@ Record, and keep each as a rollback copy:
 
 Use the guest's Docker (containerd image store, see `infra/k3s/DEV-VM.md`), with the production build arguments. `FULL_SHA` is the approved SHA above. `BUILT_AT` is the UTC build time, recorded.
 
+Two SHAs, never one checkout (review 70e92e7):
+- **Image source**: `IMAGE_SHA` (the reviewed code). `test "${#IMAGE_SHA}" = 40` before use.
+- **Tools and this file**: the reviewed procedure commit `TOOL_SHA`, given in the review/PM message (it adds `infra/hosting/m3/chat-stream/`, which older code commits do not have).
+
+Each is extracted with `git archive` into its own directory. Nothing is checked out, so neither can disappear mid-run.
+
 ```sh
-git -C "$SRC" fetch && git -C "$SRC" checkout --detach 27973daa1fd200f4d22c97a7307e837e75b4d310
-test "$(git -C "$SRC" rev-parse HEAD)" = 27973daa1fd200f4d22c97a7307e837e75b4d310
-docker build -f "$SRC/backend/Dockerfile" --target runtime --build-arg APP_GIT_SHA=27973daa1fd200f4d22c97a7307e837e75b4d310 \
-  --build-arg APP_BUILT_AT="$BUILT_AT" -t anxious-s13-issue90-runtime:27973da "$SRC"
-docker build -f "$SRC/backend/Dockerfile" --target runner --build-arg APP_GIT_SHA=27973daa1fd200f4d22c97a7307e837e75b4d310 \
-  --build-arg APP_BUILT_AT="$BUILT_AT" -t anxious-s13-issue90-runner:27973da "$SRC"
-docker save anxious-s13-issue90-runtime:27973da anxious-s13-issue90-runner:27973da -o /PRIVATE/issue90/images.tar
+# Separate, fresh directories (refuse if they already exist).
+mkdir /PRIVATE/issue90 /PRIVATE/issue90/build /PRIVATE/issue90/tools
+git -C "$SRC" fetch
+git -C "$SRC" archive "$IMAGE_SHA" | tar -x -C /PRIVATE/issue90/build
+git -C "$SRC" show "$TOOL_SHA:infra/hosting/m3/chat-stream/journal_lengths.py" > /PRIVATE/issue90/tools/journal_lengths.py
+git -C "$SRC" show "$TOOL_SHA:infra/hosting/m3/chat-stream/DEV-VM.md" > /PRIVATE/issue90/tools/DEV-VM.md
+sha256sum /PRIVATE/issue90/tools/journal_lengths.py /PRIVATE/issue90/tools/DEV-VM.md   # compare with the reviewed hashes
+docker build -f /PRIVATE/issue90/build/backend/Dockerfile --target runtime --build-arg APP_GIT_SHA="$IMAGE_SHA" \
+  --build-arg APP_BUILT_AT="$BUILT_AT" -t "anxious-s13-issue90-runtime:$IMAGE_SHA" /PRIVATE/issue90/build
+docker build -f /PRIVATE/issue90/build/backend/Dockerfile --target runner --build-arg APP_GIT_SHA="$IMAGE_SHA" \
+  --build-arg APP_BUILT_AT="$BUILT_AT" -t "anxious-s13-issue90-runner:$IMAGE_SHA" /PRIVATE/issue90/build
+docker save "anxious-s13-issue90-runtime:$IMAGE_SHA" "anxious-s13-issue90-runner:$IMAGE_SHA" -o /PRIVATE/issue90/images.tar
 sha256sum /PRIVATE/issue90/images.tar
 sudo /usr/local/bin/k3s ctr -n k8s.io images import /PRIVATE/issue90/images.tar
 sudo /usr/local/bin/k3s ctr -n k8s.io images ls | grep issue90
@@ -44,7 +55,7 @@ sudo /usr/local/bin/k3s ctr -n k8s.io images ls | grep issue90
 - Render `infra/hosting/render.sh` with `API_IMAGE` = the new runtime `repo@sha256` and every other input as recorded in P0.
 - Server dry-run and diff, then apply **only Deployment `api`**. Do not set `RESEARCH_STREAM_ENABLE`.
 - `kubectl -n m2-hosting rollout status deploy/api`.
-- The runner-controller image stays as it is: #90 does not change the controller (`runner_kube.py`, `runner_controller.py` unchanged since c50c41c).
+- The runner-controller image stays as it is for P0–P4. With both stream flags unset, `IMAGE_SHA` renders a runner Pod exactly as the current controller does (P5-0 adds keys only for `true`; `runner_controller.py` is unchanged since c50c41c), and the new API accepts that Pod. The controller moves to the same runtime image only at P5, with the flags (P5-0 below).
 
 **Runner**: the per-binding image swap (`infra/hosting/m3/multi-user-runners/CUTOVER.md` section 6, `rollout/README.md` "Existing binding images").
 - For each owner in `idle_stopped` with a completed termination proof, with entry stopped and runner-controller scaled to 0: `ops.runner_binding_image report` → review → `apply`.
@@ -72,8 +83,8 @@ L is the longest recorded secret literal of a runner's redaction journal. Stream
 
 ```sh
 docker run --rm --pull=never --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
-  --user 0:0 -v "$PV_PATH:/control:ro" -v "$SRC/infra/hosting/m3/chat-stream:/m:ro" \
-  --entrypoint python anxious-s13-issue90-runtime:27973da -I -B /m/journal_lengths.py /control
+  --user 0:0 -v "$PV_PATH:/control:ro" -v /PRIVATE/issue90/tools:/m:ro \
+  --entrypoint python "anxious-s13-issue90-runtime:$IMAGE_SHA" -I -B /m/journal_lengths.py /control
 echo "rc=$?"
 ```
 
@@ -88,12 +99,22 @@ These need **`RESEARCH_STREAM_ENABLE=true` on the api Deployment** (a state chan
 - An idle stream carries `runner`/`idle` frames and heartbeats only, so no Codex turn is needed.
 - review writes the measuring client: it holds an `/events` stream open and records when each frame arrives and when the stream ends.
 
+Client: review's `artifacts/review/issue90/p4_client.py` (sha256 `e185f7f9d4fd396eaa17ebad41649a776221903be632ef1a0bdf6b4d01c1c877`, usage in `P4-CLIENT.md`).
+
+**Evidence, kept apart** (review 70e92e7):
+- **Runner side**: the drain receipt, Pod deletion time, runner log `Application shutdown complete`.
+- **Browser stream**: the frames the client saw, and when it ended.
+- **API slot**: the `api_stream_summary` line the API writes when a stream's slot is released (one line per closed connection, `reason` included).
+
+After the runner stops, the API relay is **expected to stay open**. It sends `runner{available:false}`, then waits in its not-ready loop (up to `NOT_READY_LIMIT_SECONDS`, 600 s) for a runner to come back. The browser stream ending is therefore **not** a pass condition. The client closes it explicitly once it has seen `available:false`.
+
 | # | Action | Pass |
 |---|---|---|
-| P4-1 | Stream open; stop the runner with the existing path (`DELETE /api/research/codex/runner`; runner-controller drains) | Drain receipt `clean: true`. Stream gets `runner{available:false}` and ends. API slot released (a new `/events` from the same user is not 429). Runner Pod gone before its 20 s grace runs out |
-| P4-2 | Stream open; idle stop (`CODEX_USER_RUNNER_IDLE_SECONDS`, 1800 s unless PM lowers it for the test) | Same as P4-1 |
-| P4-3 | Stream open with a reader that stopped reading (`SO_RCVBUF` small, no reads); `kubectl -n m2-hosting rollout restart deploy/api` | Old API Pod terminates without waiting for the reader (well inside the Pod grace). `Waiting for connections to close` does not hold. The new Pod serves |
-| P4-4 | P4-1 again while the reader has stopped reading | As P4-1. The runner's own drain does not wait for the API connection |
+| P4-0 | Slot baseline: the same user opens 3 streams (the per-user cap); a 4th answers 429 `stream_limit`. Close one from the client, wait for its `api_stream_summary` line, then open again | 4th refused while 3 are open; one `api_stream_summary` per close; a new stream accepted after the line |
+| P4-1 | Reading stream open; stop the runner with the existing path (`DELETE /api/research/codex/runner`; runner-controller drains) | Runner side: drain receipt `clean: true`, Pod gone within its 20 s grace from the stop. Browser: `runner{available:false}` arrives (the stream itself may stay open). Then the client closes; API: one `api_stream_summary` for it |
+| P4-2 | As P4-1, by idle stop (`CODEX_USER_RUNNER_IDLE_SECONDS`, 1800 s unless PM lowers it for the test) | As P4-1 |
+| P4-3 | Stream open with a reader that stopped reading (`SO_RCVBUF` small, no reads); `kubectl -n m2-hosting rollout restart deploy/api` | Old API Pod terminated well inside its grace (pod timestamps); API log has no lasting `Waiting for connections to close`; the new Pod serves `/api/health`. The client sees a local deadline or reset, not a clean SSE end; that is expected |
+| P4-4 | P4-1 with a reader that stopped reading | Runner side only (the client cannot see frames): drain receipt `clean: true`, Pod gone within 20 s, runner log `Application shutdown complete`. After the client closes: one `api_stream_summary` |
 
 Not covered here, because it needs event volume and therefore a turn: slow reader → relay 10 s stall → runner connection closed inside the runner's 20 s grace. That is S6 in P5.
 
@@ -105,7 +126,7 @@ Not covered here, because it needs event volume and therefore a turn: slow reade
   - `CODEX_RUNNER_STREAM_TEXT` / `CODEX_RUNNER_STREAM_TRACE` (`true`/`false`, default `false`; anything else refuses) in the process env of runner-controller and API add exactly those keys with `"true"`.
   - By default the render is byte-identical to before.
   - `_pod` also accepts a Pod rendered under the other flag state (only the exact `"true"` keys may differ), so a flag change never strands a running Pod. Every other env difference is still refused.
-- **Turning text on (P5, after review)**: set `CODEX_RUNNER_STREAM_TEXT=true` (and `CODEX_RUNNER_STREAM_TRACE=true` for S4) on **both** the runner-controller Deployment and the api Deployment, and wait for both rollouts.
+- **Turning text on (P5, after review)**: move the runner-controller Deployment to the `IMAGE_SHA` runtime image (it renders the Pods), then set `CODEX_RUNNER_STREAM_TEXT=true` (and `CODEX_RUNNER_STREAM_TRACE=true` for S4) on **both** the runner-controller Deployment and the api Deployment, and wait for both rollouts.
   - A runner Pod created after that has the keys; one created before keeps working without them until its next entry.
   - Off again: set them back to `false` (or remove them) the same way. `RESEARCH_STREAM_ENABLE=false` on the API alone already closes every browser stream.
 
