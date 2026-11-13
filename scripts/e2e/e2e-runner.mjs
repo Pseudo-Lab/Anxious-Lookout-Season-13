@@ -8,6 +8,7 @@
 // - #89 대화 반응성(N21): 즉시 말풍선·생각 중·말풍선 연속성·자동 스크롤·이용 가능 상태 재조회
 // - #89 Enter 보내기(N22): Enter 보내기·Shift+Enter 줄바꿈·IME 조합 중 Enter 미전송·연타 한 번 전송
 // - #89 접수 뒤 첫 조회 실패 복구(N23): 보내는 중 유지·조회만 재시도·완료 기록 복구
+// - #89 완료 전환 바닥 추적(N24): 생각 중 → 같은 수의 긴 답변, 직접 펼친 도구 상세는 위치 유지
 import { chromium } from "playwright";
 
 const ORIGIN = process.env.ORIGIN ?? "http://127.0.0.1:8080";
@@ -873,6 +874,42 @@ await step("N23", async () => {
   check("N23. input locked once, unlocked once", JSON.stringify(log) === "[true,false]", JSON.stringify(log));
   await page.unroute("**/api/research/sessions/*/messages");
   await page.unroute("**/api/research/sessions/*");
+  await setMock("turnMs=2500");
+});
+
+// N24. #89 review: 바닥에서 기다리면 "생각 중"이 같은 수의 긴 답변 하나로 바뀌는 완료도 바닥을 따라간다.
+// 완료 뒤 사용자가 도구 상세를 펼친 것은 따라가지 않는다(읽던 위치 유지).
+await step("N24", async () => {
+  await setMock("runnerAll=ready&codex=fixture&turnMs=3000");
+  const input = chat.getByLabel("메시지");
+  const scroller = chat.locator("[data-chat-scroll]");
+  const gap = () => scroller.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
+  await page.setViewportSize({ width: 1280, height: 420 });
+  await input.and(chat.locator(":enabled")).waitFor({ timeout: 10000 });
+  const toolsBefore = await chat.locator("li", { hasText: "research_list" }).count();
+  await input.fill("/fixture/long-answer 긴 답변 질문");
+  await input.press("Enter");
+  await chat.locator("[data-chat-thinking]").waitFor();
+  await page.waitForTimeout(500);
+  check("N24. waiting at bottom", (await gap()) <= 48, String(await gap()));
+  await chat.getByText("긴 답변 문단 80.").waitFor({ timeout: 15000 });
+  await page.waitForTimeout(500);
+  check("N24. no tool item in this turn (same entry count)", (await chat.locator("li", { hasText: "research_list" }).count()) === toolsBefore);
+  check("N24. long answer followed to the bottom", (await gap()) <= 48, String(await gap()));
+  // 도구가 있는 답변 뒤, 바닥에서 도구 상세를 직접 펼치면 위치를 유지한다.
+  await input.and(chat.locator(":enabled")).waitFor({ timeout: 10000 });
+  await input.fill("펼침 위치 질문");
+  await input.press("Enter");
+  await chat.getByText("모의 응답: 펼침 위치 질문").waitFor({ timeout: 15000 });
+  await page.waitForTimeout(1500);
+  const tool = chat.getByRole("button", { name: /research_list/ }).last();
+  const top0 = await scroller.evaluate((el) => el.scrollTop);
+  await tool.evaluate((el) => el.click()); // 스크롤 없이 누른다
+  await chat.getByRole("button", { name: "저장된 원본 기록 보기" }).last().waitFor();
+  await page.waitForTimeout(500);
+  const top1 = await scroller.evaluate((el) => el.scrollTop);
+  check("N24. manual expand keeps reading position", top1 === top0, `${top0} -> ${top1}`);
+  await page.setViewportSize({ width: 1280, height: 800 });
   await setMock("turnMs=2500");
 });
 

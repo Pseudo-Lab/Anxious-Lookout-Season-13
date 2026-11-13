@@ -697,8 +697,12 @@ function handleMutation(owner, method, path, b, user) {
         // 접수 항목 → 기록 항목(같은 자리, 다른 id)
         if (shownItem !== userItem) s.items[s.items.indexOf(shownItem)] = userItem;
         // 모의 모델은 항상 research_list를 호출한다. 이 요청 범위에 없으면 서버 callback 거부(tool_not_allowed)로 투영한다.
+        // #89 /fixture/long-answer: 도구 없이 긴 답변 하나("생각 중" 하나가 같은 수의 답변 하나로 바뀌는 완료 스크롤 검증용).
+        const longAnswer = b.text.includes("/fixture/long-answer");
         const input = { type: "material", limit: 5, query: b.text };
-        if (scope.allowedTools.includes("research_list")) {
+        if (longAnswer) {
+          // 도구 호출 없음
+        } else if (scope.allowedTools.includes("research_list")) {
           const output = { items: [], note: "fixture" };
           s.items.push({ id: uuid(), type: "tool_call", name: "research_list", input, output, status: "completed", raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
         } else {
@@ -745,7 +749,11 @@ function handleMutation(owner, method, path, b, user) {
           const output = [{ type: "inputText", text: JSON.stringify(anyProposalView(p, false)) }];
           s.items.push({ id: uuid(), type: "tool_call", name: "research_document_save", input, output, status: "completed", raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
         }
-        const answer = b.text.includes("/fixture/wide-answer") ? WIDE_ANSWER : `모의 응답: **${b.text}**`;
+        const answer = b.text.includes("/fixture/wide-answer")
+          ? WIDE_ANSWER
+          : longAnswer
+            ? [`모의 응답: **${b.text}**`, ...Array.from({ length: 80 }, (_, i) => `긴 답변 문단 ${i + 1}.`)].join("\n\n")
+            : `모의 응답: **${b.text}**`;
         s.items.push({ id: uuid(), type: "message", role: "assistant", text: answer, raw: { kind: "agent_message", fixture: true } });
         s.state = "idle";
         s.version++;

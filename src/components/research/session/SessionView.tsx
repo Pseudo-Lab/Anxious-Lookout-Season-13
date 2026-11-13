@@ -738,7 +738,9 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
 
   // 자동 스크롤: 바닥에 있을 때만 따라간다. 위로 올려 읽는 중이면 "최신으로" 버튼을 보인다.
   const contentRef = useRef<HTMLDivElement>(null);
-  const { atBottom, stick } = useStickToBottom(contentRef, { enabled: loaded, live: awaiting, count: entries.length + (awaiting ? 1 : 0) });
+  // 완료 때 "생각 중" 하나가 답변 하나로 바뀌면 항목 수는 같으므로, 마지막 항목과 대기 여부도 함께 본다(#89 review).
+  const scrollSignal = `${entries.length}|${entries.at(-1)?.key ?? ""}|${awaiting ? 1 : 0}`;
+  const { atBottom, stick } = useStickToBottom(contentRef, { enabled: loaded, live: awaiting, signal: scrollSignal });
 
   // 접수(202)된 전송은 대화 조회가 그 버전 이상을 보여 줄 때까지 보내는 중으로 둔다. 조회가 일시 실패(네트워크·5xx)하면
   // 이전 idle 기록이 남아 polling도 시작되지 않으므로, 조회만 늘려 가는 간격으로 다시 한다(POST는 다시 보내지 않는다).
