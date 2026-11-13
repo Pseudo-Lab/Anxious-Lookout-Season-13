@@ -5,7 +5,7 @@ Issue [#62](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/62). 
 - **D1 (a):** runner internet egress is `world` 443 only. The domain restriction waits for #70.
 - **D2:** no shell-specific network rule.
 - **`hosting-web-ingress`:** included.
-- **Requirement 6 (VAP):** waiting for a user decision and **not part of this procedure**.
+- **Requirement 6:** 6a only (user decision, 2026-11-14), as step E below. 6b, the Pod envelope VAP, moved to #86.
 
 The development VM goes first; review runs it. Production follows the same order only with separate user approval, after the production read-only inventory is recorded on #62.
 
@@ -150,6 +150,42 @@ Rollback:
 3. Apply `hosting-config` and `hosting-api-ingress`.
 4. Restart the API.
 
+## Step E: runner subresource VAP (requirement 6a)
+
+`50-runner-subresources-vap.json` holds ValidatingAdmissionPolicy `runner-subresources` and its binding (`Deny`). It covers Pods in codex-runner only, matched by `kubernetes.io/metadata.name`:
+- **Refused:** `pods/exec`, `pods/attach`, `pods/portforward` (CONNECT) and `pods/ephemeralcontainers` (UPDATE), unless the requester is in `system:masters`.
+- **Effect today:** none for any service account. On 2026-11-14, `kubectl auth can-i … --subresource` showed that no non-admin service account has these rights. The policy guards against later RBAC drift.
+- **Operators keep their access:** `system:masters` (`k3s kubectl` on the node) still passes, so review and operator scripts that `kubectl exec` into runner Pods keep working.
+- **Untouched:** plain Pod create, delete and get (runner-controller, API, broker) are not matched.
+
+Apply:
+1. `kubectl apply --dry-run=server -f 50-runner-subresources-vap.json`. It must succeed with no error.
+2. Apply the policy item, then the binding item.
+
+The API server needs no restart.
+
+**VM proof.** Each check needs the exact output and rc.
+
+Test identity:
+- A temporary ServiceAccount `vap-probe` in a scratch namespace.
+- A Role in codex-runner granting it `get` on `pods` and `create` on `pods/exec`, `pods/attach`, `pods/portforward`, plus `patch` on `pods/ephemeralcontainers`.
+- Use it with `--as=system:serviceaccount:<scratch>:vap-probe` from the admin kubeconfig. Impersonation does not add `system:masters`.
+- Target: one runner Pod. The exec runs `true` only and reads no user data.
+
+| # | When | Request | Expected |
+| --- | --- | --- | --- |
+| E0 | before the binding | `vap-probe`: `kubectl exec <runner> -c runner -- true` | rc 0. Proves RBAC allows it, so a later refusal is the policy's |
+| E1 | after | `vap-probe`: same exec | refused, message starts `runner-subresources:`. **Proves CONNECT matching on k3s v1.36** |
+| E2 | after | `vap-probe`: `kubectl attach <runner> -c runner` (short timeout) and `kubectl port-forward pod/<runner> :8080` | refused, same message |
+| E3 | after | `vap-probe`: `kubectl debug <runner> --image=<runner image> --target=runner -- true` (ephemeral container) | refused, same message. No ephemeral container added (check `spec.ephemeralContainers` stays absent) |
+| E4 | after | admin (`system:masters`): `kubectl exec <runner> -c runner -- true` | rc 0 |
+| E5 | after | plain operations: the runner-controller creates and deletes a runner Pod (stop and re-entry); the API reads Pods | unchanged; no `runner-subresources` refusal in either log |
+| E6 | after | a Pod in another namespace: admin and `vap-probe` (with a Role there) exec | not matched by the policy |
+
+Afterwards, delete the temporary Role, RoleBinding, ServiceAccount and the scratch namespace. Delete the namespace only while the metrics APIService is Available (PARITY metrics row).
+
+Rollback: delete the binding `runner-subresources`, then the policy. With the binding gone, the policy has no effect.
+
 ## Production
 
 Production does the same steps and checks, after two things:
@@ -168,7 +204,8 @@ So on production:
   - the three m2-hosting CNPs;
   - the api Deployment image (it must also add `containerPort` 8081 `internal`);
   - the runner-controller image;
-  - the runner CNP.
+  - the runner CNP;
+  - the step E VAP and binding (round 1 look: production has no VAP).
   The step boundaries are the same. Each object comes from the render output, compared with the live object before apply.
 - **Step A's IngressRoute change does not apply.** The live HTTPS route already closes `/api/internal`. The check is that the public `/api/internal` forms (including the encoded ones in `route_probe.py`) answer 404 or 400 through `https://` and `http://`.
 - **Switch flag.** `hosting-root-https-v1` is immutable, so when a transition is needed, step A sets `API_INTERNAL_CALLBACK_ON_PUBLIC=true` as an `env` entry on the api Deployment (`env` overrides `envFrom`), and step D removes it.
