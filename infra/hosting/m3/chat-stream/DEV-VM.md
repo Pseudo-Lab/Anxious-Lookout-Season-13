@@ -99,7 +99,15 @@ Not covered here, because it needs event volume and therefore a turn: slow reade
 
 ## P5 — measurements with real Codex turns (only after the user's turn budget)
 
-**Prerequisite P5-0 (code + policy, separate review)**: the runner Pod env must be able to carry `RUNNER_STREAM_TEXT=true` and `STREAM_TRACE=true`. `runner_kube.py` builds a fixed env, and the runner policy checks it. Until that change is reviewed and applied, text events cannot be turned on in the cluster. back will prepare it as its own commit when PM schedules P5.
+**Prerequisite P5-0 (code, separate review)**: the runner Pod env must be able to carry `RUNNER_STREAM_TEXT=true` and `STREAM_TRACE=true`.
+- **What checks the Pod env**: `runner_kube.py` renders a fixed env, and its Pod verification (`KubePods._pod`) requires the live Pod spec to equal the render exactly. The runner admission draft (`user-runner-policy-draft`) is gated and not applied. An earlier version of this file said "the runner policy checks it"; the check is the code.
+- **The change** (its own commit):
+  - `CODEX_RUNNER_STREAM_TEXT` / `CODEX_RUNNER_STREAM_TRACE` (`true`/`false`, default `false`; anything else refuses) in the process env of runner-controller and API add exactly those keys with `"true"`.
+  - By default the render is byte-identical to before.
+  - `_pod` also accepts a Pod rendered under the other flag state (only the exact `"true"` keys may differ), so a flag change never strands a running Pod. Every other env difference is still refused.
+- **Turning text on (P5, after review)**: set `CODEX_RUNNER_STREAM_TEXT=true` (and `CODEX_RUNNER_STREAM_TRACE=true` for S4) on **both** the runner-controller Deployment and the api Deployment, and wait for both rollouts.
+  - A runner Pod created after that has the keys; one created before keeps working without them until its next entry.
+  - Off again: set them back to `false` (or remove them) the same way. `RESEARCH_STREAM_ENABLE=false` on the API alone already closes every browser stream.
 
 | # | Purpose | Turns | Notes |
 |---|---|---|---|
