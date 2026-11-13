@@ -903,12 +903,28 @@ await step("N24", async () => {
   await chat.getByText("모의 응답: 펼침 위치 질문").waitFor({ timeout: 15000 });
   await page.waitForTimeout(1500);
   const tool = chat.getByRole("button", { name: /research_list/ }).last();
-  const top0 = await scroller.evaluate((el) => el.scrollTop);
+  // 머리글 위쪽이 화면 위로 잘린 경우(브라우저 scroll anchoring이 아래 답변을 기준점으로 잡는 반례)도 덮도록 조금 올려 둔다.
+  await tool.evaluate((el) => {
+    const s = el.closest("[data-chat-scroll]");
+    s.scrollTop += el.getBoundingClientRect().top - s.getBoundingClientRect().top + 12;
+  });
+  await page.waitForTimeout(300);
+  const before = await tool.evaluate((el) => ({ scroll: el.closest("[data-chat-scroll]").scrollTop, head: Math.round(el.getBoundingClientRect().top) }));
   await tool.evaluate((el) => el.click()); // 스크롤 없이 누른다
   await chat.getByRole("button", { name: "저장된 원본 기록 보기" }).last().waitFor();
   await page.waitForTimeout(500);
+  const after = await tool.evaluate((el) => ({ scroll: el.closest("[data-chat-scroll]").scrollTop, head: Math.round(el.getBoundingClientRect().top) }));
+  check("N24. manual expand keeps scrollTop", after.scroll === before.scroll, `${before.scroll} -> ${after.scroll}`);
+  check("N24. manual expand keeps the clicked header in place", after.head === before.head, `${before.head} -> ${after.head}`);
+  // 바닥에 붙어 있던 경우(위쪽이 잘리지 않음)도 같은 위치를 유지한다.
+  await chat.getByRole("button", { name: "최신으로" }).click();
+  await tool.evaluate((el) => el.click()); // 접기
+  await page.waitForTimeout(1200);
+  const top0 = await scroller.evaluate((el) => el.scrollTop);
+  await tool.evaluate((el) => el.click());
+  await page.waitForTimeout(500);
   const top1 = await scroller.evaluate((el) => el.scrollTop);
-  check("N24. manual expand keeps reading position", top1 === top0, `${top0} -> ${top1}`);
+  check("N24. manual expand at bottom keeps reading position", top1 === top0, `${top0} -> ${top1}`);
   await page.setViewportSize({ width: 1280, height: 800 });
   await setMock("turnMs=2500");
 });

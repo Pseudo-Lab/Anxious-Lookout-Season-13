@@ -9,6 +9,7 @@ import { useCallback, useLayoutEffect, useRef, useState, type RefObject } from "
 // - 붙어 있을 때만 따라간다: 목록이 바뀔 때(signal: 항목 수·마지막 항목·응답 대기 여부 — "생각 중"이 같은 수의 답변으로
 //   바뀌는 완료도 포함)와 그 직후 SETTLE_MS 동안, 응답을 기다리는 동안(live) 내용이 커질 때, 스크롤 영역이 줄어들 때
 //   (모바일 가상 키보드), 대화를 연 직후. 그 밖에 사용자가 도구 상세를 펼쳐 커진 것은 따라가지 않는다(읽던 위치 유지).
+// - 브라우저 scroll anchoring은 스크롤 영역에서 끈다(ChatDock [overflow-anchor:none]). 위치 조정은 이 hook만 한다.
 // - 이동은 즉시(scrollTop) 한다. 부드러운 스크롤은 중간 scroll 이벤트가 "위로 스크롤"로 읽혀 붙음이 풀린다.
 
 const THRESHOLD = 48;
