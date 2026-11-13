@@ -5,6 +5,7 @@
 //   열린 대화창·보이는 탭에서 다시 조회(#16 api-contracts/issue16-multi-user-runners-draft.md)
 // - 전송 버튼만 잠금, 초안 입력 가능·유지, 자동 전송 없음, 접수 전 거절 코드는 미확인 보관 없음
 // - 이전 API(404/405)·403·500·codexRunner false·자격 전환·계정 전환의 늦은 응답·연구 권한 상실
+// - #89 대화 반응성(N21): 즉시 말풍선·생각 중·말풍선 연속성·자동 스크롤·이용 가능 상태 재조회
 import { chromium } from "playwright";
 
 const ORIGIN = process.env.ORIGIN ?? "http://127.0.0.1:8080";
@@ -122,7 +123,7 @@ const pendingSends = () =>
   page.evaluate(() => Object.keys(sessionStorage).filter((k) => k.includes(":session-send:")).length);
 
 await setMock(
-  "me=normal&health=normal&logout=normal&nextLogin=approved&reuse=0&as=&access=approved&publish=allowed&codex=fixture&csrf=normal&window=&remaining=&turnMs=2500" +
+  "me=normal&health=normal&logout=normal&nextLogin=approved&reuse=0&as=&access=approved&publish=allowed&codex=fixture&csrf=normal&window=&remaining=&turnMs=2500&pendingInput=0" +
     "&codexRunner=true&runner=not_prepared&prepare=ok&readyMs=3000&hint=&runnerAll="
 );
 
@@ -692,6 +693,87 @@ await step("N18", async () => {
   await chat.getByLabel("메시지").fill("");
 });
 
+// N21. #89 대화 반응성(모의 API): 응답 지연 중 즉시 말풍선·생각 중, 정상 실행 중 경고 없음, 입력 잠금 깜빡임 없음,
+// 접수 항목 → 기록 항목(다른 id)으로 바뀌어도 같은 말풍선(remount 없음), 자동 스크롤·"최신으로", 이용 가능 상태 재조회.
+await step("N21", async () => {
+  await setMock("runnerAll=ready&codex=fixture&turnMs=2500&hint=&pendingInput=1");
+  await chat.getByRole("button", { name: "← 대화 목록" }).click().catch(() => {});
+  await chat.getByRole("link", { name: /준비 대화/ }).click();
+  const input = chat.getByLabel("메시지");
+  const scroller = chat.locator("[data-chat-scroll]");
+  const gap = () => scroller.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
+  // 보내기 요청 응답을 1.5초 늦춘다(네트워크 대기 없이 말풍선이 보이는지).
+  await page.route("**/api/research/sessions/*/messages", async (route) => {
+    await sleep(1500);
+    return route.continue();
+  });
+  const text = "반응성 질문 하나";
+  await input.fill(text);
+  await chat.locator("button:not([disabled])", { hasText: /^보내기$/ }).waitFor({ timeout: 8000 });
+  // 입력창 잠금 변화 기록(보내기 → 완료 사이 한 번 잠기고 한 번 풀려야 한다)
+  await input.evaluate((ta) => {
+    window.__taLog = [];
+    new MutationObserver(() => window.__taLog.push(ta.disabled)).observe(ta, { attributes: true, attributeFilter: ["disabled"] });
+  });
+  const reads0 = await statusReads();
+  const t0 = Date.now();
+  await sendBtn().click();
+  const bubble = chat.locator("li[data-role=user]", { hasText: text });
+  const early = (await appears(bubble, 1200)) && (await appears(chat.locator("[data-chat-thinking]"), 200));
+  check("N21. own bubble + thinking before POST response", early && Date.now() - t0 < 1500, `${Date.now() - t0}ms`);
+  check("N21. input moved to bubble immediately", (await input.inputValue()) === "");
+  await bubble.first().evaluate((el) => {
+    window.__bubble = el;
+  });
+  // 서버 실행 중(접수 항목)
+  await chat.locator("li[data-role=user][data-sending]").waitFor({ state: "detached", timeout: 8000 });
+  check("N21. running: bubble is not a warning", (await bubble.first().getAttribute("class"))?.includes("border-dashed") === false);
+  check("N21. running: no unknown-result notice", (await chat.getByText(/전달 확인 중|이전 전송의 결과를 확인하지 못했습니다/).count()) === 0);
+  check("N21. running: same bubble element as before POST", await page.evaluate(() => window.__bubble.isConnected));
+  // 보내자마자 위로 올려 읽는 중이면 완료 내용을 따라가지 않는다.
+  await page.setViewportSize({ width: 1280, height: 420 });
+  await page.waitForTimeout(200);
+  await scroller.evaluate((el) => (el.scrollTop = 0));
+  await chat.getByText(`모의 응답: ${text}`).waitFor({ timeout: 15000 });
+  check("N21. completed: same bubble element (pending -> recorded id, no remount)", await page.evaluate(() => window.__bubble.isConnected));
+  check("N21. completed: one user bubble", (await bubble.count()) === 1);
+  const log = await page.evaluate(() => window.__taLog);
+  check("N21. input locked once, unlocked once (no flicker)", JSON.stringify(log) === "[true,false]", JSON.stringify(log));
+  check("N21. status re-read after send", (await statusReads()) > reads0);
+  await page.unroute("**/api/research/sessions/*/messages");
+  check("N21. scrolled up: not followed", (await scroller.evaluate((el) => el.scrollTop)) < 10);
+  const jump = chat.getByRole("button", { name: "최신으로" });
+  check("N21. scrolled up: jump button shown", await appears(jump, 2000));
+  await jump.click();
+  check("N21. jump goes to bottom", (await gap()) <= 48, String(await gap()));
+  check("N21. jump button hidden at bottom", (await jump.count()) === 0);
+  // 바닥에 있으면 새 내용을 따라간다.
+  await input.fill("반응성 질문 둘");
+  await sendBtn().click();
+  await chat.getByText("모의 응답: 반응성 질문 둘").waitFor({ timeout: 15000 });
+  await page.waitForTimeout(300);
+  check("N21. at bottom: follows new content", (await gap()) <= 48, String(await gap()));
+  // 대화를 다시 열면 마지막 메시지가 보인다.
+  await chat.getByRole("button", { name: "← 대화 목록" }).click();
+  await chat.getByRole("link", { name: /준비 대화/ }).click();
+  await chat.getByText("모의 응답: 반응성 질문 둘").waitFor();
+  await page.waitForTimeout(300);
+  check("N21. reopened conversation shows the last message", (await gap()) <= 48, String(await gap()));
+  await shot("responsiveness-420");
+  await page.setViewportSize({ width: 1280, height: 800 });
+  // 이용 가능 상태에서도: 네트워크 복귀 때 조회, 대화창이 열린 동안 느린 주기(45초 ±15%)로 조회해 idle 정지를 알아챈다.
+  await setMock("runnerAll=idle_stopped");
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  check("N21. online event re-reads status", await appears(chat.getByText("환경이 쉬는 중"), 3000));
+  await setMock("runnerAll=ready");
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await chat.getByText("환경이 쉬는 중").first().waitFor({ state: "hidden", timeout: 3000 });
+  await setMock("runnerAll=idle_stopped");
+  const t1 = Date.now();
+  check("N21. idle stop noticed by slow recheck while panel open", await appears(chat.getByText("환경이 쉬는 중"), 60000), `${Math.round((Date.now() - t1) / 1000)}s`);
+  await setMock("runnerAll=ready&pendingInput=0");
+});
+
 // N13. 연구 권한 상실(같은 계정 commenter로 변경): 준비 POST·상태 조회 없음, 기존 권한 안내
 await step("N13", async () => {
   const acc = (await me()).accountId;
@@ -720,7 +802,7 @@ await step("N14", async () => {
 });
 
 check("N15. no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
-await setMock("codexRunner=&runner=&prepare=ok&runnerAll=&hint=&credHint=1&readyMs=2500&turnMs=2500&codex=fixture&csrf=normal&window=&remaining=");
+await setMock("codexRunner=&runner=&prepare=ok&runnerAll=&hint=&credHint=1&readyMs=2500&turnMs=2500&codex=fixture&csrf=normal&window=&remaining=&pendingInput=0");
 await browser.close();
 const failed = results.filter((r) => !r.ok);
 console.log(`\nRESULT ${results.length - failed.length}/${results.length} passed`);

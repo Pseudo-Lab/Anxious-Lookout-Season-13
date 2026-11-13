@@ -47,6 +47,9 @@ export const researchMode = {
   remaining: null,
   // 모의 turn 실행 시간(ms). 긴 실행 안내 검증용.
   turnMs: 2500,
+  // #89 "1"이면 실제 backend(display_items)처럼 실행 중에는 접수 항목(`pending-<requestId>`, platform/pending)을 보이고,
+  // 완료 때 다른 id의 기록 항목으로 바꾼다(말풍선 연속성 검증용). 기본은 처음부터 기록 항목.
+  pendingInput: "0",
 };
 
 // 시험 창 상태(fixture 연결에만 적용): 종료 시각이 지나면 auth_expired, 횟수가 0이면 budget_exhausted
@@ -680,12 +683,19 @@ function handleMutation(owner, method, path, b, user) {
       if (closed) return fail(503, `codex_${closed}`, "Codex is not available");
       if (researchMode.remaining !== null) researchMode.remaining--;
       s.error = null;
-      s.items.push({ id: uuid(), type: "message", role: "user", text: b.text, raw: { kind: "user_message", text: b.text }, ...scope });
+      const userItem = { id: uuid(), type: "message", role: "user", text: b.text, raw: { kind: "user_message", text: b.text }, ...scope };
+      const shownItem =
+        researchMode.pendingInput === "1"
+          ? { id: `pending-${uuid()}`, type: "message", role: "user", text: b.text, source: "platform", status: "pending", raw: { type: "platformInput", source: "platform", text: b.text, status: "pending" }, ...scope }
+          : userItem;
+      s.items.push(shownItem);
       s.scope = scope;
       s.state = "running";
       s.version++;
       s.updatedAt = now();
       setTimeout(() => {
+        // 접수 항목 → 기록 항목(같은 자리, 다른 id)
+        if (shownItem !== userItem) s.items[s.items.indexOf(shownItem)] = userItem;
         // 모의 모델은 항상 research_list를 호출한다. 이 요청 범위에 없으면 서버 callback 거부(tool_not_allowed)로 투영한다.
         const input = { type: "material", limit: 5, query: b.text };
         if (scope.allowedTools.includes("research_list")) {

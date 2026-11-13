@@ -16,7 +16,7 @@ import {
 import { storeGeneration } from "@/lib/research/pendingStore";
 import { clearDraft, loadDraft, saveDraft } from "@/lib/research/chatState";
 import { useAuth } from "@/hooks/useAuth";
-import type { AcceptedScope, PageDescriptor, SessionDetail, SessionItem, ToolCallItem } from "@/lib/research/types";
+import type { PageDescriptor, SessionDetail, SessionItem, ToolCallItem } from "@/lib/research/types";
 import { describePage, kindText, pageUnresolved, sameDescriptor, scopeLabel, useRegisteredPage } from "@/lib/research/pageContext";
 import { own } from "@/lib/research/own";
 import { BASE_PATH } from "@/lib/constants";
@@ -37,6 +37,17 @@ import {
   shellView,
 } from "@/lib/research/shell";
 import { formatDateTime, toDisplayText } from "@/lib/research/format";
+import {
+  EMPTY_CONTINUITY,
+  awaitingReply,
+  chatStatus,
+  reconcile,
+  type ChatStatus,
+  type Continuity,
+  type LocalSend,
+  type TranscriptEntry,
+} from "@/lib/research/transcript";
+import { useStickToBottom } from "@/components/chat/useStickToBottom";
 import {
   CodexStatusView,
   RunnerActionButton,
@@ -252,7 +263,8 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
   );
 }
 
-const PLATFORM_STATUS_LABELS = { pending: "전달 확인 중", not_recorded: "미기록 입력" } as const;
+// 실패로 남은 입력(Codex 기록에 없음)만 경고로 보인다. 정상 실행 중인 접수 항목(status pending)은 일반 말풍선이다(#89).
+const NOT_RECORDED_LABEL = "미기록 입력";
 
 // 고정 모델 확인 실패로 중단된 실행의 항목 표시(다른 모델명·정책 사유는 표시하지 않는다).
 function ModelMismatchNote() {
@@ -264,38 +276,51 @@ function ModelMismatchNote() {
   );
 }
 
-// 서버가 접수한 질문의 화면 문맥(공개 글이면 읽기 범위). 보낸 뒤 페이지를 옮겨도 바뀌지 않는다.
-function ScopeBadge({ scope }: { scope: AcceptedScope }) {
+// 질문의 화면 문맥 표시(공개 글이면 읽기 범위). 서버가 접수한 값이며, 보내는 중에는 보낸 페이지 종류만 먼저 보인다.
+function ScopeBadge({ page }: { page: { kind: string; title?: string } }) {
   return (
     <span
       className="max-w-full break-words rounded bg-white/80 px-1.5 py-0.5 font-normal text-stone-500 ring-1 ring-stone-200"
-      title={kindText(scope.page.kind).can}
+      title={kindText(page.kind).can}
     >
-      {scopeLabel(scope.page.kind, "sent")}
-      {scope.page.title ? ` · ${scope.page.title}` : ""}
+      {scopeLabel(page.kind, "sent")}
+      {page.title ? ` · ${page.title}` : ""}
     </span>
   );
 }
 
-function Message({ sessionId, item }: { sessionId: string; item: Extract<SessionItem, { type: "message" }> }) {
+/**
+ * 메시지 하나. sending이면 화면이 먼저 그린 내 말풍선(서버 응답 전)이다. 같은 key의 서버 항목으로 바뀌어도
+ * 같은 컴포넌트라 다시 그려지지 않고 이어진다(#89).
+ */
+function Message({
+  sessionId,
+  item,
+  sending,
+}: {
+  sessionId: string;
+  item: Extract<SessionItem, { type: "message" }>;
+  sending?: { page?: PageDescriptor };
+}) {
   const [raw, setRaw] = useState(false);
   const mine = item.role === "user";
   // 플랫폼이 보존한 입력: Codex 원본 이력에 기록되지 않았으므로 모델이 본 대화나 성공으로 표시하지 않는다.
   const platform = item.source === "platform";
+  const unrecorded = platform && item.status === "not_recorded";
+  const scope = item.scope?.page ?? (sending?.page ? { kind: sending.page.kind } : undefined);
   return (
     // 내 질문은 오른쪽의 옅은 말풍선, Codex 답변은 테두리 없이 본문처럼 보여 답변을 중심에 둔다.
     <li
       data-role={item.role}
+      data-sending={sending ? "" : undefined}
       className={`min-w-0 ${mine ? "ml-auto w-fit max-w-[90%] rounded-2xl bg-stone-100 px-3 py-2" : "py-1"} ${
-        platform ? "border border-dashed border-amber-400" : ""
+        unrecorded ? "border border-dashed border-amber-400" : ""
       }`}
     >
       <p className="mb-1 flex flex-wrap items-center gap-1.5 text-[13px] font-medium text-stone-500">
         {mine ? "나" : "Codex"}
-        {mine && item.scope && <ScopeBadge scope={item.scope} />}
-        {platform && item.status && (
-          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-800">{PLATFORM_STATUS_LABELS[item.status]}</span>
-        )}
+        {mine && scope && <ScopeBadge page={scope} />}
+        {unrecorded && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-800">{NOT_RECORDED_LABEL}</span>}
       </p>
       {mine ? (
         <p className="whitespace-pre-wrap text-sm text-stone-900 [overflow-wrap:anywhere]">{item.text}</p>
@@ -303,24 +328,61 @@ function Message({ sessionId, item }: { sessionId: string; item: Extract<Session
         <SafeMarkdown content={item.text} compact />
       )}
       {item.modelMismatch && <ModelMismatchNote />}
-      {platform && (
+      {unrecorded && (
         <p className="mt-1 text-xs text-amber-800">
-          {item.status === "pending"
-            ? "Codex 대화 기록에 반영되었는지 아직 확인되지 않았습니다."
-            : "Codex 대화 기록에 반영되지 않은 입력입니다. 내 대화에는 보존되며, 필요하면 새 메시지로 다시 보내세요."}
+          Codex 대화 기록에 반영되지 않은 입력입니다. 내 대화에는 보존되며, 필요하면 새 메시지로 다시 보내세요.
         </p>
       )}
       <div className="mt-1">
-        {raw ? (
+        {sending ? (
+          // 서버 항목으로 바뀔 때 높이가 달라지지 않게 같은 자리를 비워 둔다.
+          <span aria-hidden="true" className="invisible text-[13px]">
+            원본 기록
+          </span>
+        ) : raw ? (
           <RawItem sessionId={sessionId} itemId={item.id} label={platform ? "보존된 입력 기록 (Codex 원본 아님)" : undefined} />
         ) : (
           <button onClick={() => setRaw(true)} className="text-[13px] text-stone-500 hover:text-stone-700">
-            {platform ? "보존된 입력 기록" : "원본 기록"}
+            {unrecorded ? "보존된 입력 기록" : "원본 기록"}
           </button>
         )}
       </div>
     </li>
   );
+}
+
+// 응답을 기다리는 동안의 "생각 중" 표시. 문구는 e2e가 찾는 기존 안내를 그대로 쓴다.
+function Thinking({ slow, accepted }: { slow: boolean; accepted: boolean }) {
+  return (
+    <li data-chat-thinking="" className="min-w-0 py-1">
+      <p className="mb-1 text-[13px] font-medium text-stone-500">Codex</p>
+      <div className="flex items-center gap-2 text-sm text-stone-500">
+        <span aria-hidden="true" className="flex shrink-0 gap-1">
+          {[0, 1, 2].map((i) => (
+            <span
+              key={i}
+              className="h-1.5 w-1.5 animate-bounce rounded-full bg-stone-400 motion-reduce:animate-none"
+              style={{ animationDelay: `${i * 150}ms` }}
+            />
+          ))}
+        </span>
+        <span>
+          {slow ? "응답을 기다리거나 실행 결과를 확인 중입니다. 오래 걸려도 자동으로 다시 보내지 않습니다." : "Codex가 응답하는 중입니다."}
+        </span>
+      </div>
+      {accepted && <p className="mt-1 text-xs text-stone-500">페이지를 닫았다가 다시 열어도 이어서 확인할 수 있습니다.</p>}
+    </li>
+  );
+}
+
+// 스크린리더 알림은 상태가 바뀔 때 한 번만, 짧게 한다(대화 목록 자체는 live region이 아니다).
+// 화면에 보이는 안내와 같은 문구를 쓰지 않는다(같은 글자가 두 군데 있으면 화면 낭독이 겹치고 e2e 문구 찾기도 모호해진다).
+function announcement(prev: ChatStatus, next: ChatStatus, prevText: string): string {
+  if (next === "submitted") return "메시지 전송됨, Codex 응답 대기";
+  if (next === "waiting") return prev === "submitted" ? prevText : "Codex 응답 대기 중";
+  if (next === "error") return "Codex 응답 실패";
+  if (next === "ready" && prev === "waiting") return "Codex 답변 도착";
+  return "";
 }
 
 // 다음 질문과 함께 보낼 화면 문맥. 같은 대화의 이전 내용은 그대로 이어진다. #14부터 소유자 화면은 참고일 뿐 권한을 바꾸지 않고,
@@ -348,8 +410,12 @@ function Composer({
   page,
   blocked,
   codex,
+  awaiting,
+  atBottom,
   onRecheck,
+  onSending,
   onSent,
+  onJump,
 }: {
   session: SessionDetail;
   accountId: string;
@@ -359,8 +425,16 @@ function Composer({
   blocked: boolean;
   // 잠금 사유 안내용 상태(실행 환경 상태면 준비 버튼을 함께 보인다).
   codex: FetchResult<CodexStatus> | null;
+  // 응답을 기다리는 중(보내는 중·서버 실행 중). 입력·보내기를 잠근다. 보내기 요청이 끝나도 다음 조회가 끝날 때까지 이어진다.
+  awaiting: boolean;
+  // 대화 바닥이 보이는지(아니면 "최신으로" 버튼).
+  atBottom: boolean;
   onRecheck: () => void;
-  onSent: (ok: boolean) => void;
+  // 보내기 시작. local은 화면이 먼저 그릴 내 말풍선이다(결과 미확인 재전송은 서버에 이미 있을 수 있어 그리지 않는다).
+  onSending: (local: LocalSend | null) => void;
+  // 보내기 요청이 끝남. 대화를 다시 불러온 뒤에 끝난다(그사이 입력창이 열렸다 닫히지 않게).
+  onSent: (ok: boolean) => Promise<void>;
+  onJump: () => void;
 }) {
   const { csrfToken, refresh } = useAuth();
   // Composer는 세션을 불러온 뒤 브라우저에서만 그려지므로 sessionStorage를 바로 읽어도 된다.
@@ -390,13 +464,25 @@ function Composer({
   }, []);
   const [failure, setFailure] = useState<FetchFailure | null>(null);
   const [busy, setBusy] = useState(false);
-  const running = session.state === "running";
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  // 보낸 뒤 응답이 끝나면 입력창으로 포커스를 돌려줄지(정밀 포인터 환경만. 모바일 가상 키보드를 갑자기 띄우지 않는다).
+  const refocus = useRef(false);
+  const wasAwaiting = useRef(awaiting);
+  useEffect(() => {
+    const before = wasAwaiting.current;
+    wasAwaiting.current = awaiting;
+    if (!before || awaiting || !refocus.current) return;
+    refocus.current = false;
+    // 보내기 버튼·입력창이 잠기며 포커스를 잃은 경우에만 돌려준다(그사이 사용자가 옮긴 포커스는 그대로 둔다).
+    const active = document.activeElement;
+    if (!active || active === document.body) inputRef.current?.focus({ preventScroll: true });
+  }, [awaiting]);
 
   const unresolved = pageUnresolved(page);
   async function submit(e: FormEvent) {
     e.preventDefault();
     const body = text.trim();
-    if (!body || busy || blocked) return;
+    if (!body || busy || awaiting || blocked) return;
     // 공개 글의 범위(postId)를 확정하기 전에는 새 질문을 보내지 않는다. 결과 미확인 재전송은 처음 보낸 범위 그대로라 허용한다.
     if (unresolved && !(pending !== null && pending.text === body)) return;
     if (!csrfToken) {
@@ -412,12 +498,17 @@ function Composer({
     savePendingSend(accountId, session.id, request, guard);
     setPending(request);
     setBusy(true);
+    refocus.current = window.matchMedia("(pointer: fine)").matches;
+    // 보낸 내용은 입력창에서 바로 말풍선으로 옮긴다(#89). 저장된 초안은 결과를 알 때까지 그대로 두고, 실패하면 입력을 되돌린다.
+    const typed = text;
+    setTextState("");
+    latestText.current = "";
+    onSending(isRetry ? null : { key: `local-${request.key}`, text: request.text, page: request.page, baseline: session.items.map((i) => i.id) });
     const res = await sendSessionMessage(
       session.id,
       { text: request.text, expectedVersion: request.expectedVersion, ...(request.page && { page: request.page }) },
       { csrfToken, idempotencyKey: request.key }
     );
-    setBusy(false);
     // 재전송이면 같은 key에 대한 서버 판단(성공 replay·409)만 이전 전송의 결과를 확정한다.
     // 401/CSRF/Origin/정책 거절은 이전 전송이 처리되지 않았다는 증거가 아니므로 보관을 유지한다.
     const settled = isRetry ? settlesRetry(res.ok ? null : res.failure) : res.ok || !isUncertain(res.failure);
@@ -426,24 +517,23 @@ function Composer({
       setPending(null);
     }
     if (res.ok) {
-      // 보낸 내용 그대로인 입력만 비운다. 응답을 기다리는 동안 새로 쓴 입력, 화면을 떠난 뒤 다른 입력창이
-      // 저장한 초안, 로그아웃 이후(보관소 세대 변경)의 보관소는 건드리지 않는다.
-      if (mounted.current) {
-        if (latestText.current.trim() === request.text) {
-          setTextState("");
-          latestText.current = "";
-          clearDraft(accountId, session.id);
-        }
-      } else if (storeGeneration() === guard.generation && loadDraft(accountId, session.id)?.trim() === request.text) {
+      // 보낸 내용 그대로인 초안만 지운다. 화면을 떠난 뒤 다른 입력창이 저장한 초안, 로그아웃 이후(보관소 세대 변경)의
+      // 보관소는 건드리지 않는다.
+      if (storeGeneration() === guard.generation && loadDraft(accountId, session.id)?.trim() === request.text) {
         clearDraft(accountId, session.id);
       }
       setFailure(null);
     } else {
-      // 실패해도 입력은 남겨 둔다. 이전 기록은 서버에 보존된다.
+      // 실패하면 입력을 되돌린다(그사이 새로 쓴 입력이 있으면 그대로 둔다). 이전 기록은 서버에 보존된다.
+      if (mounted.current && latestText.current === "") {
+        setTextState(typed);
+        latestText.current = typed;
+      }
       setFailure(res.failure);
       if (res.failure.kind === "http" && (res.failure.status === 401 || res.failure.code === "csrf_invalid")) void refresh();
     }
-    onSent(res.ok);
+    await onSent(res.ok);
+    setBusy(false);
   }
 
   const retrying = pending !== null && pending.text === text.trim();
@@ -474,7 +564,8 @@ function Composer({
               </button>
             </Notice>
           ))}
-        {pending && (
+        {/* 결과를 정말 확인하지 못한 경우에만 경고한다. 보내는 동안(결과를 기다리는 중)은 정상 흐름이다(#89). */}
+        {pending && !busy && (
           <Notice tone="warn">
             이전 전송의 결과를 확인하지 못했습니다. 위 대화 기록에 메시지가 이미 있는지 확인하세요.{" "}
             {retrying ? (
@@ -494,12 +585,26 @@ function Composer({
         )}
       </div>
       <form onSubmit={submit} className="sticky bottom-0 z-10 -mx-4 space-y-2 border-t border-stone-100 bg-white px-4 pb-3 pt-2">
+        {!atBottom && (
+          // 위로 스크롤해 읽는 중이면 따라가지 않고 이 버튼으로 최신 내용으로 돌아간다.
+          <button
+            type="button"
+            onClick={onJump}
+            className="absolute bottom-full left-1/2 mb-2 flex min-h-9 -translate-x-1/2 items-center gap-1 rounded-full bg-white px-3 text-xs font-medium text-stone-700 shadow-md ring-1 ring-stone-200 hover:bg-stone-50"
+          >
+            <svg aria-hidden="true" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14m-6-6 6 6 6-6" />
+            </svg>
+            최신으로
+          </button>
+        )}
         <textarea
+          ref={inputRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
           rows={3}
-          disabled={running}
-          placeholder={running ? "Codex가 응답하는 중입니다..." : "이어서 질문하기"}
+          disabled={awaiting}
+          placeholder={awaiting ? "Codex가 응답하는 중입니다..." : "이어서 질문하기"}
           aria-label="메시지"
           className="block max-h-[40vh] w-full resize-y rounded-lg border border-stone-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100 disabled:bg-stone-50"
         />
@@ -507,7 +612,7 @@ function Composer({
           <NextScope page={page} />
           <button
             type="submit"
-            disabled={busy || running || blocked || text.trim() === "" || (unresolved && !retrying)}
+            disabled={busy || awaiting || blocked || text.trim() === "" || (unresolved && !retrying)}
             className="min-h-11 shrink-0 rounded-lg bg-indigo-600 px-4 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 md:min-h-9"
           >
             {busy ? "보내는 중..." : retrying ? "다시 보내기" : "보내기"}
@@ -588,6 +693,32 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
   }, [running, id]);
   const slow = running && slowFor === id;
 
+  // #89 화면 상태: 보내는 중(submitted) → 서버 실행 중(waiting, "생각 중") → 완료(ready) / 오류(error). 한 번에 하나다.
+  // 보내기 요청이 끝나도 다음 조회가 끝날 때까지 submitted로 둔다(입력창이 잠깐 열렸다 닫히지 않게).
+  const [send, setSend] = useState<{ local: LocalSend | null } | null>(null);
+  const status = chatStatus(send !== null, result?.ok === true ? result.data.state : "idle");
+  const awaiting = awaitingReply(status);
+
+  // 서버 기록이 바뀌어도(보낸 말풍선 → 접수 항목 → 기록 항목) 같은 말풍선으로 잇는다. 화면에 있는 동안의 key 별칭을 둔다.
+  const items = result?.ok === true ? result.data.items : null;
+  const local = send?.local ?? null;
+  const [view, setView] = useState<{ items: SessionItem[] | null; local: LocalSend | null; continuity: Continuity; entries: TranscriptEntry[] }>(
+    { items: null, local: null, continuity: EMPTY_CONTINUITY, entries: [] }
+  );
+  let entries = view.entries;
+  if (items && (view.items !== items || view.local !== local)) {
+    const next = reconcile(view.continuity, items, local);
+    entries = next.entries;
+    setView({ items, local, continuity: next.next, entries });
+  }
+
+  // 자동 스크롤: 바닥에 있을 때만 따라간다. 위로 올려 읽는 중이면 "최신으로" 버튼을 보인다.
+  const contentRef = useRef<HTMLDivElement>(null);
+  const { atBottom, stick } = useStickToBottom(contentRef, { enabled: loaded, live: awaiting, count: entries.length + (awaiting ? 1 : 0) });
+
+  const [announced, setAnnounced] = useState<{ status: ChatStatus; text: string }>({ status, text: "" });
+  if (announced.status !== status) setAnnounced({ status, text: announcement(announced.status, status, announced.text) });
+
   if (!result) return <p className="text-sm text-stone-500">불러오는 중...</p>;
   // 개인 세션 조회 실패. 공개 문서 조회와는 별개다.
   if (!result.ok) return <ErrorNotice failure={result.failure} prefix="대화를 불러오지 못했습니다." />;
@@ -601,7 +732,10 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
   }
 
   return (
-    <div className="flex flex-1 flex-col gap-3">
+    <div ref={contentRef} className="flex flex-1 flex-col gap-3">
+      <p className="sr-only" role="status" aria-live="polite">
+        {announced.text}
+      </p>
       <header className="flex items-start gap-2">
         <div className="min-w-0 flex-1 space-y-0.5">
           <h3 className="break-words text-base font-semibold text-stone-900">{s.title || "(제목 없음)"}</h3>
@@ -620,7 +754,7 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
         </div>
         <button
           onClick={() => void archive()}
-          disabled={busy || running}
+          disabled={busy || awaiting}
           className="min-h-11 shrink-0 rounded-md px-2 text-xs text-stone-500 hover:bg-stone-100 hover:text-red-700 disabled:opacity-50 md:min-h-8"
         >
           보관
@@ -633,32 +767,32 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
         <ErrorNotice failure={codex.refreshFailure} prefix="Codex 상태를 다시 확인하지 못했습니다. 마지막으로 받은 상태를 표시합니다." />
       )}
 
-      {s.items.length === 0 ? (
+      {entries.length === 0 && !awaiting ? (
         <p className="text-sm text-stone-500">아직 주고받은 메시지가 없습니다.</p>
       ) : (
         <ol className="space-y-4">
-          {s.items.map((item) =>
-            item.type === "message" ? (
-              <Message key={item.id} sessionId={s.id} item={item} />
+          {entries.map((entry) =>
+            entry.kind === "local" ? (
+              <Message
+                key={entry.key}
+                sessionId={s.id}
+                item={{ id: entry.key, type: "message", role: "user", text: entry.text }}
+                sending={{ page: entry.page }}
+              />
+            ) : entry.item.type === "message" ? (
+              <Message key={entry.key} sessionId={s.id} item={entry.item} />
             ) : (
-              <ToolCall key={item.id} sessionId={s.id} item={item} />
+              <ToolCall key={entry.key} sessionId={s.id} item={entry.item} />
             )
           )}
+          {awaiting && <Thinking key="thinking" slow={slow} accepted={status === "waiting"} />}
         </ol>
       )}
 
       {refreshFailure && (
         <ErrorNotice failure={refreshFailure} prefix="최신 대화 상태를 불러오지 못했습니다. 마지막으로 받은 기록을 표시합니다." />
       )}
-      {running && (
-        <Notice tone="info">
-          {slow
-            ? "응답을 기다리거나 실행 결과를 확인 중입니다. 오래 걸려도 자동으로 다시 보내지 않습니다."
-            : "Codex가 응답하는 중입니다."}{" "}
-          페이지를 닫았다가 다시 열어도 이어서 확인할 수 있습니다.
-        </Notice>
-      )}
-      {s.state === "failed" && (
+      {s.state === "failed" && !awaiting && (
         <Notice tone="error">
           마지막 요청이 실패했습니다.{" "}
           {/* 서버 오류 문구를 그대로 옮기지 않는다(외부 provider 원문·식별자 노출 방지). 아는 코드만 안내하고 나머지는 코드만 표시. */}
@@ -677,12 +811,23 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
           page={page}
           blocked={codexBlocked(codex.result)}
           codex={codex.result}
+          awaiting={awaiting}
+          atBottom={atBottom}
           onRecheck={() => void reloadCodex()}
-          onSent={(ok) => {
-            void reload();
-            // 거절 사유(만료·한도·차단)가 생겼을 수 있으므로 상태도 다시 확인한다.
-            if (!ok) void reloadCodex();
+          onSending={(next) => {
+            setSend({ local: next });
+            // 보내면 바닥으로 가서 새 말풍선과 "생각 중"을 보인다.
+            stick();
           }}
+          onSent={async (ok) => {
+            // 보내지 못했으면 먼저 그린 말풍선을 바로 거둔다(입력은 Composer가 되돌린다). 입력 잠금은 다시 불러올 때까지 둔다.
+            if (!ok) setSend({ local: null });
+            // 실패면 거절 사유(만료·한도·차단·환경 꺼짐)가, 성공이어도 runner 상태(idle 정지 등)가 바뀌었을 수 있다.
+            void reloadCodex();
+            await reload();
+            setSend(null);
+          }}
+          onJump={stick}
         />
       )}
     </div>
