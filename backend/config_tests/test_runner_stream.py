@@ -480,3 +480,79 @@ def test_stale_plan_is_never_committed(text_on):
     hub.flush(turn, final=True)
     text = "".join(data["text"] for _, kind, data in events(hub) if kind == "item.delta")
     assert text == auth.journal.text("xx") == "[redacted]"
+
+
+# --- review stage-1 follow-ups ---------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("final", [False, True])
+def test_generation_change_withholds_command_summary(text_on, final):
+    """A literal observed during the pass: neither text nor the command summary of that pass is published."""
+    auth = FakeAuth()
+    hub, request = new_hub(auth)
+    hub.verified()
+    start_item(hub, "cmd", "commandExecution", command="echo NEW_SECRET_VALUE now")
+    note(hub, "item/commandExecution/outputDelta", itemId="cmd", delta="NEW_SECRET_VALUE out\n")
+    calls = {"n": 0}
+    original = auth.refresh_projection_secrets
+
+    def rotate():
+        calls["n"] += 1
+        if calls["n"] == 2:  # between the plan and its staleness check
+            auth.secrets.add("NEW_SECRET_VALUE")
+        original()
+    auth.refresh_projection_secrets = rotate
+    hub.flush(hub.active, final=final)
+    data = b"".join(encoded for _, encoded in hub.active.events)
+    assert b"NEW_SECRET_VALUE" not in data
+    if final:
+        assert hub.active.stopped == "sanitize"
+    else:
+        hub.flush(hub.active, final=True)  # planned again with the new journal
+        data = b"".join(encoded for _, encoded in hub.active.events)
+        assert b"NEW_SECRET_VALUE" not in data and b"echo [redacted] now" in data
+
+
+def test_long_command_keeps_only_a_safe_prefix(text_on):
+    auth = FakeAuth("S" * 40)
+    hub, request = new_hub(auth)
+    hub.verified()
+    command = "x" * (stream_module.SUMMARY_RAW_LIMIT - 20) + "S" * 40 + "tail"
+    start_item(hub, "cmd", "commandExecution", command=command)
+    assert len(hub.active.items["cmd"].summary_raw) == stream_module.SUMMARY_RAW_LIMIT
+    hub.flush(hub.active, final=True)
+    started = [data for _, kind, data in events(hub) if kind == "item.started"][0]
+    assert "S" not in started["command"] and set(started["command"]) == {"x"}
+
+
+@pytest.mark.parametrize("ending", ["discard", "never-verified"])
+def test_unverified_turn_never_reaches_a_subscriber(text_on, ending):
+    hub, request = new_hub(None)
+    start_item(hub, "cmd", "commandExecution", command="echo early-command")
+    note(hub, "item/commandExecution/outputDelta", itemId="cmd", delta="early-output\n")
+    start_item(hub)
+    note(hub, "item/agentMessage/delta", itemId="msg-1", delta="early text ")
+    hub.flush(hub.active, final=False)
+    subscription, frames = hub.subscribe(SESSION, None)
+    seen = b"".join(frames)
+    if ending == "discard":
+        hub.discard("model_unavailable")
+        hub.verified()  # a late verify after the discard opens nothing
+    hub.complete("failed", "failed", "codex_model_unavailable", hub.active)
+    seen += b"".join(encoded for _, encoded in hub.read(subscription))
+    seen += b"".join(hub.subscribe(SESSION, (request, 0))[1])
+    assert b"early" not in seen
+    assert b"turn.completed" in seen
+
+
+def test_dropped_grace_turn_cursor_resyncs(text_on):
+    hub, first = new_hub(None)
+    hub.verified()
+    subscription, _ = hub.subscribe(SESSION, None)
+    hub.complete("idle", "completed", None, hub.active)
+    hub.read(subscription)
+    other = str(uuid.uuid4())
+    hub.begin(other, str(uuid.uuid4()))
+    hub.complete("idle", "completed", None, hub.active)  # another session's turn takes the only grace slot
+    assert list(hub.previous) == [other]
+    assert [encoded for _, encoded in hub.read(subscription)] == [stream_module.frame("sync", {"reason": "expired"})]
+    assert hub.read(subscription) == []

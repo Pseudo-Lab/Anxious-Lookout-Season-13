@@ -27,6 +27,7 @@ OUTPUT_ITEM_LIMIT = 16 * 1024    # command output streamed per item
 OUTPUT_TURN_LIMIT = 128 * 1024   # command output streamed per turn
 DELTA_LIMIT = 64 * 1024          # one native delta
 SUMMARY_LIMIT = 2 * 1024         # serialized command summary
+SUMMARY_RAW_LIMIT = 16 * 1024    # raw command chars kept for the summary (a longer command keeps a safe prefix only)
 ITEM_ID_LIMIT = 128
 STRUCTURE_DATA_LIMIT = 4 * 1024
 DELTA_DATA_LIMIT = 8 * 1024
@@ -198,6 +199,7 @@ class Turn:
         self.turn_id = None
         self.verified = False
         self.pre = []               # structural events before the model check passed
+        self.pre_bytes = 0
         self.seq = 0
         self.events = deque()       # (seq, frame bytes)
         self.event_bytes = 0
@@ -221,9 +223,11 @@ class Turn:
 
     def retained(self):
         items = sum(item.meta_bytes + item.text_bytes + utf8(item.unsent) + utf8(item.output_tail)
-                    + utf8(item.output_unsent) + utf8(item.text.raw) + utf8(item.output.raw) for item in self.items.values())
+                    + utf8(item.output_unsent) + utf8(item.text.raw) + utf8(item.output.raw)
+                    + utf8(getattr(item, "summary_raw", "")) + utf8(json.dumps(item.summary, ensure_ascii=False))
+                    for item in self.items.values())
         snapshot = self.snapshot_cache[2] if self.snapshot_cache else 0
-        return self.event_bytes + items + snapshot
+        return self.event_bytes + items + snapshot + self.pre_bytes
 
 
 class Subscription:
@@ -267,29 +271,31 @@ class Hub:
     # --- turn lifecycle (turn thread) -----------------------------------------------------------------------------
 
     def begin(self, session, request):
+        """Returns the Turn: the caller names it explicitly in bind/verified/partial_items/complete (review stage-1)."""
         with self.lock:
-            self.active = Turn(session, request)
+            turn = self.active = Turn(session, request)
             self.ensure_flusher()
         self.wakeup.set()
+        return turn
 
-    def bind(self, thread=None, turn_id=None):
+    def bind(self, thread=None, turn_id=None, turn=None):
         with self.lock:
-            turn = self.active
+            turn = turn or self.active
             if turn is not None:
                 turn.thread = thread or turn.thread
                 turn.turn_id = turn_id or turn.turn_id
 
-    def verified(self):
+    def verified(self, turn=None):
         """turn/start answered with the pinned model: structural events may leave the buffer."""
         with self.lock:
-            turn = self.active
+            turn = turn or self.active
             if turn is None or turn.verified or turn.discarded:
                 return
             turn.verified = True
             self.append(turn, "turn.started", {})
             for kind, data in turn.pre:
                 self.append(turn, kind, data)
-            turn.pre = []
+            turn.pre, turn.pre_bytes = [], 0
 
     def discard(self, reason):
         with self.lock:
@@ -310,22 +316,34 @@ class Hub:
             if turn.verified:
                 self.append(turn, "stream.stopped", {"reason": reason})
 
-    def complete(self, state, turn_status, error_code):
-        """After the record is stored and saved: the turn's last event."""
-        turn = self.active
-        if turn is None:
+    def complete(self, state, turn_status, error_code, turn=None):
+        """After the record is stored and saved: `turn`'s last event (run_turn always names it). Only this turn: a turn
+        admitted meanwhile is never completed or cleared by it. The runner holds at most one completed turn (design:
+        active 1 + grace 1)."""
+        turn = turn or self.active
+        if turn is None or turn.state == "completed":
             return
         self.flush(turn, final=True)
         with self.lock:
-            if not turn.verified:
+            if not turn.verified and not turn.discarded:
+                # Never verified (failed before turn/start answered): only the turn events, no item or text.
                 turn.verified = True
+                turn.pre, turn.pre_bytes = [], 0
+                for item in turn.items.values():
+                    item.text.reset()
+                    item.output.reset()
+                    item.unsent, item.output_unsent, item.text_out, item.text_bytes = "", "", [], 0
+                turn.items, turn.order = {}, []
                 self.append(turn, "turn.started", {})
             turn.state = "completed"
             turn.result = {"state": state, "turnStatus": turn_status, "errorCode": error_code}
             self.append(turn, "turn.completed", dict(turn.result))
             turn.completed_at = time.monotonic()
-            self.previous[turn.session] = turn
-            self.active = None
+            self.previous = {turn.session: turn}  # one completed turn per runner, any session
+            if self.active is turn:
+                self.active = None
+            for subscription in list(self.subscribers):
+                subscription.notify()
         self.log_summary(turn)
 
     # --- native notifications (turn thread, O(1) work) ------------------------------------------------------------
@@ -370,10 +388,20 @@ class Hub:
                     if len(turn.items) >= MAX_ITEMS:
                         self.stop(turn, "budget")
                         return
+                    command = raw.get("command") if raw["type"] == "commandExecution" and isinstance(raw.get("command"), str) else None
                     item = turn.items[identity] = Item(identity, raw["type"])
                     turn.order.append(identity)
-                    if raw["type"] == "commandExecution" and isinstance(raw.get("command"), str):
-                        item.summary_raw = raw["command"]  # sanitized whole by the flusher before any event
+                    item.meta_bytes = 256 + utf8(identity)
+                    # Charged before anything is kept (review stage-1): the whole command counts against the budget;
+                    # over it, the item keeps its metadata only and the turn's stream stops.
+                    if command is not None and turn.retained() + utf8(command) > TURN_BUDGET:
+                        self.stop(turn, "budget")
+                        return
+                    if command is not None:
+                        # Sanitized by the flusher before any event: whole when complete, otherwise only the holdback-safe
+                        # part of a SUMMARY_RAW_LIMIT prefix (a cut could split a literal).
+                        item.summary_raw = command[:SUMMARY_RAW_LIMIT]
+                        item.summary_partial = len(command) > SUMMARY_RAW_LIMIT
                     if raw["type"] == "fileChange" and isinstance(raw.get("changes"), list):
                         item.summary = {"changes": len(raw["changes"])}
                     item.meta_bytes = 256 + utf8(identity)
@@ -429,6 +457,7 @@ class Hub:
             self.append(turn, kind, data)
         else:
             turn.pre.append((kind, data))
+            turn.pre_bytes += len(data_bytes(data))
 
     def append(self, turn, kind, data):
         data = {"requestId": turn.request, **data}
@@ -528,24 +557,26 @@ class Hub:
                 done = final or item.completed
                 text_plan = Holdback.plan(text, self.sanitizer.spans(text), before[2], done, item.text.joined) if text else None
                 output_plan = Holdback.plan(output, self.sanitizer.spans(output), before[2], done, item.output.joined) if output else None
-                summary_text = self.sanitizer.whole(summary) if summary is not None else None
+                summary_text = None
+                if summary is not None:
+                    if getattr(item, "summary_partial", False):  # a prefix of a longer command: never cut a literal
+                        summary_text = Holdback.plan(summary, self.sanitizer.spans(summary), before[2], False, False)[0]
+                    else:
+                        summary_text = self.sanitizer.whole(summary)
                 plans.append((item, text, output, text_plan, output_plan, summary_text, text_version, output_version))
             after = self.sanitizer.generation()
         except SanitizeUnavailable:
             with self.lock:
-                self.stop(turn, "sanitize")
-                for item, *_ in work:
-                    item.text.reset()
-                    item.output.reset()
-                    if hasattr(item, "summary_raw"):
-                        del item.summary_raw
+                self.drop_text(turn, work)
             return
         with self.lock:
             turn.stats["legacyL"] = max(turn.stats["legacyL"], before[2])
             if before != after:
-                turn.stats["staleFlushes"] += 1  # a literal was observed meanwhile: plan again next tick
-                if not final:
-                    return
+                # A literal was observed meanwhile: nothing of this pass is published (text, output or summary).
+                turn.stats["staleFlushes"] += 1
+                if final:
+                    self.drop_text(turn, work)  # no next pass to plan again: fail closed
+                return
             for item, text, output, text_plan, output_plan, summary_text, text_version, output_version in plans:
                 if summary_text is not None:
                     summary = {"command": self.clip(summary_text)} if self.text else {}
@@ -555,21 +586,27 @@ class Hub:
                         self.structural(turn, "item.started", {"itemId": item.identity, "kind": item.kind, **summary})
                         if item.status == "approval":
                             self.structural(turn, "item.status", {"itemId": item.identity, "status": "approval"})
-                if text_plan is not None and item.text.version == text_version and before == after:
+                if text_plan is not None and item.text.version == text_version:
                     emitted, consumed, joined = text_plan
                     item.text.commit(consumed, joined, len(text))
                     if emitted:
                         self.keep_text(turn, item, emitted)
-                if output_plan is not None and item.output.version == output_version and before == after:
+                if output_plan is not None and item.output.version == output_version:
                     emitted, consumed, joined = output_plan
                     item.output.commit(consumed, joined, len(output))
                     if emitted:
                         self.keep_output(turn, item, emitted)
                 turn.stats["holdbackPeakChars"] = max(turn.stats["holdbackPeakChars"], len(item.text.raw), len(item.output.raw))
-            if final and before != after:
-                # The journal moved during the last pass: fail closed rather than emit an unchecked tail.
-                self.stop(turn, "sanitize")
         self.emit_pending(turn, final)
+
+    def drop_text(self, turn, work):
+        """Fail closed for the turn: stop, and drop every unpublished raw text and command summary. Lock held."""
+        self.stop(turn, "sanitize")
+        for item, *_ in work:
+            item.text.reset()
+            item.output.reset()
+            if hasattr(item, "summary_raw"):
+                del item.summary_raw
 
     @staticmethod
     def clip(text):
@@ -643,10 +680,10 @@ class Hub:
 
     # --- display-only partial text (design r1 §4, r2 Q3) ----------------------------------------------------------
 
-    def partial_items(self):
-        """The sanitized agentMessage text of the active turn, after a final pass: [{id, type, text}]."""
-        turn = self.active
-        if turn is None or turn.discarded:
+    def partial_items(self, turn=None):
+        """The sanitized agentMessage text of `turn`, after a final pass: [{id, type, text}]."""
+        turn = turn or self.active
+        if turn is None or turn.discarded or not turn.verified:
             return []
         self.flush(turn, final=True)
         with self.lock:
@@ -712,7 +749,7 @@ class Hub:
             return list(turn.snapshot_cache[1])
         frames = [frame("snapshot.begin", {"requestId": turn.request, "turnState": turn.state, "seq": turn.seq,
                                            **({"stopped": turn.stopped} if turn.stopped else {})})]
-        if not turn.discarded:
+        if turn.verified and not turn.discarded:  # nothing of an unverified turn (model check) leaves, snapshot included
             for name in turn.order:
                 item = turn.items[name]
                 if hasattr(item, "summary_raw"):
@@ -760,6 +797,10 @@ class Hub:
                         and subscription.cursor >= current.seq)
             if current is None or finished:
                 if turn is None or turn is current:
+                    if current is None and subscription.request is not None:
+                        # The followed turn left the grace slot (another turn completed meanwhile): resynchronize.
+                        subscription.request, subscription.cursor = None, 0
+                        return [(None, frame("sync", {"reason": "expired"}))]
                     return []
                 # A new turn of this session started since: from its first event, or a snapshot once compacted.
                 if turn.floor == 0:

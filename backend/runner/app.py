@@ -1003,9 +1003,9 @@ class Native:
         acquired_at = time.monotonic()
         timing["queueMs"] = (acquired_at - started_at) * 1000
         entry = self.mapping[session]
-        hub = self.stream_hub()
+        hub, stream_turn = self.stream_hub(), None
         if hub is not None:
-            hub.begin(session, entry["request"])
+            stream_turn = hub.begin(session, entry["request"])
         try:
             self.check_binding()
             kind = (body.scope or {}).get("page", {}).get("kind")
@@ -1035,7 +1035,7 @@ class Native:
             if self.auth:
                 self.auth.secrets.add(body.toolToken)
             if hub is not None:
-                hub.bind(thread=entry["thread"])
+                hub.bind(thread=entry["thread"], turn=stream_turn)
             # Catalog stays thread-persistent; request mode is enforced by both
             # callback boundaries, while page data is only a compact hint.
             content = turn_prompt(body.text, body.scope)
@@ -1051,8 +1051,8 @@ class Native:
                 raise CodexFailure("policy_refused")
             turn["turnId"] = turn_id
             if hub is not None:
-                hub.bind(turn_id=turn_id)
-                hub.verified()  # the pinned model answered turn/start: structural events may leave
+                hub.bind(turn_id=turn_id, turn=stream_turn)
+                hub.verified(stream_turn)  # the pinned model answered turn/start: structural events may leave
             self.send_interrupt(session, entry)  # #90: a stop that arrived before the turn id
             for message in turn.pop("pendingTools"):
                 self.reply_server(message, turn)
@@ -1078,7 +1078,7 @@ class Native:
                 self.real_verified = True
             display_only = None
             if entry["turnStatus"] == "interrupted" and hub is not None:
-                display_only = (turn_id, hub.partial_items())  # sanitized; kept only if Codex did not record it
+                display_only = (turn_id, hub.partial_items(stream_turn))  # sanitized; kept only if Codex did not record it
             history_started_at = time.monotonic()
             self.store_record(session, entry, self.rpc("thread/read", {"threadId": entry["thread"], "includeTurns": True})["thread"],
                               verified_turn_id=turn_id if entry["state"] == "idle" and status == "completed" else None,
@@ -1118,9 +1118,12 @@ class Native:
             finally:
                 self.turn_released(entry)  # #68 P-A: the summary under the mutex, then the release
                 if hub is not None:
-                    try:  # #90: after the record is stored and saved, the stream's last event
-                        hub.complete(entry["state"], entry.get("turnStatus", "failed" if entry["state"] == "failed" else "completed"),
-                                     entry.get("error") if entry["state"] == "failed" else None)
+                    # #90: after the record is stored and saved, this turn's last event. It names its own Turn: a turn
+                    # admitted after the release is never completed or cleared by it (review stage-1).
+                    try:
+                        hub.complete(entry["state"],
+                                     entry.get("turnStatus", "failed" if entry["state"] == "failed" else "completed"),
+                                     entry.get("error") if entry["state"] == "failed" else None, stream_turn)
                     except Exception:
                         pass
                 timing["totalMs"] = (time.monotonic() - started_at) * 1000
