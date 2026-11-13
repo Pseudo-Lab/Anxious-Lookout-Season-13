@@ -602,6 +602,14 @@ new source, then on the VM:
   `UnsupportedUntrustedApprovalPolicyError`); the runner reaches it only through the thread/start and thread/resume
   override, the untrusted project and the managed `allowed_approval_policies`. Before moving the pin, check first
   that the override still exists and still yields `untrusted` in the thread response.
+- **`codex sandbox -P <profile>` ignores the managed requirements** (`requirements.toml`, including `deny_read`)
+  unless `--include-managed-config` is given (0.160.1 `cli/src/debug_sandbox.rs:190–200, 747–749`; measured
+  2026-11-13). A turn, through app-server, applies them.
+  - Without the flag, a `-c` profile that set `/control`, `/state/home` and `/run/codex-broker` to `read` made
+    them readable. With it, Codex refused that profile.
+  - Any `codex sandbox` check meant to stand in for a turn passes the flag (the token check in section 7 does). The
+    `thread-check.sh` / V3 probe sandbox runs do not; their reads rest on the profile's own deny entries.
+  - This says nothing about a turn allowing the same bypass. Recheck it when the pin moves.
 
 ## 6. A `.codex` in the workspace blocks the runner
 
@@ -819,6 +827,34 @@ The system layer, `native_policy` and `check_local` are unchanged: any `CODEX_HO
   | Build gate (`runner.image_check`) | every image build | binaries, modes, packages; the real Codex loading `/etc/codex` in the `/state` layout | thread creation: a build `RUN` has no user namespace, so bubblewrap and `thread/start` always fail there, and the build is not given more privilege |
   | Pre-release check (`thread-check.sh <image>`) | review, on every runner image before V1 import and before the section 3 window | in one local container with the runner's UID, `/state`, `/control` and `/tmp` mounts, read-only root, no capabilities, no-new-privileges, seccomp profile and no network: bubblewrap, a workspace write, fake CODEX_HOME state, `/state/home` and `/control` unreadable (also through workspace symlinks), the config checks, `thread/start` with `check_thread`, the `tmp/arg0` contents. `verdict pass` or `verdict fail <check>` | SELinux `container_t` (V3, on the VM); what a command sees during a real turn (V4); the local AppArmor profile is the host's userns profile, not the node's |
   | Runner start (section 4 self-check) and the section 3 canary | every app-server start and turn; once per window | everything above on the real node | nothing earlier: when it fires, the image is already deployed |
+- **Token isolation check (#68 decision G, 2026-11-13; supplementary evidence).** One model-free run on the
+  development VM, in a separate measurement Pod (`native68-measure/token-check`). It used the same runner image
+  digest (`docker.io/library/anxious-dev-runner@sha256:da7dc6576708bfa30de04e19bcc8b5d5b1b1dd49678c09e9ec56e4a094cd087c`) and the same permission profile (`native`).
+  - **Its spec:** the same Plan renderer's template (`ops.native_measure.runner_manifest`), with 21 allowlisted
+    differences:
+    - name / namespace / labels;
+    - the namespace's `default` SA and its projected token, audience `codex-broker`;
+    - `sleep infinity`;
+    - `RUNNER_TOKEN` a synthetic sentinel;
+    - fresh emptyDir instead of the owner PVCs.
+  - **Not covered:** it is not the deployed …5805 Pod, and not a turn.
+  - **Method:** as UID 10001, every item was observed outside first (a control), then inside
+    `codex sandbox -P native --include-managed-config`, directly and through links made outside and inside.
+  - **Result** (log `8a4cd6da995750e9f5d9669bb0568d3fcea9aea763b1733bd7d647b30c490221`): every gate ok, and 19 items `denied`:
+    - `/run/codex-broker/token` (only `lstat` / `stat`, never read) and `/run/codex-broker`;
+    - harmless markers in `/control`, `/state/home` and `/state/broker.json`;
+    - the app-server environment the runner builds (`native_command`; no token-like name, no sentinel);
+    - `/proc/1` (procfs absent inside).
+  - **No-control by design:** `/proc/<app-server pid>`, because there was no app-server.
+  - **Clean-up:** the Pod was deleted (UID precondition) and confirmed absent; the runner Pods and both ledgers were
+    unchanged.
+  - **Not measured:**
+    - the per-process `CODEX_HOME/tmp/arg0/codex-arg0…` readable root a turn adds;
+    - the variables a turn adds to the environment;
+    - the login shell;
+    - `apply_patch`'s separate filesystem-helper sandbox.
+
+  The scripts, the probe, the counter-tests and the design note are with the #68 evidence.
 - Pod manifest change: the Runner Pod manifest gate applies (section 3).
 - **Difference from the issue design.** The #68 issue body sketches control UID 10001 and agent UID
   10002 in separate places. This branch keeps one `runner` container with UID 10001, and the sandbox
