@@ -123,8 +123,9 @@ def test_dead_runner_fails_its_turn_visibly_and_releases_without_drain(service, 
         db.execute(text("INSERT INTO research.conversations(owner_id,title,state) VALUES(:owner,'busy','running')"),
                    {'owner': service.owner})
     exited = {'terminated': {'exitCode': 0, 'reason': 'Completed'}}
-    service.server.pod['status'] = {'phase': 'Failed' if dead == 'failed-phase' else 'Running', 'containerStatuses': [
-        {'name': 'runner', 'state': exited}, {'name': 'shell-executor', 'state': {'running': {}} if dead == 'runner-exited' else exited}]}
+    # #68: the native runner Pod has one container.
+    service.server.pod['status'] = {'phase': 'Failed' if dead == 'failed-phase' else 'Running',
+                                    'containerStatuses': [{'name': 'runner', 'state': exited}]}
     assert service.service.step(service.owner, 300) == 'deleting'
     assert service.drains == [] and len(service.deletes) == 1
     with admin.begin() as db:

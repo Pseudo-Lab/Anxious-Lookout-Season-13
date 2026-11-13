@@ -38,13 +38,30 @@ ARG TARGETARCH
 RUN python /app/runner/install_codex.py \
     && mkdir -p /state \
     && chown 10001:10001 /state
+# #68: Codex's workspace-write sandbox. Debian bookworm's bubblewrap 0.8.0 has no --argv0, so outside
+# app-server (no CODEX_HOME/tmp/arg0, e.g. `codex sandbox` in thread-check.sh) Codex finds its Linux sandbox
+# helper by this name on PATH; without it that path fails with "execvp codex-linux-sandbox" (measured
+# 2026-11-05). The empty directory is HOME for sandboxed commands (codex-etc/config.toml).
+RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s codex /usr/local/bin/codex-linux-sandbox \
+    && install -d -o root -g root -m 0555 /usr/local/share/anxious-shell-home
+# #68: Codex system config (the `native` permission profile) and managed requirements. Root-owned
+# and read-only for the runner; runner/native_policy.py refuses to start unless both equal it.
+# The directory first: COPY --chmod would also give a directory it creates mode 644 (not searchable).
+RUN install -d -o root -g root -m 0755 /etc/codex
+COPY --chown=0:0 --chmod=644 backend/runner/codex-etc/config.toml backend/runner/codex-etc/requirements.toml /etc/codex/
 USER 10001:10001
+# #68 build gate: the image as built, as the runner user (pins, bubblewrap, link, /etc/codex, no git), and the
+# pinned Codex itself loading /etc/codex (an offline app-server answering two config reads).
+RUN --network=none python -m runner.image_check
 CMD ["uvicorn", "runner.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log", "--no-proxy-headers"]
 
 # Isolated tests of the actual pinned bundle plus existing offline protocol cases.
 FROM test AS runner-test
 COPY --from=runner --chmod=755 /usr/local/bin/codex /usr/local/bin/codex
 COPY --from=runner --chmod=755 /usr/local/bin/codex-code-mode-host /usr/local/bin/codex-code-mode-host
+COPY --from=runner /etc/codex /etc/codex
 
 # Separate trusted host preparation image. Never used for the API deployment.
 FROM runtime AS provisioner
@@ -52,11 +69,3 @@ USER root
 RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs util-linux \
     && rm -rf /var/lib/apt/lists/*
 ENTRYPOINT ["python", "-B", "-m", "ops.runner_provision_worker"]
-
-# Untrusted commands run here, never alongside runner auth/control volumes.
-FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS shell-executor
-RUN apt-get update && apt-get install -y --no-install-recommends bash coreutils curl jq ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-COPY backend/executor/server.py /opt/executor/server.py
-USER 20002:10001
-ENTRYPOINT ["python", "-I", "/opt/executor/server.py"]

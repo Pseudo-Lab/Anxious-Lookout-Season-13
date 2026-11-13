@@ -145,6 +145,10 @@ running conversation with `codex_runner_lost`, deletes it and releases the owner
 **Existing binding images (#59).** A published binding pins `plan.image` and, for v2,
 `plan.executor.image` in `runner_bindings.bindings.plan`. Rollout values change only new
 owners' bindings, and `Bindings.publish` refuses a different plan for an existing owner.
+Since #68 rollout values have no `executor` key (refused, not ignored), so the controller's
+`inputs.json` carries none and new owners get v1 plans without a shell executor.
+The #68 window order (input change, release, per-binding runner image swap) and its rollback are in
+`../../native-shell/README.md` section 3.
 The #59 manifest no longer provides `RUNNER_TOKEN_FILE`, so a runner image older than
 #59 cannot start under it: move every existing binding to the reviewed images in the
 same window, after the API and worker images run the new code and before the next
@@ -156,7 +160,7 @@ with a completed termination proof, with entry stopped and runner-controller sca
   `oldPlanSha256` (`plan_digest` of the current plan, computed in the new worker image),
   `newImage` (runner) and, for a v2 plan, `executorImage`. One report/apply changes both
   digests; the executor's `wallSeconds`/`outputBytes` stay. A v1 plan takes `newImage`
-  alone, or the explicit `executor` opt-in instead.
+  alone; the `executor` opt-in (v1 -> v2) is refused since #68.
 - `report` first, review it, then `apply` with the same inputs and the report mounted
   read-only. Registry, generation, resources, receipts and outbox rows are unchanged; the
   next entry renders the Pod from the updated plan.

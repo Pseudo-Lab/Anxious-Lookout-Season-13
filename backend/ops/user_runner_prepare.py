@@ -65,15 +65,13 @@ def prepare(value, output, *, from_intent=False, storage_allocator=None):
     account = value['providerAccountId']
     require(isinstance(account, str) and 1 <= len(account) <= 200 and not any(c.isspace() for c in account))
     # Validate the immutable image/callback before any mutation.
-    from app.runner_kube import Plan, Reference, ExecutorPlan
-    executor = None
-    if 'executor' in value:
-        config = value['executor']
-        require(type(config) is dict and set(config) == {'image', 'wallSeconds', 'outputBytes'})
-        executor = ExecutorPlan(config['image'], config['wallSeconds'], config['outputBytes'])
+    from app.runner_kube import Plan, Reference
+    # #68: new bindings are native shell runners (plan v1). A shell-executor input is refused,
+    # never silently dropped; existing v2 plans stay readable in app.runner_bindings.
+    require('executor' not in value)
     probe = Reference('validation', uuid4(), 'validation')
     Plan(Identity(owner, uuid4(), 1), value['image'], probe,
-         Reference('other', uuid4(), 'other'), Reference('token', uuid4()), value['callback'], 'runner-workload', executor)
+         Reference('other', uuid4(), 'other'), Reference('token', uuid4()), value['callback'], 'runner-workload')
     bearer = read_private(Path(value['kubeTokenFile']), json_format=False).strip()
     pods = KubePods(value['api'], namespace, bearer, value['caFile'], [])
     engine = create_engine(secret('DATABASE_URL'), hide_parameters=True,
@@ -160,8 +158,7 @@ def prepare(value, output, *, from_intent=False, storage_allocator=None):
             'plan': {'owner': str(owner), 'state': str(state.state_id), 'generation': 1,
                      'image': value['image'], 'native': refs['native'], 'control': refs['control'],
                      'transport': {'name': names['transport'], 'uid': obj['metadata']['uid']},
-                     'callback': value['callback'], 'serviceAccount': 'runner-workload',
-                     **({'version': 2, 'executor': value['executor']} if executor else {})}})
+                     'callback': value['callback'], 'serviceAccount': 'runner-workload'}})
         write(output/'supply-inputs.json', {'ownerId': str(owner), 'stateId': str(state.state_id),
               'snapshotId': str(uuid4()), 'expectedAccountId': account})
         os.chown(output, 10001, 10001)

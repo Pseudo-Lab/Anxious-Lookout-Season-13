@@ -124,7 +124,8 @@ def export(db, fence):
             'revision': state['revision'], 'phase': state['phase'],
             'namespace': binding['namespace'], 'namespaceUid': str(binding['namespace_uid']),
             'planSha256': plan_digest(binding['plan']), 'runnerImage': plan.image,
-            'executorImage': None if plan.executor is None else plan.executor.image,
+            # From the stored plan: since #68 the runtime ignores a v2 executor (native shell Pod).
+            'executorImage': (binding['plan'].get('executor') or {}).get('image'),
             'podName': plan.identity.name,
             'resources': [{'kind': kind, 'name': name, 'uid': uid} for kind, name, uid in resources],
             'lastStop': {'stopId': str(stop['stop_id']), 'generation': stop['generation'], 'podUid': str(stop['pod_uid']),

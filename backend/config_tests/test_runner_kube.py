@@ -256,66 +256,35 @@ def test_delete_accepts_asynchronous_api_response(plan):
         port.close()
 
 
-def test_executor_plan_is_opt_in_and_confined(plan):
-    from app.runner_kube import ExecutorPlan
-    assert len(plan.manifest('isolated')['spec']['containers']) == 1
-    enabled = replace(plan, executor=ExecutorPlan('registry.invalid/executor@sha256:'+'b'*64))
-    spec = enabled.manifest('isolated')['spec']
-    assert spec['shareProcessNamespace'] is False
-    executor = spec['containers'][1]
-    assert executor['securityContext']['runAsUser'] == 20002
-    assert executor['resources'] == {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '1', 'memory': '512Mi'}}
-    assert executor['volumeMounts'] == [
-        {'name': 'native', 'mountPath': '/state/workspace', 'subPath': 'workspace'},
-        {'name': 'native', 'mountPath': '/run/shell-executor', 'subPath': 'shell-ipc'},
-        {'name': 'shell-tmp', 'mountPath': '/tmp'}]
-    assert {entry['name'] for entry in executor['env']} == {'SHELL_WALL_SECONDS', 'SHELL_OUTPUT_BYTES'}
-    server = Server(enabled)
-    port = KubePods('https://kube.invalid', 'isolated', 'k'*40, None, [enabled], _transport=httpx.MockTransport(server))
-    try:
-        pod = port.create_once(enabled.identity)
-        assert port.lookup(enabled.identity) == pod
-        server.pod['spec']['containers'][1]['volumeMounts'].append({'name': 'control', 'mountPath': '/control'})
-        with pytest.raises(Refused): port.lookup(enabled.identity)
-    finally: port.close()
-
-
 def test_pod_resources_transport_reference_and_grace(plan):
-    # #59: runner limits lowered, executor raised, transport token only as a runner env reference.
-    from app.runner_kube import ExecutorPlan, GRACE_SECONDS
-    enabled = replace(plan, executor=ExecutorPlan('registry.invalid/executor@sha256:'+'b'*64))
-    for candidate in (plan, enabled):
-        spec = candidate.manifest('isolated')['spec']
-        runner = spec['containers'][0]
-        assert spec['terminationGracePeriodSeconds'] == GRACE_SECONDS == 20
-        assert runner['resources'] == {'requests': {'cpu': '100m', 'memory': '192Mi'},
-                                       'limits': {'cpu': '500m', 'memory': '768Mi'}}
-        assert [entry for entry in runner['env'] if entry['name'].startswith('RUNNER_TOKEN')] == [
-            {'name': 'RUNNER_TOKEN', 'valueFrom': {'secretKeyRef': {'name': candidate.transport.name, 'key': 'token'}}}]
-        assert not [volume for volume in spec['volumes'] if 'secret' in volume or volume['name'] == 'transport']
-        assert not [mount for mount in runner['volumeMounts'] if mount['name'] == 'transport']
-        for other in spec['containers'][1:] + spec.get('initContainers', []):
-            assert not [entry for entry in other.get('env', []) if 'valueFrom' in entry]
-    spec = enabled.manifest('isolated')['spec']
-    assert {'name': 'shell-tmp', 'emptyDir': {'sizeLimit': '256Mi'}} in spec['volumes']
+    # #59: transport token only as a runner env reference. #68: one container, no init container.
+    from app.runner_kube import GRACE_SECONDS
+    spec = plan.manifest('isolated')['spec']
+    assert [container['name'] for container in spec['containers']] == ['runner'] and 'initContainers' not in spec
+    runner = spec['containers'][0]
+    assert spec['terminationGracePeriodSeconds'] == GRACE_SECONDS == 20
+    # #68: one provisional limit, the #59 runner (500m/768Mi) plus executor (1/512Mi).
+    assert runner['resources'] == {'requests': {'cpu': '200m', 'memory': '320Mi'},
+                                   'limits': {'cpu': '1500m', 'memory': '1280Mi'}}
+    assert spec['securityContext']['seccompProfile'] == {'type': 'Localhost',
+                                                         'localhostProfile': 'profiles/anxious-runner-userns-v1.json'}
+    assert runner['securityContext'] == {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
+                                         'capabilities': {'drop': ['ALL']}}
+    assert [entry for entry in runner['env'] if entry['name'].startswith('RUNNER_TOKEN')] == [
+        {'name': 'RUNNER_TOKEN', 'valueFrom': {'secretKeyRef': {'name': plan.transport.name, 'key': 'token'}}}]
+    assert not [volume for volume in spec['volumes'] if 'secret' in volume or volume['name'] == 'transport']
+    assert not [mount for mount in runner['volumeMounts'] if mount['name'] == 'transport']
     assert {'name': 'tmp', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '64Mi'}} in spec['volumes']
-    assert spec['initContainers'][0]['resources'] == {'requests': {'cpu': '10m', 'memory': '32Mi'},
-                                                      'limits': {'cpu': '100m', 'memory': '64Mi'}}
 
 
 def test_broker_token_is_audience_bound_and_runner_only(plan):
     # #60: automount stays off; one projected token for codex-broker, mounted in the runner only.
-    from app.runner_kube import ExecutorPlan, BROKER_URL
-    enabled = replace(plan, executor=ExecutorPlan('registry.invalid/executor@sha256:'+'b'*64))
-    for candidate in (plan, enabled):
-        spec = candidate.manifest('isolated')['spec']
-        assert spec['automountServiceAccountToken'] is False
-        assert {'name': 'broker-token', 'projected': {'defaultMode': 292, 'sources': [
-            {'serviceAccountToken': {'audience': 'codex-broker', 'expirationSeconds': 600, 'path': 'token'}}]}} in spec['volumes']
-        runner = spec['containers'][0]
-        assert {'name': 'broker-token', 'mountPath': '/run/codex-broker', 'readOnly': True} in runner['volumeMounts']
-        env = {entry['name']: entry.get('value') for entry in runner['env']}
-        assert (env['BROKER_URL'], env['BROKER_TOKEN_FILE']) == (BROKER_URL, '/run/codex-broker/token')
-        for other in spec['containers'][1:] + spec.get('initContainers', []):
-            assert not [mount for mount in other['volumeMounts'] if mount['name'] == 'broker-token']
-            assert not [entry for entry in other.get('env', []) if entry['name'].startswith('BROKER_')]
+    from app.runner_kube import BROKER_URL
+    spec = plan.manifest('isolated')['spec']
+    assert spec['automountServiceAccountToken'] is False
+    assert {'name': 'broker-token', 'projected': {'defaultMode': 292, 'sources': [
+        {'serviceAccountToken': {'audience': 'codex-broker', 'expirationSeconds': 600, 'path': 'token'}}]}} in spec['volumes']
+    runner = spec['containers'][0]
+    assert {'name': 'broker-token', 'mountPath': '/run/codex-broker', 'readOnly': True} in runner['volumeMounts']
+    env = {entry['name']: entry.get('value') for entry in runner['env']}
+    assert (env['BROKER_URL'], env['BROKER_TOKEN_FILE']) == (BROKER_URL, '/run/codex-broker/token')

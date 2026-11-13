@@ -1,0 +1,27 @@
+# #68: installed as /etc/codex/requirements.toml (root 0644) in the runner image: managed
+# requirements, above every user, project and session setting. The runner refuses to start unless
+# this file equals runner/native_policy.py requirements('/state') and configRequirements/read
+# reports it applied.
+allowed_approval_policies = ["untrusted"]
+allowed_approvals_reviewers = ["user"]
+
+# 0.160.1 forces unified exec on unless managed requirements pin it. Off: exec_command is one-shot
+# and write_stdin is not registered.
+# multi_agent_v2 pinned off: when it is on, 0.160.1 selects sub-agents (v2) before it reads
+# [agents] enabled = false in config.toml (Config::multi_agent_version_override), so no layer may turn it on.
+# view_image and goals off: tools the research workflow does not need. view_image reads files (through the
+# sandboxed filesystem); goals can start automatic continuation turns (token budget). Registered only when on
+# (core/src/tools/spec_plan.rs ViewImageHandler; app-server/src/extensions.rs goals).
+[features]
+unified_exec = false
+multi_agent_v2 = false
+view_image = false
+goals = false
+
+# Second layer only. The profile's deny entries (config.toml) are the first.
+# No "/state/codex" (CODEX_HOME) here or in the profile: 0.160.1 always adds CODEX_HOME/tmp/arg0 (its
+# execve wrapper and codex-linux-sandbox) as a readable root, refuses to load a managed deny_read on an
+# ancestor of it, and bubblewrap masks a denied ancestor over it. CODEX_HOME is not a readable root of
+# the profile, so the sandbox does not see it (native-shell/README.md sections 4 and 5).
+[permissions.filesystem]
+deny_read = ["/control", "/run/codex-broker", "/state/home"]

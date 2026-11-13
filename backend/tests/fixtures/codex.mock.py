@@ -15,6 +15,21 @@ trace = path.parent / "fixture-model-rpc.json"
 observed = json.loads(trace.read_text()) if trace.exists() else []
 
 
+# #68: what pinned Codex reports for the image's /etc/codex files (runner/native_policy.py checks it).
+ROOT = path.parent.parent
+# Kept equal to it by config_tests/test_codex_fixture_policy.py.
+PROFILE = {':minimal': 'read', ':workspace_roots': {'.': 'write'}, '/control': 'deny', '/run/codex-broker': 'deny',
+           str(ROOT / 'home'): 'deny'}
+SYSTEM = {'default_permissions': 'native', 'approvals_reviewer': 'user', 'agents': {'enabled': False},
+          'shell_environment_policy': {'set': {'HOME': '/usr/local/share/anxious-shell-home'}},
+          'permissions': {'native': {'filesystem': PROFILE}}}
+REQUIREMENTS = {'allowedApprovalPolicies': ['untrusted'], 'allowedApprovalsReviewers': ['user'],
+                'featureRequirements': {'unified_exec': False, 'multi_agent_v2': False, 'view_image': False,
+                                        'goals': False}}
+THREAD_POLICY = {'approvalPolicy': 'untrusted', 'approvalsReviewer': 'user', 'activePermissionProfile': {'id': 'native'},
+                 'sandbox': {'type': 'workspaceWrite', 'writableRoots': [], 'networkAccess': False}}
+
+
 def emit(body):
     print(json.dumps(body), flush=True)
 
@@ -55,15 +70,22 @@ for line in sys.stdin:
         emit({"id": identity, "result": {}})
     elif method == "initialized":
         pass
+    elif method == "configRequirements/read":
+        emit({"id": identity, "result": {"requirements": REQUIREMENTS}})
+    elif method == "config/read":
+        emit({"id": identity, "result": {"config": dict(SYSTEM), "origins": {}, "layers": [
+            {"name": {"type": "system", "file": "/etc/codex/config.toml"}, "version": "1", "config": SYSTEM},
+            {"name": {"type": "sessionFlags"}, "version": "1", "config": {"features": {"shell_tool": True}}}]}})
     elif method == "account/read":
         emit({"id": identity, "result": {"account": {"type": "chatgpt", "email": "fixture-provider-identity@example.invalid"}}})
     elif method == "thread/start":
         thread = str(uuid.uuid4())
         records[thread] = {"id": thread, "turns": [], "tools": params["dynamicTools"]}
         save()
-        emit({"id": identity, "result": {"thread": records[thread], "model": params["model"]}})
+        emit({"id": identity, "result": {"thread": records[thread], "model": params["model"], "cwd": params["cwd"], "runtimeWorkspaceRoots": [params["cwd"]], **THREAD_POLICY}})
     elif method == "thread/resume":
-        emit({"id": identity, "result": {"thread": records[params["threadId"]], "model": records[params["threadId"]].get("returnModel", params["model"])}})
+        emit({"id": identity, "result": {"thread": records[params["threadId"]], "model": records[params["threadId"]].get("returnModel", params["model"]),
+                                         "cwd": params["cwd"], "runtimeWorkspaceRoots": [params["cwd"]], **THREAD_POLICY}})
     elif method == "thread/read":
         emit({"id": identity, "result": {"thread": records[params["threadId"]]}})
     elif method == "turn/start":

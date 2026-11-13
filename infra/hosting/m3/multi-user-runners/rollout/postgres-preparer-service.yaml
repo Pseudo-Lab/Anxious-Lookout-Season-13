@@ -1,0 +1,27 @@
+# Host preparer DB address (#68). The host `issue16-controller` preparer runs with `--network=host`, so it
+# cannot use the headless `postgres` Service (no ClusterIP; a Pod IP written into its DSN breaks when the Pod
+# gets another IP). This Service gives the same postgres Pod one stable ClusterIP that the node's host network
+# reaches through kube-proxy. The headless `postgres` Service (StatefulSet DNS) is unchanged.
+#
+# Exposure: a ClusterIP only; no NodePort, LoadBalancer, externalIPs or hostPort. It reaches what the Pod IP
+# already reached (in-cluster and from the node), nothing outside the node.
+# clusterIP is pinned (the development VM's service CIDR is 10.43.0.0/16; 10.43.0.68 lies in the static band
+# and was free on 2026-11-08) so the preparer DSN names a fixed address, also after a delete and re-create.
+# Another cluster chooses its own free address in its service CIDR and writes that one into its DSN.
+# Create: kubectl create -f <this file> (refuses an existing object). Remove: kubectl -n m2-hosting delete
+# service postgres-preparer, after the preparer DSN no longer names it. #63 removes the host preparer and
+# this Service together.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-preparer
+  namespace: m2-hosting
+  labels:
+    app.kubernetes.io/part-of: anxious-hosting
+    anxious.io/purpose: host-preparer-db
+spec:
+  type: ClusterIP
+  clusterIP: 10.43.0.68
+  selector: {app: hosting-postgres}
+  ports: [{name: postgres, port: 5432, targetPort: postgres, protocol: TCP}]
+  sessionAffinity: None

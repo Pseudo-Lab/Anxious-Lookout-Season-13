@@ -1,0 +1,13 @@
+# #68 SELinux module, version 1 (V3b): bubblewrap's `--dev` mounts a new devpts instance; container_t may not.
+# One rule, no macros, so the compiled module adds exactly this allow. Applies to every container_t on the node
+# (README section 8: residual risk, V3x not run). Same shape as the distribution policy's
+# `allow container_userns_t devpts_t:filesystem mount;`.
+module anxious_runner_bwrap 1.0;
+
+require {
+	type container_t;
+	type devpts_t;
+	class filesystem mount;
+}
+
+allow container_t devpts_t:filesystem mount;

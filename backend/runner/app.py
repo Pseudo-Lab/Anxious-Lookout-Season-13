@@ -27,6 +27,9 @@ from .binding import canonical_uuid, require_binding
 from .access import AccessAuth, SupplySocket
 from .service_access import ServiceAccessAuth
 from .broker_client import BrokerClient, BrokerPull
+from . import dot_codex
+from . import native_policy as policy
+from .native_policy import Decision
 from app.page_scope import Scope, POLICIES, tool_allowed, turn_prompt, shell_allowed
 
 
@@ -98,6 +101,93 @@ def volume_lease(root):
             fcntl.flock(lease, fcntl.LOCK_UN)
 
 
+def native_command(binary, home, codex_home, work, *, file_auth, external, fixture):
+    """The app-server command line and environment the runner starts (also used by the #68 VM checks)."""
+    environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(home), "CODEX_HOME": str(codex_home)}
+    command = [binary, "app-server", "--listen", "stdio://",
+                "-c", 'cli_auth_credentials_store="file"' if file_auth else 'cli_auth_credentials_store="ephemeral"',
+                "-c", 'model="gpt-6.1-sol"', "-c", "features.shell_tool=true",
+                "-c", 'model_provider="openai"',
+                "-c", "features.multi_agent=false", "-c", "features.multi_agent_v2=false",
+                "-c", "features.unbounded_connection_retries=false",
+                "-c", "features.apps=false", "-c", "features.plugins=false", "-c", "features.remote_plugin=false",
+                "-c", "features.hooks=false", "-c", "features.code_mode_host=true" if not fixture else "features.code_mode_host=false",
+                "-c", "features.daemon_auto_start=false",
+                "-c", "features.browser_use=false", "-c", "features.computer_use=false",
+                "-c", "features.image_generation=false", "-c", 'web_search="disabled"',
+                "-c", 'forced_login_method="chatgpt"']
+    if external:
+        # Same authenticated Codex endpoint, named provider solely to disable retries.
+        # The pinned built-in provider cannot be overridden. No API key route.
+        for setting in ('model_provider="access_only_openai"',
+                        'model_providers.access_only_openai.name="OpenAI"',
+                        'model_providers.access_only_openai.base_url="https://chatgpt.com/backend-api/codex"',
+                        'model_providers.access_only_openai.wire_api="responses"',
+                        'model_providers.access_only_openai.requires_openai_auth=true',
+                        'model_providers.access_only_openai.supports_websockets=false',
+                        'model_providers.access_only_openai.request_max_retries=0',
+                        'model_providers.access_only_openai.stream_max_retries=0',
+                        'analytics.enabled=false', 'otel.exporter="none"',
+                        'otel.trace_exporter="none"', 'otel.metrics_exporter="none"'):
+            command += ['-c', setting]
+    # Unified exec (and with it write_stdin) is pinned off by the managed requirements only:
+    # 0.160.1 ignores a user `features.unified_exec=false` (#68).
+    # The workspace's project trust, as one inline table (#68 G5 (a′)): Codex splits a `-c` key on every `.` and
+    # does not read quotes, so the earlier `projects."<work>".trust_level=...` set a key with literal quotes and
+    # never applied. With the trust unset, 0.160.1's thread/start persisted `trusted` into CODEX_HOME/config.toml.
+    command += ['-c', 'projects={%s={trust_level="untrusted"}}' % toml_basic_string(str(work))]
+    return command, environment
+
+
+def toml_basic_string(text):
+    """`text` as a TOML 1.0 basic string: `"` and `\\` escaped, control characters as \\uXXXX. A lone surrogate
+    (a path that is not valid UTF-8) cannot be encoded and is refused rather than passed on: Codex would read an
+    unparsable `-c` value as a plain string and the trust pin would silently not apply."""
+    out = []
+    for char in text:
+        code = ord(char)
+        if 0xD800 <= code <= 0xDFFF:
+            raise CodexFailure("policy_refused")
+        if char in '"\\':
+            out.append('\\' + char)
+        elif code < 0x20 or code == 0x7F:
+            out.append('\\u%04X' % code)
+        else:
+            out.append(char)
+    return '"' + ''.join(out) + '"'
+
+
+# #68 P-A: approval records. They describe what the runner's handler did with each approval request; they never
+# decide anything, and they hold no command, cwd, path, reason text, argument or token (design P-A r3).
+APPROVAL_KINDS = {"item/commandExecution/requestApproval": "command", "item/fileChange/requestApproval": "fileChange"}
+APPROVAL_STATE_LOCK = threading.Lock()  # guards the lazy creation: the reader thread and the turn thread both record
+
+
+def approval_hash(value):
+    """The first 12 hex of sha256 over the UTF-8 text of an id, or None when the id is not a string. The same function
+    hashes rollout call_ids for the VM judge."""
+    return hashlib.sha256(value.encode('utf-8')).hexdigest()[:12] if isinstance(value, str) else None
+
+
+def approval_rpc_hash(identity):
+    """A JSON-RPC id may be an integer or a string: its canonical JSON text is hashed (null only for a missing id)."""
+    if identity is None or isinstance(identity, bool) or not isinstance(identity, (int, str)):
+        return None
+    return approval_hash(json.dumps(identity))
+
+
+def approval_utc(stamp):
+    return time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(stamp)) + '.%03dZ' % int(stamp % 1 * 1000)
+
+
+def approval_refused(message):
+    """The sorted names of policy.COMMAND_REFUSED present and non-null in a command request; [] otherwise. Names only."""
+    params = message.get('params') if isinstance(message, dict) else None
+    if APPROVAL_KINDS.get(message.get('method')) != 'command' or not isinstance(params, dict):
+        return []
+    return sorted(name for name in policy.COMMAND_REFUSED if params.get(name) is not None)
+
+
 class Native:
     PROJECTION_VERSION = PROJECTION_VERSION
     external = False
@@ -123,17 +213,18 @@ class Native:
             try:
                 pin = pinned()
             except RuntimeError:
-                raise CodexFailure("policy_refused") from None
-            try:
-                for path, digest in ((binary, pin["codex_sha256"]), ("/usr/local/bin/codex-code-mode-host", pin["host_sha256"])):
+                policy.refuse("binary.platform")
+            for path, digest, check in ((binary, pin["codex_sha256"], "binary.codex"),
+                                        ("/usr/local/bin/codex-code-mode-host", pin["host_sha256"], "binary.code_mode_host")):
+                try:
                     with open(path, "rb") as executable:
-                        if hashlib.file_digest(executable, "sha256").hexdigest() != digest or not os.access(path, os.X_OK):
-                            raise CodexFailure("policy_refused")
-            except OSError:
-                raise CodexFailure("policy_refused") from None
+                        matches = hashlib.file_digest(executable, "sha256").hexdigest() == digest and os.access(path, os.X_OK)
+                except OSError:
+                    matches = False
+                policy.require(matches, check)
+            # The image's Codex policy files, pinned in code next to the binary digests (#68).
+            policy.check_files(str(root))
         self.root, self.model, self.callback_url = root, model, callback_url
-        self.shell_enabled = os.getenv('SHELL_EXECUTOR_ENABLED', 'false') == 'true'
-        self.shell_broker = None
         self.lock, self.messages, self.next_id = threading.Lock(), queue.Queue(), 1
         self.state_lock = threading.RLock()
         self.completed = {}
@@ -145,13 +236,17 @@ class Native:
             raise CodexFailure("policy_refused")  # Legacy unsafe projections need private reconciliation, never automatic trust.
         self.closing, self.closed = False, False
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # Executor-writable .codex/AGENTS/config must never be loaded by the
-        # trusted native process. Shell cwd remains the separate workspace.
-        home, codex_home, work = root / "home", root / "codex", root / ("native-work" if self.shell_enabled else "workspace")
+        # #68: the sandboxed native shell writes the workspace, its cwd. Codex must never read
+        # model-written policy: a project `.codex` stays an untrusted (disabled) layer, checked
+        # through config/read, and CODEX_HOME config/rules or any `.codex` other than the runner's own recorded
+        # empty placeholder refuse (check_local, dot_codex).
+        home, codex_home, work = root / "home", root / "codex", root / "workspace"
         for path in (home, codex_home, work):
             path.mkdir(exist_ok=True, mode=0o700)
-        if any((path / "config.toml").exists() for path in (codex_home, work / ".codex")):
-            raise CodexFailure("policy_refused")
+        self.codex_home, self.work = codex_home, work
+        # #68 G2 (design g2 r2): the runner-owned empty `.codex`, before any Codex process or credential.
+        dot_codex.ensure_placeholder(root, work)
+        self.check_local()
         if not auth and (codex_home / "auth.json").exists():
             raise CodexFailure("policy_refused")
         if auth:
@@ -164,48 +259,10 @@ class Native:
                 raise CodexFailure("policy_refused") from None
         if (root / "model-block.json").exists() or (auth and auth.state().get("modelBlocked")):
             self.blocked_reason = "model_unavailable"
-        environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(home), "CODEX_HOME": str(codex_home)}
-        self.work = work
-        command = [binary, "app-server", "--listen", "stdio://",
-                    "-c", 'cli_auth_credentials_store="file"' if auth and not self.external else 'cli_auth_credentials_store="ephemeral"',
-                    "-c", 'model="gpt-6.1-sol"', "-c", "features.shell_tool=false",
-                    "-c", 'model_provider="openai"',
-                    "-c", "features.multi_agent=false", "-c", "features.multi_agent_v2=false",
-                    "-c", "features.unbounded_connection_retries=false", "-c", "features.unified_exec=false",
-                    "-c", "features.apps=false", "-c", "features.plugins=false", "-c", "features.remote_plugin=false",
-                    "-c", "features.hooks=false", "-c", "features.code_mode_host=true" if not self.fixture else "features.code_mode_host=false",
-                    "-c", "features.daemon_auto_start=false",
-                    "-c", "features.browser_use=false", "-c", "features.computer_use=false",
-                    "-c", "features.image_generation=false", "-c", 'web_search="disabled"',
-                    "-c", 'forced_login_method="chatgpt"']
-        if self.external:
-            # Same authenticated Codex endpoint, named provider solely to disable retries.
-            # The pinned built-in provider cannot be overridden. No API key route.
-            for setting in ('model_provider="access_only_openai"',
-                            'model_providers.access_only_openai.name="OpenAI"',
-                            'model_providers.access_only_openai.base_url="https://chatgpt.com/backend-api/codex"',
-                            'model_providers.access_only_openai.wire_api="responses"',
-                            'model_providers.access_only_openai.requires_openai_auth=true',
-                            'model_providers.access_only_openai.supports_websockets=false',
-                            'model_providers.access_only_openai.request_max_retries=0',
-                            'model_providers.access_only_openai.stream_max_retries=0',
-                            'analytics.enabled=false', 'otel.exporter="none"',
-                            'otel.trace_exporter="none"', 'otel.metrics_exporter="none"'):
-                command += ['-c', setting]
+        command, environment = native_command(binary, home, codex_home, work, file_auth=bool(auth) and not self.external,
+                                              external=self.external, fixture=self.fixture)
         self.command, self.environment = command, environment
-        if self.shell_enabled:
-            from .shell_broker import ShellBroker
-            wall = int(os.environ.get('SHELL_WALL_SECONDS', '30'))
-            if not 1 <= wall <= 300:
-                raise CodexFailure('policy_refused')
-            self.shell_broker = ShellBroker(root / 'shell-broker.sock', self.authorize_shell,
-                lambda value: self.auth.sanitize(value) if self.auth else value, wall=wall)
-            command += ['-c', 'mcp_servers.shell.command="/usr/local/bin/python"',
-                        '-c', 'mcp_servers.shell.args=["-I","/app/runner/shell_bridge.py"]',
-                        '-c', 'mcp_servers.shell.enabled_tools=["shell"]',
-                        '-c', 'mcp_servers.shell.tools.shell.approval_mode="approve"',
-                        '-c', 'mcp_servers.shell.tool_timeout_sec=325',
-                        '-c', 'mcp_servers.shell.enabled=false']
+        self.thread_policy = {"approvalPolicy": "untrusted", "approvalsReviewer": "user", "permissions": policy.PROFILE}
         self.thread_web_modes = {}
         try:
             self.launch_process()
@@ -228,6 +285,7 @@ class Native:
         try:
             self.rpc("initialize", {"clientInfo": {"name": "anxious_research", "version": "1"}, "capabilities": {"experimentalApi": True}})
             self.send({"method": "initialized"})
+            self.check_policy()  # Before any credential reaches this process.
             if self.external:
                 self.login_access()
             if self.auth:
@@ -240,6 +298,171 @@ class Native:
             raise
         except Exception:
             raise RuntimeError("Native initialization or authentication is unavailable") from None
+
+    def check_local(self, phase="start"):
+        # Model-writable places Codex could read as policy are never present (#68). The workspace `.codex` is
+        # absent or exactly the runner's recorded empty placeholder (G2, design g2 r2); any other refuses.
+        policy.require(not os.path.lexists(self.codex_home / "config.toml"), "local.codex_home_config")
+        policy.require(not os.path.lexists(self.codex_home / "rules"), "local.codex_home_rules")
+        dot_codex.check_placeholder(self.root, self.work, phase)
+        policy.require(not any(os.path.lexists(path / ".codex") for path in self.work.parents), "local.parent_dot_codex")
+
+    def check_policy(self, phase="launch"):
+        """What this app-server process reports applied (#68). Every launch and every turn."""
+        self.check_local(phase)
+        for method, params, check in (("configRequirements/read", {}, policy.check_requirements),
+                                      ("config/read", {"includeLayers": True, "cwd": str(self.work)},
+                                       lambda result: policy.check_config(result, str(self.root)))):
+            try:
+                result = self.rpc(method, params)
+            except CodexFailure:
+                policy.refuse("rpc." + method)
+            check(result)
+
+    def reply_server(self, message, turn):
+        if message.get("method") == "item/tool/call":
+            self.reply_tool(message, turn)
+        else:
+            self.reply_approval(message, turn)
+
+    def reply_approval(self, message, turn):
+        """Approve one pending command or file change after the shell permission check, or decline.
+
+        The answer goes to this request's id only, and an item is decided once: a duplicate,
+        a late request for a finished turn or anything not in the allow lists is declined.
+        """
+        seq = self.approval_dispatched(message, turn)  # #68 P-A record; never raises, never decides
+        decision, reason = Decision.DECLINE, 'error'
+        try:
+            params = message.get("params")
+            if message.get("method") == "item/commandExecution/requestApproval":
+                eligible = policy.command_eligible(params, turn, str(self.work))
+                arguments = {"command": params["command"], "cwd": params["cwd"]} if eligible else None
+            else:
+                eligible = policy.file_change_eligible(params, turn, str(self.work))
+                arguments = {}
+            if isinstance(params, dict) and turn is not None and isinstance(params.get("itemId"), str):
+                turn.setdefault("approvalItems", set()).add(params["itemId"])
+            # The same evaluation order and short-circuit as before; the reason only names the branch taken.
+            reason = 'no_turn' if turn is None else 'not_eligible'
+            if eligible:
+                reason = 'completed_turn'
+                if (turn["thread"], turn["turnId"]) not in self.completed:
+                    reason = 'authorize_refused'
+                    if self.authorize_shell(turn, arguments):
+                        decision, reason = Decision.ACCEPT, 'accepted'
+        except Exception:
+            decision, reason = Decision.DECLINE, 'error'
+        self.approval_decided(seq, message, decision, reason)
+        answer, sent, before = policy.answer(message["id"], decision), False, time.monotonic_ns()
+        try:
+            self.send(answer)
+            sent = True
+        finally:
+            self.approval_sent(seq, sent, before, time.monotonic_ns())
+
+    # --- #68 P-A approval records (logging only; every failure here is swallowed and shows as an incomplete record) --
+
+    def approval_state(self):
+        state = getattr(self, '_approval_records', None)
+        if state is None:
+            with APPROVAL_STATE_LOCK:
+                state = getattr(self, '_approval_records', None)
+                if state is None:
+                    state = self._approval_records = {'lock': threading.Lock(), 'seq': 0, 'arrived': {},
+                                                      'pending': set(), 'window': []}
+        return state
+
+    @staticmethod
+    def approval_log(prefix, record):
+        try:
+            logging.getLogger('uvicorn.error').info('%s %s', prefix, json.dumps(record, sort_keys=True))
+        except Exception:
+            pass
+
+    def approval_arrived(self, message, pending=False):
+        """Called by the stdout reader thread when an approval request line is read from Codex, before it enters the
+        queue (the design's arrival time; review round 1); with pending=True (the receive loop, when the request is
+        queued in pendingTools before the turn id is known) it only marks the request, never a new stamp."""
+        try:
+            state, key = self.approval_state(), json.dumps(message.get('id'), sort_keys=True)
+            with state['lock']:
+                if pending:
+                    state['pending'].add(key)
+                else:
+                    state['arrived'][key] = (approval_utc(time.time()), time.monotonic_ns())
+        except Exception:
+            pass
+
+    def approval_dispatched(self, message, turn):
+        try:
+            state, monotonic, stamp = self.approval_state(), time.monotonic_ns(), time.time()
+            key = json.dumps(message.get('id'), sort_keys=True)
+            with state['lock']:
+                state['seq'] += 1
+                seq = state['seq']
+                arrived = state['arrived'].pop(key, (None, None))
+                pending = key in state['pending']
+                state['pending'].discard(key)
+                state['window'].append(('dispatched', seq, turn is not None))
+            params = message.get('params') if isinstance(message.get('params'), dict) else {}
+            self.approval_log('runner_approval', {
+                'v': 1, 'seq': seq, 'stage': 'dispatched', 'kind': APPROVAL_KINDS.get(message.get('method'), 'other'),
+                'rpc': approval_rpc_hash(message.get('id')), 'item': approval_hash(params.get('itemId')),
+                'thread': approval_hash(params.get('threadId')), 'turn': approval_hash(params.get('turnId')),
+                'inTurn': turn is not None, 'pending': pending, 'arrived': arrived[0], 'arrivedM': arrived[1],
+                'm': monotonic, 't': approval_utc(stamp)})
+            return seq
+        except Exception:
+            return None
+
+    def approval_decided(self, seq, message, decision, reason):
+        try:
+            monotonic, stamp = time.monotonic_ns(), time.time()
+            with self.approval_state()['lock']:
+                self.approval_state()['window'].append(('decided', seq, None))
+            self.approval_log('runner_approval', {
+                'v': 1, 'seq': seq, 'stage': 'decided', 'decision': decision.value, 'reason': reason,
+                'refused': approval_refused(message), 'm': monotonic, 't': approval_utc(stamp)})
+        except Exception:
+            pass
+
+    def approval_sent(self, seq, ok, before, after):
+        try:
+            with self.approval_state()['lock']:
+                self.approval_state()['window'].append(('sent', seq, None))
+            self.approval_log('runner_approval', {'v': 1, 'seq': seq, 'stage': 'sent', 'ok': bool(ok), 'm0': before,
+                                                  'm1': after, 't': approval_utc(time.time())})
+        except Exception:
+            pass
+
+    def turn_released(self, entry):
+        """#68 P-A (review round 2): the turn's approval summary (snapshot, reset, line) is taken while the protocol
+        mutex is still held, so the next turn's records never fall into this turn's summary; then the mutex is
+        released, always (approval_summary never raises)."""
+        try:
+            self.approval_summary(entry.get("thread"), entry.get("turn_id"))
+        finally:
+            self.lock.release()
+
+    def approval_summary(self, thread, turn_id):
+        """One line per turn, in the turn's final block: the counts since the previous summary, then reset."""
+        try:
+            state = self.approval_state()
+            with state['lock']:
+                window, arrived_only = state['window'], len(state['arrived'])
+                state['window'], state['arrived'], state['pending'] = [], {}, set()
+            seqs = [seq for stage, seq, _ in window if stage == 'dispatched' and seq is not None]
+            self.approval_log('runner_approval_summary', {
+                'v': 1, 'thread': approval_hash(thread), 'turn': approval_hash(turn_id),
+                'dispatched': sum(stage == 'dispatched' for stage, _, _ in window),
+                'decided': sum(stage == 'decided' for stage, _, _ in window),
+                'sent': sum(stage == 'sent' for stage, _, _ in window), 'arrivedOnly': arrived_only,
+                'seqFirst': min(seqs) if seqs else None, 'seqLast': max(seqs) if seqs else None,
+                'outside': sum(stage == 'dispatched' and not in_turn for stage, _, in_turn in window),
+                't': approval_utc(time.time())})
+        except Exception:
+            pass
 
     def authorize_shell(self, turn, arguments):
         try:
@@ -426,7 +649,10 @@ class Native:
     def reader(self):
         try:
             for line in self.process.stdout:
-                self.messages.put(json.loads(line))
+                message = json.loads(line)
+                if isinstance(message, dict) and message.get("method") in APPROVAL_KINDS and "id" in message:
+                    self.approval_arrived(message)  # #68 P-A: stamped as read from Codex's stdout, before the queue
+                self.messages.put(message)
         except Exception:
             pass
         self.messages.put({"fatal": True})
@@ -466,6 +692,8 @@ class Native:
                 raise CodexFailure("auth_revoked")
         if message.get("method") in {"turn/started", "turn/updated"}:
             self.ensure_model(message.get("params", {}).get("turn", {}))
+        if message.get("method") == "item/started" and turn:
+            self.file_change_started(message.get("params"), turn)
         if message.get("method") == "turn/completed":
             params = message.get("params", {})
             self.ensure_model(params.get("turn", {}))
@@ -494,19 +722,48 @@ class Native:
                 self.auth.block('auth_revoked')
                 self.blocked_reason = 'auth_revoked'
                 raise CodexFailure('auth_revoked')
-            if method == "item/tool/call" and turn:
-                if not turn.get("turnId") and params.get("threadId") == turn["thread"]:
+            if method in {"item/tool/call", "item/commandExecution/requestApproval", "item/fileChange/requestApproval"} and turn:
+                if not turn.get("turnId") and isinstance(params, dict) and params.get("threadId") == turn["thread"]:
                     pending = turn.setdefault("pendingTools", [])
                     if len(pending) < 32:
                         pending.append(message)  # Wait for correlated turn/start response; never borrow a token early.
+                        if method in APPROVAL_KINDS:
+                            self.approval_arrived(message, pending=True)
                     else:
-                        self.reply_tool(message, None)
+                        self.reply_server(message, None)
                 else:
-                    self.reply_tool(message, turn)
+                    self.reply_server(message, turn)
+            elif method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
+                self.reply_approval(message, None)  # Outside a turn: declined.
             else:
                 # No hidden shell/file permission grants or host credential refresh.
                 self.send({"id": message["id"], "error": {"code": -32601, "message": "Interactive capability is unavailable"}})
         return message
+
+    @staticmethod
+    def file_change_started(params, turn):
+        """#68 X2: keep a fileChange item's changes for its approval (native_policy.file_change_eligible). In 0.160.1
+        the item/started notification of a patch is sent before its approval request, with the same itemId and the
+        same verified action. Kept only for this turn's thread. A second item/started for the same id marks the item
+        as a conflict, so its approval is declined. Beyond policy.FILE_CHANGE_ITEMS items nothing more is kept (declined).
+        Never raises."""
+        try:
+            item = params.get("item") if isinstance(params, dict) else None
+            if not isinstance(item, dict) or item.get("type") != "fileChange" or params.get("threadId") != turn["thread"]:
+                return
+            identity = item.get("id")
+            if not isinstance(identity, str) or not identity:
+                return
+            kept = turn.setdefault("fileChanges", {})
+            if identity in kept:
+                kept[identity]["conflict"] = True
+                return
+            if len(kept) >= policy.FILE_CHANGE_ITEMS:
+                return
+            kept[identity] = {"threadId": params.get("threadId"), "turnId": params.get("turnId"),
+                              "changes": json.loads(json.dumps(item.get("changes")))}
+        except Exception:
+            pass
 
     def reply_tool(self, message, turn):
         started = time.monotonic()
@@ -636,26 +893,23 @@ class Native:
             self.check_binding()
             kind = (body.scope or {}).get("page", {}).get("kind")
             web_mode = "live" if kind in POLICIES and kind not in {"public_document", "public_post"} else "disabled"
-            if self.shell_enabled or (entry["thread"] in self.thread_web_modes and self.thread_web_modes[entry["thread"]] != web_mode):
+            if entry["thread"] in self.thread_web_modes and self.thread_web_modes[entry["thread"]] != web_mode:
                 self.reset_thread_tools()
             config = {"web_search": web_mode}
-            turn = {"thread": entry["thread"], "turnId": None, "pendingTools": [],
+            self.check_policy("turn_pre")  # Again per turn: nothing the last turn wrote may change the policy.
+            turn = {"thread": entry["thread"], "turnId": None, "pendingTools": [], "approvalItems": set(),
                     "session": session, "request": entry["request"], "token": body.toolToken, "scope": body.scope, "timing": timing}
-            if self.shell_broker:
-                lease = self.shell_broker.activate(turn)
-                config.update({'mcp_servers.shell.enabled': shell_allowed(body.scope),
-                    'mcp_servers.shell.env.SHELL_BROKER_SOCKET': str(self.shell_broker.path),
-                    'mcp_servers.shell.env.SHELL_BRIDGE_LEASE': lease})
             if entry["thread"]:
                 result = self.rpc("thread/resume", {"threadId": entry["thread"], "model": self.model,
-                                  "cwd": str(self.work), "approvalPolicy": "never", "sandbox": "read-only", "config": config})
+                                  "cwd": str(self.work), **self.thread_policy, "config": config})
                 if result.get("thread", {}).get("id") != entry["thread"]:
                     raise CodexFailure("policy_refused")
             else:
                 result = self.rpc("thread/start", {"model": self.model, "cwd": str(self.work),
-                                  "approvalPolicy": "never", "sandbox": "read-only", "config": config, "dynamicTools": body.tools,
+                                  **self.thread_policy, "config": config, "dynamicTools": body.tools,
                                   "historyMode": "legacy", "ephemeral": False})
             self.ensure_model(result, required=True)
+            policy.check_thread(result, self.work)  # Applied to this thread, start and resume alike.
             timing["threadMs"] = (time.monotonic() - acquired_at) * 1000
             entry["thread"] = result["thread"]["id"]
             self.thread_web_modes[entry["thread"]] = web_mode
@@ -678,7 +932,7 @@ class Native:
                 raise CodexFailure("policy_refused")
             turn["turnId"] = turn_id
             for message in turn.pop("pendingTools"):
-                self.reply_tool(message, turn)
+                self.reply_server(message, turn)
             entry["turn_id"] = turn_id
             self.save()
             key = (entry["thread"], turn_id)
@@ -721,8 +975,6 @@ class Native:
                 except Exception:
                     pass
         finally:
-            if self.shell_broker:
-                self.shell_broker.revoke()
             try:
                 with self.state_lock:
                     try:
@@ -731,7 +983,7 @@ class Native:
                         self.active_session = None
                         self.idle_since = time.monotonic()
             finally:
-                self.lock.release()
+                self.turn_released(entry)  # #68 P-A: the summary under the mutex, then the release
                 timing["totalMs"] = (time.monotonic() - started_at) * 1000
                 logging.getLogger("uvicorn.error").info("runner_turn_timing %s", json.dumps({
                     "requestId": str(body.requestId), "state": entry["state"],
@@ -811,8 +1063,6 @@ class Native:
                     except (BrokenPipeError, OSError):
                         pass
             self.closed = True
-            if self.shell_broker:
-                self.shell_broker.close()
         return self.clean_shutdown
 
 

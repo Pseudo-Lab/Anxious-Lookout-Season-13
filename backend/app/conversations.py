@@ -195,10 +195,43 @@ def display_native_item(item):
                             result[-1].update(status="rejected", error={"code": "tool_not_allowed"})
                     except (ValueError, AttributeError):
                         pass
+        elif kind == "commandExecution":
+            # #68 native shell, shown in the #23 shell shape (api-contracts/issue68-native-shell-history.md).
+            status = NATIVE_STATUS.get(item.get("status"), item.get("status", "unknown"))
+            result.append({"id": identity, "type": "tool_call", "name": "shell",
+                           "input": {"command": item.get("command"), "cwd": workspace_path(item.get("cwd"))},
+                           "output": {"status": status, "stdout": item.get("aggregatedOutput"), "stderr": None,
+                                      "combinedOutput": True, "exitCode": item.get("exitCode"),
+                                      "durationMs": item.get("durationMs")},
+                           "status": status, **({"error": {"code": "shell_declined"}} if status == "rejected" else {})})
+        elif kind == "fileChange":
+            status = NATIVE_STATUS.get(item.get("status"), item.get("status", "unknown"))
+            changes = []
+            for change in item.get("changes") or []:
+                if isinstance(change, dict):
+                    change_kind = change.get("kind") if isinstance(change.get("kind"), dict) else {}
+                    changes.append({"path": workspace_path(change.get("path")), "kind": change_kind.get("type"),
+                                    "movePath": workspace_path(change_kind.get("move_path")), "diff": change.get("diff")})
+            result.append({"id": identity, "type": "tool_call", "name": "apply_patch", "input": {"changes": changes},
+                           "output": {"status": status}, "status": status,
+                           **({"error": {"code": "shell_declined"}} if status == "rejected" else {})})
         if item.get("modelMismatch") is True:
             for projected in result:
                 projected["modelMismatch"] = True
     return result
+
+
+NATIVE_STATUS = {"declined": "rejected"}  # inProgress, completed and failed pass through unchanged.
+WORKSPACE = "/state/workspace"  # runner/app.py: RUNNER_STATE_DIR (/state) / "workspace", the native shell cwd.
+
+
+def workspace_path(path):
+    """Workspace-relative display path; anything outside the workspace is shown as given."""
+    if path == WORKSPACE:
+        return "."
+    if isinstance(path, str) and path.startswith(WORKSPACE + "/"):
+        return path[len(WORKSPACE) + 1:]
+    return path
 
 
 def register_conversations(app, authorized, sessions, settings, response, write, current_session):

@@ -1,0 +1,95 @@
+{
+ "apiVersion": "v1",
+ "kind": "Pod",
+ "metadata": {
+  "labels": {
+   "anxious.io/purpose": "native68-measure"
+  },
+  "name": "g1-dotcodex",
+  "namespace": "native68-measure"
+ },
+ "spec": {
+  "automountServiceAccountToken": false,
+  "containers": [
+   {
+    "command": [
+     "sleep",
+     "infinity"
+    ],
+    "image": "docker.io/library/anxious-dev-runner@sha256:840679946e8071b5495b9609c6e9f33c0708d9196e712e262361e200d4641801",
+    "imagePullPolicy": "Never",
+    "name": "runner",
+    "resources": {
+     "limits": {
+      "cpu": "1500m",
+      "memory": "1280Mi"
+     },
+     "requests": {
+      "cpu": "200m",
+      "memory": "320Mi"
+     }
+    },
+    "securityContext": {
+     "allowPrivilegeEscalation": false,
+     "capabilities": {
+      "drop": [
+       "ALL"
+      ]
+     },
+     "readOnlyRootFilesystem": true
+    },
+    "volumeMounts": [
+     {
+      "mountPath": "/state",
+      "name": "native"
+     },
+     {
+      "mountPath": "/control",
+      "name": "control"
+     },
+     {
+      "mountPath": "/tmp",
+      "name": "tmp"
+     }
+    ]
+   }
+  ],
+  "dnsPolicy": "ClusterFirst",
+  "enableServiceLinks": false,
+  "hostIPC": false,
+  "hostNetwork": false,
+  "hostPID": false,
+  "restartPolicy": "Never",
+  "securityContext": {
+   "runAsGroup": 10001,
+   "runAsNonRoot": true,
+   "runAsUser": 10001,
+   "seccompProfile": {
+    "localhostProfile": "profiles/anxious-runner-userns-v1.json",
+    "type": "Localhost"
+   }
+  },
+  "terminationGracePeriodSeconds": 20,
+  "volumes": [
+   {
+    "emptyDir": {
+     "sizeLimit": "1Gi"
+    },
+    "name": "native"
+   },
+   {
+    "emptyDir": {
+     "sizeLimit": "16Mi"
+    },
+    "name": "control"
+   },
+   {
+    "emptyDir": {
+     "medium": "Memory",
+     "sizeLimit": "64Mi"
+    },
+    "name": "tmp"
+   }
+  ]
+ }
+}
