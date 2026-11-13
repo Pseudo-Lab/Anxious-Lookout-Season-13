@@ -29,6 +29,7 @@ DELTA_LIMIT = 64 * 1024          # one native delta
 SUMMARY_LIMIT = 2 * 1024         # serialized command summary
 SUMMARY_RAW_LIMIT = 16 * 1024    # raw command chars kept for the summary (a longer command keeps a safe prefix only)
 STATUS_EVENTS_PER_ITEM = 4
+SNAPSHOT_TEXT_SLICE = 8192       # chars per snapshot text frame (bounded working space while a snapshot is sent)
 ITEM_ID_LIMIT = 128
 STRUCTURE_DATA_LIMIT = 4 * 1024
 DELTA_DATA_LIMIT = 8 * 1024
@@ -234,11 +235,34 @@ class Turn:
         return self.event_bytes + items + self.pre_bytes  # snapshots are lazy views: nothing retained
 
 
+class SnapshotView:
+    """References captured for one subscriber's snapshot at seq N (Hub.snapshot). `cancel` drops them all."""
+
+    def __init__(self, subscription, request, seq, result):
+        self.subscription, self.request, self.seq, self.result = subscription, request, seq, result
+        self.items = []  # (itemId, kind, status, summary, text_out list, chars sent by N, had output)
+        self.cancelled = False
+        subscription.view = self
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def cancel(self):
+        """Lock held. The turn left the runner: release, and let the stream resynchronize once (sync{expired})."""
+        self.cancelled, self.items = True, []
+        subscription, self.subscription = self.subscription, None
+        if subscription is not None:
+            if subscription.request == self.request:
+                subscription.request, subscription.cursor = None, 0
+            subscription.notify()
+
+
 class Subscription:
     def __init__(self, hub, session):
         self.hub, self.session = hub, session
         self.request, self.cursor = None, 0
         self.pending = None   # the rest of a snapshot (a generator), sent before any later event
+        self.view = None
         self.snapshots = {}
         self.sent = {}
         self.closed = None
@@ -263,6 +287,7 @@ class Hub:
         self.lock = threading.RLock()
         self.active = None
         self.previous = {}           # session -> completed Turn in grace
+        self.views = {}              # request -> live SnapshotViews (cancelled when the turn leaves)
         self.subscribers = set()
         self.text = text_enabled()
         self.wakeup = threading.Event()
@@ -307,6 +332,7 @@ class Hub:
             if turn is None or turn.discarded:
                 return
             turn.discarded = True
+            self.cancel_views(turn.request)
             for item in turn.items.values():
                 item.text.reset()
                 item.unsent, item.text_out, item.text_bytes = "", [], 0
@@ -343,6 +369,9 @@ class Hub:
             turn.result = {"state": state, "turnStatus": turn_status, "errorCode": error_code}
             self.append(turn, "turn.completed", dict(turn.result))
             turn.completed_at = time.monotonic()
+            for evicted in self.previous.values():
+                if evicted is not turn:
+                    self.cancel_views(evicted.request)  # its slow subscribers stop holding it
             self.previous = {turn.session: turn}  # one completed turn per runner, any session
             if self.active is turn:
                 self.active = None
@@ -540,6 +569,7 @@ class Hub:
             for session, turn in list(self.previous.items()):
                 if now - turn.completed_at > GRACE_SECONDS:
                     del self.previous[session]
+                    self.cancel_views(turn.request)
 
     def flush(self, turn, final):
         with self.flush_lock:
@@ -717,6 +747,14 @@ class Hub:
     def unsubscribe(self, subscription):
         with self.lock:
             self.subscribers.discard(subscription)
+            view, subscription.view, subscription.pending = subscription.view, None, None
+            if view is not None:  # a snapshot never drained: release its references now
+                registered = self.views.get(view.request)
+                if registered is not None:
+                    registered.discard(view)
+                    if not registered:
+                        del self.views[view.request]
+                view.cancelled, view.items = True, []
 
     def turn_for(self, session):
         if self.active is not None and self.active.session == session:
@@ -756,48 +794,74 @@ class Hub:
         # (the item order, each item's status/summary objects and its append-only text_out list with the length sent
         # by N) and turns into frames one at a time as the stream sends them; nothing is copied or cached. Command
         # output is never in a snapshot (its tail is a sliding window): the item says it was omitted.
-        view = []
+        view = SnapshotView(subscription, turn.request, turn.seq, dict(turn.result) if turn.result is not None else None)
         if turn.verified and not turn.discarded:  # nothing of an unverified turn (model check) leaves, snapshot included
             for name in turn.order:
                 item = turn.items[name]
                 if hasattr(item, "summary_raw"):
                     continue
                 sent = item.text_bytes_chars() - len(item.unsent) if self.text and turn.stopped is None else 0
-                view.append((name, item.kind, item.status, item.summary, item.text_out, sent,
-                             item.output_sent > 0 or bool(item.output_unsent)))
-        subscription.pending = self.snapshot_rest(turn.request, turn.seq, view,
-                                                  dict(turn.result) if turn.result is not None else None)
+                view.items.append((name, item.kind, item.status, item.summary, item.text_out, sent,
+                                   item.output_sent > 0 or bool(item.output_unsent)))
+        # Registered with the hub: a view of a turn that leaves the runner (evicted from the grace slot, expired,
+        # discarded, hub closed) is cancelled, which drops every reference it holds (review 01d30ce).
+        self.views.setdefault(turn.request, set()).add(view)
+        subscription.pending = self.snapshot_rest(view)
         return [frame("snapshot.begin", {"requestId": turn.request, "turnState": turn.state, "seq": turn.seq,
                                          **({"stopped": turn.stopped} if turn.stopped else {})})]
 
-    @staticmethod
-    def snapshot_rest(request, seq, view, result):
-        """The snapshot after snapshot.begin, one frame at a time (each within SNAPSHOT_DATA_LIMIT serialized)."""
-        for name, kind, status, summary, chunks, sent, had_output in view:
-            yield frame("snapshot.item", {"requestId": request, "itemId": name, "kind": kind, "status": status, **summary,
-                                          **({"output": {"omitted": True}} if had_output else {})})
-            buffer, remaining = "", sent
-            for chunk in list(chunks[:len(chunks)]):  # the list object only grows; its prefix is what N had sent
-                if remaining <= 0:
+    def cancel_views(self, request):
+        """Lock held. Views of `request` drop their references now; their streams get one sync{expired}."""
+        for view in self.views.pop(request, ()):
+            view.cancel()
+
+    def snapshot_rest(self, view):
+        """The snapshot after snapshot.begin, one frame at a time. Bounded working space (review 01d30ce): text is read
+        in slices of at most SNAPSHOT_TEXT_SLICE chars straight from the item's chunk list, and no local holds the
+        turn's text or summary across a yield (everything is re-read from `view` by index), so a cancelled view
+        releases them even while its consumer is suspended."""
+        request, i, chunk_index, position, done, meta_sent = view.request, 0, 0, 0, 0, False
+        try:
+            while True:
+                if view.cancelled:
+                    yield frame("sync", {"reason": "expired"})
+                    return
+                if i >= len(view.items):
                     break
-                piece = chunk[:remaining]
-                remaining -= len(piece)
-                buffer += piece
-                while len(buffer) >= SNAPSHOT_DATA_LIMIT // 4:
-                    part = buffer[: SNAPSHOT_DATA_LIMIT // 4]
-                    while len(data_bytes({"requestId": request, "itemId": name, "text": part})) > SNAPSHOT_DATA_LIMIT:
-                        part = part[: len(part) // 2]
-                    yield frame("snapshot.item", {"requestId": request, "itemId": name, "text": part})
-                    buffer = buffer[len(part):]
-            while buffer:
-                part = buffer[: SNAPSHOT_DATA_LIMIT // 4]
-                while len(data_bytes({"requestId": request, "itemId": name, "text": part})) > SNAPSHOT_DATA_LIMIT:
-                    part = part[: len(part) // 2]
-                yield frame("snapshot.item", {"requestId": request, "itemId": name, "text": part})
-                buffer = buffer[len(part):]
-        if result is not None:
-            yield frame("turn.completed", {"requestId": request, **result})
-        yield frame("snapshot.end", {"requestId": request, "seq": seq}, request + ":" + str(seq))
+                name, kind, status, summary, chunks, sent, had_output = view.items[i]
+                if not meta_sent:
+                    encoded = frame("snapshot.item", {"requestId": request, "itemId": name, "kind": kind, "status": status,
+                                                      **summary, **({"output": {"omitted": True}} if had_output else {})})
+                    meta_sent = True
+                    del summary, chunks
+                    yield encoded
+                    continue
+                if done >= sent or chunk_index >= len(chunks):
+                    i, chunk_index, position, done, meta_sent = i + 1, 0, 0, 0, False
+                    del summary, chunks
+                    continue
+                chunk = chunks[chunk_index]
+                take = min(SNAPSHOT_TEXT_SLICE, len(chunk) - position, sent - done)
+                piece = chunk[position:position + take]
+                while len(data_bytes({"requestId": request, "itemId": name, "text": piece})) > SNAPSHOT_DATA_LIMIT:
+                    piece = piece[: len(piece) // 2]
+                position, done = position + len(piece), done + len(piece)
+                if position >= len(chunk):
+                    chunk_index, position = chunk_index + 1, 0
+                encoded = frame("snapshot.item", {"requestId": request, "itemId": name, "text": piece})
+                del summary, chunks, chunk, piece
+                yield encoded
+            if view.result is not None:
+                yield frame("turn.completed", {"requestId": request, **view.result})
+            yield frame("snapshot.end", {"requestId": request, "seq": view.seq}, request + ":" + str(view.seq))
+        finally:
+            with self.lock:
+                registered = self.views.get(request)
+                if registered is not None:
+                    registered.discard(view)
+                    if not registered:
+                        del self.views[request]
+            view.items = []
 
     def drain_snapshot(self, subscription):
         """The pending snapshot frames, materialized (tests and small callers only; the stream iterates lazily)."""
@@ -848,6 +912,9 @@ class Hub:
     def close(self):
         """Drain/shutdown: every open stream ends now (it does not wait for its heartbeat)."""
         self.closed = True
+        with self.lock:
+            for request in list(self.views):
+                self.cancel_views(request)
         self.wakeup.set()
         with self.lock:
             for subscription in list(self.subscribers):

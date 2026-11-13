@@ -553,6 +553,7 @@ def test_dropped_grace_turn_cursor_resyncs(text_on):
     hub, first = new_hub(None)
     hub.verified()
     subscription, _ = hub.subscribe(SESSION, None)
+    hub.drain_snapshot(subscription)  # the stream always sends the snapshot rest before reading on
     hub.complete("idle", "completed", None, hub.active)
     hub.read(subscription)
     other = str(uuid.uuid4())
@@ -616,3 +617,33 @@ def test_item_status_events_are_bounded(text_on):
                  "requested" if index % 2 == 0 else "decided")
     statuses = [data["status"] for _, kind, data in events(hub) if kind == "item.status"]
     assert statuses == ["approval", "inProgress", "approval", "inProgress"]
+
+
+def test_evicted_turn_cancels_a_pending_snapshot_once(text_on):
+    """review 01d30ce: a slow subscriber's undrained snapshot of a turn that leaves the grace slot holds nothing and
+    resynchronizes exactly once."""
+    hub, first = new_hub(None)
+    hub.verified()
+    start_item(hub)
+    note(hub, "item/agentMessage/delta", itemId="msg-1", delta="kept text " * 100)
+    hub.flush(hub.active, final=True)
+    subscription, frames = hub.subscribe(SESSION, None)
+    view = subscription.view
+    hub.complete("idle", "completed", None, hub.active)
+    other = str(uuid.uuid4())
+    hub.begin(other, str(uuid.uuid4()))
+    hub.complete("idle", "completed", None, hub.active)  # evicts the first turn
+    assert view.cancelled and list(view) == [] and hub.views.get(first) is None
+    rest = hub.drain_snapshot(subscription)
+    assert rest == [stream_module.frame("sync", {"reason": "expired"})]
+    assert hub.read(subscription) == []  # no second sync
+
+
+def test_unsubscribe_releases_an_undrained_snapshot(text_on):
+    hub, request = new_hub(None)
+    hub.verified()
+    start_item(hub)
+    subscription, frames = hub.subscribe(SESSION, None)
+    view = subscription.view
+    hub.unsubscribe(subscription)
+    assert view.cancelled and list(view) == [] and request not in hub.views and subscription.pending is None
