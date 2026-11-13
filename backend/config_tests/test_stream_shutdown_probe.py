@@ -111,3 +111,30 @@ def test_relay_cuts_a_stalled_browser_and_closes_the_runner_side(monkeypatch):
     assert relay.stalled and relay.stats["reason"] == "stalled" and upstream_closed == [True]
     assert rest[-1] == chat_stream.frame("sync", {"reason": "overflow"})
     assert len(rest) < 10  # only what was already queued, then the end
+
+
+def test_uvicorn_internals_the_protocol_relies_on():
+    """Guard (PM, a1d390b): app.serve.stream_aware_h11 overrides H11Protocol.shutdown and reads cycle.scope,
+    cycle.response_complete and transport.abort. An upgrade that moves any of these fails here first; re-check the
+    override (and test_review_probe_idle_and_slow_reader_exit_promptly) before raising the pin."""
+    import inspect
+    import uvicorn
+    from uvicorn.config import Config
+    from uvicorn.protocols.http import h11_impl
+    from uvicorn.protocols.http.auto import AutoHTTPProtocol
+
+    with open(HERE.parent / "requirements.lock") as lock:
+        pinned = next(line.split("==")[1].strip() for line in lock if line.startswith("uvicorn=="))
+    assert uvicorn.__version__ == pinned == "0.54.0"
+    assert AutoHTTPProtocol is h11_impl.H11Protocol  # main's server already ran h11 (no httptools)
+    shutdown = inspect.getsource(h11_impl.H11Protocol.shutdown)
+    assert "self.cycle is None or self.cycle.response_complete" in shutdown and "self.cycle.keep_alive = False" in shutdown
+    protocol = inspect.getsource(h11_impl.H11Protocol)
+    assert "self.cycle: RequestResponseCycle = None" in protocol and "self.transport = transport" in protocol
+    assert "self.cycle = RequestResponseCycle(" in protocol and "scope=self.scope" in protocol
+    cycle = inspect.getsource(h11_impl.RequestResponseCycle.__init__)
+    assert "self.scope = scope" in cycle and "self.response_complete = False" in cycle
+    assert '"state": self.app_state.copy()' in protocol  # per-request scope["state"] dict carries the mark
+    config = Config(app=lambda scope, receive, send: None, http=stream_aware_h11())
+    config.load()
+    assert issubclass(config.http_protocol_class, h11_impl.H11Protocol)
