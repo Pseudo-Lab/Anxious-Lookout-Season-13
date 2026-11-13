@@ -15,8 +15,9 @@ ARG APP_BUILT_AT
 RUN APP_GIT_SHA="$APP_GIT_SHA" APP_BUILT_AT="$APP_BUILT_AT" python -m app.write_release
 RUN mkdir -p /var/lib/posts/images && chown 10001:10001 /var/lib/posts/images && chmod 700 /var/lib/posts/images
 USER 10001:10001
-EXPOSE 8080
-CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log", "--no-proxy-headers"]
+# #62: public 8080 and the internal runner-callback listener 8081 (app/serve.py), one process.
+EXPOSE 8080 8081
+CMD ["python", "-m", "app.serve"]
 
 FROM runtime AS test
 USER root

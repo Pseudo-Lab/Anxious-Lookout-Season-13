@@ -37,7 +37,9 @@ and measurements are in #58 C.
 | CiliumNetworkPolicy `codex-broker` | ingress: `codex-runner` user-runner Pods and the host (kubelet probes; the cluster sets `allow-localhost: policy`) → 8080. egress: kube-dns 53 (plain L4, no DNS proxy), kube-apiserver 6443, `world` on 443 (default). The `fqdn` switch renders `toFQDNs` `auth.openai.com` and `chatgpt.com` on 443 instead, with all broker DNS through the proxy |
 
 The runner side adds an explicit egress rule to `codex-broker:8080` in
-`user-runner-e2e/40-runner-network.json`. The runner's broader egress narrowing is #62.
+`user-runner-e2e/40-runner-network.json`. Since #62 that file allows runner egress only to the
+broker, kube-dns, the API internal listener (8081) and `world` on 443 (the same internet scope as
+the broker); this broker policy is unchanged by #62.
 
 **Egress: `world` by default (user decision on #60, 2026-10-29).**
 - **What it renders:** `toEntities: world` on TCP 443. The broker reaches **any internet host on 443**, not only

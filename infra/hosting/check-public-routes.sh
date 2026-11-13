@@ -6,7 +6,7 @@ test_image=${ROUTING_TEST_IMAGE:-anxious-hosting-api-test}
 fixture_prefix="anxious-back-route-$$"
 fixture_dir=$(mktemp -d)
 cleanup() {
-  docker rm -f "$fixture_prefix-probe" "$fixture_prefix-gateway" "$fixture_prefix-server" >/dev/null 2>&1 || true
+  docker rm -f "$fixture_prefix-probe" "$fixture_prefix-gateway" "$fixture_prefix-server" "$fixture_prefix-gated" >/dev/null 2>&1 || true
   docker network rm "$fixture_prefix" >/dev/null 2>&1 || true
   rm -f "$fixture_dir/routes.yml" "$fixture_dir/rendered.yml"
   rmdir "$fixture_dir"
@@ -49,6 +49,13 @@ http:
       entryPoints: [web]
       service: fixture
       middlewares: [android]
+    # #62 test-only: a route that leaks every path to the real API public-listener gate with the
+    # runner switch flag on (tests/route_gate_fixture.py), to prove the second layer.
+    leak:
+      rule: 'Host(\`leak.invalid\`)'
+      priority: 30
+      entryPoints: [web]
+      service: gated
   middlewares:
     api: {headers: {customRequestHeaders: {X-Fixture-Service: api}}}
     web: {headers: {customRequestHeaders: {X-Fixture-Service: web}}}
@@ -57,11 +64,17 @@ http:
     fixture:
       loadBalancer:
         servers: [{url: 'http://fixture:8080'}]
+    gated:
+      loadBalancer:
+        servers: [{url: 'http://gated:8080'}]
 YAML
 docker network create --internal "$fixture_prefix" >/dev/null
 docker run -d --name "$fixture_prefix-server" --network "$fixture_prefix" --network-alias fixture \
   --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
   "$test_image" python -m tests.route_fixture >/dev/null
+docker run -d --name "$fixture_prefix-gated" --network "$fixture_prefix" --network-alias gated \
+  --read-only --tmpfs /tmp --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges \
+  "$test_image" python -m tests.route_gate_fixture >/dev/null
 docker run -d --name "$fixture_prefix-gateway" --network "$fixture_prefix" --network-alias gateway \
   --read-only --tmpfs /tmp --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges \
   -v "$fixture_dir/routes.yml:/etc/traefik/routes.yml:ro" \

@@ -1,0 +1,45 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicy",
+      "metadata": {"name": "runner-subresources"},
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConstraints": {
+          "matchPolicy": "Equivalent",
+          "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "codex-runner"}},
+          "resourceRules": [
+            {
+              "apiGroups": [""], "apiVersions": ["v1"], "operations": ["CONNECT"],
+              "resources": ["pods/exec", "pods/attach", "pods/portforward", "pods/proxy"], "scope": "Namespaced"
+            },
+            {
+              "apiGroups": [""], "apiVersions": ["v1"], "operations": ["UPDATE"],
+              "resources": ["pods/ephemeralcontainers"], "scope": "Namespaced"
+            }
+          ]
+        },
+        "validations": [
+          {
+            "expression": "has(request.userInfo.groups) && 'system:masters' in request.userInfo.groups",
+            "message": "runner-subresources: exec, attach, port-forward, proxy and ephemeral containers on codex-runner Pods are for cluster administrators only (#62)",
+            "reason": "Forbidden"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicyBinding",
+      "metadata": {"name": "runner-subresources"},
+      "spec": {
+        "policyName": "runner-subresources",
+        "validationActions": ["Deny"],
+        "matchResources": {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "codex-runner"}}}
+      }
+    }
+  ]
+}
