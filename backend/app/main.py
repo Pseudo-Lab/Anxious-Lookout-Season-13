@@ -67,7 +67,13 @@ def create_app(settings=None):
             raise RuntimeError("Invalid release timestamp")
         datetime.fromisoformat(built.replace("Z", "+00:00"))
         app.state.release = release
+        # #90: open event streams end on SIGTERM/SIGINT before uvicorn waits for responses (no change otherwise).
+        import asyncio
+        from .chat_stream import install_shutdown
+        app.state.chat_stream_shutdown = asyncio.Event()
+        restore = install_shutdown(app.state.chat_stream_shutdown, asyncio.get_running_loop())
         yield
+        restore()
         if getattr(app.state, "chat_stream_client", None) is not None:
             await app.state.chat_stream_client.aclose()  # #90 relay connections
         if app.state.user_runner_runtime:

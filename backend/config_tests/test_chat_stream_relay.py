@@ -354,3 +354,45 @@ def test_no_reader_task_outlives_the_relay():
         await asyncio.sleep(0)
         return [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
     assert asyncio.run(asyncio.wait_for(main(), 3.0)) == []
+
+
+def test_shutdown_event_ends_the_relay_at_once(monkeypatch):
+    monkeypatch.setattr(chat_stream, "HEARTBEAT_SECONDS", 10.0)
+
+    async def main():
+        shutdown = asyncio.Event()
+        dep, _ = deps()
+        relay = Relay(SESSION, None, dep, upstreams([hello(), 30.0]), shutdown=shutdown)
+        out = []
+
+        async def consume():
+            async for chunk in relay.events({"requestId": R1, "state": "running"}):
+                out.append(chunk)
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0.3)
+        started = asyncio.get_running_loop().time()
+        shutdown.set()
+        await asyncio.wait_for(task, 2.0)
+        return asyncio.get_running_loop().time() - started, relay.stats["reason"]
+    elapsed, reason = asyncio.run(main())
+    assert elapsed < 0.5 and reason == "shutdown"
+
+
+def test_install_shutdown_chains_signals():
+    import signal
+    calls = []
+    original = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, lambda signum, frame: calls.append(signum))
+    try:
+        async def main():
+            event = asyncio.Event()
+            restore = chat_stream.install_shutdown(event, asyncio.get_running_loop())
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            await asyncio.sleep(0)
+            restore()
+            return event.is_set()
+        assert asyncio.run(main()) is True and calls == [signal.SIGTERM]
+        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        assert calls == [signal.SIGTERM, signal.SIGTERM]  # restored: only the previous handler now
+    finally:
+        signal.signal(signal.SIGTERM, original)

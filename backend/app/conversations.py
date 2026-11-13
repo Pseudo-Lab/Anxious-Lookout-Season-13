@@ -599,7 +599,8 @@ def register_conversations(app, authorized, sessions, settings, response, write,
         deps = {"target": lambda: runner_for(owner).stream_target(identity),
                 "row": lambda: row_check()[1],
                 "status": lambda: status_value(request, owner)}
-        relay = chat_stream.Relay(str(identity), cursor, deps, stream_client(), stats)
+        relay = chat_stream.Relay(str(identity), cursor, deps, stream_client(), stats,
+                                  getattr(app.state, "chat_stream_shutdown", None))
 
         async def body():
             try:

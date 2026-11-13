@@ -126,8 +126,9 @@ class Relay:
     - status() -> the /codex/status body for this owner
     """
 
-    def __init__(self, session, cursor, deps, client, stats=None):
+    def __init__(self, session, cursor, deps, client, stats=None, shutdown=None):
         self.session, self.cursor, self.deps, self.client = session, cursor, deps, client
+        self.shutdown = shutdown  # an asyncio.Event set on API SIGTERM/SIGINT: every relay ends at once
         self.bound = None
         self.last_id = None
         self.last_status = None
@@ -152,6 +153,9 @@ class Relay:
             yield await self.status_frame(force=True)
             attempts = 0
             while True:
+                if self.stopping():
+                    self.stats["reason"] = "shutdown"
+                    return
                 try:
                     target = await self.call(self.deps["target"])
                 except Exception:
@@ -175,7 +179,7 @@ class Relay:
                 finally:
                     await upstream.aclose()  # cancels and awaits the reader task now, not at garbage collection
                 reason = ended[1] if ended else "end"
-                if reason in {"mismatch", "gone"}:
+                if reason in {"mismatch", "gone", "shutdown"}:
                     if reason == "mismatch":
                         yield frame("sync", {"reason": "mismatch"})
                     self.stats["reason"] = reason
@@ -198,18 +202,33 @@ class Relay:
             self.stats["durationMs"] = round((time.monotonic() - started) * 1000, 3)
 
     async def wait(self, seconds):
-        """Sleep, revalidating on schedule; yields nothing (an async generator so callers can relay heartbeats)."""
-        await asyncio.sleep(seconds)
-        await self.maybe_revalidate()
-        if False:
-            yield b""
+        """Sleep (ended early by an API shutdown), then the periodic checks; yields a changed runner status."""
+        await self.sleep(seconds)
+        status = await self.periodic()
+        if status:
+            yield status
 
-    async def maybe_revalidate(self):
-        if time.monotonic() >= self.revalidate_at:
-            self.revalidate_at = time.monotonic() + REVALIDATE_SECONDS
-            row = await self.call(self.deps["row"])  # raises (closing the stream) when the login or row is gone
-            if row["requestId"] != self.bound and self.bound is not None:
-                pass  # a newer turn exists: the next turn.started rebinds; nothing older is forwarded meanwhile
+    async def sleep(self, seconds):
+        if self.shutdown is None:
+            await asyncio.sleep(seconds)
+            return
+        try:
+            await asyncio.wait_for(self.shutdown.wait(), seconds)
+        except asyncio.TimeoutError:
+            pass
+
+    def stopping(self):
+        return self.shutdown is not None and self.shutdown.is_set()
+
+    async def periodic(self):
+        """Every REVALIDATE_SECONDS: login and ownership again (raises, closing the stream, when either is gone),
+        and the runner status (review d319fcb: the browser stops /codex/status polling while connected, so a change
+        must arrive here). Returns a runner frame when the status changed."""
+        if time.monotonic() < self.revalidate_at:
+            return None
+        self.revalidate_at = time.monotonic() + REVALIDATE_SECONDS
+        await self.call(self.deps["row"])
+        return await self.status_frame()
 
     async def status_frame(self, force=False):
         try:
@@ -266,16 +285,24 @@ class Relay:
                 return waiting and not seen_bound and self.launch_deadline is not None \
                     and time.monotonic() > self.launch_deadline
             while True:
-                timeout_for = HEARTBEAT_SECONDS - (time.monotonic() - last_send)
-                item = await self.next(queue, max(0.05, timeout_for))
-                await self.maybe_revalidate()
-                if launch_overdue() and (item is None or item[0] == "end"):
+                if launch_overdue():
                     # The DB says R_bind runs and the runner never showed it within the window (also across
-                    # reconnects): count a rebind attempt, then a fresh window.
+                    # reconnects), whatever else the runner sends meanwhile (review d319fcb): count a rebind
+                    # attempt, then a fresh window.
                     self.launch_deadline = None
                     yield ("end", "rebind")
                     return
+                timeout_for = HEARTBEAT_SECONDS - (time.monotonic() - last_send)
+                if waiting and not seen_bound and self.launch_deadline is not None:
+                    timeout_for = min(timeout_for, self.launch_deadline - time.monotonic())
+                item = await self.next(queue, max(0.05, timeout_for))
+                status = await self.periodic()
+                if status:
+                    yield status
+                    last_send = time.monotonic()
                 if item is None:
+                    if launch_overdue():
+                        continue  # the deadline check at the loop top, before any heartbeat
                     yield b": hb\n\n"
                     last_send = time.monotonic()
                     continue
@@ -329,12 +356,25 @@ class Relay:
             except (asyncio.CancelledError, Exception):
                 pass
 
-    @staticmethod
-    async def next(queue, seconds):
+    async def next(self, queue, seconds):
+        """The next upstream item, None on timeout, or ('end', 'shutdown') as soon as the API is shutting down."""
+        if self.shutdown is None:
+            try:
+                return await asyncio.wait_for(queue.get(), seconds)
+            except asyncio.TimeoutError:
+                return None
+        if self.shutdown.is_set():
+            return ("end", "shutdown")
+        get, stop = asyncio.ensure_future(queue.get()), asyncio.ensure_future(self.shutdown.wait())
         try:
-            return await asyncio.wait_for(queue.get(), seconds)
-        except asyncio.TimeoutError:
-            return None
+            done, _ = await asyncio.wait({get, stop}, timeout=seconds, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (get, stop):
+                if not task.done():
+                    task.cancel()
+        if get in done:
+            return get.result()
+        return ("end", "shutdown") if stop in done else None
 
     def check_hello(self, hello, target):
         expected = {"ownerId": target["ownerId"], "stateId": target["stateId"], "sessionId": self.session}
@@ -356,3 +396,31 @@ def json_data(fields):
     if not isinstance(value, dict):
         raise Mismatch("data")
     return value
+
+
+def install_shutdown(event, loop):
+    """API SIGTERM/SIGINT: set `event` (every relay ends at once), then uvicorn's own handler. uvicorn waits for open
+    responses before the lifespan shutdown and serve.py sets no graceful timeout (unchanged from main), so an open
+    event stream must end itself. Returns the restore function; outside the main thread nothing is installed."""
+    import signal
+    import threading
+    if threading.current_thread() is not threading.main_thread():
+        return lambda: None
+    installed = []
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        previous = signal.getsignal(sig)
+        if not callable(previous):
+            continue
+
+        def handler(signum, frame, previous=previous):
+            try:
+                loop.call_soon_threadsafe(event.set)
+            finally:
+                previous(signum, frame)
+        signal.signal(sig, handler)
+        installed.append((sig, previous))
+
+    def restore():
+        for sig, previous in installed:
+            signal.signal(sig, previous)
+    return restore

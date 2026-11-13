@@ -110,7 +110,7 @@ def test_events_relay_bound_turn_only_then_end(client, admin, stream_on):
     def handler(request):
         calls.append(request)
         if len(calls) == 1:
-            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=httpx.ByteStream(body))  # a raw, not pre-read, body (review d319fcb)
         return httpx.Response(503)
     client.app.state.chat_stream_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
