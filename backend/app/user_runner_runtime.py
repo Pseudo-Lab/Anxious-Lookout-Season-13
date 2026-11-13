@@ -116,7 +116,8 @@ class BoundRunner:
     def __init__(self, runtime, owner):
         self.runtime, self.owner = runtime, owner
 
-    def call(self, method, path, body=None):
+    def resolve(self, method):
+        """The verified Pod address now: (Runner, pod uid). Same checks for a call and for a stream (#90)."""
         runtime = self.runtime
         runtime.namespace()
         # Serialize dispatch with stop; never use a stale cached Pod address.
@@ -134,9 +135,20 @@ class BoundRunner:
             require(address in runtime.network and not address.is_loopback and not address.is_link_local)
             host = '['+str(address)+']' if address.version == 6 else str(address)
             from .conversations import Runner
-            result = Runner('http://'+host+':8080', runtime.token, self.owner, str(state.state_id)).call(method, path, body)
-            require(result.get('podUid') == str(state.pod_uid))
-            return result
+            return Runner('http://'+host+':8080', runtime.token, self.owner, str(state.state_id)), str(state.pod_uid)
+
+    def call(self, method, path, body=None):
+        runner, pod_uid = self.resolve(method)
+        result = runner.call(method, path, body)
+        require(result.get('podUid') == pod_uid)
+        return result
+
+    def interrupt(self, identity, request_id):
+        return self.call('POST', '/sessions/'+str(identity)+'/interrupt', {'requestId': str(request_id)})
+
+    def stream_target(self, identity):
+        runner, pod_uid = self.resolve('GET')
+        return {**runner.stream_target(identity), 'podUid': pod_uid}
 
     def health(self):
         value = self.call('GET', '/health')

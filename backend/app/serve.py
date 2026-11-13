@@ -81,7 +81,8 @@ def main():
     legacy_public = public_internal()
     settings = Settings.load()
     app = gate(create_app(settings), settings.base_path, legacy_public)
-    config = uvicorn.Config(app, workers=1, access_log=False, proxy_headers=False)
+    # #90: an open event stream must not hold a rolling update; browsers reconnect with their cursor.
+    config = uvicorn.Config(app, workers=1, access_log=False, proxy_headers=False, timeout_graceful_shutdown=5)
     uvicorn.Server(config).run(sockets=[listener(PUBLIC_PORT), listener(INTERNAL_PORT)])
 
 

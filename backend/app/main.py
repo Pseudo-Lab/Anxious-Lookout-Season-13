@@ -68,6 +68,8 @@ def create_app(settings=None):
         datetime.fromisoformat(built.replace("Z", "+00:00"))
         app.state.release = release
         yield
+        if getattr(app.state, "chat_stream_client", None) is not None:
+            await app.state.chat_stream_client.aclose()  # #90 relay connections
         if app.state.user_runner_runtime:
             app.state.user_runner_runtime.close()
         engine.dispose()

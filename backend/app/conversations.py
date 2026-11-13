@@ -1,6 +1,7 @@
 """Owned conversation records and a broker for isolated per-account runners."""
 import hashlib
 import json
+import logging
 import os
 import secrets
 import uuid
@@ -10,6 +11,8 @@ from urllib.parse import urlsplit
 
 import httpx
 from fastapi import BackgroundTasks, Request
+from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import Field
 from sqlalchemy import select, text
 
@@ -29,6 +32,10 @@ class NewConversation(Input):
 class Message(Expected):
     text: str = Field(min_length=1, max_length=50000)
     page: Page | None = None
+
+
+class Interrupt(Input):
+    requestId: str = Field(min_length=36, max_length=36)
 
 
 class ToolRequest(Input):
@@ -65,6 +72,17 @@ class Runner:
 
     def submit(self, identity, body):
         return self.call("POST", "/sessions/" + str(identity) + "/turn", body)
+
+    def interrupt(self, identity, request_id):
+        return self.call("POST", "/sessions/" + str(identity) + "/interrupt", {"requestId": str(request_id)})
+
+    def stream_target(self, identity):
+        """#90: where the API opens this session's runner event stream, and what its hello must say."""
+        headers = {"Authorization": "Bearer " + self.token, "Accept": "text/event-stream"}
+        if self.state_id:
+            headers["X-Runner-State-Id"] = self.state_id
+        return {"url": self.url + "/sessions/" + str(identity) + "/events", "headers": headers,
+                "ownerId": str(self.owner), "stateId": self.state_id, "podUid": None}
 
 
 def runners_from_file():
@@ -144,15 +162,29 @@ def display_items(row):
             if item["beforeTurn"] == index or (index == len(turns) and item["beforeTurn"] > index):
                 result.append({"id": item["id"], "type": "message", "role": "user", "text": item["text"],
                                "source": "platform", "status": "not_recorded", **applied(item["requestId"])})
+    display_only = row.native_record.get("displayOnly") or {}
+    removed = set(row.native_record.get("displayOnlyDropped") or [])
     for index, turn in enumerate(turns):
         add_unrecorded(index)
         metadata = next((entry for entry in scopes if entry.get("turnId") == turn.get("id")), None)
+        # #90: a stopped turn's items say so; its unrecorded partial answer is display only (not in the Codex thread).
+        stopped = {"turnStatus": "interrupted"} if turn.get("status") == "interrupted" else {}
         for item in turn.get("items", []):
             projected = display_native_item(item)
             if metadata and item.get("type") == "userMessage":
                 for value in projected:
                     value.update(text=metadata["text"], **scope_summary(metadata["scope"]))
+            if item.get("type") != "userMessage":
+                for value in projected:
+                    value.update(stopped)
             result.extend(projected)
+        for item in display_only.get(turn.get("id"), []) if not turn.get("modelMismatch") else []:
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and isinstance(item.get("text"), str):
+                result.append({"id": item["id"], "type": "message", "role": "assistant", "text": item["text"],
+                               "partial": True, "displayOnly": True, "turnStatus": "interrupted"})
+        if turn.get("id") in removed:
+            result.append({"id": "partial-removed-" + str(index), "type": "notice", "code": "partial_removed",
+                           "turnStatus": "interrupted"})
     add_unrecorded(len(turns))
     if row.pending_text:
         result.append({"id": "pending-" + str(row.request_id), "type": "message", "role": "user", "text": row.pending_text,
@@ -361,6 +393,9 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                    for turn in record.get("turns", []) if turn.get("id") == result["turnId"]
                    for item in turn.get("items", [])):
                 row.pending_text = None
+        if store.db.is_modified(row):
+            # #90 M5: refresh UPDATEs counted apart (fallback polling vs the stream path, which writes nothing).
+            logging.getLogger("hosting").info("conversation_refresh_write %s", json.dumps({"state": row.state}))
         store.db.flush()
 
     def launch(owner, identity, request_id, token):
@@ -468,6 +503,10 @@ def register_conversations(app, authorized, sessions, settings, response, write,
             for raw in native_items(row):
                 if raw.get("id") == item_id and raw.get("type") in {"userMessage", "agentMessage", "dynamicToolCall", "mcpToolCall"}:
                     return response({"id": item_id, "format": "json", "raw": raw})
+            for turn_id, extra in (row.native_record.get("displayOnly") or {}).items():
+                for raw in extra if isinstance(extra, list) else []:
+                    if isinstance(raw, dict) and raw.get("id") == item_id:
+                        return response({"id": item_id, "format": "json", "raw": {**raw, "type": "displayOnlyAgentMessage"}})
             for raw in row.native_record.get("unrecordedInputs", []):
                 if raw["id"] == item_id:
                     return response({"id": item_id, "format": "json", "raw": {**raw, "type": "platformInput", "status": "not_recorded"}})
@@ -507,8 +546,103 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                 row.updated_at, row.error_code = datetime.now(timezone.utc), None
                 store.db.flush()
                 background.add_task(launch, store.owner, row.id, row.request_id, token)
-                return summary(row)
+                # #90: the Stop target, known from the 202 on (additive field; an idempotent replay returns the same)
+                return {**summary(row), "requestId": str(row.request_id)}
             return write(store, request, Message, body, action, 202)
+
+    # --- #90 chat stream (api-contracts/issue90-chat-stream.md) -------------------------------------------------------
+    from . import chat_stream
+    chat_stream.enabled()  # an invalid RESEARCH_STREAM_ENABLE refuses startup
+    app.state.chat_stream_limits = chat_stream.Limits()
+    app.state.chat_stream_client = None
+
+    def stream_client():
+        if app.state.chat_stream_client is None:
+            app.state.chat_stream_client = httpx.AsyncClient(
+                trust_env=False, follow_redirects=False,
+                limits=httpx.Limits(max_connections=chat_stream.GLOBAL, max_keepalive_connections=0))
+        return app.state.chat_stream_client
+
+    def status_value(request, owner):
+        if app.state.user_runners_enabled:
+            return json.loads(runner_status(request).body)
+        return connection_status(owner)
+
+    @app.get(prefix + "/sessions/{identity}/events")
+    async def events(identity: uuid.UUID, request: Request, after: str | None = None):
+        if not chat_stream.enabled():
+            fail("stream_disabled", "Streaming is not enabled", 404)
+        try:
+            cursor = chat_stream.parse_cursor(after if after is not None else request.headers.get("last-event-id"))
+        except ValueError:
+            fail("validation_error", "Invalid stream cursor", 400)
+
+        def row_check():
+            # Login, approval, role and ownership again (authorized + owned), read only, bounded.
+            with authorized(request) as store:
+                store.db.execute(text("SET LOCAL statement_timeout = '2s'"))
+                require_schema(store)
+                row = owned(store, identity)
+                return store.owner, {"requestId": str(row.request_id) if row.request_id else None, "state": row.state}
+
+        owner, row = await run_in_threadpool(row_check)
+        limits = app.state.chat_stream_limits
+        if not limits.acquire(owner):
+            fail("stream_limit", "Too many open streams", 429)
+        released = []
+
+        def release():
+            if not released:
+                released.append(True)
+                limits.release(owner)
+        stats = {}
+        deps = {"target": lambda: runner_for(owner).stream_target(identity),
+                "row": lambda: row_check()[1],
+                "status": lambda: status_value(request, owner)}
+        relay = chat_stream.Relay(str(identity), cursor, deps, stream_client(), stats)
+
+        async def body():
+            try:
+                async for chunk in relay.events(row):
+                    yield chunk
+            except Exception:
+                stats["reason"] = stats.get("reason") or "closed"  # login/row gone or a broken upstream: close
+            finally:
+                release()
+
+        class Stream(StreamingResponse):
+            async def __call__(self, scope, receive, send):
+                try:
+                    await super().__call__(scope, receive, send)
+                finally:
+                    release()  # also when the body never started (early disconnect)
+                    logging.getLogger("hosting").info("api_stream_summary %s", json.dumps(
+                        {"session": str(identity), **stats}, sort_keys=True))
+        return Stream(body(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
+
+    @app.post(prefix + "/sessions/{identity}/interrupt")
+    def interrupt(identity: uuid.UUID, body: dict, request: Request):
+        if not chat_stream.enabled():
+            fail("stream_disabled", "Streaming is not enabled", 404)
+        with authorized(request, True) as store:
+            require_schema(store)
+            parsed = Interrupt.model_validate(body)
+            row = owned(store, identity, lock=True)  # read and lock only: a stop writes nothing
+            request_id = parse_id(parsed.requestId)
+            if str(request_id) != parsed.requestId:
+                fail("validation_error", "A canonical UUID is required", 422)
+            if row.state != "running" or row.request_id != request_id:
+                fail("conflict", "This turn is not running", 409)
+            owner = store.owner
+        try:
+            result = runner_for(owner).interrupt(identity, request_id)
+            if result.get("state") not in {"interrupting", "not_running"} or result.get("requestId") != str(parsed.requestId):
+                raise ValueError()
+        except ResearchError:
+            raise
+        except Exception:
+            fail("codex_unavailable", "Codex did not confirm the stop", 503)
+        return response({"requestId": str(parsed.requestId), "state": result["state"]})
 
     @app.delete(prefix + "/sessions/{identity}")
     def archive(identity: uuid.UUID, body: dict, request: Request):

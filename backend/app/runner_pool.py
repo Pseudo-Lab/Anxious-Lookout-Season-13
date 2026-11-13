@@ -82,6 +82,15 @@ class PooledRunner:
         with self.pool.bound(self.owner) as runtime:
             return runtime.runner(self.owner).read(identity)
 
+    def interrupt(self, identity, request_id):
+        with self.pool.bound(self.owner) as runtime:
+            return runtime.runner(self.owner).interrupt(identity, request_id)
+
+    def stream_target(self, identity):
+        # Plain data (URL, headers, expected hello): nothing of the per-operation client outlives the scope.
+        with self.pool.bound(self.owner) as runtime:
+            return runtime.runner(self.owner).stream_target(identity)
+
 
 def load(engine, path):
     return Pool(engine, read_private(Path(path)))
