@@ -340,6 +340,7 @@ def test_no_cursor_gets_snapshot_and_cursor_is_atomic(text_on):
     note(hub, "item/agentMessage/delta", itemId="msg-1", delta="hello there ")
     hub.flush(hub.active, final=True)
     subscription, frames = hub.subscribe(SESSION, None)
+    frames = frames + hub.drain_snapshot(subscription)  # the lazy rest after snapshot.begin
     kinds = frames_kinds(frames)
     assert kinds[0] == "snapshot.begin" and kinds[-1] == "snapshot.end"
     assert subscription.cursor == hub.active.seq
@@ -387,6 +388,7 @@ def test_completion_snapshot_carries_result(text_on):
     hub.verified()
     hub.complete("idle", "interrupted", None)
     subscription, frames = hub.subscribe(SESSION, (request, 10 ** 6))
+    frames = frames + hub.drain_snapshot(subscription)
     kinds = frames_kinds(frames)
     assert kinds == ["snapshot.begin", "turn.completed", "snapshot.end"]
 
@@ -400,9 +402,11 @@ def test_snapshot_limit_and_compaction(text_on, monkeypatch):
         start_item(hub, "f-" + str(index), "fileChange", changes=[])
     assert hub.active.floor > 1
     assert frames_kinds([encoded for _, encoded in hub.read(subscription)])[0] == "snapshot.begin"
+    assert frames_kinds(hub.drain_snapshot(subscription))[-1] == "snapshot.end"
     for index in range(20, 40):
         start_item(hub, "f-" + str(index), "fileChange", changes=[])
     assert frames_kinds([encoded for _, encoded in hub.read(subscription)])[0] == "snapshot.begin"
+    assert frames_kinds(hub.drain_snapshot(subscription))[-1] == "snapshot.end"
     for index in range(40, 60):
         start_item(hub, "f-" + str(index), "fileChange", changes=[])
     assert frames_kinds([encoded for _, encoded in hub.read(subscription)]) == ["sync"]
@@ -533,13 +537,14 @@ def test_unverified_turn_never_reaches_a_subscriber(text_on, ending):
     note(hub, "item/agentMessage/delta", itemId="msg-1", delta="early text ")
     hub.flush(hub.active, final=False)
     subscription, frames = hub.subscribe(SESSION, None)
-    seen = b"".join(frames)
+    seen = b"".join(frames + hub.drain_snapshot(subscription))
     if ending == "discard":
         hub.discard("model_unavailable")
         hub.verified()  # a late verify after the discard opens nothing
     hub.complete("failed", "failed", "codex_model_unavailable", hub.active)
-    seen += b"".join(encoded for _, encoded in hub.read(subscription))
-    seen += b"".join(hub.subscribe(SESSION, (request, 0))[1])
+    seen += b"".join(encoded for _, encoded in hub.read(subscription)) + b"".join(hub.drain_snapshot(subscription))
+    again, frames = hub.subscribe(SESSION, (request, 0))
+    seen += b"".join(frames + hub.drain_snapshot(again))
     assert b"early" not in seen
     assert b"turn.completed" in seen
 
@@ -556,3 +561,58 @@ def test_dropped_grace_turn_cursor_resyncs(text_on):
     assert list(hub.previous) == [other]
     assert [encoded for _, encoded in hub.read(subscription)] == [stream_module.frame("sync", {"reason": "expired"})]
     assert hub.read(subscription) == []
+
+
+def test_snapshot_is_lazy_and_bounded_per_frame(text_on):
+    """review c894465: subscribing allocates no copy of the turn; the rest is produced one frame at a time and still
+    reproduces exactly the text sent up to the snapshot's seq."""
+    import tracemalloc
+    hub, request = new_hub(None)
+    hub.verified()
+    start_item(hub)
+    text = "".join("word%05d " % index for index in range(40000))  # ~400 KB
+    for index in range(0, len(text), 32000):
+        note(hub, "item/agentMessage/delta", itemId="msg-1", delta=text[index:index + 32000])
+    hub.flush(hub.active, final=True)
+    retained = hub.active.retained()
+    tracemalloc.start()
+    subscription, frames = hub.subscribe(SESSION, None)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak < 64 * 1024 and hub.active.retained() == retained
+    sizes, pieces = [], []
+    for encoded in subscription.pending:
+        sizes.append(len(encoded))
+        lines = encoded.decode().split("\n")
+        data = json.loads(next(l[6:] for l in lines if l.startswith("data: ")))
+        pieces.append(data.get("text", ""))
+    assert max(sizes) <= stream_module.SNAPSHOT_DATA_LIMIT + 200
+    assert "".join(pieces) == text  # all sent by the snapshot's seq (final flush), nothing more
+
+
+def test_snapshot_text_stops_at_its_seq(text_on):
+    """Text kept but not yet sent as item.delta (rate limit) is not in the snapshot: it follows as events after N."""
+    hub, request = new_hub(None)
+    hub.verified()
+    start_item(hub)
+    note(hub, "item/agentMessage/delta", itemId="msg-1", delta="sent ")
+    hub.flush(hub.active, final=True)
+    hub.active.tokens = 0
+    note(hub, "item/agentMessage/delta", itemId="msg-1", delta="queued ")
+    hub.flush(hub.active, final=False)  # kept, but no token: unsent
+    subscription, frames = hub.subscribe(SESSION, None)
+    texts = [json.loads(next(l[6:] for l in e.decode().split("\n") if l.startswith("data: "))).get("text", "")
+             for e in hub.drain_snapshot(subscription)]
+    assert "".join(texts) == "sent "
+
+
+def test_item_status_events_are_bounded(text_on):
+    hub, request = new_hub(None)
+    hub.verified()
+    start_item(hub, "patch", "fileChange", changes=[])
+    for index in range(20):
+        hub.note({"method": "item/fileChange/requestApproval",
+                  "params": {"threadId": "thread-1", "turnId": "turn-1", "itemId": "patch"}},
+                 "requested" if index % 2 == 0 else "decided")
+    statuses = [data["status"] for _, kind, data in events(hub) if kind == "item.status"]
+    assert statuses == ["approval", "inProgress", "approval", "inProgress"]

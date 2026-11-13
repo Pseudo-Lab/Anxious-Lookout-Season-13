@@ -28,6 +28,7 @@ OUTPUT_TURN_LIMIT = 128 * 1024   # command output streamed per turn
 DELTA_LIMIT = 64 * 1024          # one native delta
 SUMMARY_LIMIT = 2 * 1024         # serialized command summary
 SUMMARY_RAW_LIMIT = 16 * 1024    # raw command chars kept for the summary (a longer command keeps a safe prefix only)
+STATUS_EVENTS_PER_ITEM = 4
 ITEM_ID_LIMIT = 128
 STRUCTURE_DATA_LIMIT = 4 * 1024
 DELTA_DATA_LIMIT = 8 * 1024
@@ -191,6 +192,9 @@ class Item:
         self.completed = False
         self.meta_bytes = 0
 
+    def text_bytes_chars(self):
+        return sum(len(chunk) for chunk in self.text_out)
+
 
 class Turn:
     def __init__(self, session, request):
@@ -219,22 +223,22 @@ class Turn:
                       "bufferPeakBytes": 0, "outputDroppedBytes": 0, "subscribersPeak": 0, "staleFlushes": 0}
         self.samples = deque(maxlen=SAMPLE_RING)
         self.peaks = {"rssKb": 0, "messagesQueue": 0, "flushLagMs": 0}
-        self.snapshot_cache = None  # (seq, [frames], bytes)
+
 
     def retained(self):
         items = sum(item.meta_bytes + item.text_bytes + utf8(item.unsent) + utf8(item.output_tail)
                     + utf8(item.output_unsent) + utf8(item.text.raw) + utf8(item.output.raw)
                     + utf8(getattr(item, "summary_raw", "")) + utf8(json.dumps(item.summary, ensure_ascii=False))
                     for item in self.items.values())
-        snapshot = self.snapshot_cache[2] if self.snapshot_cache else 0
-        return self.event_bytes + items + snapshot + self.pre_bytes
+
+        return self.event_bytes + items + self.pre_bytes  # snapshots are lazy views: nothing retained
 
 
 class Subscription:
     def __init__(self, hub, session):
         self.hub, self.session = hub, session
         self.request, self.cursor = None, 0
-        self.pending = deque()
+        self.pending = None   # the rest of a snapshot (a generator), sent before any later event
         self.snapshots = {}
         self.sent = {}
         self.closed = None
@@ -371,6 +375,9 @@ class Hub:
                 if item is None or item.completed:
                     return
                 item.status = "approval" if approval == "requested" else "inProgress"
+                item.statuses = getattr(item, "statuses", 0) + 1
+                if item.statuses > STATUS_EVENTS_PER_ITEM:  # bounded per item: the send estimate holds
+                    return
                 if turn.stopped is None and not hasattr(item, "summary_raw"):  # else sent after its item.started
                     self.structural(turn, "item.status", {"itemId": item.identity, "status": item.status})
                 return
@@ -473,7 +480,7 @@ class Hub:
         turn.stats["eventBytes"] += len(encoded)
         if turn.stats["firstEventMs"] is None and kind == "item.delta":
             turn.stats["firstEventMs"] = round((time.monotonic() - turn.started_at) * 1000, 3)
-        turn.snapshot_cache = None
+
         while len(turn.events) > MAX_EVENTS or turn.event_bytes > MAX_EVENT_BYTES:
             seq, old = turn.events.popleft()
             turn.event_bytes -= len(old)
@@ -745,43 +752,57 @@ class Hub:
             return [frame("sync", {"reason": "overflow"})]
         subscription.snapshots[turn.request] = count + 1
         subscription.request, subscription.cursor = turn.request, turn.seq
-        if turn.snapshot_cache is not None and turn.snapshot_cache[0] == turn.seq:
-            return list(turn.snapshot_cache[1])
-        frames = [frame("snapshot.begin", {"requestId": turn.request, "turnState": turn.state, "seq": turn.seq,
-                                           **({"stopped": turn.stopped} if turn.stopped else {})})]
+        # Lazy (review c894465): only snapshot.begin is built here. The rest is a view of references captured at seq N
+        # (the item order, each item's status/summary objects and its append-only text_out list with the length sent
+        # by N) and turns into frames one at a time as the stream sends them; nothing is copied or cached. Command
+        # output is never in a snapshot (its tail is a sliding window): the item says it was omitted.
+        view = []
         if turn.verified and not turn.discarded:  # nothing of an unverified turn (model check) leaves, snapshot included
             for name in turn.order:
                 item = turn.items[name]
                 if hasattr(item, "summary_raw"):
                     continue
-                base = {"requestId": turn.request, "itemId": name, "kind": item.kind, "status": item.status, **item.summary}
-                frames.append(frame("snapshot.item", base))
-                if self.text and turn.stopped is None:
-                    text = "".join(item.text_out)[: max(0, len("".join(item.text_out)) - len(item.unsent))] if item.unsent else "".join(item.text_out)
-                    for piece in self.pieces(turn, name, text, "text"):
-                        frames.append(piece)
-                    if item.output_tail:
-                        frames.append(frame("snapshot.item", {"requestId": turn.request, "itemId": name,
-                                                              "output": {"tail": item.output_tail[-TEXT_CHUNK:],
-                                                                         "truncated": item.output_dropped > 0,
-                                                                         "droppedBytes": item.output_dropped}}))
-        if turn.result is not None:
-            frames.append(frame("turn.completed", {"requestId": turn.request, **turn.result}))
-        frames.append(frame("snapshot.end", {"requestId": turn.request, "seq": turn.seq}, turn.request + ":" + str(turn.seq)))
-        turn.snapshot_cache = (turn.seq, frames, sum(len(part) for part in frames))
-        return list(frames)
+                sent = item.text_bytes_chars() - len(item.unsent) if self.text and turn.stopped is None else 0
+                view.append((name, item.kind, item.status, item.summary, item.text_out, sent,
+                             item.output_sent > 0 or bool(item.output_unsent)))
+        subscription.pending = self.snapshot_rest(turn.request, turn.seq, view,
+                                                  dict(turn.result) if turn.result is not None else None)
+        return [frame("snapshot.begin", {"requestId": turn.request, "turnState": turn.state, "seq": turn.seq,
+                                         **({"stopped": turn.stopped} if turn.stopped else {})})]
 
     @staticmethod
-    def pieces(turn, name, text, field):
-        """`text` as snapshot.item frames each within SNAPSHOT_DATA_LIMIT (serialized)."""
-        result, rest = [], text
-        while rest:
-            chunk = rest[: SNAPSHOT_DATA_LIMIT // 4]
-            while len(data_bytes({"requestId": turn.request, "itemId": name, field: chunk})) > SNAPSHOT_DATA_LIMIT:
-                chunk = chunk[: len(chunk) // 2]
-            result.append(frame("snapshot.item", {"requestId": turn.request, "itemId": name, field: chunk}))
-            rest = rest[len(chunk):]
-        return result
+    def snapshot_rest(request, seq, view, result):
+        """The snapshot after snapshot.begin, one frame at a time (each within SNAPSHOT_DATA_LIMIT serialized)."""
+        for name, kind, status, summary, chunks, sent, had_output in view:
+            yield frame("snapshot.item", {"requestId": request, "itemId": name, "kind": kind, "status": status, **summary,
+                                          **({"output": {"omitted": True}} if had_output else {})})
+            buffer, remaining = "", sent
+            for chunk in list(chunks[:len(chunks)]):  # the list object only grows; its prefix is what N had sent
+                if remaining <= 0:
+                    break
+                piece = chunk[:remaining]
+                remaining -= len(piece)
+                buffer += piece
+                while len(buffer) >= SNAPSHOT_DATA_LIMIT // 4:
+                    part = buffer[: SNAPSHOT_DATA_LIMIT // 4]
+                    while len(data_bytes({"requestId": request, "itemId": name, "text": part})) > SNAPSHOT_DATA_LIMIT:
+                        part = part[: len(part) // 2]
+                    yield frame("snapshot.item", {"requestId": request, "itemId": name, "text": part})
+                    buffer = buffer[len(part):]
+            while buffer:
+                part = buffer[: SNAPSHOT_DATA_LIMIT // 4]
+                while len(data_bytes({"requestId": request, "itemId": name, "text": part})) > SNAPSHOT_DATA_LIMIT:
+                    part = part[: len(part) // 2]
+                yield frame("snapshot.item", {"requestId": request, "itemId": name, "text": part})
+                buffer = buffer[len(part):]
+        if result is not None:
+            yield frame("turn.completed", {"requestId": request, **result})
+        yield frame("snapshot.end", {"requestId": request, "seq": seq}, request + ":" + str(seq))
+
+    def drain_snapshot(self, subscription):
+        """The pending snapshot frames, materialized (tests and small callers only; the stream iterates lazily)."""
+        pending, subscription.pending = subscription.pending, None
+        return list(pending) if pending is not None else []
 
     def read(self, subscription):
         """[(seq or None, frame)] after the subscription's cursor; follows into the session's next turn."""
@@ -850,13 +871,22 @@ async def stream(hub, subscription, initial, hello, stopping):
     """The SSE body: hello, the initial frames, then events as they are appended; a heartbeat every 15 s."""
     subscription.loop, subscription.wake = asyncio.get_running_loop(), asyncio.Event()
     trace = trace_enabled()
+    def lazy_snapshot():
+        """The rest of a pending snapshot, one frame at a time ((None, frame) pairs, never all at once)."""
+        pending, subscription.pending = subscription.pending, None
+        for encoded in pending or ():
+            yield None, encoded
+
     try:
         yield frame("hello", hello)
         for encoded in initial:
             yield encoded
         while subscription.closed is None and not stopping():
-            frames = hub.read(subscription)
-            if not frames:
+            if subscription.pending is not None:  # a snapshot's rest goes out before any later event
+                frames = lazy_snapshot()
+            else:
+                frames = hub.read(subscription)  # a snapshot here is its begin frame; the rest is drained next round
+            if frames == []:
                 try:
                     await asyncio.wait_for(subscription.wake.wait(), HEARTBEAT_SECONDS)
                 except asyncio.TimeoutError:
