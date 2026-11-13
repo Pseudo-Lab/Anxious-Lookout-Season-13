@@ -7,86 +7,80 @@ Issue: https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/90.
 - **On error**: a nonzero rc is reported, never re-run.
 - **Turn budget**: phases P0–P4 use **no Codex turn**. P5 needs the user's turn budget first and is not run before that.
 
-All commands run inside the guest unless a step says otherwise. Chain time-coupled commands in one ssh command (relay gaps).
+All guest commands run as root inside the guest. Chain time-coupled commands in one ssh command (relay gaps).
+
+**Executable blocks (r3, PM 2026-11-14)**: the commands PM runs are reviewed scripts in `infra/hosting/m3/chat-stream/vm/`, delivered in stages. Each stage's pins exist only after the previous stage's output, as in #68 (`native-shell/vm/`):
+
+| Stage | Script(s) | Runs where | Status |
+|---|---|---|---|
+| A | `i90-look.py` (P0 remainder), `i90-host-build.sh` (P1 build) | guest / development server | this revision |
+| B | `i90-import.sh` (P1 import, pinned to the stage A build output) | guest | after the build output |
+| C | `i90-switch.py` (P2: api image + runner binding, survey → expected file → precheck → run) | guest | after the import |
+| D | P3/P4 blocks (L measurement on the stopped volume; API flag; P4-0..4 with review's client; session) | guest | after P2 |
+
+Guest layout (the native68 pattern):
+- evidence and private files: `/root/issue90/` (root 0700). P0 is already there in `/root/issue90/p0/`.
+- archives copied from the development server: `/home/opc/issue90-images/`.
+- the stage scripts: `/root/issue90/`, each checked against its reviewed sha256 before it runs.
 
 ## P0 — read-only inventory (before anything changes)
 
-Record, and keep each as a rollback copy:
-- **Deployment specs**: `kubectl -n m2-hosting get deploy api -o json`, the runner-controller Deployment, and the ConfigMaps the api Deployment reads. Export these privately; do not publish values.
-- **Image references**: `sudo /usr/local/bin/k3s ctr -n k8s.io images ls` (rows for the current API/runtime and runner images, column DIGEST).
-- **Runner state**: the runner registry rows (owner, phase, generation, revision, pod UID) and each published binding's `plan.image`. Read them the same read-only way the #61/#68 steps did (`ops.runner_binding_image report` needs `oldPlanSha256` from this).
-- **No turn running**: no conversation in `running`. The same read-only check as the earlier runner stages. If one is running, stop here.
-- **Flags**: the api Deployment env has no `RESEARCH_STREAM_ENABLE`, and the runner Pod env has no `RUNNER_STREAM_TEXT` (`runner_kube.py` sets neither). Both default to `false`.
+Done by PM (2026-11-14): the api and runner-controller Deployments, the full image list, no `RESEARCH_STREAM_ENABLE`, no runner Pod.
 
-## P1 — build the images in the guest (from the approved SHA)
+**Remainder**: `python3 -I -B /root/issue90/i90-look.py | tee /root/issue90/p0/look.txt; echo "rc=${PIPESTATUS[0]}"` (bash).
+- It prints, read only: every registry row joined to its binding (fence, `plan.image`, `oldPlanSha256` = the tool's plan digest, pending work, proofs); the totals (open stops/entries/outbox/admissions, live sessions, `running` conversations); client sessions; both Deployments (UID, replicas, each container's and init container's name, image, env names, and the values of only the stream/idle/allowlist names); runner Pods; the `anxious-dev-runtime`/`anxious-dev-runner` image rows.
+- Its SQL runs inside `BEGIN READ ONLY` as postgres in `postgres-0` (pa-switch.py `rows`).
+- If `running` is not 0, stop here.
 
-Use the guest's Docker (containerd image store, see `infra/k3s/DEV-VM.md`), with the production build arguments. `FULL_SHA` is the approved SHA above. `BUILT_AT` is the UTC build time, recorded.
+## P1 — build on the development server, import into the guest
 
-Two SHAs, never one checkout (review 70e92e7):
-- **Image source**: `IMAGE_SHA` (the reviewed code). `test "${#IMAGE_SHA}" = 40` before use.
-- **Tools and this file**: the reviewed procedure commit `TOOL_SHA`, given in the review/PM message (it adds `infra/hosting/m3/chat-stream/`, which older code commits do not have).
-
-Each is extracted with `git archive` into its own directory. Nothing is checked out, so neither can disappear mid-run.
+**Build (stage A)**: on the development server, in this repository's checkout, never sudo:
 
 ```sh
-# Separate, fresh directories (refuse if they already exist).
-mkdir /PRIVATE/issue90 /PRIVATE/issue90/build /PRIVATE/issue90/tools
-git -C "$SRC" fetch
-git -C "$SRC" archive "$IMAGE_SHA" | tar -x -C /PRIVATE/issue90/build
-git -C "$SRC" show "$TOOL_SHA:infra/hosting/m3/chat-stream/journal_lengths.py" > /PRIVATE/issue90/tools/journal_lengths.py
-git -C "$SRC" show "$TOOL_SHA:infra/hosting/m3/chat-stream/DEV-VM.md" > /PRIVATE/issue90/tools/DEV-VM.md
-sha256sum /PRIVATE/issue90/tools/journal_lengths.py /PRIVATE/issue90/tools/DEV-VM.md   # compare with the reviewed hashes
-docker build -f /PRIVATE/issue90/build/backend/Dockerfile --target runtime --build-arg APP_GIT_SHA="$IMAGE_SHA" \
-  --build-arg APP_BUILT_AT="$BUILT_AT" -t "anxious-s13-issue90-runtime:$IMAGE_SHA" /PRIVATE/issue90/build
-docker build -f /PRIVATE/issue90/build/backend/Dockerfile --target runner --build-arg APP_GIT_SHA="$IMAGE_SHA" \
-  --build-arg APP_BUILT_AT="$BUILT_AT" -t "anxious-s13-issue90-runner:$IMAGE_SHA" /PRIVATE/issue90/build
-docker save "anxious-s13-issue90-runtime:$IMAGE_SHA" "anxious-s13-issue90-runner:$IMAGE_SHA" -o /PRIVATE/issue90/images.tar
-sha256sum /PRIVATE/issue90/images.tar
-sudo /usr/local/bin/k3s ctr -n k8s.io images import /PRIVATE/issue90/images.tar
-sudo /usr/local/bin/k3s ctr -n k8s.io images ls | grep issue90
+infra/hosting/m3/chat-stream/vm/i90-host-build.sh "$IMAGE_SHA" /home/infmedix/issue90-build-$(date -u +%Y%m%dT%H%M%SZ)
+echo "rc=$?"
 ```
 
-- Then tag the repo@sha256 references from the DIGEST column, as in `infra/hosting/README.md`. Do not use `import --digests`.
-- **The digests are produced here, on the guest.** back does not quote them in advance. Record runtime and runner `repo@sha256` from the `images ls` output (pins copied from output, never typed).
+- **What it is**: `native-shell/vm/pa-host-build.sh` (reviewed) with only listed changes (its header names them; `config_tests/test_i90_vm.py` checks every changed line).
+- **Context**: `git archive "$IMAGE_SHA"`, never the working tree.
+- **Output**: both images and their archives (`anxious-dev-runner:90-<short>`, `anxious-dev-runtime:90-<short>`), the runner gate and content checks, and the runtime's `/app/release.json` sha.
+- **Send back to back**: the final lines (host ids, archive sha256s) and the output directory.
 
-## P2 — deploy with both flags off
+**Import (stage B)**:
+- Copy the two archives to `/home/opc/issue90-images/` (the native68 path pattern). Then run `i90-import.sh` (pa-import.sh pattern, both archives).
+- It checks the chain: source sha → host id → archive sha256 → import digest → CRI id = host id, then the digest reference.
+- back writes it with the stage A output pins; review clears it by hash.
 
-**API**: the #62 step A pattern (`infra/hosting/m3/user-runner-e2e/RUNNER-NETWORK.md`).
-- Render `infra/hosting/render.sh` with `API_IMAGE` = the new runtime `repo@sha256` and every other input as recorded in P0.
-- Server dry-run and diff, then apply **only Deployment `api`**. Do not set `RESEARCH_STREAM_ENABLE`.
-- `kubectl -n m2-hosting rollout status deploy/api`.
+## P2 — deploy with both flags off (stage C, `i90-switch.py`)
+
+**Correction (r3)**: earlier revisions said to render `infra/hosting/render.sh` and apply Deployment `api`. On this VM that would replace the live api spec: it has an init container (`runner-pool-input`) and sets its env directly (no envFrom, P0), and `render.sh` produces neither. **`render.sh` is not used.**
+
+`i90-switch.py` follows `native-shell/vm/pa-switch.py` (reviewed): survey → `i90-expected.json` (written by back from the survey output only, cleared by review by hash) → precheck → run. The run does:
+1. **Window**: runner-controller and api scaled to 0 by UID-preconditioned patch, every owner `idle_stopped`, no runner Pod, no client session.
+2. **Runner binding**: `ops.runner_binding_image` report → apply for the owner(s) the expected file names. `newImage` is the stage B runner digest reference; the fence and `oldPlanSha256` come from the survey.
+3. **api image**: an image-only, UID-preconditioned change of the api Deployment. Only the containers that run the runtime image move to the stage B runtime digest reference; nothing else in the spec changes, and `RESEARCH_STREAM_ENABLE` is not set.
+4. **Reopen**: api to 1 (`/api/health` 200, `/api/version` = `IMAGE_SHA`), then runner-controller to 1 (its image unchanged), then an observation period with no unexpected runner Pod.
+
+It also keeps pa-switch.py's precheck rc 3, forward report, in-window undo, FREEZE and evidence rules.
 - The runner-controller image stays as it is for P0–P4. With both stream flags unset, `IMAGE_SHA` renders a runner Pod exactly as the current controller does (P5-0 adds keys only for `true`; `runner_controller.py` is unchanged since c50c41c), and the new API accepts that Pod. The controller moves to the same runtime image only at P5, with the flags (P5-0 below).
 
-**Runner**: the per-binding image swap (`infra/hosting/m3/multi-user-runners/CUTOVER.md` section 6, `rollout/README.md` "Existing binding images").
-- For each owner in `idle_stopped` with a completed termination proof, with entry stopped and runner-controller scaled to 0: `ops.runner_binding_image report` → review → `apply`.
-  - Inputs: `newImage` = the new runner `repo@sha256`, plus the P0 fence (`owner`, `state`, `generation`, `revision`, `oldPlanSha256`).
-- Scale runner-controller back. The next entry renders the Pod from the new plan.
-
-**Regression checks (flags off, no turn)**:
-- `/api/health` and `/api/version` show the approved SHA.
-- `/api/research/codex/status` keeps its earlier shape. Prepare one runner entry (the existing prepare path) and check it reaches `available: true` (an explicit signal: `/codex/status` reads `available:true`, not an empty log).
+**Regression checks (flags off, no turn; stage D block)**:
+- `/api/health` and `/api/version` show `IMAGE_SHA`.
+- `/api/research/codex/status` keeps its earlier shape. Prepare one runner entry (the existing prepare path) and check it reaches `available: true` (an explicit signal, not an empty log).
 - `GET /api/research/sessions` and `GET /api/research/sessions/{id}` give the same items as before for an existing conversation.
 - `GET …/events` answers 404 `stream_disabled`, and `POST …/interrupt` answers 404.
-- Use the browser session from `infra/k3s/DEV-VM.md` (token file in the guest, `session_digest` computed in the API image).
+- The browser session follows `infra/k3s/DEV-VM.md` (token file in the guest, `session_digest` computed in the API image); the stage D block creates and removes it.
 - **Sending a message is a Codex turn**: it is in P5 (S0), not here.
 
-**Rollback**: apply the saved api Deployment, and run `ops.runner_binding_image` back to each owner's P0 `plan.image` (the same report/apply, idle_stopped). Nothing in the DB schema changes in #90, so no data step.
+**Rollback**: `i90-switch.py`'s reverse path. The runner binding goes back to its P0 `plan.image` (report/apply, `idle_stopped`), and the api containers go back to their P0 images (the same image-only change). Nothing in the DB schema changes in #90, so no data step.
 
 ## P3 — L measurement (read only, no turn)
 
 L is the longest recorded secret literal of a runner's redaction journal. Streamed text waits L−1 chars (design r3 B1).
 
-1. For an owner whose runner is in `idle_stopped` (no Pod), find the control PVC's PV path:
-   - `kubectl -n codex-runner get pvc <control volume of the binding plan> -o jsonpath='{.spec.volumeName}'`
-   - then `kubectl get pv <name> -o jsonpath='{.spec.local.path}{.spec.hostPath.path}'`
-2. Run the reviewed script on that directory, read only, from the new runtime image:
-
-```sh
-docker run --rm --pull=never --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
-  --user 0:0 -v "$PV_PATH:/control:ro" -v /PRIVATE/issue90/tools:/m:ro \
-  --entrypoint python "anxious-s13-issue90-runtime:$IMAGE_SHA" -I -B /m/journal_lengths.py /control
-echo "rc=$?"
-```
+The stage D block does this; the steps it takes:
+1. For an owner whose runner is in `idle_stopped` (no Pod), the control PVC name is the binding plan's `control.name` (the plan in P0's `look.txt`). Its PV path: `kubectl -n codex-runner get pvc <name> -o jsonpath='{.spec.volumeName}'`, then `kubectl get pv <pv> -o jsonpath='{.spec.local.path}{.spec.hostPath.path}'`.
+2. Run `journal_lengths.py` (its reviewed sha256 checked first) on that directory, read only, in a throwaway container with no network, a read-only root, all capabilities dropped and the PV mounted read only. The block names the exact container image and command.
 
 - **Output**: one JSON line `{"ok", "literals", "L", "holdbackChars", "lengths": {length: count}}`. No literal, digest, filter or MAC.
 - **Exit codes**: 2 = refused input (missing, symlink, non-regular file, hot `-journal`/`-wal`), 3 = database error. Report the rc, do not retry.
