@@ -21,6 +21,28 @@ def rolling(value):
     return result
 
 
+def merge_spans(hits):
+    """Sorted, merged [start, end) ranges; touching ranges merge too (start <= previous end), as text() always did."""
+    merged = []
+    for start, end in sorted(hits):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def redact(value, merged):
+    """`value` with each merged range replaced by one marker."""
+    if not merged:
+        return value
+    parts, previous = [], 0
+    for start, end in merged:
+        parts.extend((value[previous:start], "[redacted]"))
+        previous = end
+    return "".join(parts) + value[previous:]
+
+
 class ProjectionJournal:
     VERSION = 1
 
@@ -78,7 +100,9 @@ class ProjectionJournal:
         payload["mac"] = self.journal_mac(payload)
         return payload
 
-    def text(self, value):
+    def spans(self, value):
+        """The merged [start, end) ranges of every recorded literal in `value` (#90: the stream holdback needs the
+        ranges, not only the redacted text)."""
         hits = []
         for length, groups in self.values.items():
             if length > len(value):
@@ -91,19 +115,15 @@ class ProjectionJournal:
                     hits.append((offset, offset + length))
                 if offset + length < len(value):
                     current = ((current - ord(value[offset]) * factor) * BASE + ord(value[offset + length])) & MASK
-        if not hits:
-            return value
-        merged = []
-        for start, end in sorted(hits):
-            if merged and start <= merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
-            else:
-                merged.append((start, end))
-        parts, previous = [], 0
-        for start, end in merged:
-            parts.extend((value[previous:start], "[redacted]"))
-            previous = end
-        return "".join(parts) + value[previous:]
+        return merge_spans(hits)
+
+    def generation(self):
+        """(literal count, longest literal length) of this journal: the stream holdback's L and its staleness check."""
+        lengths = [length for length, groups in self.values.items() for group in groups.values() for _ in group]
+        return len(lengths), max(lengths, default=0)
+
+    def text(self, value):
+        return redact(value, self.spans(value))
 
     def sanitize(self, value):
         if isinstance(value, str):
