@@ -602,14 +602,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
         relay = chat_stream.Relay(str(identity), cursor, deps, stream_client(), stats,
                                   getattr(app.state, "chat_stream_shutdown", None))
 
-        async def body():
-            try:
-                async for chunk in relay.events(row):
-                    yield chunk
-            except Exception:
-                stats["reason"] = stats.get("reason") or "closed"  # login/row gone or a broken upstream: close
-            finally:
-                release()
+        body = lambda: chat_stream.relay_body(relay, row, release)  # noqa: E731 (closes the relay before release)
 
         def closed():
             release()  # also when the body never started (early disconnect)

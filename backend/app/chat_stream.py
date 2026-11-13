@@ -5,6 +5,7 @@ DB or Kubernetes read here is a short threadpool call (connect, rebind, 60 s rev
 event loop and holds no DB session. Turn frames are forwarded only for the bound request (design r3 Q1).
 """
 import asyncio
+import contextlib
 import json
 import os
 import time
@@ -438,3 +439,17 @@ def install_shutdown(event, loop):
         for sig, previous in installed:
             signal.signal(sig, previous)
     return restore
+
+
+async def relay_body(relay, row, finished):
+    """The /events response body. The relay generator is closed explicitly (review 7d6f247): when the response is
+    stopped or the browser leaves, its upstream reader and connection are closed before `finished` (the slot
+    release) runs, not later by a garbage-collection finalizer. A gone login/row or a broken upstream closes."""
+    try:
+        async with contextlib.aclosing(relay.events(row)) as events:
+            async for chunk in events:
+                yield chunk
+    except Exception:
+        relay.stats["reason"] = relay.stats.get("reason") or "closed"
+    finally:
+        finished()
