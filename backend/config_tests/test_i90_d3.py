@@ -137,6 +137,8 @@ class Guest:
         if tag == "session":
             token_hash = re.search(r"token_hash='([0-9a-f]{64})'", text).group(1)
             return 0, json.dumps({"n": 1 if self.sessions.get(token_hash) else 0})
+        if tag == "revoke" and self.faults.get("revoke_fails"):
+            return 3, ""
         if tag == "revoke":
             token_hash = re.search(r"token_hash='([0-9a-f]{64})'", text).group(1)
             self.sessions[token_hash] = False
@@ -487,3 +489,27 @@ def test_pins_are_the_committed_files():
     m = load()
     assert m.EXPECTED_SHA == hashlib.sha256((VM / "i90-expected.json").read_bytes()).hexdigest()
     assert re.fullmatch(r"[0-9a-f]{64}", m.CLIENT_SHA)
+
+
+def test_a_failed_revoke_is_rc70_whatever_the_step_rc(guest):
+    """Review 65291e6 major: a live session is never hidden behind a measurement failure (step rc kept)."""
+    m, g, evidence, doc = guest(never_ready=True)
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    g.faults["revoke_fails"] = True
+    assert m.main(["i90-d3.py", "p4"]) == 70
+    done = json.loads((run_dir(evidence, "p4") / "exit.json").read_text())
+    assert done["stepRc"] == 5 and done["sessionRevoked"] is False and done["runnerReleased"] is True
+    assert any(g.sessions.values())  # the session is still there, and the rc says so
+
+
+def test_an_evidence_failure_after_a_step_failure_is_rc9_with_the_step_rc_kept(guest, monkeypatch):
+    m, g, evidence, doc = guest(never_ready=True)
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    real_fsync = m.os.fsync
+    def failing(fd):
+        if m.OUT["stream"] is not None and fd == m.OUT["stream"].fileno() and ("POST", m.BASE + "/codex/runner") in g.requests:
+            raise OSError(28, "No space left on device")
+        return real_fsync(fd)
+    monkeypatch.setattr(m.os, "fsync", failing)
+    assert m.main(["i90-d3.py", "p4"]) == 9
+    assert json.loads((run_dir(evidence, "p4") / "exit.json").read_text())["stepRc"] == 5

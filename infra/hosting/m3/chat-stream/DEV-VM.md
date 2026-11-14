@@ -202,7 +202,8 @@ table).
     entry or API restart; `stopped at:` and `verdict overall pass: False`.
   - Cleanup results decide the final rc after the step rc (kept as `stepRc`; 7/8 stay): runner release not proved 6
     (the cleanup sends the stop and proves the release), a client container or the private files left 80, the
-    session revoke 70, evidence 9. `verdict overall pass` is computed after them.
+    session revoke 70, evidence 9 - each whatever the step rc (r11, review 65291e6: a live session is never hidden
+    behind a measurement failure). `verdict overall pass` is computed after them.
   - The client containers run with `--security-opt label=disable` (as D2); before any runner start a probe container
     with the same image, user and mounts must read both private files (else rc 5, nothing changed).
 

@@ -30,7 +30,8 @@ Pod's log from before the restart).
 Every step prints `verdict <step>: True|False`; rc 0 means every step ran and its evidence was recorded, not that
 every verdict is True (a last line names the False ones). PM judges rc and the verdict lines together.
 
-rc (the step's own rc is kept in exit.json `stepRc`; cleanup failures override it, 7/8 excepted):
+rc (the step's own rc is kept in exit.json `stepRc`; 7/8 (held) stay; otherwise these override it, in this order:
+runner release not proved 6 > a container or private files left 80 > session revoke not proved 70 > evidence 9):
 0 ran to its end (the verdicts decide the pass); 3 refused before any change (each action's conditions, see
 precheck); 4 a flag patch was refused (nothing changed); 5 a measurement step could not run, or the client container
 cannot read its private files (cleanup ran and proved); 6 runner stop/release not proved, in a step or in the cleanup;
@@ -186,7 +187,8 @@ def record(ev, **items):
 
 
 def record_required(ev, code, message, **items):
-    """Like record, but a failed durable write raises Stop(code): for values a later step depends on."""
+    """Like record, but a failed durable write raises Stop(code): for values a later step depends on (flag-on's
+    baseline: 3, nothing sent; the value after P4-3: 9)."""
     try:
         path = os.path.join(ev, 'run.json')
         value = json.load(open(path)) if os.path.exists(path) else {}
@@ -197,7 +199,7 @@ def record_required(ev, code, message, **items):
     except Stop:
         raise
     except Exception:
-        OUT['failed'] = True
+        # reported by its own rc (code), not as a general evidence failure (which would override it with 9)
         raise Stop(code, message) from None
 
 
@@ -1207,9 +1209,9 @@ def main(argv):
             code = 6
         elif not gone or private is False:
             code = 80
-        elif code == 0 and revoked is False:
+        elif revoked is False:  # whatever the step rc (review 65291e6 major): a live session is never hidden
             code = 70
-        elif code == 0 and OUT.get('failed'):
+        elif OUT.get('failed'):
             code = 9
     say('cleanup: runner released %s; client containers gone %s; private files removed %s; session revoked %s'
         % ({None: 'n/a'}.get(runner, runner), gone, {None: 'n/a'}.get(private, private),
