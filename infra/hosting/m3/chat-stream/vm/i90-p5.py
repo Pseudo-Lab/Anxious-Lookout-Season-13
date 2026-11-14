@@ -29,7 +29,7 @@ controller) by inverse patches whose tests name every entry it removes, and prov
 the recorded pre-enable ones (`equal: True`). PM: disable runs after every enable whatever `turns` gave; the only
 exception is a held state (rc 7 / 8 of any p5 action), which back and review decide; disable refuses then.
 
-Turns: one browser session for …5805 (1 h; revoked in a `finally` that never raises), the P5 conversation (created by
+Turns: one browser session for …5805 (3 h: `turns` runs 7 turns; revoked in a `finally` that never raises), the P5 conversation (created by
 `s0`, POST /sessions is not a turn), an explicit runner entry before the first send of an action (POST /codex/runner,
 ready by the D1 rule: available true at the +65 s read) with the runner Pod env checked (`s0`: no stream key; `turns`:
 RUNNER_STREAM_TEXT=true and STREAM_TRACE=true), review's measuring client (CLIENT_SHA) in throwaway guest containers
@@ -567,7 +567,7 @@ def create_session(ev):
     record(ev, session='pending', sessionId=token_hash[:16])
     try:
         rows = sql('session', "WITH s AS (INSERT INTO auth.sessions(token_hash,account_id,csrf_token,expires_at) VALUES "
-                   "('%s','%s','%s',now()+interval '1 hour') RETURNING token_hash) SELECT "
+                   "('%s','%s','%s',now()+interval '3 hours') RETURNING token_hash) SELECT "
                    "json_build_object('id',left(token_hash,16)) FROM s;" % (token_hash, OWNER, csrf), 5, write=True)
     except Stop:
         raise Stop(5, 'session: insert failed or its result is unknown (removed below)') from None
@@ -575,7 +575,7 @@ def create_session(ev):
         raise Stop(5, 'session: insert answered another row')
     SESSION.update(created=True, token=token, csrf=csrf)
     record(ev, session='created')
-    say('session created: id %s, 1 hour, owner …5805' % token_hash[:16])
+    say('session created: id %s, 3 hours, owner …5805' % token_hash[:16])
 
 
 def revoke_session(ev):
