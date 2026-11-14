@@ -17,6 +17,7 @@ All guest commands run as root inside the guest. Chain time-coupled commands in 
 | B | `i90-import.sh` (P1 import, pinned to the stage A build output) | guest | after the build output |
 | C | `i90-switch.py` (P2: api image + runner binding, survey → expected file → precheck → run) | guest | after the import |
 | D | P3/P4 blocks (L measurement on the stopped volume; API flag; P4-0..4 with review's client; session) | guest | after P2 |
+| R | the r4 redeploy, flags off: `i90-host-build.sh` (R-A), `i90r-import.sh` (R-B), `i90r-switch.py` (R-C); rollback `i90rb-switch.py` (section "Stage R") | development server / guest | r16, after D3 |
 
 Guest layout (the native68 pattern):
 - evidence and private files: `/root/issue90/` (root 0700). P0 is already there in `/root/issue90/p0/`.
@@ -157,7 +158,14 @@ Client: review's `artifacts/review/issue90/p4_client.py` (sha256 `e185f7f9d4fd39
 - **Browser stream**: the frames the client saw, and when it ended.
 - **API slot**: the `api_stream_summary` line the API writes when a stream's slot is released (one line per closed connection, `reason` included).
 
-After the runner stops, the API relay is **expected to stay open**. It sends `runner{available:false}`, then waits in its not-ready loop (up to `NOT_READY_LIMIT_SECONDS`, 600 s) for a runner to come back. The browser stream ending is therefore **not** a pass condition. The client closes it explicitly once it has seen `available:false`.
+After the runner stops, the API relay is **expected to stay open**. It sends `runner{available:false}` and keeps polling for a runner to come back. The browser stream ending is therefore **not** a pass condition. The client closes it explicitly once it has seen `available:false`.
+- r16 (review wording, contract v1.3.2 §5): `NOT_READY_LIMIT_SECONDS` (600 s) is **cumulative from the connection's
+  start** and is checked **only when a runner target lookup fails**; it is never reset by a successful lookup and is
+  not a lifetime limit. So the relay stays open after the runner stops only while the connection is younger than
+  600 s; an older one closes at the first failed lookup (`not_ready_limit`, D3-e: a ~1749 s connection closed right
+  after the runner's idle stop). `runner{available:false}` before that close is not guaranteed. The P4 clients open
+  their stream shortly before the stop, well inside 600 s. (Earlier revisions said the relay "waits up to 600 s" from
+  the stop; that described a not-ready timer the code does not have.)
 
 | # | Action | Pass |
 |---|---|---|
@@ -225,6 +233,83 @@ table).
     the newest restartedAt of p4 / p4-rerun / p4-tail.
   - The client containers run with `--security-opt label=disable` (as D2); before any runner start a probe container
     with the same image, user and mounts must read both private files (else rc 5, nothing changed).
+
+## Stage R — the r4 redeploy, both flags off (r16, PM 2026-11-14)
+
+**What moves**: …5805's runner binding (stage C runner → r4 runner) and the api container (stage C runtime → r4
+runtime), in one window, exactly as stage C did. Source `IMAGE_SHA` = `bb3aa97070f175a74eec3a0c024cd158cd64fadd`:
+the r4 prefix holdback (`runner/stream_prefix.py`, 732e278 + the capacity fix 3807398) and the `api_stream_summary`
+reason fix (f1e8eea); 2dd3100 is reverted in it (net zero). Later commits change only `infra/` and
+`backend/config_tests/`, which no image copies. The runner-controller image stays as it is (as in P2).
+
+**Flags**: `RESEARCH_STREAM_ENABLE` absent on api (D3 `flag-off` restored stage C's template), `RUNNER_STREAM_TEXT`
+off. Stage R sets neither; the switch changes only the api container image. With both off, the r4 code serves the
+same responses as stage C (P2 regression list); the prefix file is written but read only by a streaming relay.
+
+**Scripts** (each the reviewed stage file with listed changes only; `config_tests/test_i90_vm.py` checks every
+changed line, and that every mode but `survey` refuses rc 3 while a pin is the placeholder):
+
+| Step | Script | From | Pins (copied from output, never typed) |
+|---|---|---|---|
+| R-A | `vm/i90-host-build.sh`, unchanged | — | — (its output gives R-B / R-C's pins) |
+| R-B | `vm/i90r-import.sh` | `i90-import.sh` (stage B) | the 9 source / tag / archive / host-id pins: R-A output |
+| R-C | `vm/i90r-switch.py` + `i90r-expected.json` | `i90-switch.py` (stage C), tags `90-bb3aa97` | NEW_ID / API_ID: R-A; GENERATION / REVISION, OLD_REF, LEDGERS and the expected file: R-C survey |
+| rollback | `vm/i90rb-switch.py` + `i90rb-expected.json` | `i90-switch.py`, targets unchanged (stage C tags / ids) | GENERATION / REVISION, OLD_REF, LEDGERS and the expected file: its own survey |
+
+`vm/i90-install.sh` r5 adds only the four names `i90r-switch.py`, `i90r-expected.json`, `i90rb-switch.py`,
+`i90rb-expected.json` to its case. New names (and evidence `i90r-*` / `i90rb-*`) because the stage C switch's
+precheck refuses once `i90-switch-*` evidence exists, and its expected file is the stage C record.
+
+**R-A build** (development server, this checkout, never sudo; PM / the user runs it, not back):
+
+```sh
+IMAGE_SHA=$(git rev-parse bb3aa97) && [ "$IMAGE_SHA" = bb3aa97070f175a74eec3a0c024cd158cd64fadd ] &&
+infra/hosting/m3/chat-stream/vm/i90-host-build.sh "$IMAGE_SHA" /home/infmedix/issue90-build-$(date -u +%Y%m%dT%H%M%SZ)
+echo "rc=$?"
+```
+
+Tags `anxious-dev-runner:90-bb3aa97` / `anxious-dev-runtime:90-bb3aa97`. Send back the final lines (host ids, archive
+sha256s) and the output directory, as for stage A.
+
+**R-B import** (guest, after back pins `i90r-import.sh` from R-A and review clears it by hash): copy the two archives
+to `/home/opc/issue90-images/` as for stage B; `/root/issue90/evidence` already exists (root 0700, stage B) and is
+not re-created. Run as stage B (`sh -c "$(cat i90r-import.sh)"`, rc and the output kept). Evidence
+`/root/issue90/evidence/i90r-import-<UTC>.txt`. The stage C images and digest references stay in containerd: the
+rollback needs them. Nothing prunes images in #90.
+
+**R-C switch** (guest, root), the stage C cycle:
+1. Install the placeholder `i90r-switch.py` (this revision's reviewed sha) with `i90-install.sh`, run `survey`
+   (read only; it needs the R-B tags). Preconditions it prints: …5805 `idle_stopped`, no runner Pod, no client
+   session (D3 revoked its own), host units quiet, ledgers.
+2. back pins `i90r-switch.py` (NEW_ID / API_ID from R-A; GENERATION / REVISION, OLD_REF, LEDGERS from the survey) and
+   writes `i90r-expected.json` from the survey's `expected candidate` line only; review clears both by hash.
+3. Install both (the survey copy stays as `i90r-switch.py.r0`), `precheck <expected sha256>` (read only), then `run`
+   once as a systemd unit after its rc 0 and PM's go. Judge by the journal's last `result rc=` line.
+4. The switch proves `/api/health` 200 and the observation period; `/api/version` = `bb3aa97…` and the runner start
+   are R-D's.
+
+**R-D (after R-C, its own revision)**: one runner start on the r4 image (no turn), then the D2 v2 measurement.
+- Why a start: `stream-prefixes.json` is written only on the runner's remember paths (install / remember_secrets
+  at entry, after the journal write). Before a start on the r4 image the control volume has no prefix file and
+  journal_lengths v2 can only report `prefixFile: absent`, every long literal legacy.
+- D1 / D2 are not reused as they are: D1 is once-guarded with its own evidence, and both take the stage C images from
+  `i90-expected.json`. R-D is `i90r-d1.py` / `i90r-d2.py` derived from them the same way (names, the R-C expected
+  file, the R-C generation), written after R-C's output; journal_lengths.py v2 r1 (sha256 `fd1d9f7f…`, approved
+  dd04d84) is installed for it. Its result (structural covered / legacy, snapshots count) is bounded as review set:
+  `macVerified: false`, `snapshots` only the observed row count; the final coverage answer is the runtime `legacyL`
+  of a streaming turn (P5 S1). The P5 plan is set after this result (PM).
+
+**Rollback**:
+- **In the window** (a failure after apply began): `i90r-switch.py`'s undo, as stage C: the binding by one reverse
+  apply, the api image back to the recorded stage C image; 'other' states FREEZE (rc 7/8/80): stop and report,
+  nothing re-run.
+- **After a completed R-C** (PM decision): `i90rb-switch.py`, the same cycle (install placeholder → survey → back pins
+  it and writes `i90rb-expected.json` from that survey only → review → install → precheck → run). Its targets are
+  stage C's lines unchanged (tags `90-159e271`, stage A host ids); nothing is built or imported, and the survey
+  refuses rc 3 if the stage C images are gone. Before R-D it needs nothing else.
+- After R-D, the r4 prefix file stays on …5805's control volume; the stage C image never reads it (no module reads
+  `stream-prefixes.json` there), and a later r4 start reuses or rewrites it (`stream_prefix.load`: an invalid or
+  foreign file is legacy). Nothing in the DB schema changes in #90: no data step.
 
 ## P5 — measurements with real Codex turns (only after the user's turn budget)
 

@@ -632,3 +632,94 @@ def test_install_accepts_the_stage_d2_files(tmp_path, name):
 def test_install_accepts_the_stage_d3_files(tmp_path, name):
     code, out, d = install_run(tmp_path, name, b"x = 3\n")
     assert code == 0 and (d / name).read_bytes() == b"x = 3\n"
+
+
+# --- stage R (the r4 redeploy): i90r-switch.py / i90r-import.sh are the stage C / B files with listed changes only;
+# i90rb-switch.py (the rollback after a completed i90r run) is the stage C switch with its targets unchanged ---
+
+import re as _re
+
+
+def stage_r_switch_from(text, tag="i90r"):
+    """The documented substitutions of <tag>-switch.py, applied to i90-switch.py (the header excepted)."""
+    out = []
+    for line in text.splitlines():
+        line = (line.replace("i90-expected.json", tag + "-expected.json").replace("i90-expected-r0", tag + "-expected-r0")
+                .replace("i90-switch", tag + "-switch").replace("/*i90:", "/*%s:" % tag)
+                .replace("issue90-i90-", "issue90-%s-" % tag))
+        if tag == "i90r" and line.startswith(("NEW_TAG = ", "API_TAG = ")):
+            line = line.replace("90-159e271", "90-bb3aa97")
+        if line.startswith("GENERATION, REVISION = "):
+            line = "GENERATION, REVISION = 'PIN', 'PIN'  # …5805's fence now (survey)"
+        elif line.startswith("OLD_REF = "):
+            line = ("OLD_REF = PIN  # …5805's current plan.image (the %s runner reference, printed by `survey`)"
+                    % ("stage C" if tag == "i90r" else "r4"))
+        elif tag == "i90r" and line.startswith("NEW_ID = "):
+            line = "NEW_ID = PIN  # the runner host image id (stage R-A build output)"
+        elif tag == "i90r" and line.startswith("API_ID = "):
+            line = "API_ID = PIN  # the runtime host image id (stage R-A build output)"
+        elif line.startswith("LEDGERS = {"):
+            line = "LEDGERS = {'/root/native68/evidence/ledger-isolation-42.json': PIN,  # sha256 printed by `survey`"
+        elif line.startswith("           '/root/native68/evidence/ledger-resources-6.json'"):
+            line = "           '/root/native68/evidence/ledger-resources-6.json': PIN}"
+        elif line == "    pins = {'OLD_REF': OLD_REF, 'NEW_ID': NEW_ID, 'API_ID': API_ID}":
+            line = ("    pins = {'OLD_REF': OLD_REF, 'NEW_ID': NEW_ID, 'API_ID': API_ID, 'GENERATION': GENERATION, "
+                    "'REVISION': REVISION}")
+        out.append(line)
+    out[0] = out[0][3:]  # the stage C header's first line, now under the stage R header
+    return out
+
+
+@pytest.mark.parametrize("tag,title", [("i90r", '"""#90 stage R switch'), ("i90rb", '"""#90 stage R rollback switch')])
+def test_stage_r_switch_is_stage_c_with_the_listed_changes_only(tag, title):
+    old = (VM / "i90-switch.py").read_text()
+    new = (VM / (tag + "-switch.py")).read_text().splitlines()
+    marker = new.index("The stage C header follows unchanged.")
+    assert new[0].startswith(title) and new[marker + 1] == ""
+    assert new[marker + 2:] == stage_r_switch_from(old, tag)
+
+
+def test_stage_r_switch_pins_block_every_mode_but_survey():
+    module = load("i90r-switch")
+    assert module.pins_missing() == ["API_ID", "GENERATION", "LEDGERS ledger-isolation-42.json",
+                                     "LEDGERS ledger-resources-6.json", "NEW_ID", "OLD_REF", "REVISION"]
+    assert module.EXPECTED_FILE == "/root/issue90/i90r-expected.json" and module.VERSION == "i90r-expected-r0"
+    assert module.NEW_TAG.endswith(":90-bb3aa97") and module.API_TAG.endswith(":90-bb3aa97")
+    assert module.main(["i90r-switch.py", "precheck", "0" * 64]) == 3
+    assert module.main(["i90r-switch.py", "run", "0" * 64]) == 3
+
+
+def test_stage_r_rollback_targets_are_stage_c_and_its_pins_block():
+    module, stage_c = load("i90rb-switch"), load("i90-switch")
+    assert module.pins_missing() == ["GENERATION", "LEDGERS ledger-isolation-42.json",
+                                     "LEDGERS ledger-resources-6.json", "OLD_REF", "REVISION"]
+    assert (module.NEW_TAG, module.NEW_ID, module.API_TAG, module.API_ID) == (
+        stage_c.NEW_TAG, stage_c.NEW_ID, stage_c.API_TAG, stage_c.API_ID)
+    assert module.EXPECTED_FILE == "/root/issue90/i90rb-expected.json" and module.VERSION == "i90rb-expected-r0"
+    assert module.main(["i90rb-switch.py", "precheck", "0" * 64]) == 3
+    assert module.main(["i90rb-switch.py", "run", "0" * 64]) == 3
+
+
+def test_stage_r_import_is_stage_b_with_the_listed_changes_only():
+    old = (VM / "i90-import.sh").read_text().splitlines()
+    new = (VM / "i90r-import.sh").read_text().splitlines()
+    assert all(line.startswith("# ") for line in new[:3]) and "stage R import" in new[0]
+    expected = []
+    for line in old:
+        line = (line.replace("i90-import-", "i90r-import-").replace("i90-import: ", "i90r-import: ")
+                .replace('"i90 $1 digest reference', '"i90r $1 digest reference'))
+        match = _re.match(r"^(SOURCE|RUNNER_TAG_REF|RUNNER_FILE|RUNNER_ARCHIVE_SHA|RUNNER_HOST_ID|RUNTIME_TAG_REF|"
+                          r"RUNTIME_FILE|RUNTIME_ARCHIVE_SHA|RUNTIME_HOST_ID)=", line)
+        expected.append(match.group(1) + "=PIN" if match else line)
+    assert new[3:] == expected
+
+
+def test_stage_r_import_refuses_while_a_pin_is_the_placeholder():
+    result = subprocess.run(["sh", "-c", (VM / "i90r-import.sh").read_text()], capture_output=True, text=True)
+    assert result.returncode == 3 and "a pin is still the placeholder" in result.stdout
+
+
+@pytest.mark.parametrize("name", ["i90r-switch.py", "i90r-expected.json", "i90rb-switch.py", "i90rb-expected.json"])
+def test_install_accepts_the_stage_r_files(tmp_path, name):
+    code, out, d = install_run(tmp_path, name, b"x = 4\n")
+    assert code == 0 and (d / name).read_bytes() == b"x = 4\n"
