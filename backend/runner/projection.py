@@ -122,6 +122,14 @@ class ProjectionJournal:
         lengths = [length for length, groups in self.values.items() for group in groups.values() for _ in group]
         return len(lengths), max(lengths, default=0)
 
+    def stream_rows(self, limit):
+        """(longest length <= limit, {(length, digest)} of the longer literals): the r4 holdback's classification
+        input (#90). The rows were verified with the journal MAC at load."""
+        short = max((length for length in self.values if length <= limit), default=0)
+        rows = {(length, digest) for length, groups in self.values.items() if length > limit
+                for digests in groups.values() for digest in digests}
+        return short, rows
+
     def text(self, value):
         return redact(value, self.spans(value))
 

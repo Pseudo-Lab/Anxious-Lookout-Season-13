@@ -4,7 +4,8 @@ Nothing here writes a file or a database, and nothing here decides a turn: every
 turn (`stream.stopped`) and the record path (`thread/read` -> signed projection) stays the source of truth.
 
 Text (agentMessage deltas, command output, the command summary) leaves this module only through the holdback in
-`Holdback.plan` (design r3 B1): the cut never moves right of `len(raw) - (L - 1)`, where L is the longest recorded
+`Holdback.plan` (design r3 B1, r4 prefix fingerprints): the cut never moves right of the policy's start (r4: see
+stream_prefix; r3: `len(raw) - (L - 1)`, where L is the longest recorded
 literal, and a detected range that crosses the cut pulls the cut back to its start. Text events are emitted only when
 RUNNER_STREAM_TEXT=true (default false until the B1 review gate and the VM checks).
 """
@@ -14,6 +15,8 @@ import os
 import threading
 import time
 from collections import deque
+
+from .stream_prefix import HoldPolicy, policy as hold_policy
 
 MARKER = "[redacted]"
 
@@ -98,16 +101,18 @@ class Sanitizer:
         self.auth = auth
 
     def generation(self):
-        """(journal identity, literal count, L). Computed before and after a plan; a change discards the plan."""
+        """(journal identity, literal count, HoldPolicy). Computed before and after a plan; a change (a literal, or the
+        prefix fingerprint file, design r4) discards the plan. The journal unreadable -> SanitizeUnavailable (text
+        stops); a fingerprint problem only makes long literals legacy (stream_prefix)."""
         if self.auth is None:
-            return (None, 0, 1)
+            return (None, 0, HoldPolicy.none())
         for _ in range(3):  # `secrets` can change size while another thread installs a credential
             try:
-                self.auth.refresh_projection_secrets()  # current secrets enter the journal first
+                self.auth.refresh_projection_secrets()  # current secrets enter the journal (and fingerprints) first
                 journal = self.auth.journal
-                count, longest = journal.generation()
-                current = max((len(value) for value in list(self.auth.secrets) if isinstance(value, str)), default=0)
-                return (id(journal), count, max(longest, current, 1))
+                count, _ = journal.generation()
+                current = [value for value in list(self.auth.secrets) if isinstance(value, str)]
+                return (id(journal), count, hold_policy(journal, getattr(self.auth, "control", None), current))
             except RuntimeError:
                 continue
             except Exception:
@@ -144,9 +149,16 @@ class Holdback:
         self.raw += text
 
     @staticmethod
-    def plan(window, spans, longest, final, joined):
-        """(emitted text, consumed raw chars, joined after). `spans` are the merged ranges of `window`."""
-        c0 = len(window) if final else max(0, len(window) - (max(longest, 1) - 1))
+    def plan(window, spans, hold, final, joined):
+        """(emitted text, consumed raw chars, joined after). `spans` are the merged ranges of `window`. `hold` is the
+        design r4 HoldPolicy (its `start` gives the cut before the left-only rule) or, as in r3, the longest literal
+        length L (cut at len - (L - 1))."""
+        if final:
+            c0 = len(window)
+        elif isinstance(hold, HoldPolicy):
+            c0 = hold.start(window)
+        else:
+            c0 = max(0, len(window) - (max(hold, 1) - 1))
         cut = c0
         for start, end in spans:
             if start < c0 < end:
@@ -221,7 +233,7 @@ class Turn:
         self.raw_bytes = 0
         self.started_at = time.monotonic()
         self.stats = {"deltaIn": {}, "eventsOut": 0, "eventBytes": 0, "flushes": 0, "compactions": 0,
-                      "firstDeltaMs": None, "firstEventMs": None, "holdbackPeakChars": 0, "legacyL": 0,
+                      "firstDeltaMs": None, "firstEventMs": None, "holdbackPeakChars": 0, "legacyL": 0, "cutDelayPeakChars": 0,
                       "bufferPeakBytes": 0, "outputDroppedBytes": 0, "subscribersPeak": 0, "staleFlushes": 0}
         self.samples = deque(maxlen=SAMPLE_RING)
         self.peaks = {"rssKb": 0, "messagesQueue": 0, "flushLagMs": 0}
@@ -643,9 +655,11 @@ class Hub:
             return
         try:
             before = self.sanitizer.generation()
-            plans = []
+            plans, delays = [], []
             for item, text, output, summary, text_version, output_version in work:
                 done = final or item.completed
+                if not done:  # the candidate-cut delay (r4.1), apart from the final buffer peak (holdbackPeakChars)
+                    delays += [len(window) - before[2].start(window) for window in (text, output) if window]
                 text_plan = Holdback.plan(text, self.sanitizer.spans(text), before[2], done, item.text.joined) if text else None
                 output_plan = Holdback.plan(output, self.sanitizer.spans(output), before[2], done, item.output.joined) if output else None
                 summary_text = None
@@ -661,7 +675,8 @@ class Hub:
                 self.drop_text(turn, work)
             return
         with self.lock:
-            turn.stats["legacyL"] = max(turn.stats["legacyL"], before[2])
+            turn.stats["legacyL"] = max(turn.stats["legacyL"], before[2].legacy)  # r4: L_legacy (verified)
+            turn.stats["cutDelayPeakChars"] = max([turn.stats["cutDelayPeakChars"]] + delays)
             if before != after:
                 # A literal was observed meanwhile: nothing of this pass is published (text, output or summary).
                 turn.stats["staleFlushes"] += 1

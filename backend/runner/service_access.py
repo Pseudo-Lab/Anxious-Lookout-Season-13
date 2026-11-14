@@ -18,6 +18,7 @@ from app.codex_policy import CodexFailure, REASONS
 from .access import AccessAuth, claims
 from .auth import read_private
 from .binding import canonical_uuid
+from . import stream_prefix
 from .projection import ProjectionJournal, BASE, MASK, rolling, merge_spans, redact
 from .service_store import ServiceStore, LEDGER, LEGACY, refuse, private_file
 
@@ -86,6 +87,20 @@ class ServiceJournal(ProjectionJournal):
             refuse(metadata['projectionKey'] == self.key.hex() and metadata['trialId'] == self.trial)
             count, longest = db.execute('SELECT COUNT(*), MAX(length) FROM literals').fetchone()
         return count, longest or 0
+
+    def stream_rows(self, limit):
+        """(longest length <= limit, {(length, digest)} of the longer literals), every long row's MAC verified (#90 r4
+        holdback classification; a bad row refuses, which stops the stream's text)."""
+        with self.auth.store.transaction() as db:
+            metadata = self.auth._state(db)
+            refuse(metadata['projectionKey'] == self.key.hex() and metadata['trialId'] == self.trial)
+            short = db.execute('SELECT MAX(length) FROM literals WHERE length <= ?', (limit,)).fetchone()[0] or 0
+            rows = set()
+            for length, filter_hash, digest, mac in db.execute(
+                    'SELECT length, filter, digest, mac FROM literals WHERE length > ?', (limit,)):
+                refuse(hmac.compare_digest(self.row_mac(length, int(filter_hash), digest), mac))
+                rows.add((length, digest))
+        return short, rows
 
     def text(self, value):
         return redact(value, self.spans(value))
@@ -212,6 +227,8 @@ class ServiceAccessAuth(AccessAuth):
                 self.snapshot['chatgptPlanType'] = plan
             self.secrets = literals  # Historical plaintext need not stay in memory.
             self.journal = journal
+            # #90 r4: prefix fingerprints after the committed journal rows; never raises (failure = legacy).
+            stream_prefix.remember(self.control, journal, literals)
 
     def attach(self, codex_home):
         with self.mutex:
@@ -289,6 +306,7 @@ class ServiceAccessAuth(AccessAuth):
                 value = self._state(db)
                 refuse(value['projectionKey'] == self.journal.key.hex())
                 self.journal.remember(db, self.secrets)
+            stream_prefix.remember(self.control, self.journal, self.secrets)  # #90 r4: after the commit; never raises
 
     def status(self):
         return {}  # No trial remainingAdmissions/accessExpiresAt fields.
