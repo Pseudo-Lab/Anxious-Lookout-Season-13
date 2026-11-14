@@ -53,7 +53,7 @@ OTHERS = ('00000000-0000-4000-8000-000000000048', '00000000-0000-4000-8000-00000
 OWNERS = OTHERS + (OWNER,)
 LIB = 'docker.io/library/'
 PIN = 'PIN'  # a placeholder: every mode but `survey` refuses while any pin below is still PIN
-OLD_REF = PIN  # …5805's current plan.image (full digest reference, printed by `survey`)
+OLD_REF = 'docker.io/library/anxious-dev-runner@sha256:da7dc6576708bfa30de04e19bcc8b5d5b1b1dd49678c09e9ec56e4a094cd087c'  # survey.txt
 NEW_TAG = LIB + 'anxious-dev-runner:90-159e271'
 NEW_ID = 'sha256:d0c261e4a7981d209115685e341fa40550413609bff051a8a7cef25b793faf57'  # runner id, stage A images.txt
 NEW_PREFIX = LIB + 'anxious-dev-runner@sha256:'
@@ -64,8 +64,8 @@ API_CONTAINER = 'api'
 TOOL_TAG = 'anxious-dev-runtime:68-42a1e8b'
 MODULES = {'/app/ops/runner_binding_image.py': '0a60c7d4f3b8765bb9fb7f204f47917e49d5a5b9c3bc5b0cd48eb8a6ed632d7e',
            '/app/app/runner_bindings.py': '0cc5706f8db9193d1b1ff61dac46533a62a09eb951dfff39f2d2b2d0160e5342'}
-LEDGERS = {'/root/native68/evidence/ledger-isolation-42.json': PIN,  # sha256 printed by `survey`
-           '/root/native68/evidence/ledger-resources-6.json': PIN}
+LEDGERS = {'/root/native68/evidence/ledger-isolation-42.json': '3fcf7c844caa46fcf5d2b0b579d2abfda9c973730aff542ee445268149752928',  # survey.txt
+           '/root/native68/evidence/ledger-resources-6.json': '51e7ae651e8dcb79213082362fef2bd6873c11f2000b9567719974c61b6eafeb'}
 # (namespace, name, recorded UID, Pod label, containers, init containers)
 CTRL = ('runner-control', 'runner-controller', '41564f26-95e7-4ad1-8af3-d73b93c4669a', 'app=runner-controller',
         ('controller',), ())

@@ -53,9 +53,11 @@ root shell, once (the block review cleared on 2026-11-14 after the first import 
 ```sh
 set -eu
 [ "$(id -u)" = 0 ]
-[ -d /root/issue90 ] && [ ! -L /root/issue90 ]
+[ -d /root/issue90 ]
+[ ! -L /root/issue90 ]
 [ "$(stat -c '%u:%g:%a' /root/issue90)" = '0:0:700' ]
-[ ! -e /root/issue90/evidence ] && [ ! -L /root/issue90/evidence ]
+[ ! -e /root/issue90/evidence ]
+[ ! -L /root/issue90/evidence ]
 install -d -m 0700 -o root -g root /root/issue90/evidence
 [ "$(stat -c '%u:%g:%a' /root/issue90/evidence)" = '0:0:700' ]
 stat -c '%u:%g:%a %n' /root/issue90/evidence
@@ -65,6 +67,9 @@ stat -c '%u:%g:%a %n' /root/issue90/evidence
   existing path, a symlink, or a parent that is not root:root 0700 is never changed or reused by this block.
 - Run it once only: the directory then stays for stage C, whose precheck also needs it with no earlier
   `i90-switch-*` entry.
+- r5: every check is its own simple command. `set -e` does not stop on a failed left side of `A && B`, so the r4
+  form (`[ ! -e … ] && [ ! -L … ]`) let an existing directory reach `install` (its mode changed, rc 0; review
+  reproduced it). The 2026-11-14 run was on an absent path and is not repeated.
 
 **Import (stage B)**:
 - Copy the two archives to `/home/opc/issue90-images/` (the native68 path pattern). Check the evidence directory
@@ -83,6 +88,12 @@ stat -c '%u:%g:%a %n' /root/issue90/evidence
 4. **Reopen**: api to 1 (`/api/health` 200, `/api/version` = `IMAGE_SHA`), then runner-controller to 1 (its image unchanged), then an observation period with no unexpected runner Pod.
 
 It also keeps pa-switch.py's precheck rc 3, forward report, in-window undo, FREEZE and evidence rules.
+
+**Install (r5)**: after review clears the pinned `i90-switch.py` and `vm/i90-expected.json` by hash, PM installs each
+with `vm/i90-install.sh` (as root, the script as the argument of `sh -c`, stdin = the file, `$1` = its guest name,
+`$2` = its reviewed sha256). It writes `/root/issue90/<name>` root:root 0600 through a checked temp file; the survey
+copy of `i90-switch.py` already there is kept as `i90-switch.py.r0`, never overwritten. A nonzero rc is reported, not
+re-run. Then `precheck <expected sha256>` (read only), and `run` only after its rc 0 and PM's go.
 - The runner-controller image stays as it is for P0–P4. With both stream flags unset, `IMAGE_SHA` renders a runner Pod exactly as the current controller does (P5-0 adds keys only for `true`; `runner_controller.py` is unchanged since c50c41c), and the new API accepts that Pod. The controller moves to the same runtime image only at P5, with the flags (P5-0 below).
 
 **Regression checks (flags off, no turn; stage D block)**:

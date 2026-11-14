@@ -298,15 +298,51 @@ def expected_doc(module, **changes):
     return doc
 
 
-def test_switch_pins_are_placeholders_and_block_every_mode_but_survey():
+@pytest.mark.parametrize("name", ["OLD_REF", "NEW_ID", "API_ID", "LEDGERS"])
+def test_switch_a_placeholder_pin_blocks_every_mode_but_survey(monkeypatch, name):
     module = switch()
-    # NEW_ID / API_ID are filled from stage A; OLD_REF and LEDGERS wait for `survey`.
-    assert module.pins_missing() == ["LEDGERS ledger-isolation-42.json", "LEDGERS ledger-resources-6.json", "OLD_REF"]
+    if name == "LEDGERS":
+        first = sorted(module.LEDGERS)[0]
+        monkeypatch.setattr(module, "LEDGERS", dict(module.LEDGERS, **{first: module.PIN}))
+    else:
+        monkeypatch.setattr(module, name, module.PIN)
+    assert module.pins_missing()
     with pytest.raises(module.Stop) as stopped:
         module.load_expected("0" * 64)
     assert stopped.value.code == 3 and "pins are still placeholders" in stopped.value.message
     assert module.main(["i90-switch.py", "precheck", "0" * 64]) == 3
     assert module.main(["i90-switch.py", "run", "0" * 64]) == 3
+
+
+def test_switch_pins_are_filled_from_the_survey():
+    """Stage C pins: OLD_REF and LEDGERS from the survey output (NEW_ID / API_ID from stage A); none is left."""
+    module = switch()
+    assert module.pins_missing() == []
+    prefix = module.NEW_PREFIX
+    assert module.OLD_REF.startswith(prefix) and module.HEX64.fullmatch(module.OLD_REF[len(prefix):])
+    assert sorted(module.LEDGERS) == ["/root/native68/evidence/ledger-isolation-42.json",
+                                      "/root/native68/evidence/ledger-resources-6.json"]
+    assert all(module.HEX64.fullmatch(v) for v in module.LEDGERS.values())
+
+
+def test_switch_committed_expected_file_is_the_survey_candidate_shape():
+    """vm/i90-expected.json (the survey's `expected candidate:` line plus a newline, copied, never typed): accepted by
+    expected_problem with the filled pins, canonical bytes, and consistent with the pins. Its values are checked by
+    review against the survey text, by hash."""
+    module = switch()
+    data = (VM / "i90-expected.json").read_bytes()
+    doc = json.loads(data)
+    assert data == (json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    assert module.expected_problem(doc) is None
+    assert doc["version"] == module.VERSION
+    assert doc["newImage"] != module.OLD_REF and doc["oldImageId"] != module.NEW_ID
+    assert doc["deployments"]["api"]["images"]["api"] != doc["newApiImage"]
+    assert doc["deployments"]["api"]["uid"] == module.API[2]
+    assert doc["deployments"]["runner-controller"]["uid"] == module.CTRL[2]
+    report = module.derive(doc)
+    assert report["forward"]["report"]["oldImage"] == module.OLD_REF
+    assert report["forward"]["report"]["newImage"] == doc["newImage"]
+    assert report["reverse"]["report"]["newImage"] == module.OLD_REF
 
 
 def test_switch_expected_file_rules_for_the_api_image():
@@ -477,3 +513,83 @@ def test_api_image_refuses_a_change_between_read_and_patch(monkeypatch, race):
         with pytest.raises(module.Stop):
             module.api_image(doc, "forward", 6)
         assert not patched
+
+
+# --- stage C: i90-install.sh (fake /root/issue90, run as the test user) -------------------------------------------
+
+def install_run(tmp_path, name, data, sha=None, prepare=None):
+    import hashlib
+    import os
+    d = tmp_path / "issue90"
+    if not d.exists():
+        d.mkdir(mode=0o700)
+        d.chmod(0o700)
+    if prepare:
+        prepare(d)
+    uid, gid = os.getuid(), os.getgid()
+    script = (VM / "i90-install.sh").read_text()
+    for old, new in (("D=/root/issue90", "D=" + str(d)),
+                     ('[ "$(id -u)" = 0 ] ||', 'true ||'),
+                     ("= '0:0:700' ]", "= '%d:%d:700' ]" % (uid, gid)),
+                     ('chown root:root "$T" && ', ''),
+                     ("= 'regular file|0|0|600|1' ]", "= 'regular file|%d|%d|600|1' ]" % (uid, gid))):
+        assert script.count(old) == 1, old
+        script = script.replace(old, new)
+    sha = sha or hashlib.sha256(data).hexdigest()
+    result = subprocess.run(["sh", "-c", script, "sh", name, sha], input=data, capture_output=True, timeout=60)
+    return result.returncode, result.stdout.decode(), d
+
+
+def test_install_new_file_root_0600_and_verified(tmp_path):
+    code, out, d = install_run(tmp_path, "i90-expected.json", b'{"a":1}\n')
+    assert code == 0 and out.endswith("install rc=0\n"), out
+    target = d / "i90-expected.json"
+    assert target.read_bytes() == b'{"a":1}\n' and oct(target.stat().st_mode & 0o777) == "0o600"
+    assert sorted(p.name for p in d.iterdir()) == ["i90-expected.json"]
+
+
+def test_install_keeps_the_previous_file_as_rn(tmp_path):
+    install_run(tmp_path, "i90-switch.py", b"survey version\n")
+    code, out, d = install_run(tmp_path, "i90-switch.py", b"pinned version\n")
+    assert code == 0 and "as i90-switch.py.r0" in out, out
+    code, out, d = install_run(tmp_path, "i90-switch.py", b"third\n")
+    assert code == 0 and "as i90-switch.py.r1" in out, out
+    assert (d / "i90-switch.py.r0").read_bytes() == b"survey version\n"
+    assert (d / "i90-switch.py.r1").read_bytes() == b"pinned version\n"
+    assert (d / "i90-switch.py").read_bytes() == b"third\n"
+
+
+def test_install_same_file_changes_nothing(tmp_path):
+    install_run(tmp_path, "i90-expected.json", b"x\n")
+    code, out, d = install_run(tmp_path, "i90-expected.json", b"x\n")
+    assert code == 0 and "already the reviewed file" in out
+    assert sorted(p.name for p in d.iterdir()) == ["i90-expected.json"]
+
+
+def test_install_wrong_bytes_change_nothing(tmp_path):
+    install_run(tmp_path, "i90-switch.py", b"old\n")
+    code, out, d = install_run(tmp_path, "i90-switch.py", b"tampered\n", sha="0" * 64)
+    assert code == 5 and "not the reviewed file" in out
+    assert sorted(p.name for p in d.iterdir()) == ["i90-switch.py"] and (d / "i90-switch.py").read_bytes() == b"old\n"
+
+
+@pytest.mark.parametrize("args", [("other.py", "0" * 64), ("i90-switch.py", "0" * 63), ("i90-switch.py", "A" * 64),
+                                  ("i90-switch.py",)])
+def test_install_usage(tmp_path, args):
+    script = (VM / "i90-install.sh").read_text()
+    result = subprocess.run(["sh", "-c", script, "sh", *args], input=b"", capture_output=True, timeout=60)
+    assert result.returncode == 2 and b"nothing changed" in result.stdout
+
+
+def test_install_refuses_a_symlink_or_directory_at_the_name(tmp_path):
+    code, out, d = install_run(tmp_path, "i90-expected.json", b"x\n",
+                               prepare=lambda d: (d / "i90-expected.json").symlink_to(d / "elsewhere"))
+    assert code == 3 and "not a regular file" in out
+    code, out, d = install_run(tmp_path, "i90-switch.py", b"x\n", prepare=lambda d: (d / "i90-switch.py").mkdir())
+    assert code == 3 and "not a regular file" in out
+    assert not [p for p in d.iterdir() if p.name.startswith(".i90-install-new.")]
+
+
+def test_install_refuses_a_parent_that_is_not_0700(tmp_path):
+    code, out, d = install_run(tmp_path, "i90-expected.json", b"x\n", prepare=lambda d: d.chmod(0o755))
+    assert code == 3 and "is not root:root 700" in out and not (d / "i90-expected.json").exists()
