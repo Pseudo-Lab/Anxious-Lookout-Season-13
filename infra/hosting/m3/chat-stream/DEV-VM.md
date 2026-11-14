@@ -355,7 +355,8 @@ PM decisions Q1–Q5, review plan notes; its docstring is the specification). In
   - Budget: 4 used, 4 left.
 - **r23 (2026-11-15, r7):**
   - `turns-r6` stopped at S4a before its turn: the hop ② reader (a `--network host` container, connecting to the api cluster IP :8080) got no headers. No turn was spent. `disable-r6` restored both templates.
-  - The cause is assessed separately by the read-only `vm/i90-p5-hop2-look.py`: an observation of the policy objects only, not of the datapath. S4a and S4b stay unmeasured, never passes, and the policy is not widened.
+  - S4a and S4b are recorded as "미측정 — 원인 미확정" (not measured, cause not determined). The hypothesis is that #62 `hosting-api-ingress` does not admit host→8080. It is inferred from the repo policy and the Cilium settings, with neither the datapath nor the policy objects observed. They are never passes, and the policy is not widened.
+  - A read-only diagnostic for this (`vm/i90-p5-hop2-look.py`) was written. No revision was approved for execution, and none was run. PM stopped it, and it was **removed from the branch unused**; its history is in git. The pinned r7 decision still names it in its accepted observations, which are recorded bytes and are not edited.
   - r7 adds `enable-r7` → `turns-r7` (S5, S6 only; both read at hop ③) → `disable-r7`. `enable-r7` continues through `vm/i90-p5-continue-r7.json`, which binds the turns-r6 / disable-r6 evidence runs from the read-only r7 pins.
   - A round may reserve only its own steps' turns (`round_cap`): r7 reaches 6 of 8. The remaining 2 turns are not used.
 - The rest of this section is the original P5 design that the script implements.
