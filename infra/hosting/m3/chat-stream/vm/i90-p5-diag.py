@@ -1,25 +1,26 @@
-"""#90 P5 S0 diagnosis (PM / review 2026-11-15), development VM only, READ ONLY: why the S0 record shows no tool item.
-No runner entry, session, turn, replay or deployment change; nothing is written on the guest. Run as root on the guest
-with the reviewed bytes on stdin (the sheet checks their sha256 on the development server first):
+"""#90 P5 S0 observation r1 (PM 2026-11-15 scope; review diag r0), development VM only, READ ONLY: counts about the
+S0 conversation, with no a/b conclusion. No runner entry, session, turn, replay or deployment change; nothing is
+written on the guest. Run as root on the guest with the reviewed bytes on stdin (the block checks their sha256 on the
+development server first):
 
     sudo -n python3 -I -B - < i90-p5-diag.py
 
-It keeps four facts apart (review): (1) native persistence - the conversation's native record: turn statuses and item
-type counts, nativeThreadId present; (2) invocation - the thread's Codex rollout (native PV codex/sessions): tool-call
-records by kind, the code-mode `exec` calls and the nested tool names their input names (allowlisted names only:
-research_* and exec_command, anything else counted as `other`), their outputs; (3) callback logging coverage - whether
-the api runs with `--no-access-log` (then a tool callback leaves no api log line and its absence proves nothing);
-(4) runner logs - the S0 runner Pod is gone; only the filtered evidence lines remain.
-
-Output: JSON lines (kind + fields), counts / statuses / allowlisted names only - never prompts, answer text, tool
-arguments or results, raw native JSON, ids (the conversation and thread only as an 8-char sha256 prefix) or
-credentials. The last line is `diagnosis`: `a` (the rollout is intact and has no tool-call record: the model did not
-call a tool), `b` (the rollout has a research tool call - a code-mode exec naming tools.research_* or a function call
-named research_* - while the native record has no tool item: invoked, not persisted as an item), or `unknown` (the
-rollout is missing, unreadable, ambiguous, or the record and the rollout disagree otherwise). rc: 0 diagnosed (any of
-the three); 3 refused (not root, evidence or the record not found).
+Output: JSON lines whose keys and values come only from the fixed name lists below; anything else is counted in an
+`unknown` bucket, never echoed (review r0 major: no arbitrary string from the record, the rollout or the names):
+- `s0`: the s0 result (rc, the S0 verdict) - its evidence directory name is a fixed pattern;
+- `native`: item counts per known type, turn counts per known status, known top-level key presence (+ unknown keys
+  counted), platformRequests / unrecordedInputs counts, nativeThreadId present (yes / no);
+- `rollout`: found (yes / no and a fixed reason), lines, unreadable lines, event counts per known kind (+ unknown),
+  for the record's last turn: its start / end event counts and order, the session_meta thread match - coverage facts,
+  not a completeness claim;
+- `references`: tool names referenced in code-mode exec inputs and named by function calls, per exact known tool name
+  (+ other) - **references only, not invocation evidence** (review r0 major: a reference in code is not a call);
+  correlated function_call / function_call_output pairs by call id are counted separately;
+- `callbackLogging`: whether the api runs with --no-access-log; if it does, callback lines: not logged (count n/a);
+- `runnerLogs`: Pod logs unavailable (the S0 Pod was deleted by the stop); filtered evidence line count;
+- `conclusion`: the fixed sentence "observed counts only; invocation unknown unless correlated".
+rc: 0 reported; 3 refused (not root, the s0 evidence or the record not found exactly once).
 """
-import hashlib
 import json
 import os
 import re
@@ -32,10 +33,26 @@ STATE_HEX = '75780e81ef7f4aeca59ced9d71f4061a'
 EVIDENCE = '/root/issue90/evidence'
 CODEX_SESSIONS = '/var/lib/anxious-lookout/user-runners/%s/native/data/codex/sessions' % STATE_HEX
 K3S = '/usr/local/bin/k3s'
-MESSAGE_ITEMS = {'userMessage', 'agentMessage'}
-TOOL_ITEMS = {'dynamicToolCall', 'mcpToolCall', 'commandExecution', 'fileChange'}
-NAMES = re.compile(r'\btools\.([A-Za-z_]\w*)')
 LIMIT = 64 << 20
+ITEM_TYPES = ('userMessage', 'agentMessage', 'reasoning', 'dynamicToolCall', 'mcpToolCall', 'commandExecution',
+              'fileChange', 'webSearch')
+TURN_STATUSES = ('completed', 'interrupted', 'failed', 'inProgress')
+RECORD_KEYS = ('turns', 'nativeThreadId', 'platformRequests', 'unrecordedInputs', 'displayOnly', 'displayOnlyDropped')
+EVENT_KINDS = ('session_meta', 'turn_context', 'compacted', 'event_msg/task_started', 'event_msg/task_complete',
+               'event_msg/turn_started', 'event_msg/turn_complete', 'event_msg/turn_aborted', 'event_msg/token_count',
+               'event_msg/agent_message', 'event_msg/user_message', 'event_msg/agent_reasoning', 'event_msg/error',
+               'event_msg/exec_command_begin', 'event_msg/exec_command_end', 'event_msg/mcp_tool_call_begin',
+               'event_msg/mcp_tool_call_end', 'response_item/message', 'response_item/reasoning',
+               'response_item/custom_tool_call', 'response_item/custom_tool_call_output',
+               'response_item/function_call', 'response_item/function_call_output')
+TOOL_NAMES = ('research_archive', 'research_document_save', 'research_document_update', 'research_get',
+              'research_list', 'research_material_save', 'research_material_update', 'research_page_context',
+              'research_post_draft_get', 'research_post_propose', 'research_relation_save',
+              'research_relation_update', 'research_relations', 'research_version_get', 'research_versions',
+              'exec', 'exec_command')  # backend/app/research_tools.py TOOLS + the code-mode exec tools
+START, END = ('task_started', 'turn_started'), ('task_complete', 'turn_complete', 'turn_aborted')
+NAMES = re.compile(r'\btools\.([A-Za-z_]\w*)')
+CONCLUSION = 'observed counts only; invocation unknown unless correlated'
 
 
 class Refused(Exception):
@@ -46,13 +63,9 @@ def out(kind, **fields):
     print(json.dumps({'kind': kind, **fields}, sort_keys=True), flush=True)
 
 
-def short(value):
-    return hashlib.sha256(value.encode()).hexdigest()[:8]
-
-
-def allow(name):
-    return name if isinstance(name, str) and (name.startswith('research_') or name in ('exec', 'exec_command')) \
-        else 'other'
+def bucket(counts, value, known):
+    key = value if value in known else 'unknown'
+    counts[key] = counts.get(key, 0) + 1
 
 
 def run(cmd, stdin=None, timeout=60):
@@ -70,11 +83,13 @@ def sql(query):
                       'postgres', '-d', 'hosting', '-Atq', '-v', 'ON_ERROR_STOP=1', '-f', '-'], text.encode())
     if rc != 0:
         raise Refused('database lookup failed')
-    rows = [json.loads(line) for line in output.splitlines() if line.strip() not in ('', 'BEGIN', 'COMMIT')]
-    return rows
+    try:
+        return [json.loads(line) for line in output.splitlines() if line.strip() not in ('', 'BEGIN', 'COMMIT')]
+    except ValueError:
+        raise Refused('database result unreadable') from None
 
 
-def s0_conversation():
+def s0_evidence():
     runs = sorted(x for x in os.listdir(EVIDENCE) if re.fullmatch(r'i90-p5-s0-\d{8}T\d{6}Z', x))
     if len(runs) != 1:
         raise Refused('not exactly one s0 evidence directory')
@@ -86,68 +101,71 @@ def s0_conversation():
     conversation = value.get('conversation')
     if not (isinstance(conversation, str) and re.fullmatch(r'[0-9a-f-]{36}', conversation)):
         raise Refused('the s0 run.json has no conversation')
-    out('s0', evidence=runs[0], conversation=short(conversation), rc=done.get('rc'),
-        S0=(done.get('verdicts') or {}).get('S0'), started=value.get('started'), finished=done.get('finished'))
-    return conversation
+    verdict = (done.get('verdicts') or {}).get('S0') if isinstance(done.get('verdicts'), dict) else None
+    out('s0', evidence=runs[0], rc=done.get('rc') if type(done.get('rc')) is int else None,
+        S0=verdict if verdict in (True, False, None) else None)
+    return runs[0], conversation
 
 
-def native_record(conversation):
-    """(1) The native record in memory: only counts, statuses and type names leave this function."""
-    rows = sql("SELECT json_build_object('r',native_record,'state',state,'updated',updated_at,'version',version) "
-               "FROM research.conversations WHERE id='%s' AND owner_id='%s';" % (conversation, OWNER))
+def native(conversation):
+    """The record in memory; only fixed-list counts leave. Returns (thread, last turn id) for correlation only."""
+    rows = sql("SELECT json_build_object('r',native_record) FROM research.conversations WHERE id='%s' AND "
+               "owner_id='%s';" % (conversation, OWNER))
     if len(rows) != 1 or not isinstance(rows[0].get('r'), dict):
         raise Refused('the conversation record is not there exactly once')
     record = rows[0]['r']
     turns = record.get('turns') if isinstance(record.get('turns'), list) else []
-    shape = []
+    items, statuses = {}, {}
     for turn in turns:
-        items = turn.get('items') if isinstance(turn, dict) and isinstance(turn.get('items'), list) else []
-        types = {}
-        for item in items:
-            key = item.get('type') if isinstance(item, dict) and isinstance(item.get('type'), str) else '<none>'
-            key = key if key in MESSAGE_ITEMS | TOOL_ITEMS else 'other'
-            types[key] = types.get(key, 0) + 1
-        shape.append({'status': turn.get('status') if isinstance(turn, dict) and turn.get('status') in (
-            'completed', 'interrupted', 'failed', 'inProgress') else 'other', 'itemTypes': types})
+        turn = turn if isinstance(turn, dict) else {}
+        bucket(statuses, turn.get('status'), TURN_STATUSES)
+        for item in turn.get('items') if isinstance(turn.get('items'), list) else []:
+            bucket(items, item.get('type') if isinstance(item, dict) else None, ITEM_TYPES)
+    keys = {k: k in record for k in RECORD_KEYS}
     thread = record.get('nativeThreadId') if isinstance(record.get('nativeThreadId'), str) else None
-    out('native', state=rows[0].get('state'), version=rows[0].get('version'), updated=rows[0].get('updated'),
-        keys=sorted(k for k in record if isinstance(k, str))[:40], turns=shape,
-        platformRequests=len(record.get('platformRequests') or []),
-        unrecordedInputs=len(record.get('unrecordedInputs') or []), thread=short(thread) if thread else None)
-    tool_items = sum(t['itemTypes'].get(k, 0) for t in shape for k in TOOL_ITEMS)
-    return thread, tool_items
+    last = turns[-1].get('id') if turns and isinstance(turns[-1], dict) and isinstance(turns[-1].get('id'), str) \
+        else None
+    out('native', turns=len(turns), turnStatuses=statuses, itemTypes=items, keys=keys,
+        unknownKeys=sum(1 for k in record if k not in RECORD_KEYS),
+        platformRequests=len(record['platformRequests']) if isinstance(record.get('platformRequests'), list) else None,
+        unrecordedInputs=len(record['unrecordedInputs']) if isinstance(record.get('unrecordedInputs'), list) else None,
+        threadPresent=thread is not None, lastTurnIdPresent=last is not None)
+    return thread, last
 
 
-def rollout(thread):
-    """(2) The thread's rollout: event kinds and tool-call records, names allowlisted, nothing else."""
+def rollout_lines(thread):
+    """(lines, None) or (None, a fixed reason)."""
     if not thread or not re.fullmatch(r'[0-9A-Za-z-]{1,200}', thread):
-        out('rollout', found=False, why='no nativeThreadId')
-        return None
+        return None, 'no thread id'
     try:
-        base = os.lstat(CODEX_SESSIONS)
-        if not stat.S_ISDIR(base.st_mode):
+        if not stat.S_ISDIR(os.lstat(CODEX_SESSIONS).st_mode):
             raise OSError()
     except OSError:
-        out('rollout', found=False, why='codex/sessions absent or not a directory')
-        return None
+        return None, 'sessions directory absent'
     found = []
     for folder, dirs, files in os.walk(CODEX_SESSIONS, followlinks=False):
         dirs[:] = [d for d in dirs if stat.S_ISDIR(os.lstat(os.path.join(folder, d)).st_mode)]
         found += [os.path.join(folder, f) for f in files
                   if f.startswith('rollout-') and f.endswith('-%s.jsonl' % thread)]
     if len(found) != 1:
-        out('rollout', found=False, why='%d rollout files for the thread' % len(found))
-        return None
-    path = found[0]
-    info = os.lstat(path)
+        return None, 'no single rollout file for the thread'
+    info = os.lstat(found[0])
     if not stat.S_ISREG(info.st_mode) or info.st_size > LIMIT:
-        out('rollout', found=False, why='not a regular file or too large')
-        return None
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        return None, 'not a regular file or too large'
+    fd = os.open(found[0], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as stream:
-        lines = stream.read(LIMIT + 1).splitlines()
-    kinds, unreadable, calls, outputs, functions, nested, other_calls, tool_events = {}, 0, {}, 0, {}, {}, 0, 0
-    for line in lines:
+        return stream.read(LIMIT + 1).splitlines(), None
+
+
+def rollout(thread, turn):
+    lines, why = rollout_lines(thread)
+    if lines is None:
+        out('rollout', found=False, reason=why)
+        out('references', execReferences={}, functionCalls={}, correlatedFunctionPairs=0, available=False)
+        return
+    kinds, unreadable, starts, ends, meta_match, aborted = {}, 0, [], [], None, False
+    references, functions, calls, answers = {}, {}, {}, {}
+    for index, line in enumerate(lines):
         try:
             event = json.loads(line)
         except ValueError:
@@ -155,87 +173,67 @@ def rollout(thread):
             continue
         payload = event.get('payload') if isinstance(event, dict) and isinstance(event.get('payload'), dict) else {}
         kind, sub = event.get('type') if isinstance(event, dict) else None, payload.get('type')
-        key = '%s/%s' % (kind, sub) if isinstance(sub, str) else str(kind)
-        kinds[key] = kinds.get(key, 0) + 1
-        if kind == 'response_item' and sub == 'custom_tool_call':
-            name = allow(payload.get('name'))
-            calls[name] = calls.get(name, 0) + 1
-            if isinstance(payload.get('input'), str):
-                for each in NAMES.findall(payload['input']):
-                    nested[allow(each)] = nested.get(allow(each), 0) + 1
-        elif kind == 'response_item' and sub == 'custom_tool_call_output':
-            outputs += 1
-        elif kind == 'response_item' and sub == 'function_call':
-            name = allow(payload.get('name'))
-            functions[name] = functions.get(name, 0) + 1
-        elif kind == 'response_item' and isinstance(sub, str) and sub.endswith('_call'):
-            other_calls += 1
-        elif kind == 'event_msg' and isinstance(sub, str) and any(w in sub for w in ('tool', 'mcp', 'exec', 'call')):
-            tool_events += 1
-    facts = {'found': True, 'file': short(os.path.basename(path)), 'lines': len(lines), 'unreadable': unreadable,
-             'eventKinds': dict(sorted(kinds.items())), 'customToolCalls': calls, 'customToolOutputs': outputs,
-             'nestedToolNames': nested, 'functionCalls': functions, 'otherCallRecords': other_calls,
-             'toolEvents': tool_events}
-    out('rollout', **facts)
-    return facts
+        bucket(kinds, '%s/%s' % (kind, sub) if isinstance(sub, str) else kind, EVENT_KINDS)
+        if kind == 'session_meta':
+            meta_match = payload.get('id') == thread
+        if kind == 'event_msg' and sub in START and payload.get('turn_id') == turn:
+            starts.append(index)
+        if kind == 'event_msg' and sub in END and payload.get('turn_id') == turn:
+            ends.append(index)
+            aborted = aborted or sub == 'turn_aborted'
+        if kind == 'response_item' and sub == 'custom_tool_call' and isinstance(payload.get('input'), str):
+            for name in NAMES.findall(payload['input']):
+                bucket(references, name, TOOL_NAMES)
+        if kind == 'response_item' and sub == 'function_call':
+            bucket(functions, payload.get('name'), TOOL_NAMES)
+            calls.setdefault(payload.get('call_id'), []).append(index)
+        if kind == 'response_item' and sub == 'function_call_output':
+            answers.setdefault(payload.get('call_id'), []).append(index)
+    pairs = sum(1 for k, v in calls.items() if isinstance(k, str) and k and len(v) == 1
+                and len(answers.get(k, [])) == 1 and answers[k][0] > v[0])
+    ordered = len(starts) == 1 and len(ends) == 1 and starts[0] < ends[0]
+    out('rollout', found=True, lines=len(lines), unreadable=unreadable, eventKinds=kinds,
+        lastTurn={'starts': len(starts), 'ends': len(ends), 'startBeforeEnd': ordered, 'aborted': aborted},
+        sessionMetaThreadMatch=meta_match)
+    out('references', execReferences=references, functionCalls=functions, correlatedFunctionPairs=pairs,
+        available=True, note='references only, not invocation evidence')
 
 
 def coverage():
-    """(3) Is a tool callback logged by the api at all?"""
     rc, output = run([K3S, 'kubectl', '-n', 'm2-hosting', 'get', 'deployment', 'api', '-o', 'json'])
     try:
         container = [c for c in json.loads(output)['spec']['template']['spec']['containers'] if c['name'] == 'api'][0]
-        argv = (container.get('command') or []) + (container.get('args') or [])
-        quiet = '--no-access-log' in argv
+        quiet = '--no-access-log' in (container.get('command') or []) + (container.get('args') or [])
     except Exception:
         quiet = None
-    out('callbackLogging', apiNoAccessLog=quiet,
-        meaning='a tool callback leaves no api log line; its absence proves nothing' if quiet is not False
-        else 'access lines exist; not read by this diagnosis (bounded scope)')
+    # review scope ack: unavailable / not collected is never reported as an observed zero
+    out('callbackLogging', apiNoAccessLog=quiet, callbackLines='unavailable (api runs --no-access-log)' if quiet else
+        ('not collected (access log on; outside this bounded scope)' if quiet is False else 'unavailable (unknown)'),
+        observedZero=False)
 
 
-def runner_logs(evidence_name):
-    """(4) The S0 runner Pod is gone; only its filtered evidence lines remain."""
-    path = os.path.join(EVIDENCE, evidence_name, 'runner-s0.log')
+def runner_logs(evidence):
     try:
-        count = len(open(path, 'rb').read().splitlines())
+        count = len(open(os.path.join(EVIDENCE, evidence, 'runner-s0.log'), 'rb').read().splitlines())
     except Exception:
         count = None
-    out('runnerLogs', podLogs='unavailable (the gen 35 Pod was deleted by the s0 stop; not restarted)',
-        filteredEvidenceLines=count)
-
-
-def diagnose(tool_items, facts):
-    if facts is None or facts.get('unreadable'):
-        return 'unknown', 'the rollout is missing or has unreadable lines'
-    research = sum(v for k, v in facts['nestedToolNames'].items() if k.startswith('research_')) + \
-        sum(v for k, v in facts['functionCalls'].items() if k.startswith('research_'))
-    any_call = sum(facts['customToolCalls'].values()) + sum(facts['functionCalls'].values()) + \
-        facts['otherCallRecords']
-    if research and not tool_items:
-        return 'b', 'the rollout has %d research tool reference(s) in tool calls; the native record has no tool item' \
-            % research
-    if not any_call and not facts['customToolOutputs'] and not facts['toolEvents'] and not tool_items:
-        return 'a', 'the rollout is intact and has no tool-call record'
-    return 'unknown', 'tool records exist but none names a research tool, or the record has tool items'
+    out('runnerLogs', podLogs='unavailable', filteredEvidenceLines=count)
 
 
 def main():
     if os.geteuid() != 0:
-        out('refused', why='not root')
+        out('refused', reason='not root')
         return 3
     try:
-        conversation = s0_conversation()
-        evidence = sorted(x for x in os.listdir(EVIDENCE) if re.fullmatch(r'i90-p5-s0-\d{8}T\d{6}Z', x))[0]
-        thread, tool_items = native_record(conversation)
-        facts = rollout(thread)
+        evidence, conversation = s0_evidence()
+        thread, turn = native(conversation)
+        rollout(thread, turn)
         coverage()
         runner_logs(evidence)
     except Refused as error:
-        out('refused', why=str(error))
+        out('refused', reason=str(error))
         return 3
-    verdict, why = diagnose(tool_items, facts)
-    out('diagnosis', result=verdict, why=why)
+    out('conclusion', text=CONCLUSION)
     return 0
 
 
