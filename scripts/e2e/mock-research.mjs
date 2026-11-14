@@ -793,7 +793,8 @@ function handleMutation(owner, method, path, b, user) {
         s.version++;
         s.updatedAt = now();
         s.turn = null;
-        if (researchMode.stream === "on") endTurn(s.id, { state: "idle", turnStatus: "completed", errorCode: null });
+        // 스트림 플래그와 무관하게 턴을 끝낸다(꺼진 동안 끝난 턴이 다시 켰을 때 running snapshot으로 남지 않게 — review a5ed24c).
+        endTurn(s.id, { state: "idle", turnStatus: "completed", errorCode: null });
       }, researchMode.turnMs);
       return ok(202, { ...sessionSummary(s), requestId });
     }

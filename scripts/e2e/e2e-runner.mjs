@@ -1037,8 +1037,9 @@ await step("N25", async () => {
   }
 
   // 계약 v1.2 idle 예외(PM 결정): 로컬 진행 중이면 idle 1건당 GET 1회, ready면 0회.
-  // "연결 전에 턴이 끝나 turn.completed를 받지 못한 경우"를 만들기 위해, 끝난 턴의 대화를 다시 열면서 첫 상세 GET만
-  // 그 턴이 실행 중일 때 저장해 둔 응답으로 돌려준다(화면은 실행 중, 서버는 진행 턴 없음 → 연결하면 idle).
+  // 마운트 GET과 idle GET이 섞이지 않게(review a5ed24c), 다시 연 화면의 스트림 연결은 상세 GET에 응답한 뒤에 풀어 주고
+  // 그 시각 이후의 mock 상세 GET만 센다. 진행 중 경우는 연결을 풀기 전의 상세 GET에 모두 그 턴이 실행 중일 때 저장한
+  // 응답을 돌려준다(화면은 진행 중, 서버에는 진행 턴 없음 → 연결하면 idle). 화면이 몇 번 마운트되든 같은 조건이 된다.
   {
     const sessionGetsSince = async (t) => (await mockCalls()).filter((c) => c.method === "GET" && /^\/research\/sessions\/[^/]+$/.test(c.path) && c.at >= t).length;
     let runningBody = null;
@@ -1055,38 +1056,51 @@ await step("N25", async () => {
     await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
     page.off("response", keep);
     check("N25. captured a running record", runningBody !== null);
-    let stale = true;
-    await page.route("**/api/research/sessions/*", (route) => {
-      if (stale && route.request().method() === "GET") {
-        stale = false;
-        return route.fulfill({ status: 200, contentType: "application/json", body: runningBody ?? "{}" });
-      }
-      return route.continue();
-    });
-    // 새로고침 뒤 대화창이 열려 있던 대화를 그대로 다시 열 수 있다. 상세 화면이 한 번만 마운트되도록, 목록이 보일 때만 고른다.
+    // 새로고침 뒤 대화창이 열려 있던 대화를 그대로 다시 열 수 있다. 목록이 보일 때만 고른다.
     const reopen = async () => {
       await openPanel();
       await Promise.race([input.waitFor(), chat.getByRole("link", { name: /준비 대화/ }).waitFor()]).catch(() => {});
       if (!(await input.isVisible())) await chat.getByRole("link", { name: /준비 대화/ }).click();
       await input.waitFor();
     };
-    let t = Date.now();
+    // gate: 상세 GET 하나에 응답한 뒤 0.5초가 지나야 스트림 연결을 통과시킨다. stale이면 그 전의 상세 GET은 저장한 응답으로.
+    const gate = async (stale) => {
+      const g = { answered: false, releasedAt: null };
+      await page.route("**/api/research/sessions/*", (route) => {
+        if (route.request().method() !== "GET" || g.releasedAt !== null) return route.continue();
+        g.answered = true;
+        return stale ? route.fulfill({ status: 200, contentType: "application/json", body: runningBody ?? "{}" }) : route.continue();
+      });
+      await page.route("**/api/research/sessions/*/events*", async (route) => {
+        while (!g.answered) await sleep(50);
+        await sleep(500);
+        if (g.releasedAt === null) g.releasedAt = Date.now();
+        return route.continue();
+      });
+      return g;
+    };
+    const ungate = async () => {
+      await page.unroute("**/api/research/sessions/*/events*");
+      await page.unroute("**/api/research/sessions/*");
+    };
+    let g = await gate(true);
     await page.reload();
     await reopen();
     check("N25. v1.2 idle while in progress: record confirmed", await appears(input.and(chat.locator(":enabled")), 10000));
     check("N25. v1.2 idle recovered the answer", await appears(chat.getByText("모의 응답: idle 예외 질문")));
     await page.waitForTimeout(2500);
-    let n = await sessionGetsSince(t);
-    check("N25. v1.2 idle while in progress: exactly one GET (stale mount GET was served by the test)", n === 1, String(n));
-    await page.unroute("**/api/research/sessions/*");
-    // ready에서 다시 열기: 상세 GET 1회(마운트)뿐, idle로는 GET하지 않는다.
-    t = Date.now();
+    let n = g.releasedAt === null ? -1 : await sessionGetsSince(g.releasedAt);
+    check("N25. v1.2 idle while in progress: exactly one GET after the stream connected", n === 1, String(n));
+    await ungate();
+    // ready에서 다시 열기: 스트림 연결 뒤 idle로는 GET하지 않는다.
+    g = await gate(false);
     await page.reload();
     await reopen();
     await input.and(chat.locator(":enabled")).waitFor({ timeout: 10000 });
     await page.waitForTimeout(3000);
-    n = await sessionGetsSince(t);
-    check("N25. v1.2 idle while ready: mount GET only", n === 1, String(n));
+    n = g.releasedAt === null ? -1 : await sessionGetsSince(g.releasedAt);
+    check("N25. v1.2 idle while ready: no GET after the stream connected", n === 0, String(n));
+    await ungate();
     await setMock("turnMs=6000");
   }
 
