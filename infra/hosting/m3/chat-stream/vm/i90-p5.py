@@ -1191,12 +1191,32 @@ def completed_turn(client, request):
     return done[-1] if done else None
 
 
+def snapshot_open(client, request):
+    """A snapshot.begin of `request` whose snapshot.end has not arrived yet. review r1 major: the runner sends a
+    completed snapshot's turn.completed *before* its snapshot.end (runner/stream.py snapshot_rest), and the client's
+    reconstructed hashes are in that snapshot.end: the reader must not be closed, or its summary trusted, before."""
+    state = None
+    for r in scoped(client, request):
+        if r.get('event') == 'snapshot.begin':
+            state = 'open'
+        elif r.get('event') == 'snapshot.end':
+            state = 'closed'
+    return state == 'open'
+
+
+def finished(client, request):
+    """This request's turn.completed seen and no snapshot of it left open."""
+    return bool(completed_turn(client, request)) and not snapshot_open(client, request)
+
+
 def reconstruction(client, request, item):
     """The reader's own summary of `item` for `request` (review r0 major): its item.completed, else (a reader that
     joined a completed turn gets no replayed item.completed) the item in its last snapshot.end; either only with that
     request's turn.completed seen. (summary, source) or (None, why)."""
     if completed_turn(client, request) is None:
         return None, 'no turn.completed of this request on the reader'
+    if snapshot_open(client, request):
+        return None, 'a snapshot of this request has no snapshot.end on the reader (incomplete, not a pass)'
     done = [r for r in scoped(client, request, 'item.completed') if r.get('item') == item]
     if done:
         return done[-1], 'item.completed'
@@ -1285,7 +1305,8 @@ def turn(ev, step, conversation, runner, prompt, readers, db=False, during=None)
     extra = during(request, clients) if during else None
     body = wait_done(step, conversation)
     for client in clients.values():
-        client.until(lambda c=client: completed_turn(c, request) or c.process.poll() is not None, 60)
+        # this request's turn.completed AND any snapshot of it ended (its snapshot.end follows the turn.completed)
+        client.until(lambda c=client: finished(c, request) or c.process.poll() is not None, 60)
         client.process.send_signal(signal.SIGINT)  # the client writes its end record (rc 130); SIGTERM leaves none
         client.end(30)
     after, others = None, None
@@ -1442,7 +1463,8 @@ def step_s4(ev, conversation, runner, verdicts, name):
                           and all(equal for equal, _ in texts.values()))
 
 
-OUTPUT_ITEM_LIMIT = 16 * 1024  # runner/stream.py: command output streamed per item (S5 expects the cap to apply)
+OUTPUT_ITEM_LIMIT = 16 * 1024   # runner/stream.py: command output streamed per item (S5 expects the cap to apply)
+OUTPUT_TURN_LIMIT = 128 * 1024  # runner/stream.py: command output streamed per turn
 
 
 def step_s5(ev, conversation, runner, verdicts):
@@ -1468,24 +1490,40 @@ def step_s5(ev, conversation, runner, verdicts):
     equal, detail = same_text(b, f['body'], request) if b else (False, 'no reader b')
     commands = {r.get('item') for r in scoped(a, request, 'item.started') if r.get('itemKind') == 'commandExecution'}
     output = [r for r in scoped(a, request, 'item.output') if r.get('item') in commands]
-    out_chars = sum(r.get('chars') or 0 for r in output)
+    per_item = {}
+    for r in output:
+        per_item[r.get('item')] = per_item.get(r.get('item'), 0) + (r.get('chars') or 0)
+    out_chars = sum(per_item.values())
     summary = f['runner'][-1] if f['runner'] else None
     dropped = summary.get('outputDroppedBytes') if isinstance(summary, dict) else None
-    say('S5: reader a end %s; command items %d, output pieces %d, %d chars on a (cap %d bytes per item); runner '
-        'outputDroppedBytes %s, deltaIn %s, eventsOut %s, eventBytes %s' % (
-            a_end, len(commands), len(output), out_chars, OUTPUT_ITEM_LIMIT, dropped,
-            json.dumps((summary or {}).get('deltaIn'), sort_keys=True), (summary or {}).get('eventsOut'),
-            (summary or {}).get('eventBytes')))
+    raw = (((summary or {}).get('deltaIn') or {}).get('commandExecution') or {}).get('bytes')
+    # review r1 major: the cap is enforced, not inferred from "something was dropped". A Unicode code point is at least
+    # one UTF-8 byte, so streamed chars above a byte limit are a certain overflow; chars at or under it are necessary,
+    # not sufficient (no per-item byte count is in the client's or the runner's evidence; seq prints ASCII only).
+    over_item = {k: v for k, v in per_item.items() if v > OUTPUT_ITEM_LIMIT}
+    over_turn = out_chars > OUTPUT_TURN_LIMIT
+    say('S5: reader a end %s; command items %d, output pieces %d, output chars per item %s (cap %d bytes per item, %d '
+        'per turn; chars <= cap is necessary, not a byte-exact proof); runner outputDroppedBytes %s, deltaIn '
+        'commandExecution bytes %s, eventsOut %s, eventBytes %s' % (
+            a_end, len(commands), len(output), json.dumps(sorted(per_item.values())), OUTPUT_ITEM_LIMIT,
+            OUTPUT_TURN_LIMIT, dropped, raw, (summary or {}).get('eventsOut'), (summary or {}).get('eventBytes')))
     say('S5: reader b snapshot of this turn %d (turnState %s: mid-turn %s), live text after it %d; b final text %s' % (
         len(begin), begin[-1].get('turnState') if begin else None, mid_turn, len(continued), detail))
-    if type(dropped) is not int or not commands:
-        say('S5: no runner output-cap evidence or no command item of this turn: unknown, no extra turn')
+    if over_item or over_turn:
+        say('S5: CAP EXCEEDED on the reader (items over %d chars: %d; turn total %d chars): False' % (
+            OUTPUT_ITEM_LIMIT, len(over_item), out_chars))
+        verdicts['S5'] = False
+        return
+    if type(dropped) is not int or type(raw) is not int or not commands:
+        say('S5: required cap evidence missing (runner outputDroppedBytes / deltaIn commandExecution bytes) or no '
+            'command item of this turn: unknown, no extra turn')
         verdicts['S5'] = None
         return
     if begin and not mid_turn:
         say('S5: reader b joined a completed turn (race); not counted as a mid-turn reload')
     verdicts['S5'] = bool(ended_ok(f['body']) and a_end == ['local_close'] and state.get('bStatus') == 200
-                          and mid_turn and continued and equal and output and dropped > 0)
+                          and mid_turn and continued and equal and output and dropped > 0
+                          and raw > OUTPUT_ITEM_LIMIT)
 
 
 def step_s6(ev, conversation, runner, verdicts):

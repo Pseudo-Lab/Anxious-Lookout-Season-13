@@ -374,8 +374,8 @@ def test_s3_a_completion_of_this_turn_first_is_a_race_without_an_interrupt(m, mo
 def test_reconstruction_from_a_completed_snapshot(m):
     """review r0 adversarial: a reader joining a completed turn gets snapshot.end items, no item.completed."""
     client = FakeClient([fr(m, "snapshot.begin", CUR, turnState="completed"),
-                         fr(m, "snapshot.end", None, items={item_hash(m, "a1"): summary_of(m, "answer")}),
-                         fr(m, "turn.completed", CUR, status="completed")])
+                         fr(m, "turn.completed", CUR, status="completed"),  # the server order: before snapshot.end
+                         fr(m, "snapshot.end", CUR, items={item_hash(m, "a1"): summary_of(m, "answer")})])
     equal, detail = m.same_text(client, body_with(m, "answer"), CUR)
     assert equal and "snapshot.end" in detail
 
@@ -426,6 +426,8 @@ def test_s6_passes_with_ready_pause_later_output_one_stall_and_a_complete_normal
     assert verdicts["S6"] is True
 
 
+CAP_EVIDENCE = {"outputDroppedBytes": 92000, "deltaIn": {"commandExecution": {"count": 40, "bytes": 108894}}}
+
 def s5_turn(m, monkeypatch, b_records, summary):
     """The fake turn runs S5's own `reload` (reader a's end, then reader b from a patched Client)."""
     a = FakeClient([fr(m, "item.started", CUR, 2, item=item_hash(m, "c1"), itemKind="commandExecution"),
@@ -449,14 +451,14 @@ def b_mid_turn(m, text):
 
 
 def test_s5_passes_with_a_mid_turn_reload_reconstruction_and_output_cap_evidence(m, monkeypatch):
-    monkeypatch.setattr(m, "turn", s5_turn(m, monkeypatch, b_mid_turn(m, "answer"), {"outputDroppedBytes": 92000}))
+    monkeypatch.setattr(m, "turn", s5_turn(m, monkeypatch, b_mid_turn(m, "answer"), CAP_EVIDENCE))
     verdicts = {}
     m.step_s5("ev", "c" * 36, {}, verdicts)
     assert verdicts["S5"] is True
 
 
 def test_s5_compares_reader_b_alone(m, monkeypatch):
-    monkeypatch.setattr(m, "turn", s5_turn(m, monkeypatch, b_mid_turn(m, "answ"), {"outputDroppedBytes": 92000}))
+    monkeypatch.setattr(m, "turn", s5_turn(m, monkeypatch, b_mid_turn(m, "answ"), CAP_EVIDENCE))
     verdicts = {}
     m.step_s5("ev", "c" * 36, {}, verdicts)
     assert verdicts["S5"] is False  # b's own reconstruction differs from GET, whatever a saw
@@ -473,7 +475,7 @@ def test_s5_a_reader_b_that_joined_a_completed_turn_is_not_a_reload(m, monkeypat
     records = [fr(m, "snapshot.begin", CUR, 10, turnState="completed"),
                fr(m, "snapshot.end", None, 11, items={item_hash(m, "a1"): summary_of(m, "answer")}),
                fr(m, "turn.completed", CUR, 12, status="completed")]
-    monkeypatch.setattr(m, "turn", s5_turn(m, monkeypatch, records, {"outputDroppedBytes": 92000}))
+    monkeypatch.setattr(m, "turn", s5_turn(m, monkeypatch, records, CAP_EVIDENCE))
     verdicts = {}
     m.step_s5("ev", "c" * 36, {}, verdicts)
     assert verdicts["S5"] is False
@@ -590,3 +592,73 @@ def test_apply_patch_never_mutates_the_patch(m):
     frozen = json.dumps(ops, sort_keys=True)
     first, second = m.apply_patch(d, ops), m.apply_patch(d, ops)
     assert first == second and json.dumps(ops, sort_keys=True) == frozen
+
+
+# --- r1 review majors: the server's snapshot order, and the S5 cap enforced -------------------------------------
+
+def test_a_snapshot_without_its_end_is_not_finished_nor_trusted(m):
+    """runner/stream.py snapshot_rest: turn.completed comes before snapshot.end."""
+    records = [fr(m, "snapshot.begin", CUR, 1, turnState="completed"), fr(m, "turn.completed", CUR, 2)]
+    client = FakeClient(records)
+    assert m.completed_turn(client, CUR) and m.snapshot_open(client, CUR) and not m.finished(client, CUR)
+    equal, detail = m.same_text(client, body_with(m, "answer"), CUR)
+    assert not equal and "no snapshot.end" in detail
+    records.append(fr(m, "snapshot.end", CUR, 3, items={item_hash(m, "a1"): summary_of(m, "answer")}))
+    assert m.finished(client, CUR) and m.same_text(client, body_with(m, "answer"), CUR)[0]
+
+
+def test_turn_waits_for_a_delayed_snapshot_end_before_closing_the_reader(m, monkeypatch, tmp_path):
+    """review r1 probe through the real turn(): snapshot.end arrives some polls after turn.completed."""
+    records = [fr(m, "snapshot.begin", CUR, 1, turnState="completed"), fr(m, "turn.completed", CUR, 2)]
+    polls, signalled = {"n": 0}, []
+
+    class Proc:
+        def poll(self):
+            polls["n"] += 1
+            if polls["n"] == 5:  # the final frame is delivered late
+                records.append(fr(m, "snapshot.end", CUR, 3, items={item_hash(m, "a1"): summary_of(m, "answer")}))
+            return None
+
+        def send_signal(self, sig):
+            signalled.append(len(records))
+
+    class Reader(FakeClient):
+        def __init__(self, *a, **k):
+            super().__init__(records)
+            self.process = Proc()
+
+        def end(self, limit):
+            return {}
+
+    monkeypatch.setattr(m, "Client", Reader)
+    monkeypatch.setattr(m, "send", lambda *a: (CUR, 1.0, 1.1))
+    monkeypatch.setattr(m, "wait_done", lambda *a: body_with(m, "answer"))
+    monkeypatch.setattr(m, "api_lines", lambda *a: ([], 0))
+    monkeypatch.setattr(m, "runner_summaries", lambda *a: [])
+    monkeypatch.setattr(m, "step_end", lambda step: None)
+    f = m.turn(str(tmp_path), "S1", "c" * 36, {}, "p", [("hop3", ("10.0.0.1", 80), ())])
+    assert signalled == [3]  # SIGINT only after snapshot.end arrived
+    assert m.same_text(f["clients"]["hop3"], f["body"], CUR)[0]
+
+
+def test_s5_gross_output_overflow_fails_even_with_dropped_bytes(m, monkeypatch):
+    """review r1 adversarial: one item streaming 50,000 chars (> 16 KiB in any encoding) with dropped > 0."""
+    turn = s5_turn(m, monkeypatch, b_mid_turn(m, "answer"), CAP_EVIDENCE)
+    original = turn
+
+    def overflow(*args, **kwargs):
+        f = original(*args, **kwargs)
+        f["clients"]["a"]._records.insert(2, fr(m, "item.output", CUR, 3, item=item_hash(m, "c1"), chars=50000))
+        return f
+
+    monkeypatch.setattr(m, "turn", overflow)
+    verdicts = {}
+    m.step_s5("ev", "c" * 36, {}, verdicts)
+    assert verdicts["S5"] is False
+
+
+def test_s5_without_the_runner_byte_evidence_is_unknown(m, monkeypatch):
+    monkeypatch.setattr(m, "turn", s5_turn(m, monkeypatch, b_mid_turn(m, "answer"), {"outputDroppedBytes": 92000}))
+    verdicts = {}
+    m.step_s5("ev", "c" * 36, {}, verdicts)
+    assert verdicts["S5"] is None
