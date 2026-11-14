@@ -7,6 +7,17 @@ root on the guest, each action other than `check` once, as a systemd unit, after
     systemd-run … python3 -I -B /root/issue90/i90-p5.py enable   # controller image + stream env, api stream env
     systemd-run … python3 -I -B /root/issue90/i90-p5.py turns    # S1-S6: 7 turns, stops at the first False step
     systemd-run … python3 -I -B /root/issue90/i90-p5.py disable  # both templates back to enable's recorded ones
+    systemd-run … python3 -I -B /root/issue90/i90-p5.py enable-r5 / turns-r5 / disable-r5  # r5: S2-S6 (see below)
+
+r5 (2026-11-15, after turns stopped at S1 on V1 and disable restored the templates; PM r5 decision, review notes):
+the second round enable-r5 -> turns-r5 (S2-S6, six turns, S1 not repeated) -> disable-r5 does what enable / turns /
+disable do, with its own evidence and once-guards. enable-r5 continues only through the reviewed decision
+CONTINUE_R5_FILE at CONTINUE_R5_SHA (`r5_accepted()`): the one turns run and the one disable run by name, their
+exit.json bytes (sha256) and recorded facts (type-strict), and the budget exactly S0 + S1 accepted; S0 / S1 stay
+False on record. Text is matched by kind and order, never by id (contract v1.4: ids are not guaranteed): the reader's
+final agentMessage of the request (first appearance via item.started or snapshot.item, reset by snapshot.begin;
+summary from item.completed or snapshot.end with observed text) against GET's final assistant message (`final_agent`,
+`same_text`); the id overlap is printed as `V1 observation` only.
 
 Budget (PM: 8 turns, hard cap 8, a failed turn counts, no retry; a 9th needs the user through PM). Review plan-notes
 major: a turn is **reserved durably before its POST**, under the shared lock (evidence/i90-p5-budget.json, written and
@@ -116,6 +127,8 @@ CLIENT_FILE = '/root/issue90/p5_client.py'
 CLIENT_SHA = 'e963d3986150fa3db031f5b4e32326b5206529080b8c812ceafa34edd8b51484'  # review's p5_client.py r1, from sha256sum (review 2026-11-15)
 SOURCE = 'bb3aa97070f175a74eec3a0c024cd158cd64fadd'  # IMAGE_SHA of the stage R images: /api/version must name it
 CONTINUE_FILE = '/root/issue90/i90-p5-continue.json'
+CONTINUE_R5_FILE = '/root/issue90/i90-p5-continue-r5.json'
+CONTINUE_R5_SHA = 'f43a64e6904f2a683072e128c1d56e0807fe87029b5aafff4ca0233259162450'  # i90-p5-continue-r5.json (r5 decision), from sha256sum
 CONTINUE_SHA = '72995355c4534891b93ad633045eeefbeb7815974ebb10224f487795cf9a44bd'  # i90-p5-continue.json (r4 decision, pins from i90-p5-s0-pins.py output), from sha256sum
 K3S, DOCKER = '/usr/local/bin/k3s', '/usr/bin/docker'
 EVIDENCE = '/root/issue90/evidence'
@@ -139,7 +152,8 @@ RUNNER_GRACE = 20
 SUMMARY_WAIT = 30
 TURN_LIMIT = 900             # seconds a turn may run before the step gives up (the turn is not stopped by this)
 STATS_IDLE = 12              # > the 10 s a PostgreSQL backend may keep pending statistics while idle
-ACTIONS = ('check', 's0', 'enable', 'turns', 'disable')
+ACTIONS = ('check', 's0', 'enable', 'turns', 'disable', 'enable-r5', 'turns-r5', 'disable-r5')
+R5_ACTIONS = ('enable-r5', 'turns-r5', 'disable-r5')  # r5: S2-S6 after the S1-stopped round (own once-guards)
 PROMPTS = {
     'S0': 'Use the research_list tool once to list my research items, then reply with one short sentence saying how '
           'many items there are.',
@@ -154,6 +168,7 @@ PROMPTS = {
     'S6': 'Write about 2500 words in plain prose (no lists, no headings) on the history of number systems.',
 }
 TURN_STEPS = ('S1', 'S2', 'S3', 'S4a', 'S4b', 'S5', 'S6')
+TURN_STEPS_R5 = TURN_STEPS[1:]  # S1 is not repeated (PM r5 decision)
 SESSION, OUT, STOPPING, CLIENTS, FOLLOWERS, ENTERED, PRIVATE = {}, {'stream': None}, {'requested': False}, [], [], {}, {}
 
 
@@ -512,11 +527,16 @@ def enable(ev, doc):
         % (template_sha(deployment(CTRL, 8)), template_sha(deployment(API, 8))))
 
 
-def enable_record():
-    """run.json of the one enable run: (before, progress) or Stop(3)."""
-    runs = runs_of('enable')
+def base(action):
+    """The behaviour of an action: an r5 action does what its first-round namesake does (own evidence and once-guard)."""
+    return action[:-3] if action in R5_ACTIONS else action
+
+
+def enable_record(enable_action='enable'):
+    """run.json of the one `enable_action` run (enable, or enable-r5 for disable-r5): (before, progress) or Stop(3)."""
+    runs = runs_of(enable_action)
     if len(runs) != 1:
-        raise Stop(3, 'disable needs exactly one enable run (found %d)' % len(runs))
+        raise Stop(3, 'disable needs exactly one %s run (found %d)' % (enable_action, len(runs)))
     try:
         value = json.load(open(os.path.join(EVIDENCE, runs[0], 'run.json')))
         before, progress = value['before'], value['progress']
@@ -525,8 +545,8 @@ def enable_record():
     return before, progress
 
 
-def disable(ev, doc):
-    before, progress = enable_record()
+def disable(ev, doc, enable_action='enable'):
+    before, progress = enable_record(enable_action)
     say('disable: enable progress %s' % progress)
     if progress == 'api':
         api = deployment(API, 3)
@@ -1219,21 +1239,37 @@ def finished(client, request):
     return bool(completed_turn(client, request)) and not snapshot_open(client, request)
 
 
-def reconstruction(client, request, item):
-    """The reader's own summary of `item` for `request` (review r0 major): its item.completed, else (a reader that
-    joined a completed turn gets no replayed item.completed) the item in its last snapshot.end; either only with that
-    request's turn.completed seen. (summary, source) or (None, why)."""
+def final_agent(client, request):
+    """r5 (V1: live item ids are not the record's; review r5 notes): the reader's final agentMessage of `request` by a
+    fixed rule, never by id - its agentMessage items in order of first appearance (item.started or snapshot.item kind),
+    reset by a snapshot.begin (a snapshot replaces the request's state); the LAST one; its summary from item.completed,
+    else the last snapshot.end items; observed text required. Only with this request's turn.completed seen and no
+    snapshot left open. (summary, source) or (None, why)."""
     if completed_turn(client, request) is None:
         return None, 'no turn.completed of this request on the reader'
     if snapshot_open(client, request):
         return None, 'a snapshot of this request has no snapshot.end on the reader (incomplete, not a pass)'
-    done = [r for r in scoped(client, request, 'item.completed') if r.get('item') == item]
-    if done:
-        return done[-1], 'item.completed'
-    snaps = [r for r in scoped(client, request, 'snapshot.end') if item in (r.get('items') or {})]
-    if snaps:
-        return snaps[-1]['items'][item], 'snapshot.end'
-    return None, 'no summary of the item on the reader'
+    order, done, snap = [], {}, {}
+    for r in scoped(client, request):
+        event, item = r.get('event'), r.get('item')
+        if event == 'snapshot.begin':
+            order, done, snap = [], {}, {}
+        elif event in ('item.started', 'snapshot.item') and item and r.get('itemKind') == 'agentMessage':
+            if item not in order:
+                order.append(item)
+        elif event == 'item.completed' and item:
+            done[item] = r
+        elif event == 'snapshot.end' and isinstance(r.get('items'), dict):
+            snap.update({k: v for k, v in r['items'].items() if isinstance(v, dict)})
+    if not order:
+        return None, 'no agentMessage of this request on the reader'
+    final = order[-1]
+    summary, source = (done[final], 'item.completed') if final in done else \
+        ((snap[final], 'snapshot.end') if final in snap else (None, None))
+    where = 'position %d of %d' % (len(order) - 1, len(order))
+    if summary is None or summary.get('textObserved') is not True:
+        return None, 'no summary with observed text for the final agentMessage (%s)' % where
+    return summary, '%s, %s' % (source, where)
 
 
 def last_agent(facts):
@@ -1242,16 +1278,26 @@ def last_agent(facts):
 
 
 def same_text(client, body, request):
-    """The reader's reconstructed final assistant message against GET's: (equal, detail)."""
+    """The reader's final agentMessage of this request (kind and order) against GET's final assistant message, by text
+    sha256 and length - not by id (contract v1.4: ids are not guaranteed to match). (equal, detail)."""
     agent = last_agent(facts_of(body))
     if agent is None:
         return False, 'no assistant message in GET'
-    mine, source = reconstruction(client, request, agent['item'])
+    mine, source = final_agent(client, request)
     if not mine:
         return False, source
     equal = mine.get('textSha256') == agent['textSha256'] and mine.get('textChars') == agent['textChars']
-    return equal, 'reader %s chars (%s) vs GET %s chars, sha equal %s' % (
+    return equal, 'reader %s chars (%s) vs GET final assistant %s chars, sha equal %s' % (
         mine.get('textChars'), source, agent['textChars'], mine.get('textSha256') == agent['textSha256'])
+
+
+def v1_observation(client, request, body):
+    """V1 as an observation (not a criterion): how many of this request's live item ids are among GET's item ids."""
+    live = {r.get('item') for r in scoped(client, request) if r.get('event') in ('item.started', 'snapshot.item')
+            and r.get('item')}
+    stored = {x['item'] for x in facts_of(body)}
+    return 'V1 observation: live item ids of this request in GET %d of %d (ids not guaranteed; turn replacement)' % (
+        len(live & stored), len(live))
 
 
 def first_text_ms(client, request, sent):
@@ -1339,6 +1385,8 @@ def turn(ev, step, conversation, runner, prompt, readers, db=False, during=None)
                 step, json.dumps(before), json.dumps(after), json.dumps(delta), STATS_IDLE, others,
                 '' if others == 0 else ' - the delta is not attributable to this turn alone'))
         facts['db'] = {'delta': delta, 'others': others}
+    if clients:
+        say('%s %s' % (step, v1_observation(list(clients.values())[0], request, body)))
     front(ev, step, list(clients.values())[0] if clients else None, body, request, sent)
     step_end(step)
     return facts
@@ -1683,6 +1731,64 @@ def guard(action):
         if name:
             raise Stop(3, 'a held state (rc 7 / 8, or an unreadable exit) of %s: back and review decide; nothing sent'
                        % name)
+    if action == 'enable-r5':
+        say('enable-r5 precondition: %s' % r5_accepted())
+    if action == 'turns-r5':
+        done = [exit_of(n) for n in runs_of('enable-r5')]
+        if len(done) != 1 or not done[0] or done[0]['rc'] != 0:
+            raise Stop(3, 'turns-r5 needs exactly one enable-r5 that ended rc 0')
+        if runs_of('disable-r5'):
+            raise Stop(3, 'turns-r5 after disable-r5 is refused')
+    if action == 'disable-r5':
+        if len(runs_of('enable-r5')) != 1:
+            raise Stop(3, 'disable-r5 needs exactly one enable-r5 run')
+        name = held()
+        if name:
+            raise Stop(3, 'a held state (rc 7 / 8, or an unreadable exit) of %s: back and review decide; nothing sent'
+                       % name)
+
+
+def r5_accepted():
+    """r5 continuation (PM r5 decision; review r5 notes): the reviewed decision CONTINUE_R5_FILE at CONTINUE_R5_SHA binds
+    the first round's end exactly - the one `turns` run and the one `disable` run by name, the sha256 of each exit.json's
+    bytes and, field by field (type-strict, a missing key is not null), their recorded facts (turns: rc 0, S1 False,
+    release True, stopped at S1, cleanup; disable: rc 0) - and the budget (exactly S0 and S1, both accepted). No r5 run
+    may exist yet. Nothing is rewritten. Anything missing or different: Stop(3), nothing sent."""
+    try:
+        decision = json.loads(read_pinned(CONTINUE_R5_FILE, CONTINUE_R5_SHA, 'i90-p5-continue-r5.json'))
+    except Stop:
+        raise
+    except Exception:
+        raise Stop(3, 'the r5 continuation decision is unreadable; nothing sent') from None
+    if not isinstance(decision, dict):
+        raise Stop(3, 'the r5 continuation decision is not an object; nothing sent')
+    checks = {'version': decision.get('version') == 'i90-p5-continue-r5-r0',
+              'noR5Run': not any(runs_of(a) for a in R5_ACTIONS)}
+    for action in ('turns', 'disable'):
+        want = decision.get(action) if isinstance(decision.get(action), dict) else {}
+        runs = runs_of(action)
+        try:
+            raw = read_plain(os.path.join(EVIDENCE, runs[0], 'exit.json')) if len(runs) == 1 else None
+            done = json.loads(raw) if raw is not None else None
+        except Exception:
+            raw, done = None, None
+        recorded = want.get('recorded') if isinstance(want.get('recorded'), dict) else None
+        checks[action] = (len(runs) == 1 and runs[0] == want.get('run') and raw is not None
+                          and isinstance(want.get('exitSha256'), str)
+                          and re.fullmatch(r'[0-9a-f]{64}', want['exitSha256']) is not None
+                          and hashlib.sha256(raw).hexdigest() == want['exitSha256']
+                          and isinstance(done, dict) and bool(recorded)
+                          and all(k in done and canonical(done[k]) == canonical(v) for k, v in recorded.items()))
+    turns = budget_read()
+    checks['budget'] = (decision.get('turnsUsed') == 2 and canonical(
+        [[t.get('n'), t.get('step'), t.get('outcome')] for t in turns]) == canonical(
+        [[1, 'S0', 'accepted'], [2, 'S1', 'accepted']]))
+    failed = sorted(k for k, ok in checks.items() if not ok)
+    if failed:
+        raise Stop(3, 'the r5 continuation decision does not bind the first round (%s); nothing sent'
+                   % ', '.join(failed))
+    return 'S1 False on record; r5 decision %s… binds %s and %s (exit bytes, facts) and budget 2/8' % (
+        CONTINUE_R5_SHA[:8], decision['turns']['run'], decision['disable']['run'])
 
 
 def precheck(doc, action):
@@ -1707,7 +1813,7 @@ def precheck(doc, action):
     version = body.get('sha') if isinstance(body, dict) else None
     say('/api/version %s %s' % (status, version))
     quiet = (state['phase'], state['pod']) == ('idle_stopped', None) and not pods and live['n'] == 0
-    if action == 'disable':
+    if base(action) == 'disable':
         if not ready:
             raise Stop(3, 'disable: a Deployment is not the recorded 1/1 one')
         return
@@ -1715,11 +1821,11 @@ def precheck(doc, action):
         raise Stop(3, 'not the stage R baseline (1/1 recorded Deployments, …5805 idle with no Pod, no live session, '
                       'version, api image)')
     flags = bool(stream_entries(api, API) or stream_entries(ctrl, CTRL))
-    if action in ('check', 's0', 'enable'):
+    if base(action) in ('check', 's0', 'enable'):
         if flags or api_template_sha(api) != doc['apiTemplateSha256'] or \
                 ctrl_image != doc['deployments']['runner-controller']['images']['controller']:
             raise Stop(3, '%s needs the stage R templates with no stream env' % action)
-    if action == 'turns':
+    if base(action) == 'turns':
         want_api = all(stream_entries(api, API).get(e['name']) for e in API_ENV)
         want_ctrl = all(stream_entries(ctrl, CTRL).get(e['name']) for e in CTRL_ENV) and ctrl_image == doc['newApiImage']
         if not (want_api and want_ctrl):
@@ -1748,12 +1854,12 @@ def measure(ev, doc, action, verdicts):
     else:
         conversation = conversation_of_s0()
         say('P5 conversation %s (from s0)' % conversation[:8])
-    if action == 'turns':
+    if base(action) == 'turns':
         prepare_private(ev, doc['toolImage'])
         probe_private()
     else:
         PRIVATE['salt'] = secrets.token_hex(32)  # s0 has no reader: ids are hashed for its facts only
-    runner = start_runner(ev, action, action == 'turns', doc)
+    runner = start_runner(ev, action, base(action) == 'turns', doc)
     if action == 's0':
         steps = (('S0', lambda: step_s0(ev, conversation, runner, verdicts)),)
     else:
@@ -1764,6 +1870,8 @@ def measure(ev, doc, action, verdicts):
                  ('S4b', lambda: step_s4(ev, conversation, runner, verdicts, 'S4b')),
                  ('S5', lambda: step_s5(ev, conversation, runner, verdicts)),
                  ('S6', lambda: step_s6(ev, conversation, runner, verdicts)))
+        if action == 'turns-r5':  # S1 is not repeated (PM r5 decision)
+            steps = steps[1:]
     stopped_at = None
     for name, step in steps:
         time.sleep(1.1)
@@ -1836,10 +1944,10 @@ def main(argv):
             OUT['stream'] = os.fdopen(fd, 'w')
             record(ev, action=action, started=now_utc(), expectedSha256=EXPECTED_SHA, clientSha256=CLIENT_SHA)
             say('evidence: %s' % ev)
-            if action == 'enable':
+            if base(action) == 'enable':
                 enable(ev, doc)
-            elif action == 'disable':
-                disable(ev, doc)
+            elif base(action) == 'disable':
+                disable(ev, doc, 'enable-r5' if action == 'disable-r5' else 'enable')
             else:
                 stopped_at = measure(ev, doc, action, verdicts)
         except Stop as stop:
@@ -1862,7 +1970,8 @@ def main(argv):
     say('cleanup: runner released %s; client containers gone %s; private files removed %s; session revoked %s'
         % ({None: 'n/a'}.get(runner, runner), gone, {None: 'n/a'}.get(private, private),
            {None: 'n/a'}.get(revoked, revoked)))
-    items = ('S0',) if action == 's0' else TURN_STEPS if action == 'turns' else ()
+    items = ('S0',) if action == 's0' else TURN_STEPS if action == 'turns' else TURN_STEPS_R5 if action == 'turns-r5' \
+        else ()
     for name in items:
         say('verdict %s: %s' % (name, {True: 'True', False: 'False'}.get(verdicts.get(name), 'unknown')))
     if items:
@@ -1900,30 +2009,34 @@ def main(argv):
 
 
 NEXT = ('s0', 'enable', 'turns', 'disable')
+NEXT_R5 = ('enable-r5', 'turns-r5', 'disable-r5')
 
 
 def next_step(action, code, passed):
     """The PM stop table (2026-11-15, review-accepted) for this action's result: one rule, printed with every result.
-    A result missing from disk (no exit.json) is not covered here: unknown, read-only check, back / review decide."""
-    enabled = action in ('enable', 'turns')
+    A result missing from disk (no exit.json) is not covered here: unknown, read-only check, back / review decide.
+    r5 actions follow the same table with their own round (disable-r5 after enable-r5)."""
+    enabled = base(action) in ('enable', 'turns')
+    off = 'disable-r5' if action in R5_ACTIONS else 'disable'
     if code in (7, 8):
-        return 'HELD: report at once; nothing else is run, disable included; back and review decide'
+        return 'HELD: report at once; nothing else is run, %s included; back and review decide' % off
     if code == 80:
         return ('report at once; no further turn or measurement; prove read-only that no client container or private '
-                'file is left, then %s' % ('disable on PM go' if enabled else 'PM decides'))
+                'file is left, then %s' % ('%s on PM go' % off if enabled else 'PM decides'))
     if code == 6:
         return ('report at once; prove the runner release read-only, then %s'
-                % ('disable on PM go' if enabled else 'PM decides'))
+                % ('%s on PM go' % off if enabled else 'PM decides'))
     if code == 70:
         return ('report; the session expires 3 hours after it was created (expiry is not proof of a revoke); %s'
-                % ('disable on PM go' if enabled else 'PM decides'))
+                % ('%s on PM go' % off if enabled else 'PM decides'))
     if code == 9:
-        return 'report; %s' % ('disable on PM go' if enabled else 'PM decides')
+        return 'report; %s' % ('%s on PM go' % off if enabled else 'PM decides')
     if code != 0 or not passed:
-        return ('stop here, the remaining turns unspent; %s' % ('disable next' if enabled else 'report'))
-    if action == 'disable':
+        return ('stop here, the remaining turns unspent; %s' % ('%s next' % off if enabled else 'report'))
+    if base(action) == 'disable':
         return 'P5 complete: report the results'
-    return 'the next action: %s' % NEXT[NEXT.index(action) + 1] if action in NEXT[:-1] else 'report'
+    order = NEXT_R5 if action in R5_ACTIONS else NEXT
+    return 'the next action: %s' % order[order.index(action) + 1] if action in order[:-1] else 'report'
 
 
 def final_rc(step, facts, evidence_failed):

@@ -1,0 +1,10 @@
+{
+ "version": "i90-p5-continue-r5-r0",
+ "turns": {"run": "i90-p5-turns-20261114T163034Z", "exitSha256": "2a2d98ecff7c8506d7ff802584000db603ee394c120ccb29c62d0dee768f03af", "recorded": {"rc": 0, "stepRc": 0, "verdicts": {"S1": false, "release": true}, "stoppedAt": "S1", "runnerReleased": null, "clientsGone": true, "privateRemoved": true, "sessionRevoked": true}},
+ "disable": {"run": "i90-p5-disable-20261114T163347Z", "exitSha256": "bc6a7c048f19b1e09d6a0e663de2de8068d492af0c14c34144e64035cc4e2498", "recorded": {"rc": 0, "stepRc": 0}},
+ "turnsUsed": 2,
+ "evidence": {"turnsLogSha256": "8e98dddc7d1284e55d38161305852bb731ffe889bfff28679da274af9e746cba", "disableLogSha256": "e02dd85b3eee4557924c1a0cb02e2c3acafa4f13df611c073cd0b558a15f6b9d", "s1LookLogSha256": "199c01a278bdfad1ca8520c6c6ef45651360e53324d48389094a7e28f35d9fe6", "note": "log hashes are provenance references; the guard checks the guest exit files themselves"},
+ "acceptedObservations": ["S1 runtime: legacyL 43, cutDelayPeakChars 42, holdbackPeakChars 66 (this run)", "S1 text equality under the fixed selection rule (s1-look compare: equal; not id correspondence)", "V1: at least one of five live item ids not in GET; ids not guaranteed (contract v1.4)", "disable restored both pre-enable templates (equal: True)"],
+ "decision": "continue S2-S6 in r5 within the six remaining turns; S0 and S1 stay False on record; text matched by kind and order",
+ "references": ["messages/back/2026-11-15-pm-issue90-p5-r5-decisions.md", "messages/back/2026-11-15-pm-issue90-v1-correction.md", "messages/back/2026-11-15-review-issue90-p5-s1-analysis-r5-notes.md", "messages/back/2026-11-15-review-issue90-s1-look-result-ack.md", "messages/back/2026-11-15-pm-issue90-s1-look-result.md"]
+}

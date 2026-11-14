@@ -342,6 +342,12 @@ PM decisions Q1–Q5, review plan notes; its docstring is the specification). In
   - S2 passes on the text criterion; command and tool streaming is an observation.
   - S5 and S6 use long prose: S5's output cap and S6's stall cleanup are printed as gaps, never passes.
   - Budget: 1 used, 7 left (S1–S6).
+- **r21 (2026-11-15, r5):**
+  - `turns` stopped at S1 (False) on V1: at least one live item id was not in GET. `disable` restored both templates.
+  - The read-only S1 look then found the final text equal under the fixed selection rule (not id correspondence).
+  - Contract v1.4: ids are not guaranteed; turn-level replacement is the rule.
+  - r5 adds `enable-r5` → `turns-r5` (S2–S6, six turns) → `disable-r5`. Text is matched by kind and order; V1 is printed as an observation.
+  - `enable-r5` continues through the reviewed decision `vm/i90-p5-continue-r5.json`. S0 and S1 stay False; budget 2 used, 6 left.
 - The rest of this section is the original P5 design that the script implements.
 
 **Prerequisite P5-0 (code, separate review)**: the runner Pod env must be able to carry `RUNNER_STREAM_TEXT=true` and `STREAM_TRACE=true`.

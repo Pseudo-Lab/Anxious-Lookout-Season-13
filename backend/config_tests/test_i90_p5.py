@@ -299,7 +299,12 @@ def body_with(m, text, status=None, display=False):
 
 
 def summary_of(m, text):
-    return {"textChars": len(text), "textSha256": hashlib.sha256(text.encode()).hexdigest()}
+    return {"textChars": len(text), "textSha256": hashlib.sha256(text.encode()).hexdigest(), "textObserved": True}
+
+
+def started(m, request=CUR, t=1, event="item.started"):
+    """r5: the agentMessage kind frame the kind / order rule needs (item.started live, snapshot.item in a snapshot)."""
+    return fr(m, event, request, t, item=item_hash(m, "a1"), itemKind="agentMessage")
 
 
 def completed(m, text, request=CUR, t=2):
@@ -373,7 +378,7 @@ def test_s3_a_completion_of_this_turn_first_is_a_race_without_an_interrupt(m, mo
 
 def test_reconstruction_from_a_completed_snapshot(m):
     """review r0 adversarial: a reader joining a completed turn gets snapshot.end items, no item.completed."""
-    client = FakeClient([fr(m, "snapshot.begin", CUR, turnState="completed"),
+    client = FakeClient([fr(m, "snapshot.begin", CUR, turnState="completed"), started(m, t=1, event="snapshot.item"),
                          fr(m, "turn.completed", CUR, status="completed"),  # the server order: before snapshot.end
                          fr(m, "snapshot.end", CUR, items={item_hash(m, "a1"): summary_of(m, "answer")})])
     equal, detail = m.same_text(client, body_with(m, "answer"), CUR)
@@ -404,7 +409,7 @@ def test_the_send_time_is_taken_before_the_post(m, monkeypatch):
 # --- step verdicts ---------------------------------------------------------------------------------------------
 
 def test_s6_without_server_stall_evidence_is_unknown(m, monkeypatch):
-    normal = FakeClient([completed(m, "answer"), fr(m, "turn.completed", CUR, 3)])
+    normal = FakeClient([started(m), completed(m, "answer"), fr(m, "turn.completed", CUR, 3)])
     paused = FakeClient([{"kind": "reader_paused", "unixNs": 1}])
     monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
                                                    "clients": {"n": normal, "p": paused},
@@ -415,7 +420,7 @@ def test_s6_without_server_stall_evidence_is_unknown(m, monkeypatch):
 
 
 def test_s6_passes_with_ready_pause_later_output_one_stall_and_a_complete_normal_reader(m, monkeypatch):
-    normal = FakeClient([fr(m, "item.output", CUR, 5, item=item_hash(m, "c1"), chars=9), completed(m, "answer", t=6),
+    normal = FakeClient([started(m), fr(m, "item.output", CUR, 5, item=item_hash(m, "c1"), chars=9), completed(m, "answer", t=6),
                          fr(m, "turn.completed", CUR, 7)])
     paused = FakeClient([{"kind": "reader_paused", "unixNs": 1}])
     monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
@@ -445,7 +450,8 @@ def s5_turn(m, monkeypatch, b_records, summary):
 
 
 def b_mid_turn(m, text):
-    return [fr(m, "snapshot.begin", CUR, 10, turnState="running"), fr(m, "snapshot.end", None, 11, items={}),
+    return [fr(m, "snapshot.begin", CUR, 10, turnState="running"), started(m, t=10, event="snapshot.item"),
+            fr(m, "snapshot.end", None, 11, items={}),
             fr(m, "item.delta", CUR, 12, item=item_hash(m, "a1"), chars=3), completed(m, text, t=13),
             fr(m, "turn.completed", CUR, 14, status="completed")]
 
@@ -472,7 +478,7 @@ def test_s5_r3_without_runner_cap_evidence_still_judges_the_reload(m, monkeypatc
 
 
 def test_s5_a_reader_b_that_joined_a_completed_turn_is_not_a_reload(m, monkeypatch):
-    records = [fr(m, "snapshot.begin", CUR, 10, turnState="completed"),
+    records = [fr(m, "snapshot.begin", CUR, 10, turnState="completed"), started(m, t=10, event="snapshot.item"),
                fr(m, "snapshot.end", None, 11, items={item_hash(m, "a1"): summary_of(m, "answer")}),
                fr(m, "turn.completed", CUR, 12, status="completed")]
     monkeypatch.setattr(m, "turn", s5_turn(m, monkeypatch, records, CAP_EVIDENCE))
@@ -598,7 +604,8 @@ def test_apply_patch_never_mutates_the_patch(m):
 
 def test_a_snapshot_without_its_end_is_not_finished_nor_trusted(m):
     """runner/stream.py snapshot_rest: turn.completed comes before snapshot.end."""
-    records = [fr(m, "snapshot.begin", CUR, 1, turnState="completed"), fr(m, "turn.completed", CUR, 2)]
+    records = [fr(m, "snapshot.begin", CUR, 1, turnState="completed"), started(m, t=1, event="snapshot.item"),
+               fr(m, "turn.completed", CUR, 2)]
     client = FakeClient(records)
     assert m.completed_turn(client, CUR) and m.snapshot_open(client, CUR) and not m.finished(client, CUR)
     equal, detail = m.same_text(client, body_with(m, "answer"), CUR)
@@ -609,7 +616,8 @@ def test_a_snapshot_without_its_end_is_not_finished_nor_trusted(m):
 
 def test_turn_waits_for_a_delayed_snapshot_end_before_closing_the_reader(m, monkeypatch, tmp_path):
     """review r1 probe through the real turn(): snapshot.end arrives some polls after turn.completed."""
-    records = [fr(m, "snapshot.begin", CUR, 1, turnState="completed"), fr(m, "turn.completed", CUR, 2)]
+    records = [fr(m, "snapshot.begin", CUR, 1, turnState="completed"), started(m, t=1, event="snapshot.item"),
+               fr(m, "turn.completed", CUR, 2)]
     polls, signalled = {"n": 0}, []
 
     class Proc:
@@ -637,7 +645,7 @@ def test_turn_waits_for_a_delayed_snapshot_end_before_closing_the_reader(m, monk
     monkeypatch.setattr(m, "runner_summaries", lambda *a: [])
     monkeypatch.setattr(m, "step_end", lambda step: None)
     f = m.turn(str(tmp_path), "S1", "c" * 36, {}, "p", [("hop3", ("10.0.0.1", 80), ())])
-    assert signalled == [3]  # SIGINT only after snapshot.end arrived
+    assert signalled == [len(records)] and records[-1]["event"] == "snapshot.end"  # SIGINT only after snapshot.end
     assert m.same_text(f["clients"]["hop3"], f["body"], CUR)[0]
 
 
@@ -793,7 +801,7 @@ def test_the_pins_collector_prints_hashes_never_the_uuid(tmp_path, monkeypatch, 
 
 
 def test_s2_r3_passes_on_the_text_criterion_with_no_command_events(m, monkeypatch, capsys):
-    client = FakeClient([completed(m, "answer"), fr(m, "turn.completed", CUR, 3)])
+    client = FakeClient([started(m), completed(m, "answer"), fr(m, "turn.completed", CUR, 3)])
     monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
                                                    "clients": {"hop3": client}, "runner": []})
     verdicts = {}
@@ -803,7 +811,7 @@ def test_s2_r3_passes_on_the_text_criterion_with_no_command_events(m, monkeypatc
 
 
 def test_s2_r3_fails_when_the_text_differs(m, monkeypatch):
-    client = FakeClient([completed(m, "answ"), fr(m, "turn.completed", CUR, 3)])
+    client = FakeClient([started(m), completed(m, "answ"), fr(m, "turn.completed", CUR, 3)])
     monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
                                                    "clients": {"hop3": client}, "runner": []})
     verdicts = {}
@@ -817,7 +825,7 @@ def test_s5_r3_prompts_are_prose_only(m):
 
 
 def test_s6_r3_unknown_prints_the_gap(m, monkeypatch, capsys):
-    normal = FakeClient([completed(m, "answer"), fr(m, "turn.completed", CUR, 3)])
+    normal = FakeClient([started(m), completed(m, "answer"), fr(m, "turn.completed", CUR, 3)])
     paused = FakeClient([{"kind": "reader_paused", "unixNs": 1}])
     monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
                                                    "clients": {"n": normal, "p": paused}, "api": [{"reason": None}]})
@@ -825,3 +833,167 @@ def test_s6_r3_unknown_prints_the_gap(m, monkeypatch, capsys):
     m.step_s6("ev", "c" * 36, {}, verdicts)
     assert verdicts == {"S1": True, "S6": None} and "S6 gap: stall and upstream cleanup not exercised" in \
         capsys.readouterr().out
+
+
+# --- r5: text by kind and order (V1: ids differ), the r5 continuation, turns-r5 -------------------------------
+
+def live(m, item, text, request=CUR, t=1):
+    """An agentMessage with a live id of its own (not GET's 'a1'): started + completed."""
+    return [fr(m, "item.started", request, t, item=item_hash(m, item), itemKind="agentMessage"),
+            fr(m, "item.completed", request, t + 1, item=item_hash(m, item), **summary_of(m, text))]
+
+
+def test_r5_different_ids_with_equal_final_text_are_equal(m):
+    client = FakeClient(live(m, "live-x", "answer") + [fr(m, "turn.completed", CUR, 9, status="completed")])
+    equal, detail = m.same_text(client, body_with(m, "answer"), CUR)
+    assert equal and "position 0 of 1" in detail and "item.completed" in detail
+    assert "0 of 1" in m.v1_observation(client, CUR, body_with(m, "answer"))  # V1 is an observation only
+
+
+def test_r5_same_kind_but_wrong_final_text_is_not_equal(m):
+    client = FakeClient(live(m, "live-x", "answ") + [fr(m, "turn.completed", CUR, 9, status="completed")])
+    assert m.same_text(client, body_with(m, "answer"), CUR)[0] is False
+
+
+def test_r5_the_final_of_several_agent_messages_is_compared(m):
+    client = FakeClient(live(m, "live-1", "first", t=1) + live(m, "live-2", "answer", t=3)
+                        + [fr(m, "turn.completed", CUR, 9, status="completed")])
+    equal, detail = m.same_text(client, body_with(m, "answer"), CUR)
+    assert equal and "position 1 of 2" in detail
+    # the final (not "any equal hash"): an equal FIRST message does not make a different final pass
+    swapped = FakeClient(live(m, "live-1", "answer", t=1) + live(m, "live-2", "other", t=3)
+                         + [fr(m, "turn.completed", CUR, 9, status="completed")])
+    assert m.same_text(swapped, body_with(m, "answer"), CUR)[0] is False
+
+
+def test_r5_a_prior_request_never_supplies_the_final_text(m):
+    client = FakeClient(live(m, "old", "answer", request=PREV, t=1)
+                        + [fr(m, "turn.completed", PREV, 2, status="completed"), fr(m, "turn.started", CUR, 3)]
+                        + [fr(m, "item.started", CUR, 4, item=item_hash(m, "new"), itemKind="agentMessage"),
+                           fr(m, "turn.completed", CUR, 9, status="completed")])
+    equal, detail = m.same_text(client, body_with(m, "answer"), CUR)
+    assert not equal and "no summary with observed text" in detail
+
+
+def test_r5_a_final_summary_without_observed_text_is_not_equal(m):
+    summary = dict(summary_of(m, ""), textObserved=False)
+    client = FakeClient([fr(m, "item.started", CUR, 1, item=item_hash(m, "x"), itemKind="agentMessage"),
+                         fr(m, "item.completed", CUR, 2, item=item_hash(m, "x"), **summary),
+                         fr(m, "turn.completed", CUR, 9, status="completed")])
+    assert m.same_text(client, body_with(m, ""), CUR)[0] is False
+
+
+R5_TURNS_EXIT = {"rc": 0, "stepRc": 0, "verdicts": {"S1": False, "release": True}, "stoppedAt": "S1",
+                 "runnerReleased": None, "clientsGone": True, "privateRemoved": True, "sessionRevoked": True,
+                 "finished": "2026-11-14T16:33:34Z"}
+R5_DISABLE_EXIT = {"rc": 0, "stepRc": 0, "verdicts": {}, "stoppedAt": None, "runnerReleased": None,
+                   "clientsGone": True, "privateRemoved": None, "sessionRevoked": None, "finished": "x"}
+TURNS_RUN, DISABLE_RUN = "i90-p5-turns-20261114T163034Z", "i90-p5-disable-20261114T163347Z"
+
+
+def r5_state(m, tmp_path, monkeypatch, turns_exit=None, disable_exit=None, budget=None, decision=None):
+    raws = {}
+    for run, doc in ((TURNS_RUN, turns_exit or R5_TURNS_EXIT), (DISABLE_RUN, disable_exit or R5_DISABLE_EXIT)):
+        folder = Path(m.EVIDENCE) / run
+        folder.mkdir(exist_ok=True)
+        raws[run] = json.dumps(doc, sort_keys=True, indent=1).encode()
+        (folder / "exit.json").write_bytes(raws[run])
+    turns = budget or [{"n": 1, "step": "S0", "outcome": "accepted"}, {"n": 2, "step": "S1", "outcome": "accepted"}]
+    m.durable_json(m.BUDGET, {"cap": 8, "turns": turns})
+    value = json.loads((VM / "i90-p5-continue-r5.json").read_text())
+    value["turns"]["exitSha256"] = hashlib.sha256(json.dumps(R5_TURNS_EXIT, sort_keys=True, indent=1).encode()).hexdigest()
+    value["disable"]["exitSha256"] = hashlib.sha256(json.dumps(R5_DISABLE_EXIT, sort_keys=True, indent=1).encode()
+                                                    ).hexdigest()
+    value.update(decision or {})
+    data = json.dumps(value).encode()
+    path = tmp_path / "continue-r5.json"
+    path.write_bytes(data)
+    monkeypatch.setattr(m, "CONTINUE_R5_FILE", str(path))
+    monkeypatch.setattr(m, "CONTINUE_R5_SHA", hashlib.sha256(data).hexdigest())
+    monkeypatch.setattr(m, "read_pinned", lambda p, want, name: (
+        open(p, "rb").read() if hashlib.sha256(open(p, "rb").read()).hexdigest() == want
+        else (_ for _ in ()).throw(m.Stop(3, "%s is not the reviewed root file" % name))))
+    return path
+
+
+def test_r5_the_committed_decision_binds_the_first_round(m):
+    value = json.loads((VM / "i90-p5-continue-r5.json").read_text())
+    assert value["turns"]["run"] == TURNS_RUN and value["disable"]["run"] == DISABLE_RUN and value["turnsUsed"] == 2
+    assert value["turns"]["recorded"] == {k: v for k, v in R5_TURNS_EXIT.items() if k != "finished"}
+    import re
+    assert all(re.fullmatch(r"[0-9a-f]{64}", value[a]["exitSha256"]) for a in ("turns", "disable"))
+    assert m.CONTINUE_R5_SHA == hashlib.sha256((VM / "i90-p5-continue-r5.json").read_bytes()).hexdigest()
+
+
+def test_r5_enable_continues_through_the_bound_decision(m, tmp_path, monkeypatch):
+    r5_state(m, tmp_path, monkeypatch)
+    assert "binds %s and %s" % (TURNS_RUN, DISABLE_RUN) in m.r5_accepted()
+    assert len(m.budget_read()) == 2
+
+
+@pytest.mark.parametrize("case", ["tampered", "turns_exit_changed", "release_false", "missing_nullable",
+                                  "disable_rc", "budget_three", "r5_run_exists", "other_turns_run"])
+def test_r5_continuation_refuses_anything_else(m, tmp_path, monkeypatch, case):
+    if case == "turns_exit_changed":
+        r5_state(m, tmp_path, monkeypatch, turns_exit=dict(R5_TURNS_EXIT, finished="other"))
+    elif case == "release_false":
+        r5_state(m, tmp_path, monkeypatch, turns_exit=dict(R5_TURNS_EXIT, verdicts={"S1": False, "release": False}))
+    elif case == "missing_nullable":
+        r5_state(m, tmp_path, monkeypatch, turns_exit={k: v for k, v in R5_TURNS_EXIT.items()
+                                                       if k != "runnerReleased"})
+    elif case == "disable_rc":
+        r5_state(m, tmp_path, monkeypatch, disable_exit=dict(R5_DISABLE_EXIT, rc=8))
+    elif case == "budget_three":
+        r5_state(m, tmp_path, monkeypatch, budget=[{"n": 1, "step": "S0", "outcome": "accepted"},
+                                                   {"n": 2, "step": "S1", "outcome": "accepted"},
+                                                   {"n": 3, "step": "S2", "outcome": "accepted"}])
+    else:
+        path = r5_state(m, tmp_path, monkeypatch)
+        if case == "tampered":
+            path.write_bytes(path.read_bytes().replace(b'"turnsUsed": 2', b'"turnsUsed": 3'))
+        elif case == "r5_run_exists":
+            (Path(m.EVIDENCE) / "i90-p5-enable-r5-20261115T000000Z").mkdir()
+        elif case == "other_turns_run":
+            (Path(m.EVIDENCE) / "i90-p5-turns-20261115T000000Z").mkdir()
+    with pytest.raises(m.Stop) as stopped:
+        m.r5_accepted()
+    assert stopped.value.code == 3
+
+
+def test_turns_r5_skips_s1_and_follows_the_stop_policy(m, monkeypatch, tmp_path):
+    ran = []
+
+    def fake(step):
+        def run(ev, conversation, runner, verdicts, *rest):
+            name = rest[0] if rest else step
+            ran.append(name)
+            verdicts[name] = True if name != "S3" else None
+        return run
+
+    for name in ("s1", "s2", "s3", "s5", "s6"):
+        monkeypatch.setattr(m, "step_" + name, fake(name.upper()))
+    monkeypatch.setattr(m, "step_s4", fake("S4"))
+    for name, value in (("create_session", lambda ev: None), ("conversation_of_s0", lambda: "c" * 36),
+                        ("prepare_private", lambda ev, image: None), ("probe_private", lambda: None),
+                        ("start_runner", lambda *a: {}), ("stop_runner", lambda *a: True)):
+        monkeypatch.setattr(m, name, value)
+    verdicts = {}
+    stopped = m.measure(str(tmp_path), {"toolImage": "x"}, "turns-r5", verdicts)
+    assert ran == ["S2", "S3"] and stopped == "S3" and "S1" not in verdicts
+
+
+def test_r5_guards_and_next_steps(m, tmp_path, monkeypatch):
+    assert m.base("enable-r5") == "enable" and m.base("turns-r5") == "turns" and m.base("disable") == "disable"
+    assert m.next_step("enable-r5", 0, True) == "the next action: turns-r5"
+    assert "disable-r5 next" in m.next_step("turns-r5", 0, False)
+    assert "disable-r5 on PM go" in m.next_step("turns-r5", 80, False)
+    assert m.next_step("disable-r5", 0, True) == "P5 complete: report the results"
+    with pytest.raises(m.Stop):
+        m.guard("turns-r5")  # no enable-r5 yet
+    folder = Path(m.EVIDENCE) / "i90-p5-enable-r5-20261115T000000Z"
+    folder.mkdir()
+    (folder / "exit.json").write_text(json.dumps({"rc": 0, "verdicts": {}}))
+    m.guard("turns-r5")
+    (Path(m.EVIDENCE) / "i90-p5-disable-r5-20261115T010000Z").mkdir()
+    with pytest.raises(m.Stop):
+        m.guard("turns-r5")

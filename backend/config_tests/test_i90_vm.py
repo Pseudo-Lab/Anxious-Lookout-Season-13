@@ -818,7 +818,7 @@ def test_install_accepts_the_stage_r_d1_script(tmp_path):
     assert code == 0 and (d / "i90r-d1.py").read_bytes() == b"print('rd1')\n"
 
 
-@pytest.mark.parametrize("name", ["i90-p5.py", "p5_client.py", "i90-p5-continue.json"])
+@pytest.mark.parametrize("name", ["i90-p5.py", "p5_client.py", "i90-p5-continue.json", "i90-p5-continue-r5.json"])
 def test_install_accepts_the_p5_files(tmp_path, name):
     code, out, d = install_run(tmp_path, name, b"print('p5')\n")
     assert code == 0 and (d / name).read_bytes() == b"print('p5')\n"
