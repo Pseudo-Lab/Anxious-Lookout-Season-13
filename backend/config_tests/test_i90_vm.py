@@ -517,7 +517,8 @@ def test_api_image_refuses_a_change_between_read_and_patch(monkeypatch, race):
 
 # --- stage C: i90-install.sh (fake /root/issue90, run as the test user) -------------------------------------------
 
-def install_run(tmp_path, name, data, sha=None, prepare=None):
+def install_run(tmp_path, name, data, sha=None, prepare=None, owner=None):
+    """owner: the uid the script expects (default the test user, standing in for root)."""
     import hashlib
     import os
     d = tmp_path / "issue90"
@@ -532,7 +533,8 @@ def install_run(tmp_path, name, data, sha=None, prepare=None):
                      ('[ "$(id -u)" = 0 ] ||', 'true ||'),
                      ("= '0:0:700' ]", "= '%d:%d:700' ]" % (uid, gid)),
                      ('chown root:root "$T" && ', ''),
-                     ("= 'regular file|0|0|600|1' ]", "= 'regular file|%d|%d|600|1' ]" % (uid, gid))):
+                     ("WANT='regular file|0|0|600|1'",
+                      "WANT='regular file|%d|%d|600|1'" % (uid if owner is None else owner, gid))):
         assert script.count(old) == 1, old
         script = script.replace(old, new)
     sha = sha or hashlib.sha256(data).hexdigest()
@@ -564,6 +566,26 @@ def test_install_same_file_changes_nothing(tmp_path):
     code, out, d = install_run(tmp_path, "i90-expected.json", b"x\n")
     assert code == 0 and "already the reviewed file" in out
     assert sorted(p.name for p in d.iterdir()) == ["i90-expected.json"]
+
+
+@pytest.mark.parametrize("bad", ["mode 0666", "another owner", "a second link"])
+def test_install_same_bytes_with_other_metadata_refuse(tmp_path, bad):
+    """Review eba3ede major: the already-installed branch checks root:root 0600 with one link, never only the hash."""
+    import os
+    install_run(tmp_path, "i90-expected.json", b"x\n")
+    d = tmp_path / "issue90"
+    target = d / "i90-expected.json"
+    owner = None
+    if bad == "mode 0666":
+        target.chmod(0o666)
+    elif bad == "another owner":
+        owner = os.getuid() + 1  # the script expects another uid than the file's (root vs the test user)
+    else:
+        os.link(target, tmp_path / "second-link")
+    before = {p.name: (p.read_bytes(), p.stat().st_mode, p.stat().st_nlink) for p in d.iterdir()}
+    code, out, _ = install_run(tmp_path, "i90-expected.json", b"x\n", owner=owner)
+    assert code == 3 and "has the reviewed bytes but is" in out and "nothing changed" in out, out
+    assert {p.name: (p.read_bytes(), p.stat().st_mode, p.stat().st_nlink) for p in d.iterdir()} == before
 
 
 def test_install_wrong_bytes_change_nothing(tmp_path):

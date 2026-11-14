@@ -4,11 +4,13 @@
 # written new as /root/issue90/<name>, root:root 0600. An existing regular file of that name is kept as <name>.rN (the
 # first free N in 0-9, never overwritten) before the new one moves in; anything else at that name refuses.
 # native-shell/vm/pa-switch-install.sh's temp / hash / mv -n / after-move checks, without its pins of other files.
-# rc: 0 installed and verified (or already the reviewed file: nothing changed); 2 usage; 3 refused before any change;
+# rc: 0 installed and verified (or already the reviewed file, root:root 0600 with one link: nothing changed); 2 usage;
+#     3 refused before any change (also the reviewed bytes with other owner / mode / link count);
 #     5 the received bytes or the temp file failed (temp removed, nothing changed); 7 after a move a check did not
 #     hold: the state is kept as it is, nothing is retried, report it.
 set -u
 D=/root/issue90
+WANT='regular file|0|0|600|1'  # stat %F|%u|%g|%a|%h of an installed file (new, or already the reviewed one)
 case "${1:-}" in
   i90-switch.py|i90-expected.json) ;;
   *) echo 'usage: i90-install.sh i90-switch.py|i90-expected.json <sha256> < file; nothing changed'; exit 2 ;;
@@ -26,7 +28,11 @@ old=
 if [ -e "$N" ] || [ -L "$N" ]; then
   if [ -L "$N" ] || [ ! -f "$N" ]; then echo "$N exists and is not a regular file; nothing changed"; exit 3; fi
   if printf '%s  %s\n' "$E" "$N" | sha256sum -c - >/dev/null 2>&1; then
-    echo "$N is already the reviewed file $E; nothing changed"; echo 'install rc=0'; exit 0
+    # The same bytes count only with the installed metadata (review eba3ede major): never accept a file another
+    # user can write, owned by another user, or with a second link.
+    m=$(stat -c '%F|%u|%g|%a|%h' "$N") || { echo "stat $N failed; nothing changed"; exit 3; }
+    [ "$m" = "$WANT" ] || { echo "$N has the reviewed bytes but is $m, not $WANT; nothing changed"; exit 3; }
+    echo "$N is already the reviewed file $E ($m); nothing changed"; echo 'install rc=0'; exit 0
   fi
   for k in 0 1 2 3 4 5 6 7 8 9; do
     if [ ! -e "$N.r$k" ] && [ ! -L "$N.r$k" ]; then old=$N.r$k; break; fi
@@ -54,7 +60,7 @@ echo "sha256 check after the move rc=$r"
 m=$(stat -c '%F|%u|%g|%a|%h' "$N"); r=$?
 echo "stat $N rc=$r: $m"
 [ "$r" = 0 ] || { echo 'stat failed after the move (rc 7)'; exit 7; }
-[ "$m" = 'regular file|0|0|600|1' ] || { echo "$N is not a root:root 600 regular file with one link (rc 7)"; exit 7; }
+[ "$m" = "$WANT" ] || { echo "$N is not a root:root 600 regular file with one link (rc 7)"; exit 7; }
 l=$(ls -A "$D"); r=$?
 echo "listing rc=$r"
 [ "$r" = 0 ] || { echo 'listing failed: the temp count is unknown, not 0 (rc 7)'; exit 7; }
