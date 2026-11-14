@@ -956,10 +956,13 @@ await step("N25", async () => {
   // 받는 중 표시와 polling 멈춤
   const g0 = await sessionGets();
   const r0 = await statusReads();
+  // 이번 질문의 답변만(앞선 N21–N24 답변과 섞이지 않게 — review ecc183f). 스트리밍 중에는 굵게 표시가 덜 닫혀
+  // "모의 응답: **스트림…"처럼 보이므로 질문 고유 낱말로 찾는다.
+  const answer = chat.locator("li[data-role=assistant]", { hasText: "스트림" });
+  check("N25. no earlier answer matches this turn's text", (await answer.count()) === 0);
   await input.fill("스트림 질문 하나");
   const t0 = Date.now();
   await input.press("Enter");
-  const answer = chat.locator("li[data-role=assistant]", { hasText: "모의 응답" }).last();
   check("N25. answer streams before the turn ends", (await appears(answer, 4500)) && Date.now() - t0 < 5500, `${Date.now() - t0}ms`);
   await answer.evaluate((el) => (window.__ans = el));
   check("N25. stop button while answering", await stopBtn().isVisible());
@@ -988,7 +991,7 @@ await step("N25", async () => {
     const posts0 = (await mockCalls()).filter((c) => c.method === "POST" && /\/messages$/.test(c.path)).length;
     await input.fill("완료 조회 실패 질문");
     await input.press("Enter");
-    await appears(chat.locator("li[data-role=assistant]", { hasText: "모의 응답" }).last(), 5000);
+    await appears(chat.locator("li[data-role=assistant]", { hasText: "완료 조회" }), 5000);
     await page.waitForTimeout(800);
     gets.length = 0;
     failNext = true; // 다음 GET = 완료 확정 GET
@@ -1006,7 +1009,7 @@ await step("N25", async () => {
   const i0 = (await counts()).interrupts;
   await input.fill("중지할 질문");
   await input.press("Enter");
-  await appears(chat.locator("li[data-role=assistant]", { hasText: "모의 응답: 중" }), 5000);
+  await appears(chat.locator("li[data-role=assistant]", { hasText: "중지할" }), 5000);
   await stopBtn().click();
   check("N25. one interrupt request", await waitFor(async () => (await counts()).interrupts === i0 + 1, 3000));
   check("N25. stopped partial answer marked", await appears(chat.getByText("중지됨(부분)"), 8000));
