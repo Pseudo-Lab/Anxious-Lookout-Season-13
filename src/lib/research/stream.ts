@@ -269,6 +269,32 @@ export function applyFrame(state: StreamState, frame: StreamFrame): { state: Str
   return { state: next, effects };
 }
 
+// ---- 스트림 턴 표시 범위 ----
+
+/**
+ * 스트림으로 받은 턴을 화면에 보일지(순수 함수). 확정 기록이 그 턴을 담으면 턴 단위로 기록 항목으로 바꾼다.
+ * 실측(P5 V1): 스트림 itemId와 기록 id는 일부 또는 전부 다를 수 있다. 그래서 id로 맞추지 않고, 기록이 그 턴을 지나 끝났는지로 정한다.
+ * - seenAtVersion: 이 턴을 처음 본 순간의 기록 version. 그 뒤에 받은 기록이 실행 중이 아니면(완료·중지·실패) 기록이 이 턴을 담은 것이므로
+ *   스트림 항목을 모두 숨긴다. 기록 저장 → turn.completed 전송 사이에 다른 GET이 먼저 와도 두 벌로 보이지 않는다.
+ * - 연결된 스트림이 진행 중이라고 하면(이전 기록이 idle이어도) 보인다. 끊겼으면 기록이 정한다(실행 중 기록의 같은 요청일 때만).
+ */
+export function showLiveTurn(a: {
+  turn: LiveTurn | null;
+  connected: boolean;
+  recordState: string | null;
+  recordVersion: number | null;
+  recordPendingRequestId: string | null;
+  seenAtVersion: number | null;
+}): boolean {
+  const { turn } = a;
+  if (!turn) return false;
+  const settledPast =
+    a.recordState !== null && a.recordState !== "running" && a.recordVersion !== null && a.seenAtVersion !== null && a.recordVersion > a.seenAtVersion;
+  if (settledPast) return false;
+  if (turn.running && a.connected) return true;
+  return a.recordState === "running" && (a.recordPendingRequestId === null || a.recordPendingRequestId === turn.requestId);
+}
+
 // ---- 스트리밍 Markdown ----
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;

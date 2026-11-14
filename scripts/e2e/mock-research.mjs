@@ -54,6 +54,9 @@ export const researchMode = {
   // #90 "on"이면 GET /sessions/{id}/events(SSE)와 POST /interrupt를 제공하고 fixture 턴을 스트림으로도 보낸다.
   // 기본 "off": 실제 서버의 RESEARCH_STREAM_ENABLE=false처럼 404 stream_disabled(front는 polling).
   stream: "off",
+  // #90 스트림 itemId와 기록 id의 관계(P5 V1 실측: 일부 또는 전부 다를 수 있다).
+  // "same": 같다 / "partial": 도구만 같고 답변은 다르다 / "distinct": 모두 다르다
+  streamIds: "same",
 };
 
 // 시험 창 상태(fixture 연결에만 적용): 종료 시각이 지나면 auth_expired, 횟수가 0이면 budget_exhausted
@@ -709,24 +712,28 @@ function handleMutation(owner, method, path, b, user) {
           ? [`모의 응답: **${b.text}**`, ...Array.from({ length: 80 }, (_, i) => `긴 답변 문단 ${i + 1}.`)].join("\n\n")
           : `모의 응답: **${b.text}**`;
       s.requestId = requestId;
-      s.turn = { shownItem, userItem, toolId, answerId, toolStatus, toolDone: false };
+      const liveId = (id, kind) =>
+        researchMode.streamIds === "same" || (researchMode.streamIds === "partial" && kind === "tool") ? id : `live-${id}`;
+      const liveToolId = liveId(toolId, "tool");
+      const liveAnswerId = liveId(answerId, "answer");
+      s.turn = { shownItem, userItem, toolId, answerId, liveAnswerId, toolStatus, toolDone: false };
       if (researchMode.stream === "on") {
         // 모의 진행: 시작 → 도구(시작·완료) → 답변 조각들 → (완료 타이머가 기록 저장 뒤 turn.completed)
         const T = researchMode.turnMs;
         beginTurn(s.id, requestId);
         later(s.id, 100, () => emit(s.id, "turn.started", {}));
         if (toolStatus) {
-          later(s.id, 200, () => emit(s.id, "item.started", { itemId: toolId, kind: "dynamicToolCall" }));
+          later(s.id, 200, () => emit(s.id, "item.started", { itemId: liveToolId, kind: "dynamicToolCall" }));
           later(s.id, 400, () => {
             s.turn.toolDone = true;
-            emit(s.id, "item.completed", { itemId: toolId, status: toolStatus });
+            emit(s.id, "item.completed", { itemId: liveToolId, status: toolStatus });
           });
         }
-        later(s.id, 500, () => emit(s.id, "item.started", { itemId: answerId, kind: "agentMessage" }));
+        later(s.id, 500, () => emit(s.id, "item.started", { itemId: liveAnswerId, kind: "agentMessage" }));
         const pieces = answer.match(/[\s\S]{1,6}/g) ?? [];
         const span = Math.max(T - 800, 200);
-        pieces.forEach((text, i) => later(s.id, 600 + Math.floor((span * i) / Math.max(pieces.length, 1)), () => emit(s.id, "item.delta", { itemId: answerId, text })));
-        later(s.id, Math.max(T - 100, 650), () => emit(s.id, "item.completed", { itemId: answerId, status: "completed" }));
+        pieces.forEach((text, i) => later(s.id, 600 + Math.floor((span * i) / Math.max(pieces.length, 1)), () => emit(s.id, "item.delta", { itemId: liveAnswerId, text })));
+        later(s.id, Math.max(T - 100, 650), () => emit(s.id, "item.completed", { itemId: liveAnswerId, status: "completed" }));
       }
       s.turnTimer = setTimeout(() => {
         // 접수 항목 → 기록 항목(같은 자리, 다른 id)
@@ -1148,7 +1155,7 @@ export async function handleResearch(req, res, path, url, session) {
       const input = { type: "material", limit: 5, query: t.userItem.text };
       s.items.push({ id: t.toolId, type: "tool_call", name: "research_list", input, output: { items: [] }, status: t.toolStatus, turnStatus: "interrupted", raw: { kind: "function_call" } });
     }
-    const partial = liveText(s.id, t.answerId);
+    const partial = liveText(s.id, t.liveAnswerId);
     if (partial) {
       s.items.push({ id: t.answerId, type: "message", role: "assistant", text: partial, partial: true, displayOnly: true, turnStatus: "interrupted", raw: { type: "displayOnlyAgentMessage" } });
     }

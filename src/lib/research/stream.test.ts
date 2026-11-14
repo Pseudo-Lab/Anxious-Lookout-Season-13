@@ -1,6 +1,16 @@
 // #90 스트림 순수 로직: SSE 해석, 계약 v1.1 프레임 적용(id 규칙·snapshot·확정 신호), 스트리밍 Markdown 분할.
 import { describe, expect, it } from "vitest";
-import { EMPTY_STREAM, SseParser, applyFrame, dropPartial, streamingBlocks, type StreamFrame, type StreamState } from "@/lib/research/stream";
+import {
+  EMPTY_STREAM,
+  SseParser,
+  applyFrame,
+  dropPartial,
+  showLiveTurn,
+  streamingBlocks,
+  type LiveTurn,
+  type StreamFrame,
+  type StreamState,
+} from "@/lib/research/stream";
 
 const R = "11111111-1111-4111-8111-111111111111";
 const R2 = "22222222-2222-4222-8222-222222222222";
@@ -145,6 +155,38 @@ describe("applyFrame", () => {
     expect(run([{ id: `${R}:2`, event: "item.delta", data: "{bad" }], base).state).toBe(base);
     expect(run([f("future.event", { requestId: R }, `${R}:2`)], base).state).toBe(base);
     expect(run([f("item.started", { requestId: R2, itemId: "x", kind: "agentMessage" }, `${R2}:2`)], base).state.turn?.items).toEqual([]);
+  });
+});
+
+describe("showLiveTurn (turn-level replacement, ids may differ — P5 V1)", () => {
+  const turn = (running: boolean, outcome = false): LiveTurn => ({
+    requestId: R,
+    items: [{ itemId: "live-1", kind: "agentMessage", status: "inProgress", text: "부분" }],
+    running,
+    stopped: null,
+    outcome: outcome ? { state: "idle", turnStatus: "completed", errorCode: null } : null,
+  });
+  const base = { connected: true, recordPendingRequestId: null, seenAtVersion: 5 };
+  it("shows a running turn and the finished turn until the record settles past it", () => {
+    expect(showLiveTurn({ ...base, turn: turn(true), recordState: "running", recordVersion: 5 })).toBe(true);
+    expect(showLiveTurn({ ...base, turn: turn(false, true), recordState: "running", recordVersion: 5 })).toBe(true);
+    expect(showLiveTurn({ ...base, turn: turn(false, true), recordState: "idle", recordVersion: 6 })).toBe(false);
+  });
+  it("hides the stream once a later record settled, even before turn.completed arrives (no double copy)", () => {
+    expect(showLiveTurn({ ...base, turn: turn(true), recordState: "idle", recordVersion: 6 })).toBe(false);
+    expect(showLiveTurn({ ...base, turn: turn(true), recordState: "failed", recordVersion: 7 })).toBe(false);
+  });
+  it("a connected running turn wins over an older idle record (turn from another tab)", () => {
+    expect(showLiveTurn({ ...base, turn: turn(true), recordState: "idle", recordVersion: 5 })).toBe(true);
+  });
+  it("when disconnected the record decides", () => {
+    const off = { ...base, connected: false };
+    expect(showLiveTurn({ ...off, turn: turn(true), recordState: "running", recordVersion: 5 })).toBe(true);
+    expect(showLiveTurn({ ...off, turn: turn(true), recordState: "running", recordVersion: 5, recordPendingRequestId: "other" })).toBe(false);
+    expect(showLiveTurn({ ...off, turn: turn(true), recordState: "idle", recordVersion: 5 })).toBe(false);
+  });
+  it("no turn, nothing to show", () => {
+    expect(showLiveTurn({ ...base, turn: null, recordState: "running", recordVersion: 5 })).toBe(false);
   });
 });
 

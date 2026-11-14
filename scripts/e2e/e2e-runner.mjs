@@ -10,6 +10,7 @@
 // - #89 접수 뒤 첫 조회 실패 복구(N23): 보내는 중 유지·조회만 재시도·완료 기록 복구
 // - #89 완료 전환 바닥 추적(N24): 생각 중 → 같은 수의 긴 답변, 직접 펼친 도구 상세는 위치 유지
 // - #90 스트림(N25, 모의): polling 멈춤·실시간 답변·remount 없음·중지·알림/모르는 항목·숨김 닫기/after 재연결·플래그 꺼짐 fallback
+// - #90 턴 단위 교체(N26, 모의): 스트림 id ≠ 기록 id(일부·전부)에서 두 벌·빈 순간 없음, 말풍선 유지, 바닥 유지·읽던 위치 유지
 import { chromium } from "playwright";
 
 const ORIGIN = process.env.ORIGIN ?? "http://127.0.0.1:8080";
@@ -127,7 +128,7 @@ const pendingSends = () =>
   page.evaluate(() => Object.keys(sessionStorage).filter((k) => k.includes(":session-send:")).length);
 
 await setMock(
-  "me=normal&health=normal&logout=normal&nextLogin=approved&reuse=0&as=&access=approved&publish=allowed&codex=fixture&csrf=normal&window=&remaining=&turnMs=2500&pendingInput=0&stream=off" +
+  "me=normal&health=normal&logout=normal&nextLogin=approved&reuse=0&as=&access=approved&publish=allowed&codex=fixture&csrf=normal&window=&remaining=&turnMs=2500&pendingInput=0&stream=off&streamIds=same" +
     "&codexRunner=true&runner=not_prepared&prepare=ok&readyMs=3000&hint=&runnerAll="
 );
 
@@ -967,7 +968,7 @@ await step("N25", async () => {
   await answer.evaluate((el) => (window.__ans = el));
   check("N25. stop button while answering", await stopBtn().isVisible());
   await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
-  check("N25. same answer element after the record replaces the stream", await page.evaluate(() => window.__ans.isConnected));
+  check("N25. same answer element after the record replaces the stream (mock ids match; mismatched ids: N26)", await page.evaluate(() => window.__ans.isConnected));
   check("N25. one recorded answer", (await chat.locator("li[data-role=assistant]", { hasText: "모의 응답: 스트림 질문 하나" }).count()) === 1);
   const gets = (await sessionGets()) - g0;
   check("N25. no 2s session polling while streaming (confirm + completion only)", gets <= 3, String(gets));
@@ -1153,6 +1154,93 @@ await step("N25", async () => {
   await setMock("turnMs=2500");
 });
 
+// N26. #90 턴 단위 교체(모의 API): 실측(P5 V1)에서 스트림 itemId와 기록 id가 일부 또는 전부 다르다. 완료 기록으로 바뀔 때
+// 텍스트가 두 벌이 되거나 비는 순간이 없고(깜빡임 없음), 사용자 말풍선은 그대로이며, 바닥을 따라가던 중이면 바닥을 유지하고
+// 위로 올려 읽던 중이면 읽던 위치가 튀지 않는다. 일부만 같은 경우(partial)와 전부 다른 경우(distinct)를 모두 본다.
+await step("N26", async () => {
+  const counts = () => fetch(`${ORIGIN}/__mock/counts`).then((r) => r.json());
+  const waitFor = async (fn, ms) => {
+    for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) if (await fn()) return true;
+    return false;
+  };
+  const input = chat.getByLabel("메시지");
+  const scroller = chat.locator("[data-chat-scroll]");
+  const gap = () => scroller.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
+  const toolRows = () => chat.locator("li:has(> button[aria-expanded])").count();
+  // 이 낱말을 담은 답변 수를 DOM이 바뀔 때마다 기록한다(두 벌 = max>1, 빈 순간 = 나타난 뒤 0).
+  const watch = (word) =>
+    page.evaluate((w) => {
+      const root = document.querySelector("[data-chat-scroll]");
+      const st = { max: 0, appeared: false, gapAfter: false };
+      const count = () => [...root.querySelectorAll("li[data-role=assistant]")].filter((li) => (li.textContent ?? "").includes(w)).length;
+      const obs = new MutationObserver(() => {
+        const n = count();
+        st.max = Math.max(st.max, n);
+        if (n > 0) st.appeared = true;
+        else if (st.appeared) st.gapAfter = true;
+      });
+      obs.observe(root, { subtree: true, childList: true, characterData: true });
+      window.__n26 = { st, stop: () => obs.disconnect() };
+    }, word);
+  const watched = () => page.evaluate(() => (window.__n26.stop(), window.__n26.st));
+
+  await page.setViewportSize({ width: 1280, height: 420 });
+  for (const [mode, word] of [
+    ["distinct", "교체갑"],
+    ["partial", "교체을"],
+  ]) {
+    await setMock(`stream=on&turnMs=4000&streamIds=${mode}`);
+    await page.reload();
+    await openPanel();
+    await chat.getByRole("button", { name: "← 대화 목록" }).click().catch(() => {});
+    await chat.getByRole("link", { name: /준비 대화/ }).click();
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 10000 });
+    await waitFor(async () => (await counts()).streamOpen >= 1, 5000);
+
+    // 바닥을 따라가는 중
+    const tools0 = await toolRows();
+    await watch(`${word} 바닥`);
+    await input.fill(`${word} 바닥 질문`);
+    await input.press("Enter");
+    const userBubble = chat.locator("li[data-role=user]", { hasText: `${word} 바닥 질문` });
+    await userBubble.waitFor();
+    await userBubble.evaluate((el) => (window.__n26user = el));
+    await chat.locator("li[data-role=assistant]", { hasText: word }).waitFor({ timeout: 5000 });
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
+    await page.waitForTimeout(600);
+    let st = await watched();
+    check(`N26[${mode}]. bottom: never two copies of the answer`, st.max === 1, JSON.stringify(st));
+    check(`N26[${mode}]. bottom: no empty moment during replacement`, st.appeared && !st.gapAfter, JSON.stringify(st));
+    check(`N26[${mode}]. bottom: one final answer with full text`, (await chat.locator("li[data-role=assistant]", { hasText: `모의 응답: ${word} 바닥 질문` }).count()) === 1);
+    check(`N26[${mode}]. bottom: one tool row added (live row replaced, not kept)`, (await toolRows()) === tools0 + 1, `${tools0} -> ${await toolRows()}`);
+    check(`N26[${mode}]. bottom: user bubble unchanged`, await page.evaluate(() => window.__n26user.isConnected));
+    check(`N26[${mode}]. bottom: stays at the bottom after replacement`, (await gap()) <= 48, String(await gap()));
+
+    // 위로 올려 읽는 중
+    await watch(`${word} 위`);
+    await input.fill(`${word} 위 질문`);
+    await input.press("Enter");
+    await chat.locator("li[data-role=assistant]", { hasText: `${word} 위` }).waitFor({ timeout: 5000 });
+    // 화면 위쪽에 보이는 이전 말풍선 하나를 기준으로 잡고 위로 올린다.
+    const ref = await scroller.evaluate((el) => {
+      el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - 600);
+      const top = el.getBoundingClientRect().top;
+      const li = [...el.querySelectorAll("li[data-role]")].find((x) => x.getBoundingClientRect().top >= top);
+      window.__n26ref = li;
+      return { scroll: el.scrollTop, y: Math.round(li.getBoundingClientRect().top) };
+    });
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
+    await page.waitForTimeout(600);
+    st = await watched();
+    const after = await scroller.evaluate((el) => ({ scroll: el.scrollTop, y: Math.round(window.__n26ref.getBoundingClientRect().top), connected: window.__n26ref.isConnected }));
+    check(`N26[${mode}]. scrolled up: never two copies, no empty moment`, st.max === 1 && st.appeared && !st.gapAfter, JSON.stringify(st));
+    check(`N26[${mode}]. scrolled up: reading position kept`, after.connected && after.scroll === ref.scroll && after.y === ref.y, `${JSON.stringify(ref)} -> ${JSON.stringify(after)}`);
+    check(`N26[${mode}]. scrolled up: one final answer`, (await chat.locator("li[data-role=assistant]", { hasText: `모의 응답: ${word} 위 질문` }).count()) === 1);
+  }
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await setMock("streamIds=same&turnMs=2500");
+});
+
 // N13. 연구 권한 상실(같은 계정 commenter로 변경): 준비 POST·상태 조회 없음, 기존 권한 안내
 await step("N13", async () => {
   const acc = (await me()).accountId;
@@ -1181,7 +1269,7 @@ await step("N14", async () => {
 });
 
 check("N15. no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
-await setMock("codexRunner=&runner=&prepare=ok&runnerAll=&hint=&credHint=1&readyMs=2500&turnMs=2500&codex=fixture&csrf=normal&window=&remaining=&pendingInput=0&stream=off");
+await setMock("codexRunner=&runner=&prepare=ok&runnerAll=&hint=&credHint=1&readyMs=2500&turnMs=2500&codex=fixture&csrf=normal&window=&remaining=&pendingInput=0&stream=off&streamIds=same");
 await browser.close();
 const failed = results.filter((r) => !r.ok);
 console.log(`\nRESULT ${results.length - failed.length}/${results.length} passed`);

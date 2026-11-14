@@ -13,7 +13,7 @@ import {
   researchErrorMessage,
   sendSessionMessage,
 } from "@/lib/research/api";
-import type { LiveItem } from "@/lib/research/stream";
+import { showLiveTurn, type LiveItem } from "@/lib/research/stream";
 import { useChatStream } from "@/components/research/session/useChatStream";
 import { useLoad, useMutation } from "@/lib/research/hooks";
 import { isUncertain, settlesRetry, uuidV4 } from "@/lib/research/idempotency";
@@ -948,7 +948,20 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
   // 스트림이 진행 중이라고 보는 턴은 연결돼 있을 때만 믿는다. 끊겼거나 polling으로 돌아갔으면 기록(polling)이 정한다
   // (review d02c691: 끊긴 뒤 남은 running이 완료 기록보다 앞서 입력이 영구 잠김). 연결 중에는 이전 idle 기록이 새 턴을 지우지 않는다.
   const liveRunning = liveTurn !== null && liveTurn.running && streamLive;
-  const showLive = liveTurn !== null && (liveRunning || (running && (recordRequestId === null || recordRequestId === liveTurn.requestId)));
+  // 이 턴을 처음 본 순간의 기록 version. 그 뒤의 기록이 끝난 상태면 기록이 이 턴을 담은 것이므로 스트림 항목을 턴 단위로 바꾼다
+  // (P5 V1: 스트림 itemId와 기록 id는 일부 또는 전부 다르다 — id로 맞추지 않는다).
+  const [liveSeen, setLiveSeen] = useState<{ requestId: string; version: number } | null>(null);
+  if (liveTurn && result?.ok === true && liveSeen?.requestId !== liveTurn.requestId) setLiveSeen({ requestId: liveTurn.requestId, version: result.data.version });
+  const showLive =
+    liveTurn !== null &&
+    showLiveTurn({
+      turn: liveTurn,
+      connected: streamLive,
+      recordState: result?.ok === true ? result.data.state : null,
+      recordVersion: result?.ok === true ? result.data.version : null,
+      recordPendingRequestId: recordRequestId,
+      seenAtVersion: liveSeen?.requestId === liveTurn.requestId ? liveSeen.version : null,
+    });
 
   // #89 화면 상태: 보내는 중(submitted) → 서버 실행 중(waiting, "생각 중") → #90 받는 중(streaming) → 완료(ready) / 오류(error).
   // 한 번에 하나다. 보내기 요청이 끝나도 다음 조회가 끝날 때까지 submitted로 둔다(입력창이 잠깐 열렸다 닫히지 않게).
@@ -973,7 +986,9 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
     setView({ items, local, continuity: next.next, entries });
   }
 
-  // #90 스트림 항목: 기록에 같은 id가 이미 있으면 기록 항목을 쓴다(같은 key라 remount 없음). 빈 답변 조각은 "생각 중"으로 둔다.
+  // #90 스트림 항목. 확정 기록이 이 턴을 담으면(showLive=false) 턴 단위로 기록 항목으로 바뀐다. id가 같은 항목은 같은 key라
+  // 그대로 이어지고, 다른 항목은 한 번 다시 그려진다. 같은 id가 기록에 이미 있으면 기록 쪽만 보인다(한 key 한 항목).
+  // 빈 답변 조각은 "생각 중"으로 둔다.
   const recordIds = new Set(items?.map((i) => i.id) ?? []);
   const liveItems = showLive ? liveTurn.items.filter((i) => !recordIds.has(i.itemId) && !(i.kind === "agentMessage" && i.text === "")) : [];
   const lastLive = liveItems.at(-1);
