@@ -396,3 +396,26 @@ def test_install_shutdown_chains_signals():
         assert calls == [signal.SIGTERM, signal.SIGTERM]  # restored: only the previous handler now
     finally:
         signal.signal(signal.SIGTERM, original)
+
+
+def test_not_ready_wait_counts_from_the_outage_not_from_the_stream_start(monkeypatch):
+    """D3-e (2026-11-14): a stream open longer than NOT_READY_LIMIT_SECONDS closed at the first failed target after
+    the runner stopped (reason not_ready_limit at once). The wait must start at the outage."""
+    import time as clock
+    monkeypatch.setattr(chat_stream, "NOT_READY_LIMIT_SECONDS", 0.4)
+    marks = {}
+
+    def first_then_fail():
+        if "fail" not in marks:
+            marks["fail"] = 0
+            return target()
+        marks.setdefault("first", clock.monotonic())
+        raise ValueError("runner gone")
+    dep, calls = deps(status=lambda: {"available": False, "reason": "stopping"}, target_fn=first_then_fail)
+    # the runner keeps the first stream open longer than the limit, then ends it
+    relay = Relay(SESSION, None, dep, upstreams([hello(activeRequestId=None), 0.8]))
+    chunks = run(relay, {"requestId": R1, "state": "idle"}, limit=1000, seconds=4.0)
+    ended = clock.monotonic()
+    assert relay.stats["reason"] == "not_ready_limit"
+    assert ended - marks["first"] >= 0.4  # waited the limit after the outage, not closed at once
+    assert datas(chunks, "runner")[-1] == {"available": False, "reason": "stopping"}

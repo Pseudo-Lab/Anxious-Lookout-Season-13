@@ -154,7 +154,8 @@ class Relay:
         if self.cursor and self.cursor[0] != self.bound:
             self.cursor = None  # another turn's cursor: the runner answers with the active turn's snapshot
         started = time.monotonic()
-        try:
+        not_ready_since = None  # the not-ready wait is counted from the runner becoming unreachable (D3-e), not
+        try:                    # from the stream's start: a long-open stream waits its full limit like a new one
             yield await self.status_frame(force=True)
             attempts = 0
             while True:
@@ -164,7 +165,9 @@ class Relay:
                 try:
                     target = await self.call(self.deps["target"])
                 except Exception:
-                    if time.monotonic() - started > NOT_READY_LIMIT_SECONDS:
+                    if not_ready_since is None:
+                        not_ready_since = time.monotonic()
+                    if time.monotonic() - not_ready_since > NOT_READY_LIMIT_SECONDS:
                         self.stats["reason"] = "not_ready_limit"
                         return
                     status = await self.status_frame()
@@ -173,6 +176,7 @@ class Relay:
                     async for heartbeat in self.wait(STATUS_RETRY_SECONDS):
                         yield heartbeat
                     continue
+                not_ready_since = None  # reachable again: a later outage gets its own full wait
                 ended = None
                 upstream = self.upstream(target)
                 try:
