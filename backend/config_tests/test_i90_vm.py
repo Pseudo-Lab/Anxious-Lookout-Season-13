@@ -626,3 +626,9 @@ def test_install_accepts_the_stage_d1_script(tmp_path):
 def test_install_accepts_the_stage_d2_files(tmp_path, name):
     code, out, d = install_run(tmp_path, name, b"x = 1\n")
     assert code == 0 and (d / name).read_bytes() == b"x = 1\n"
+
+
+@pytest.mark.parametrize("name", ["i90-d3.py", "p4_client.py"])
+def test_install_accepts_the_stage_d3_files(tmp_path, name):
+    code, out, d = install_run(tmp_path, name, b"x = 3\n")
+    assert code == 0 and (d / name).read_bytes() == b"x = 3\n"

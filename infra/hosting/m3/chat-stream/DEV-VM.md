@@ -169,6 +169,26 @@ After the runner stops, the API relay is **expected to stay open**. It sends `ru
 
 Not covered here, because it needs event volume and therefore a turn: slow reader → relay 10 s stall → runner connection closed inside the runner's 20 s grace. That is S6 in P5.
 
+**Stage D3 (r9)**: `vm/i90-d3.py` (`check` read only; `flag-on`, `p4`, `p4-2`, `flag-off` once each as systemd
+units, each on its own PM go; order and rc in its docstring and the D3 sheet, which also gives the rc → `flag-off`
+table).
+- `flag-on` / `flag-off`: one UID/resourceVersion/container-name tested JSON patch of the api Deployment, applied to a
+  local copy first and sent only when the result has the wanted template hash. `flag-on` records the template's
+  `kubectl.kubernetes.io/restartedAt` state (value or absent); `flag-off` removes the env entry and **restores that
+  state** (removed only when it was absent), on a compare-and-set of the value P4-3 left (recorded by `p4`), and prints
+  `api template sha256 after flag-off: …; stage C apiTemplateSha256: …; equal: …` (PM/review D3).
+- Client: review's `p4_client.py` (pinned), standard library only, in throwaway containers of the guest Docker tool
+  image (`toolImage`; the stage C runtime image is in k3s containerd only), `--network host`, `--connect-address
+  10.0.0.107` with `Host: 192.88.99.1` (nothing is sent to 192.88.99.1). Client copy and Cookie value 0400 owned by
+  10001 in a private directory removed at the end.
+- Each P4 step ends with every client proved gone and every log follower stopped; summaries are counted per step in
+  that step's own window. Every action prints `verdict P4-n: True|False|unknown` and `verdict overall pass:` (false on
+  any False or unknown) and the flag state at the end.
+- P4-2 and the idle clock: the registry's `last_activity` changes on an entry, a message and a turn completion
+  (`runner_registry` / `lifecycle`); the runner's `idle_since` at app start and turn start/end. A `/codex/status` read
+  or an SSE stream (heartbeats) touches neither, and `p4-2` makes no status read after the three ready reads. The
+  release time after the entry is reported; release outside [idle, idle + 600 s] is a False verdict and a finding.
+
 ## P5 — measurements with real Codex turns (only after the user's turn budget)
 
 **Prerequisite P5-0 (code, separate review)**: the runner Pod env must be able to carry `RUNNER_STREAM_TEXT=true` and `STREAM_TRACE=true`.
