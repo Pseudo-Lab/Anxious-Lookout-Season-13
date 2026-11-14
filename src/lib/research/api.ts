@@ -14,6 +14,7 @@ import {
   type Material,
   type MaterialSummary,
   type MessageItem,
+  type NoticeItem,
   type AdminAccount,
   type AcceptedScope,
   type PageDescriptor,
@@ -484,8 +485,11 @@ function parseSessionSummary(v: unknown): SessionSummary | null {
   }
   const scope = parseScope(v);
   if (scope) out.scope = scope;
+  if (isStr(v.requestId) && UUID_LOWER.test(v.requestId)) out.requestId = v.requestId;
   return out;
 }
+
+const UUID_LOWER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function parseSessionItem(v: unknown): SessionItem | null {
   if (!isObj(v) || !isId(v.id)) return null;
@@ -501,13 +505,26 @@ function parseSessionItem(v: unknown): SessionItem | null {
       const scope = parseScope(v);
       if (scope) item.scope = scope;
     }
+    if (v.turnStatus === "interrupted") item.turnStatus = "interrupted";
+    if (v.partial === true) item.partial = true;
+    if (v.displayOnly === true) item.displayOnly = true;
     return item;
   }
   if (v.type === "tool_call" && isStr(v.name) && isStr(v.status)) {
     const tool: ToolCallItem = { id: v.id, type: "tool_call", name: v.name, input: v.input, output: v.output, status: v.status };
     if (isObj(v.error) && isStr(v.error.code)) tool.error = { code: v.error.code };
     if (v.modelMismatch === true) tool.modelMismatch = true;
+    if (v.turnStatus === "interrupted") tool.turnStatus = "interrupted";
     return tool;
+  }
+  if (v.type === "notice" && isStr(v.code)) {
+    const notice: NoticeItem = { id: v.id, type: "notice", code: v.code };
+    if (v.turnStatus === "interrupted") notice.turnStatus = "interrupted";
+    return notice;
+  }
+  // #90: 알려진 종류(message·tool_call·notice)가 형식에 맞지 않으면 지금처럼 거른다. 새 종류는 대화 전체를 실패로 만들지 않는다.
+  if (isStr(v.type) && v.type !== "message" && v.type !== "tool_call" && v.type !== "notice") {
+    return { id: v.id, type: "unknown", originalType: v.type };
   }
   return null;
 }
@@ -761,6 +778,25 @@ export const sendSessionMessage = (
   body: { text: string; expectedVersion: number; page?: PageDescriptor },
   ctx: MutationContext
 ) => mutate(`/research/sessions/${enc(id)}/messages`, "POST", body, parseSessionSummary, ctx);
+
+// #90 중지(api-contracts/issue90-chat-stream.md §2). 멱등이라 Idempotency-Key가 필요 없다. 서버는 DB에 쓰지 않는다.
+export interface InterruptResult {
+  requestId: string;
+  state: "interrupting" | "not_running";
+}
+function parseInterrupt(v: unknown): InterruptResult | null {
+  if (!isObj(v) || !isStr(v.requestId) || (v.state !== "interrupting" && v.state !== "not_running")) return null;
+  return { requestId: v.requestId, state: v.state };
+}
+export const interruptSession = (id: string, requestId: string, csrfToken: string) =>
+  fetchJson(apiUrl(`/research/sessions/${enc(id)}/interrupt`), parseInterrupt, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+    body: JSON.stringify({ requestId }),
+  });
+
+/** 스트림 runner 이벤트(`/codex/status`와 같은 객체)를 상태 값으로 읽는다. 형식이 맞지 않으면 null. */
+export const readCodexStatus = (v: unknown): CodexStatus | null => parseCodexStatus(v);
 
 export const archiveSession = (id: string, expectedVersion: number, ctx: MutationContext) =>
   mutate(`/research/sessions/${enc(id)}`, "DELETE", { expectedVersion }, parseArchive, ctx);

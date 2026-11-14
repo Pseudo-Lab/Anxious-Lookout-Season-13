@@ -17,6 +17,11 @@ describe("chatStatus", () => {
     expect(chatStatus(false, "failed")).toBe("error");
     expect(chatStatus(false, "idle")).toBe("ready");
   });
+  it("streaming (#90) wins over the record state but not over an in-flight send", () => {
+    expect(chatStatus(false, "running", true)).toBe("streaming");
+    expect(chatStatus(false, "idle", true)).toBe("streaming");
+    expect(chatStatus(true, "idle", true)).toBe("submitted");
+  });
   it("awaits a reply only while sending, running or streaming", () => {
     expect(["ready", "submitted", "waiting", "streaming", "error"].map((s) => awaitingReply(s as never))).toEqual([false, true, true, true, false]);
   });

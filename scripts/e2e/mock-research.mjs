@@ -2,6 +2,7 @@
 // 계약의 소유권(타인 ID 404), Origin/CSRF, Idempotency-Key 재생, expectedVersion 충돌, 정책 대기 응답을 흉내 낸다.
 import crypto from "node:crypto";
 import { paragraph } from "./mock-blocks.mjs";
+import { beginTurn, emit, endTurn, later, liveText, openStream, streamStats } from "./mock-stream.mjs";
 import {
   IMAGE_LIMIT, comparePostProposal, createPostProposal, resolvePostMaterials, handleImageDelete, handleImageRead, handlePostMutation, handlePostRead, handlePublicPosts,
   mediaBytes, newPostDraftOf, postTitle, publicPostTitle, uploadImage,
@@ -50,6 +51,9 @@ export const researchMode = {
   // #89 "1"이면 실제 backend(display_items)처럼 실행 중에는 접수 항목(`pending-<requestId>`, platform/pending)을 보이고,
   // 완료 때 다른 id의 기록 항목으로 바꾼다(말풍선 연속성 검증용). 기본은 처음부터 기록 항목.
   pendingInput: "0",
+  // #90 "on"이면 GET /sessions/{id}/events(SSE)와 POST /interrupt를 제공하고 fixture 턴을 스트림으로도 보낸다.
+  // 기본 "off": 실제 서버의 RESEARCH_STREAM_ENABLE=false처럼 404 stream_disabled(front는 polling).
+  stream: "off",
 };
 
 // 시험 창 상태(fixture 연결에만 적용): 종료 시각이 지나면 auth_expired, 횟수가 0이면 budget_exhausted
@@ -693,21 +697,51 @@ function handleMutation(owner, method, path, b, user) {
       s.state = "running";
       s.version++;
       s.updatedAt = now();
-      setTimeout(() => {
+      // #90 요청 id(202 응답·스트림 이벤트·중지 대상)와, 스트림 항목과 기록 항목이 같게 쓸 id.
+      const requestId = uuid();
+      const toolId = uuid();
+      const answerId = uuid();
+      const longAnswer = b.text.includes("/fixture/long-answer");
+      const toolStatus = longAnswer ? null : scope.allowedTools.includes("research_list") ? "completed" : "rejected";
+      const answer = b.text.includes("/fixture/wide-answer")
+        ? WIDE_ANSWER
+        : longAnswer
+          ? [`모의 응답: **${b.text}**`, ...Array.from({ length: 80 }, (_, i) => `긴 답변 문단 ${i + 1}.`)].join("\n\n")
+          : `모의 응답: **${b.text}**`;
+      s.requestId = requestId;
+      s.turn = { shownItem, userItem, toolId, answerId, toolStatus, toolDone: false };
+      if (researchMode.stream === "on") {
+        // 모의 진행: 시작 → 도구(시작·완료) → 답변 조각들 → (완료 타이머가 기록 저장 뒤 turn.completed)
+        const T = researchMode.turnMs;
+        beginTurn(s.id, requestId);
+        later(s.id, 100, () => emit(s.id, "turn.started", {}));
+        if (toolStatus) {
+          later(s.id, 200, () => emit(s.id, "item.started", { itemId: toolId, kind: "dynamicToolCall" }));
+          later(s.id, 400, () => {
+            s.turn.toolDone = true;
+            emit(s.id, "item.completed", { itemId: toolId, status: toolStatus });
+          });
+        }
+        later(s.id, 500, () => emit(s.id, "item.started", { itemId: answerId, kind: "agentMessage" }));
+        const pieces = answer.match(/[\s\S]{1,6}/g) ?? [];
+        const span = Math.max(T - 800, 200);
+        pieces.forEach((text, i) => later(s.id, 600 + Math.floor((span * i) / Math.max(pieces.length, 1)), () => emit(s.id, "item.delta", { itemId: answerId, text })));
+        later(s.id, Math.max(T - 100, 650), () => emit(s.id, "item.completed", { itemId: answerId, status: "completed" }));
+      }
+      s.turnTimer = setTimeout(() => {
         // 접수 항목 → 기록 항목(같은 자리, 다른 id)
         if (shownItem !== userItem) s.items[s.items.indexOf(shownItem)] = userItem;
         // 모의 모델은 항상 research_list를 호출한다. 이 요청 범위에 없으면 서버 callback 거부(tool_not_allowed)로 투영한다.
         // #89 /fixture/long-answer: 도구 없이 긴 답변 하나("생각 중" 하나가 같은 수의 답변 하나로 바뀌는 완료 스크롤 검증용).
-        const longAnswer = b.text.includes("/fixture/long-answer");
         const input = { type: "material", limit: 5, query: b.text };
         if (longAnswer) {
           // 도구 호출 없음
         } else if (scope.allowedTools.includes("research_list")) {
           const output = { items: [], note: "fixture" };
-          s.items.push({ id: uuid(), type: "tool_call", name: "research_list", input, output, status: "completed", raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
+          s.items.push({ id: toolId, type: "tool_call", name: "research_list", input, output, status: "completed", raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
         } else {
           const output = { error: { code: "tool_not_allowed" } };
-          s.items.push({ id: uuid(), type: "tool_call", name: "research_list", input, output, status: "rejected", error: { code: "tool_not_allowed" }, raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
+          s.items.push({ id: toolId, type: "tool_call", name: "research_list", input, output, status: "rejected", error: { code: "tool_not_allowed" }, raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
         }
         // #23 api-contracts/issue23-shell-display.md: /fixture/shell-{ok,fail,timeout,busy,cancel,long}이면 shell 실행 결과를 투영한다.
         const shellCase = /\/fixture\/shell-([a-z]+)/.exec(b.text)?.[1];
@@ -749,17 +783,19 @@ function handleMutation(owner, method, path, b, user) {
           const output = [{ type: "inputText", text: JSON.stringify(anyProposalView(p, false)) }];
           s.items.push({ id: uuid(), type: "tool_call", name: "research_document_save", input, output, status: "completed", raw: { kind: "function_call", arguments: input, result: output, fixture: true } });
         }
-        const answer = b.text.includes("/fixture/wide-answer")
-          ? WIDE_ANSWER
-          : longAnswer
-            ? [`모의 응답: **${b.text}**`, ...Array.from({ length: 80 }, (_, i) => `긴 답변 문단 ${i + 1}.`)].join("\n\n")
-            : `모의 응답: **${b.text}**`;
-        s.items.push({ id: uuid(), type: "message", role: "assistant", text: answer, raw: { kind: "agent_message", fixture: true } });
+        s.items.push({ id: answerId, type: "message", role: "assistant", text: answer, raw: { kind: "agent_message", fixture: true } });
+        // #90 /fixture/notice: 서버 알림 항목(partial_removed)과 이 화면이 모르는 새 항목 종류
+        if (b.text.includes("/fixture/notice")) {
+          s.items.push({ id: `partial-removed-${s.items.length}`, type: "notice", code: "partial_removed", turnStatus: "interrupted", raw: { type: "notice" } });
+          s.items.push({ id: uuid(), type: "future_kind", raw: { type: "future_kind" } });
+        }
         s.state = "idle";
         s.version++;
         s.updatedAt = now();
+        s.turn = null;
+        if (researchMode.stream === "on") endTurn(s.id, { state: "idle", turnStatus: "completed", errorCode: null });
       }, researchMode.turnMs);
-      return ok(202, sessionSummary(s));
+      return ok(202, { ...sessionSummary(s), requestId });
     }
   }
   return fail(404, "not_found", "Not found");
@@ -1086,6 +1122,43 @@ export async function handleResearch(req, res, path, url, session) {
     return send(res, 403, { error: { code: "forbidden", message: "Research access is not permitted" } });
   }
   const owner = session.user.accountId;
+  // #90 스트림과 중지(Idempotency-Key 없음)
+  const ev = /^\/research\/sessions\/([^/]+)\/(events|interrupt)$/.exec(path);
+  if (ev) {
+    if (researchMode.stream !== "on") return send(res, 404, { error: { code: "stream_disabled", message: "Streaming is not enabled" } });
+    const s = sessions.get(ev[1]);
+    if (!s || s.owner !== owner) return send(res, 404, { error: { code: "not_found", message: "Not found" } });
+    if (ev[2] === "events") {
+      if (req.method !== "GET") return send(res, 405, { error: { code: "method_not_allowed", message: "Method not allowed" } });
+      return openStream(req, res, s.id, url.searchParams.get("after"), handleRead(owner, "/research/codex/status", url).body);
+    }
+    if (req.method !== "POST") return send(res, 405, { error: { code: "method_not_allowed", message: "Method not allowed" } });
+    if (req.headers.origin !== `http://${req.headers.host}`) return send(res, 403, { error: { code: "origin_not_allowed", message: "Origin not allowed" } });
+    if (req.headers["x-csrf-token"] !== session.csrf) return send(res, 403, { error: { code: "csrf_invalid", message: "Invalid CSRF token" } });
+    const body = await readBody(req);
+    if (!body || typeof body.requestId !== "string" || Object.keys(body).length !== 1) return send(res, 422, { error: { code: "validation_error", message: "requestId" } });
+    interrupts.push(body.requestId);
+    if (s.state !== "running" || s.requestId !== body.requestId || !s.turn) return send(res, 409, { error: { code: "conflict", message: "This turn is not running" } });
+    // 중지: 완료 타이머를 멈추고 기록을 저장한 뒤(사용자 메시지 + 끝난 도구 + 표시 전용 부분 답변) 확정 신호를 보낸다. state는 idle.
+    clearTimeout(s.turnTimer);
+    const t = s.turn;
+    if (t.shownItem !== t.userItem) s.items[s.items.indexOf(t.shownItem)] = t.userItem;
+    if (t.toolStatus && t.toolDone) {
+      const input = { type: "material", limit: 5, query: t.userItem.text };
+      s.items.push({ id: t.toolId, type: "tool_call", name: "research_list", input, output: { items: [] }, status: t.toolStatus, turnStatus: "interrupted", raw: { kind: "function_call" } });
+    }
+    const partial = liveText(s.id, t.answerId);
+    if (partial) {
+      s.items.push({ id: t.answerId, type: "message", role: "assistant", text: partial, partial: true, displayOnly: true, turnStatus: "interrupted", raw: { type: "displayOnlyAgentMessage" } });
+    }
+    s.state = "idle";
+    s.error = null;
+    s.version++;
+    s.updatedAt = now();
+    s.turn = null;
+    endTurn(s.id, { state: "idle", turnStatus: "interrupted", errorCode: null });
+    return send(res, 200, { requestId: body.requestId, state: "interrupting" });
+  }
   if (req.method === "GET") {
     const r = handleRead(owner, path, url);
     return send(res, r.status, r.body);
@@ -1160,5 +1233,13 @@ export function researchCounts() {
     documents: [...items.values()].filter((i) => i.type === "document").length,
     relations: [...relations.values()].filter((r) => !r.archived).length,
     sessions: sessions.size,
+    // #90 스트림 연결(after 포함)·열린 연결 수·중지 요청
+    streamConnects: streamStats.connects.length,
+    streamAfter: streamStats.connects.filter((c) => c.after).length,
+    streamOpen: streamStats.open,
+    interrupts: interrupts.length,
   };
 }
+
+/** #90 받은 중지 요청의 requestId(시험 확인용). */
+export const interrupts = [];

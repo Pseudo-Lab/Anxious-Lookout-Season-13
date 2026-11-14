@@ -9,6 +9,7 @@
 // - #89 Enter 보내기(N22): Enter 보내기·Shift+Enter 줄바꿈·IME 조합 중 Enter 미전송·연타 한 번 전송
 // - #89 접수 뒤 첫 조회 실패 복구(N23): 보내는 중 유지·조회만 재시도·완료 기록 복구
 // - #89 완료 전환 바닥 추적(N24): 생각 중 → 같은 수의 긴 답변, 직접 펼친 도구 상세는 위치 유지
+// - #90 스트림(N25, 모의): polling 멈춤·실시간 답변·remount 없음·중지·알림/모르는 항목·숨김 닫기/after 재연결·플래그 꺼짐 fallback
 import { chromium } from "playwright";
 
 const ORIGIN = process.env.ORIGIN ?? "http://127.0.0.1:8080";
@@ -126,7 +127,7 @@ const pendingSends = () =>
   page.evaluate(() => Object.keys(sessionStorage).filter((k) => k.includes(":session-send:")).length);
 
 await setMock(
-  "me=normal&health=normal&logout=normal&nextLogin=approved&reuse=0&as=&access=approved&publish=allowed&codex=fixture&csrf=normal&window=&remaining=&turnMs=2500&pendingInput=0" +
+  "me=normal&health=normal&logout=normal&nextLogin=approved&reuse=0&as=&access=approved&publish=allowed&codex=fixture&csrf=normal&window=&remaining=&turnMs=2500&pendingInput=0&stream=off" +
     "&codexRunner=true&runner=not_prepared&prepare=ok&readyMs=3000&hint=&runnerAll="
 );
 
@@ -929,6 +930,84 @@ await step("N24", async () => {
   await setMock("turnMs=2500");
 });
 
+// N25. #90 스트림(모의 API, 실제 runner 스트림이 아님): 연결 중 polling 멈춤·답변 조각 실시간 표시·완료 뒤 같은 DOM(remount 없음)·
+// 중지(202 requestId, 부분 답변 표시 전용)·알림/모르는 항목 표시·숨김 30초 닫기와 after 재연결·플래그 꺼짐이면 polling.
+await step("N25", async () => {
+  const counts = () => fetch(`${ORIGIN}/__mock/counts`).then((r) => r.json());
+  const sessionGets = async () => (await mockCalls()).filter((c) => c.method === "GET" && /^\/research\/sessions\/[^/]+$/.test(c.path)).length;
+  const waitFor = async (fn, ms) => {
+    for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) if (await fn()) return true;
+    return false;
+  };
+  const input = chat.getByLabel("메시지");
+  const openSession = async () => {
+    await openPanel();
+    await chat.getByRole("button", { name: "← 대화 목록" }).click().catch(() => {});
+    await chat.getByRole("link", { name: /준비 대화/ }).click();
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 10000 });
+  };
+  await setMock("runnerAll=ready&codex=fixture&turnMs=6000&stream=on");
+  await page.reload();
+  await openSession();
+  check("N25. stream connected", await waitFor(async () => (await counts()).streamOpen >= 1, 5000));
+
+  // 받는 중 표시와 polling 멈춤
+  const g0 = await sessionGets();
+  const r0 = await statusReads();
+  await input.fill("스트림 질문 하나");
+  const t0 = Date.now();
+  await input.press("Enter");
+  const answer = chat.locator("li[data-role=assistant]", { hasText: "모의 응답" }).last();
+  check("N25. answer streams before the turn ends", (await appears(answer, 4500)) && Date.now() - t0 < 5500, `${Date.now() - t0}ms`);
+  await answer.evaluate((el) => (window.__ans = el));
+  check("N25. stop button while answering", await chat.getByRole("button", { name: "중지" }).isVisible());
+  await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
+  check("N25. same answer element after the record replaces the stream", await page.evaluate(() => window.__ans.isConnected));
+  check("N25. one recorded answer", (await chat.locator("li[data-role=assistant]", { hasText: "모의 응답: 스트림 질문 하나" }).count()) === 1);
+  const gets = (await sessionGets()) - g0;
+  check("N25. no 2s session polling while streaming (confirm + completion only)", gets <= 3, String(gets));
+  check("N25. no status polling while streaming", (await statusReads()) === r0, String((await statusReads()) - r0));
+  check("N25. no stop button after completion", (await chat.getByRole("button", { name: "중지" }).count()) === 0);
+
+  // 중지: 부분 답변은 표시 전용, 대화는 idle(실패 아님)
+  const i0 = (await counts()).interrupts;
+  await input.fill("중지할 질문");
+  await input.press("Enter");
+  await appears(chat.locator("li[data-role=assistant]", { hasText: "모의 응답: 중" }), 5000);
+  await chat.getByRole("button", { name: "중지" }).click();
+  check("N25. one interrupt request", await waitFor(async () => (await counts()).interrupts === i0 + 1, 3000));
+  check("N25. stopped partial answer marked", await appears(chat.getByText("중지됨(부분)"), 8000));
+  check("N25. partial answer is display-only", await appears(chat.getByText(/이어서 질문해도 Codex는 이 내용을 보지 않습니다/)));
+  check("N25. stop is not a failure", (await chat.getByText("마지막 요청이 실패했습니다").count()) === 0);
+  check("N25. input unlocked after stop", await appears(input.and(chat.locator(":enabled")), 5000));
+
+  // 서버 알림·모르는 항목: 대화 전체는 그대로 보인다
+  await setMock("turnMs=1500");
+  await input.fill("/fixture/notice 알림 질문");
+  await input.press("Enter");
+  check("N25. partial_removed notice shown", await appears(chat.getByText(/보존 한도를 넘어 삭제되었습니다/), 10000));
+  check("N25. unknown item type shown without breaking the conversation", await appears(chat.getByText(/표시하지 못하는 기록 항목입니다 \(future_kind\)/)));
+
+  // 숨김 30초 → 닫기, 다시 보이면 cursor(after)로 이어 붙기
+  const a0 = (await counts()).streamAfter;
+  await setHidden(true);
+  check("N25. stream closed after 30s hidden", await waitFor(async () => (await counts()).streamOpen === 0, 36000));
+  await setHidden(false);
+  check("N25. reconnects with after= when visible", await waitFor(async () => (await counts()).streamOpen >= 1 && (await counts()).streamAfter > a0, 8000));
+
+  // 플래그 꺼짐(404 stream_disabled): 기존 polling으로 동작하고 중지 버튼은 없다
+  await setMock("stream=off&turnMs=3000");
+  await page.reload();
+  await openSession();
+  await input.fill("폴백 질문");
+  await input.press("Enter");
+  await chat.locator("[data-chat-thinking]").waitFor();
+  await page.waitForTimeout(1200);
+  check("N25. stream off: no stop button", (await chat.getByRole("button", { name: "중지" }).count()) === 0);
+  check("N25. stream off: reply via polling", await appears(chat.getByText("모의 응답: 폴백 질문"), 10000));
+  await setMock("turnMs=2500");
+});
+
 // N13. 연구 권한 상실(같은 계정 commenter로 변경): 준비 POST·상태 조회 없음, 기존 권한 안내
 await step("N13", async () => {
   const acc = (await me()).accountId;
@@ -957,7 +1036,7 @@ await step("N14", async () => {
 });
 
 check("N15. no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
-await setMock("codexRunner=&runner=&prepare=ok&runnerAll=&hint=&credHint=1&readyMs=2500&turnMs=2500&codex=fixture&csrf=normal&window=&remaining=&pendingInput=0");
+await setMock("codexRunner=&runner=&prepare=ok&runnerAll=&hint=&credHint=1&readyMs=2500&turnMs=2500&codex=fixture&csrf=normal&window=&remaining=&pendingInput=0&stream=off");
 await browser.close();
 const failed = results.filter((r) => !r.ok);
 console.log(`\nRESULT ${results.length - failed.length}/${results.length} passed`);

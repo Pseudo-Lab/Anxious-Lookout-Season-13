@@ -268,6 +268,8 @@ export interface SessionSummary {
   context?: { documentId: string; publicationId: string; title: string };
   // 가장 최근에 접수된 요청의 범위. 이전 기록에는 없을 수 있다.
   scope?: AcceptedScope;
+  // #90 메시지 전송(202) 응답에만: 그 턴의 요청 id(중지 대상, 스트림 이벤트의 requestId). 이전 API에는 없다.
+  requestId?: string;
 }
 
 export interface MessageItem {
@@ -282,6 +284,11 @@ export interface MessageItem {
   modelMismatch?: boolean;
   // 사용자 메시지가 접수된 범위(서버 기록). 이전 기록에는 없을 수 있다.
   scope?: AcceptedScope;
+  // #90 사용자가 중지한 턴의 항목(user 메시지 제외). 대화 state는 idle이다.
+  turnStatus?: "interrupted";
+  // #90 Codex 기록에 남지 않은 중지 턴의 부분 답변. 화면 표시 전용이며 이어서 질문해도 모델 문맥에는 없다.
+  partial?: boolean;
+  displayOnly?: boolean;
 }
 
 export interface ToolCallItem {
@@ -296,9 +303,25 @@ export interface ToolCallItem {
   status: string;
   error?: { code: string };
   modelMismatch?: boolean;
+  turnStatus?: "interrupted";
 }
 
-export type SessionItem = MessageItem | ToolCallItem;
+// #90 서버 알림 항목. partial_removed: 중지 턴의 부분 답변이 보존 한도로 삭제됨.
+export interface NoticeItem {
+  id: string;
+  type: "notice";
+  code: string;
+  turnStatus?: "interrupted";
+}
+
+// 이 화면이 모르는 새 항목 종류. 대화 전체를 실패로 만들지 않고 종류만 표시한다.
+export interface UnknownItem {
+  id: string;
+  type: "unknown";
+  originalType: string;
+}
+
+export type SessionItem = MessageItem | ToolCallItem | NoticeItem | UnknownItem;
 
 export interface SessionDetail extends SessionSummary {
   items: SessionItem[];
