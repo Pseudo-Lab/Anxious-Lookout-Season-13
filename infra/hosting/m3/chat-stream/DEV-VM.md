@@ -203,7 +203,11 @@ table).
   - Cleanup results decide the final rc after the step rc (kept as `stepRc`; 7/8 stay): runner release not proved 6
     (the cleanup sends the stop and proves the release), a client container or the private files left 80, the
     session revoke 70, evidence 9 - each whatever the step rc (r11, review 65291e6: a live session is never hidden
-    behind a measurement failure). `verdict overall pass` is computed after them.
+    behind a measurement failure). `verdict overall pass` is computed after them. r12 (PM: one rule for every exit
+    path): `final_rc()` alone decides the final rc - normal end, step failure, exception, signal - and is applied
+    again after the last writes (out.txt's result line, exit.json); a changed code prints a last `verdict overall
+    pass: False` and `result rc=`. A signal inside the cleanup never skips the rest of it. p4 / p4-2 also count any
+    leftover `issue90-i90-d3-*` container (the probe included) as 80.
   - The client containers run with `--security-opt label=disable` (as D2); before any runner start a probe container
     with the same image, user and mounts must read both private files (else rc 5, nothing changed).
 

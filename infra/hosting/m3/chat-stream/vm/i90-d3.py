@@ -106,14 +106,14 @@ def say(text):
     line = str(text)
     try:
         print(line, flush=True)
-    except Exception:
+    except BaseException:
         pass
     if OUT['stream'] is not None and not OUT.get('failed'):
         try:  # never raised into a cleanup step; reported as rc 9
             OUT['stream'].write(line + '\n')
             OUT['stream'].flush()
             os.fsync(OUT['stream'].fileno())
-        except Exception:
+        except BaseException:
             OUT['failed'] = True
 
 
@@ -182,7 +182,7 @@ def record(ev, **items):
         value = json.load(open(path)) if os.path.exists(path) else {}
         value.update(items)
         durable_json(path, value)
-    except Exception:
+    except BaseException:
         OUT['failed'] = True
 
 
@@ -492,7 +492,7 @@ def revoke_session(ev):
         left = sql('session', "SELECT json_build_object('n',count(*)) FROM auth.sessions WHERE token_hash='%s';"
                    % SESSION['hash'], 70)
         SESSION['revoked'] = left == [{'n': 0}]
-    except Exception:
+    except BaseException:
         SESSION['revoked'] = False
     record(ev, session='revoked' if SESSION['revoked'] else 'revoke not proved (expires by itself)')
     say('session %s: %s' % (SESSION['hash'][:16], 'revoked' if SESSION['revoked'] else 'REVOKE NOT PROVED'))
@@ -1071,7 +1071,7 @@ def flag_line(action, code):
     try:
         d = api_object(3)
         state, sha = flag_state(d), template_sha(d)
-    except Exception:
+    except BaseException:
         return 'FLAG STATE UNKNOWN (api lookup failed): check read-only and report'
     line = 'flag state at the end: %s %s; api template sha256 %s' % (FLAG['name'], state, sha)
     if state != 'absent' and code not in (0, 3):
@@ -1135,6 +1135,12 @@ def cleanup(action):
         runner = False
     try:
         gone = clients_gone()
+    except BaseException:
+        gone = False
+    try:  # p4 / p4-2: any container of this script (clients, the probe) left counts, whatever stopped the action
+        if action in ('p4', 'p4-2'):
+            rc, out = run([DOCKER, 'ps', '-a', '--filter', 'name=^issue90-i90-d3-', '--format', '{{.Names}}'], 30)
+            gone = gone and rc == 0 and not out
     except BaseException:
         gone = False
     try:
@@ -1202,51 +1208,61 @@ def main(argv):
         if lock is not None:
             os.close(lock)  # releases the flock
     step_rc = code
-    # Cleanup failures are their own final rc, the step rc kept (PM/review D3): 7 / 8 (held) stay; then runner
-    # release not proved 6; a client container or the private files left 80; the session revoke 70; evidence 9.
-    if code not in (7, 8):
-        if runner is False:
-            code = 6
-        elif not gone or private is False:
-            code = 80
-        elif revoked is False:  # whatever the step rc (review 65291e6 major): a live session is never hidden
-            code = 70
-        elif OUT.get('failed'):
-            code = 9
+    facts = {'runner': runner, 'gone': gone, 'private': private, 'revoked': revoked}
+    code = final_rc(step_rc, facts, OUT.get('failed'))
     say('cleanup: runner released %s; client containers gone %s; private files removed %s; session revoked %s'
         % ({None: 'n/a'}.get(runner, runner), gone, {None: 'n/a'}.get(private, private),
            {None: 'n/a'}.get(revoked, revoked)))
     items = {'p4': ('P4-0', 'P4-1', 'P4-3', 'P4-4'), 'p4-2': ('P4-2',)}.get(action, ())
     for name in items:  # a step that did not run is `unknown`, never a pass (review/PM D3 major)
         say('verdict %s: %s' % (name, {True: 'True', False: 'False'}.get(verdicts.get(name), 'unknown')))
+    failing = [name for name in items if verdicts.get(name) is not True]
     if items:
-        failing = [name for name in items if verdicts.get(name) is not True]
         if stopped_at:
             say('stopped at: %s' % stopped_at)
-        say('verdict overall pass: %s' % (not failing and code == 0))
         if failing:
             say('verdicts False or unknown: %s' % ', '.join(failing))
     say(flag_line(action, code))
-    if code == 0 and OUT.get('failed'):
-        code = 9
-    said = code
+    # The last writes (out.txt's result line, then exit.json) can fail too: the rule is applied again after them, in
+    # the same function, and a changed code is reported last (PM 2026-11-14: one rule for every exit path).
+    code = final_rc(step_rc, facts, OUT.get('failed'))
+    if items:
+        say('verdict overall pass: %s' % (not failing and code == 0))
     say('result rc=%d' % code)
-    if code == 0 and OUT.get('failed'):
-        code = 9
+    written = False
     if ev:
         try:
-            durable_json(os.path.join(ev, 'exit.json'), {'rc': code, 'stepRc': step_rc, 'verdicts': verdicts,
+            durable_json(os.path.join(ev, 'exit.json'), {'rc': final_rc(step_rc, facts, OUT.get('failed')),
+                                                        'stepRc': step_rc, 'verdicts': verdicts,
                                                         'stoppedAt': stopped_at, 'runnerReleased': runner,
-                                                        'privateRemoved': private, 'sessionRevoked': revoked,
-                                                        'finished': now_utc()})
-        except Exception:
-            if code == 0:
-                code = 9
+                                                        'clientsGone': gone, 'privateRemoved': private,
+                                                        'sessionRevoked': revoked, 'finished': now_utc()})
+            written = True
+        except BaseException:
             say('exit.json not written: the result is unknown on disk')
-    if code != said:
-        say('verdict overall pass: False (an evidence write failed after the result line)')
-        say('result rc=%d (an evidence write failed after the result line)' % code)
-    return code
+    final = final_rc(step_rc, facts, OUT.get('failed') or (ev is not None and not written))
+    if final != code:
+        if items:
+            say('verdict overall pass: False (an evidence write failed after the result line)')
+        say('result rc=%d (an evidence write failed after the result line)' % final)
+    return final
+
+
+def final_rc(step, facts, evidence_failed):
+    """The one rule for the final rc on every exit path (normal end, step failure, exception, signal): the held 7 / 8
+    stay; otherwise, whatever the step rc, runner release not proved 6 > a client container or the private files
+    left 80 > session revoke not proved 70 > an evidence write failed 9 > the step rc. The step rc stays `stepRc`."""
+    if step in (7, 8):
+        return step
+    if facts['runner'] is False:
+        return 6
+    if not facts['gone'] or facts['private'] is False:
+        return 80
+    if facts['revoked'] is False:
+        return 70
+    if evidence_failed:
+        return 9
+    return step
 
 
 if __name__ == '__main__':

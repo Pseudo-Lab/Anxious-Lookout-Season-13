@@ -3,6 +3,7 @@ patch, rollout, Pods, logs), psql, docker and the measuring client answered in m
 VM, no Docker, no network. Needs infra/ mounted (skipped otherwise)."""
 import importlib.util
 import json
+import os
 import re
 from pathlib import Path
 
@@ -149,6 +150,8 @@ class Guest:
         return 3, ""
 
     def stop_runner(self):
+        if self.faults.get("stuck"):  # the stop is accepted but the runner never goes away
+            return
         if self.registry["pod"]:
             self.stops.append({"gen": self.registry["gen"], "receipt": 1, "clean": True, "completed": True,
                                "requested": self.clock, "completedAt": self.clock + 2})
@@ -164,6 +167,9 @@ class Guest:
         if path.startswith(self.m.BASE + "/sessions?"):
             return 200, {"items": [{"id": CONVERSATION}], "nextCursor": None}, ""
         if path == self.m.BASE + "/codex/runner" and method == "POST":
+            if self.faults.get("signal_at_entry"):
+                self.faults["signal_at_entry"] = False
+                raise self.m.Interrupted()
             if self.faults.get("entry_refused"):
                 return 503, None, ""
             gen = self.registry["gen"] + 1
@@ -179,6 +185,8 @@ class Guest:
             ready = not self.faults.get("never_ready")
             return 200, {"available": ready, "reason": None if ready else "runner_unreachable"}, ""
         if path == self.m.BASE + "/codex/runner" and method == "DELETE":
+            if self.faults.get("signal_at_delete"):
+                raise self.m.Interrupted()
             if self.faults.get("delete_503"):
                 return 503, None, ""
             self.stop_runner()
@@ -513,3 +521,161 @@ def test_an_evidence_failure_after_a_step_failure_is_rc9_with_the_step_rc_kept(g
     monkeypatch.setattr(m.os, "fsync", failing)
     assert m.main(["i90-d3.py", "p4"]) == 9
     assert json.loads((run_dir(evidence, "p4") / "exit.json").read_text())["stepRc"] == 5
+
+
+# --- the exit matrix (PM 2026-11-14: one rule for every exit path; review d3-exit-matrix) -------------------------
+
+class FailingStream:
+    """out.txt whose write fails once a trigger appears in a line (and every write after it)."""
+
+    def __init__(self, real, trigger):
+        self.real, self.trigger, self.broken = real, trigger, False
+
+    def write(self, text):
+        if self.broken or (self.trigger and self.trigger in text):
+            self.broken = True
+            raise OSError(28, "No space left on device")
+        return self.real.write(text)
+
+    def flush(self):
+        return self.real.flush()
+
+    def fileno(self):
+        return self.real.fileno()
+
+    def close(self):
+        return self.real.close()
+
+
+OUTCOMES = {"normal": 0, "step5": 5, "exception": 5, "signal": 130}
+INJECTIONS = {"none": None, "run.json": 9, "out.txt-mid": 9, "out.txt-verdict": 9, "out.txt-result": 9,
+              "exit.json": 9, "release": 6, "container": 80, "cookie": 80, "revoke": 70}
+
+
+def inject(m, g, monkeypatch, outcome, names):
+    if outcome == "step5":
+        g.faults["never_ready"] = True
+    elif outcome == "exception":
+        monkeypatch.setattr(m, "p4_0", lambda *a: (_ for _ in ()).throw(RuntimeError("unexpected")))
+    elif outcome == "signal":
+        g.faults["signal_at_entry"] = True
+        monkeypatch.setattr(m, "p4_0", lambda ev, conversation, verdicts: verdicts.__setitem__("P4-0", True))
+    real_json, real_fdopen = m.durable_json, m.os.fdopen
+    for name in names:
+        if name == "run.json":
+            def failing(path, value, real=real_json):
+                if path.endswith("run.json") and "session" in value:
+                    raise OSError(28, "No space left on device")
+                return real(path, value)
+            real_json = failing
+            monkeypatch.setattr(m, "durable_json", failing)
+        elif name == "exit.json":
+            def failing(path, value, real=real_json):
+                if path.endswith("exit.json"):
+                    raise OSError(28, "No space left on device")
+                return real(path, value)
+            real_json = failing
+            monkeypatch.setattr(m, "durable_json", failing)
+        elif name.startswith("out.txt"):
+            trigger = {"out.txt-mid": "conversation ", "out.txt-verdict": "verdict ", "out.txt-result": "result rc="}[name]
+            def fdopen(fd, mode="r", *args, trigger=trigger, real=real_fdopen):
+                stream = real(fd, mode, *args)
+                # only out.txt is wrapped (durable_json's temporary files use os.fdopen too)
+                return FailingStream(stream, trigger) if os.readlink("/proc/self/fd/%d" % fd).endswith("out.txt") \
+                    else stream
+            monkeypatch.setattr(m.os, "fdopen", fdopen)
+        elif name == "release":
+            g.faults["stuck"] = True
+            if outcome in ("normal",):
+                pass
+        elif name == "container":
+            g.faults["leftover"] = True
+        elif name == "cookie":
+            monkeypatch.setattr(m.shutil, "rmtree", lambda path: (_ for _ in ()).throw(OSError("busy")))
+        elif name == "revoke":
+            g.faults["revoke_fails"] = True
+
+
+def expected_rc(outcome, names):
+    step = OUTCOMES[outcome]
+    order = [6, 80, 70, 9]
+    found = [INJECTIONS[name] for name in names if INJECTIONS[name] is not None]
+    # a runner that never goes away only matters after an entry (exception and signal stop before one)
+    if outcome in ("exception", "signal"):
+        found = [rc for rc in found if rc != 6]
+    for rc in order:
+        if rc in found:
+            return rc
+    return step
+
+
+def check_exit(m, g, evidence, out, rc, outcome, names):
+    results = [line for line in out.splitlines() if line.startswith("result rc=")]
+    assert results and results[-1].split()[1] == "rc=%d" % rc, results
+    overall = [line for line in out.splitlines() if line.startswith("verdict overall pass:")]
+    assert overall and (overall[-1].startswith("verdict overall pass: True") == (rc == 0)), overall
+    folder = run_dir(evidence, "p4")
+    exit_file = folder / "exit.json"
+    if "exit.json" in names:
+        assert not exit_file.exists()
+    else:
+        done = json.loads(exit_file.read_text())
+        assert done["rc"] == rc and done["stepRc"] in (OUTCOMES[outcome], 6, 9, 80)
+    assert any(g.sessions.values()) == ("revoke" in names)
+    assert (folder / "private").exists() == ("cookie" in names)
+    if "release" not in names or outcome in ("exception", "signal"):
+        assert g.runner == []  # the runner was released (or never started)
+
+
+CASES = [(o, (i,)) for o in OUTCOMES for i in INJECTIONS if not (o == "exception" and i == "release")] + [
+    ("normal", ("revoke", "exit.json")), ("step5", ("container", "revoke", "out.txt-result")),
+    ("signal", ("release", "cookie", "revoke", "exit.json")), ("step5", ("cookie", "run.json")),
+    ("exception", ("revoke", "out.txt-verdict"))]
+
+
+@pytest.mark.parametrize("outcome,names", CASES)
+def test_exit_matrix(guest, monkeypatch, capsys, outcome, names):
+    m, g, evidence, doc = guest()
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    names = tuple(n for n in names if n != "none")
+    inject(m, g, monkeypatch, outcome, names)
+    capsys.readouterr()
+    rc = m.main(["i90-d3.py", "p4"])
+    want = expected_rc(outcome, names)
+    assert rc == want, (outcome, names, rc)
+    check_exit(m, g, evidence, capsys.readouterr().out, rc, outcome, names)
+
+
+@pytest.mark.parametrize("names", [("exit.json",), ("revoke", "out.txt-result"), ("container",)])
+def test_a_held_rollout_failure_keeps_7_over_cleanup_and_evidence(guest, monkeypatch, capsys, names):
+    m, g, evidence, doc = guest()
+    real = g.run
+    def failing_rollout(cmd, timeout=60, stdin=None):
+        if cmd[2:6] == ["-n", "m2-hosting", "rollout", "status"]:
+            return 1, ""
+        return real(cmd, timeout, stdin)
+    monkeypatch.setattr(m, "run", failing_rollout)
+    inject(m, g, monkeypatch, "normal", [n for n in names if n in ("exit.json", "out.txt-result")])
+    assert m.main(["i90-d3.py", "flag-on"]) == 7
+    assert [l for l in capsys.readouterr().out.splitlines() if l.startswith("result rc=")][-1].startswith("result rc=7")
+
+
+def test_a_baseline_that_cannot_be_saved_stays_rc3_with_nothing_sent(guest, monkeypatch):
+    m, g, evidence, doc = guest()
+    real = m.durable_json
+    monkeypatch.setattr(m, "durable_json", lambda path, value: (_ for _ in ()).throw(OSError(28, "full"))
+                        if "restartedAtBefore" in value else real(path, value))
+    assert m.main(["i90-d3.py", "flag-on"]) == 3 and g.patches == []
+
+
+def test_a_signal_during_the_cleanup_stop_still_runs_the_rest_of_the_cleanup(guest, capsys):
+    """Review exit matrix: a signal inside the cleanup (here at its DELETE) never skips the remaining cleanup."""
+    m, g, evidence, doc = guest(never_ready=True, signal_at_delete=True)
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    capsys.readouterr()
+    assert m.main(["i90-d3.py", "p4"]) == 6  # the release is not proved: 6 over the step's 5
+    out = capsys.readouterr().out
+    assert [l for l in out.splitlines() if l.startswith("result rc=")][-1] == "result rc=6"
+    assert not any(g.sessions.values()) and not (run_dir(evidence, "p4") / "private").exists()
+    done = json.loads((run_dir(evidence, "p4") / "exit.json").read_text())
+    assert done["stepRc"] == 5 and done["runnerReleased"] is False and done["sessionRevoked"] is True
