@@ -8,7 +8,8 @@ Output, JSON lines, fixed keys only:
 - `services`: every Service in m2-hosting whose selector is exactly {app: hosting-api}: its name (only when it is one of
   the fixed names api / api-internal, else `other`), clusterIP present (yes / no / None-headless), and its ports as
   (name from the fixed list http / internal / other, port number);
-- `pins`: the turns-r5 and disable-r5 run names (fixed patterns), the sha256 of their exit.json bytes, their rc, and
+- `pins`: the turns-r5 and disable-r5 run names (fixed patterns), the sha256 of their exit.json bytes, their rc, their
+  typed fields from fixed lists (rc, stepRc, stoppedAt, verdicts, the four cleanup fields: value or null or missing), and
   the budget entries (n, step, outcome from fixed lists).
 rc: 0 printed; 3 refused (not root, the Service lookup failed).
 """
@@ -61,6 +62,32 @@ def services():
     return sorted(found, key=lambda x: x['name'])
 
 
+def typed(value):
+    """A field as JSON type and value, for fixed scalars only (review: the decision binds typed fields)."""
+    if value is None:
+        return 'null'
+    if value is True or value is False:
+        return value
+    if type(value) is int:
+        return value
+    return 'other'
+
+
+def fields(done):
+    """The exit's fields from fixed lists: present or missing, typed; stoppedAt only as a fixed step name."""
+    if not isinstance(done, dict):
+        return None
+    out_ = {}
+    for key in ('rc', 'stepRc', 'runnerReleased', 'clientsGone', 'privateRemoved', 'sessionRevoked'):
+        out_[key] = typed(done[key]) if key in done else 'missing'
+    stopped = done.get('stoppedAt', 'missing')
+    out_['stoppedAt'] = stopped if stopped in STEPS or stopped == 'missing' else ('null' if stopped is None else 'other')
+    verdicts = done.get('verdicts') if isinstance(done.get('verdicts'), dict) else None
+    out_['verdicts'] = None if verdicts is None else {k if k in STEPS + ('release',) else 'other': typed(v)
+                                                      for k, v in verdicts.items()}
+    return out_
+
+
 def pins():
     value = {}
     for action in ('turns-r5', 'disable-r5'):
@@ -73,9 +100,9 @@ def pins():
             done = json.loads(raw)
             rc = done.get('rc') if isinstance(done, dict) and type(done.get('rc')) is int else None
         except Exception:
-            raw, rc = None, None
+            raw, rc, done = None, None, None
         value[action] = {'run': found[0], 'exitSha256': hashlib.sha256(raw).hexdigest() if raw is not None else None,
-                         'rc': rc}
+                         'rc': rc, 'fields': fields(done)}
     try:
         turns = json.loads(read(os.path.join(EVIDENCE, 'i90-p5-budget.json'))).get('turns')
         value['budget'] = [{'n': t.get('n') if type(t.get('n')) is int else None,
