@@ -940,6 +940,8 @@ await step("N25", async () => {
     return false;
   };
   const input = chat.getByLabel("메시지");
+  // 입력창 옆 중지 버튼만(도구 행의 "· 중지됨" 상태 문구가 들어간 버튼과 섞이지 않게 — review c6c0105)
+  const stopBtn = () => chat.locator("button[data-chat-stop]");
   const openSession = async () => {
     await openPanel();
     await chat.getByRole("button", { name: "← 대화 목록" }).click().catch(() => {});
@@ -960,14 +962,14 @@ await step("N25", async () => {
   const answer = chat.locator("li[data-role=assistant]", { hasText: "모의 응답" }).last();
   check("N25. answer streams before the turn ends", (await appears(answer, 4500)) && Date.now() - t0 < 5500, `${Date.now() - t0}ms`);
   await answer.evaluate((el) => (window.__ans = el));
-  check("N25. stop button while answering", await chat.getByRole("button", { name: "중지" }).isVisible());
+  check("N25. stop button while answering", await stopBtn().isVisible());
   await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
   check("N25. same answer element after the record replaces the stream", await page.evaluate(() => window.__ans.isConnected));
   check("N25. one recorded answer", (await chat.locator("li[data-role=assistant]", { hasText: "모의 응답: 스트림 질문 하나" }).count()) === 1);
   const gets = (await sessionGets()) - g0;
   check("N25. no 2s session polling while streaming (confirm + completion only)", gets <= 3, String(gets));
   check("N25. no status polling while streaming", (await statusReads()) === r0, String((await statusReads()) - r0));
-  check("N25. no stop button after completion", (await chat.getByRole("button", { name: "중지" }).count()) === 0);
+  check("N25. no stop button after completion", (await stopBtn().count()) === 0);
 
   // review(1908aaf): 완료 확정 GET이 일시 실패(503)해도 스트림 연결 중 GET만 다시 해 완료 기록으로 복구하고 입력 잠금을 푼다.
   {
@@ -1005,7 +1007,7 @@ await step("N25", async () => {
   await input.fill("중지할 질문");
   await input.press("Enter");
   await appears(chat.locator("li[data-role=assistant]", { hasText: "모의 응답: 중" }), 5000);
-  await chat.getByRole("button", { name: "중지" }).click();
+  await stopBtn().click();
   check("N25. one interrupt request", await waitFor(async () => (await counts()).interrupts === i0 + 1, 3000));
   check("N25. stopped partial answer marked", await appears(chat.getByText("중지됨(부분)"), 8000));
   check("N25. partial answer is display-only", await appears(chat.getByText(/이어서 질문해도 Codex는 이 내용을 보지 않습니다/)));
@@ -1022,13 +1024,13 @@ await step("N25", async () => {
     await input.fill("늦은 중지 A");
     await input.press("Enter");
     await appears(chat.locator("li[data-role=assistant]", { hasText: "늦은" }), 5000);
-    await chat.getByRole("button", { name: "중지" }).click();
+    await stopBtn().click();
     await input.and(chat.locator(":enabled")).waitFor({ timeout: 8000 });
     await input.fill("다음 턴 B");
     await input.press("Enter");
-    await chat.getByRole("button", { name: /^중지/ }).waitFor({ timeout: 5000 });
+    await stopBtn().waitFor({ timeout: 5000 });
     await page.waitForTimeout(3500); // A의 늦은 응답이 도착한 뒤(B 턴 6초 안)
-    const b = chat.getByRole("button", { name: /^중지/ });
+    const b = stopBtn();
     check("N25. late stop reply of turn A does not lock turn B's stop button", (await b.textContent())?.trim() === "중지" && (await b.isEnabled()), `${await b.textContent()} enabled=${await b.isEnabled()}`);
     await page.unroute("**/api/research/sessions/*/interrupt");
     await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
@@ -1101,7 +1103,7 @@ await step("N25", async () => {
     check("N25. after drop -> 404 fallback, still in progress while the turn runs", await input.isDisabled());
     check("N25. drop fallback: completed via polling, input unlocked", await appears(input.and(chat.locator(":enabled")), 12000));
     check("N25. drop fallback: final answer recorded", await appears(chat.getByText("모의 응답: 중간 끊김 질문")));
-    check("N25. drop fallback: no thinking / stop left", (await chat.locator("[data-chat-thinking]").count()) === 0 && (await chat.getByRole("button", { name: /^중지/ }).count()) === 0);
+    check("N25. drop fallback: no thinking / stop left", (await chat.locator("[data-chat-thinking]").count()) === 0 && (await stopBtn().count()) === 0);
     await setMock("stream=on");
     await page.reload();
     await openSession();
@@ -1129,7 +1131,7 @@ await step("N25", async () => {
   await input.press("Enter");
   await chat.locator("[data-chat-thinking]").waitFor();
   await page.waitForTimeout(1200);
-  check("N25. stream off: no stop button", (await chat.getByRole("button", { name: "중지" }).count()) === 0);
+  check("N25. stream off: no stop button", (await stopBtn().count()) === 0);
   check("N25. stream off: reply via polling", await appears(chat.getByText("모의 응답: 폴백 질문"), 10000));
   await setMock("turnMs=2500");
 });

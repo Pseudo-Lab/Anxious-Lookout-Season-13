@@ -721,6 +721,7 @@ function Composer({
           {stop && (
             <button
               type="button"
+              data-chat-stop=""
               onClick={stop.onStop}
               disabled={stop.disabled}
               className="min-h-11 shrink-0 rounded-lg border border-stone-300 bg-white px-4 text-sm font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50 md:min-h-9"
