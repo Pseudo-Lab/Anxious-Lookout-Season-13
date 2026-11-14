@@ -35,6 +35,7 @@ async function api(req, res, path, url) {
     csrf: req.headers["x-csrf-token"] ?? null,
     origin: req.headers.origin ?? null,
     idempotencyKey: req.headers["idempotency-key"] ?? null,
+    at: Date.now(),
   });
   if (path.startsWith("/admin/")) return handleAdmin(req, res, path, url);
   if (path.startsWith("/research/") || path.startsWith("/public/") || path.startsWith("/media/")) {

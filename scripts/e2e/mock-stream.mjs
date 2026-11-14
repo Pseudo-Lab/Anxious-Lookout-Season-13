@@ -77,7 +77,7 @@ function snapshot(res, t) {
 
 /** GET /sessions/{id}/events. runner는 `/codex/status`와 같은 값. */
 export function openStream(req, res, sessionId, after, runner) {
-  streamStats.connects.push({ sessionId, after });
+  streamStats.connects.push({ sessionId, after, at: Date.now() });
   streamStats.open++;
   res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store", "X-Accel-Buffering": "no" });
   write(res, { event: "runner", data: runner });

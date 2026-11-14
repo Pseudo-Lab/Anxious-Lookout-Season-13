@@ -864,9 +864,11 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
       const status = readCodexStatus(raw);
       if (status) pushStatus(status);
     },
-    // 기록은 실행 중인데 스트림이 진행 중인 턴이 없다고 하면(연결 전에 끝남) 기록으로 확인한다.
-    onIdle: () => {
-      if (running && send === null) void refreshRecord();
+    // 계약 v1.2 예외(PM 결정 #90, issuecomment-6872695326): 받는 순간 화면의 로컬 턴 상태가 진행 중(submitted·waiting·streaming,
+    // 또는 스트림이 진행 중으로 보던 턴)이면 그 턴은 연결 전에 끝났을 수 있으므로 기록 GET으로 확정한다. idle 1건당 최대 1회
+    // (일시 실패만 refreshRecord가 2–15초로 재시도), 메시지는 다시 보내지 않는다. 진행 중이 아니면 GET하지 않는다(v1.1대로).
+    onIdle: (wasRunning) => {
+      if (awaiting || wasRunning) void refreshRecord();
     },
     onTurnRunning: (requestId) => {
       startedTurns.current.add(requestId);

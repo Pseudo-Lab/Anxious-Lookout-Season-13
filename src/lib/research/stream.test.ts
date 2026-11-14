@@ -133,7 +133,11 @@ describe("applyFrame", () => {
   it("runner unavailable or idle while a turn runs ends it via the record", () => {
     const base = run([f("turn.started", { requestId: R }, `${R}:1`)]).state;
     expect(run([f("runner", { available: false, reason: "idle_stopped" })], base).effects).toEqual(["runner", "refresh"]);
-    expect(run([f("idle", { requestId: null, turnState: null })], base).effects).toEqual(["idle", "refresh"]);
+    // idle은 refresh를 직접 내지 않는다(화면이 진행 중 상태일 때만 1회 확인 — PM 결정 #90).
+    const idle = applyFrame(base, f("idle", { requestId: null, turnState: null }));
+    expect(idle.effects).toEqual([{ type: "idle", wasRunning: true }]);
+    expect(idle.state.turn?.running).toBe(false);
+    expect(applyFrame(EMPTY_STREAM, f("idle", { requestId: null, turnState: null })).effects).toEqual([{ type: "idle", wasRunning: false }]);
   });
 
   it("ignores unknown events, other turns and bad JSON", () => {

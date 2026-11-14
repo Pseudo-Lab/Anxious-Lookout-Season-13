@@ -1034,6 +1034,60 @@ await step("N25", async () => {
     await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
   }
 
+  // 계약 v1.2 idle 예외(PM 결정): 로컬 진행 중이면 idle 1건당 GET 1회, ready면 0회.
+  // "연결 전에 턴이 끝나 turn.completed를 받지 못한 경우"를 만들기 위해, 끝난 턴의 대화를 다시 열면서 첫 상세 GET만
+  // 그 턴이 실행 중일 때 저장해 둔 응답으로 돌려준다(화면은 실행 중, 서버는 진행 턴 없음 → 연결하면 idle).
+  {
+    const sessionGetsSince = async (t) => (await mockCalls()).filter((c) => c.method === "GET" && /^\/research\/sessions\/[^/]+$/.test(c.path) && c.at >= t).length;
+    let runningBody = null;
+    const keep = async (resp) => {
+      if (resp.request().method() !== "GET" || !/\/api\/research\/sessions\/[^/?]+$/.test(new URL(resp.url()).pathname)) return;
+      const body = await resp.text().catch(() => "");
+      if (body.includes('"state":"running"')) runningBody = body;
+    };
+    page.on("response", keep);
+    await setMock("turnMs=3000");
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
+    await input.fill("idle 예외 질문");
+    await input.press("Enter");
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
+    page.off("response", keep);
+    check("N25. captured a running record", runningBody !== null);
+    let stale = true;
+    await page.route("**/api/research/sessions/*", (route) => {
+      if (stale && route.request().method() === "GET") {
+        stale = false;
+        return route.fulfill({ status: 200, contentType: "application/json", body: runningBody ?? "{}" });
+      }
+      return route.continue();
+    });
+    // 새로고침 뒤 대화창이 열려 있던 대화를 그대로 다시 열 수 있다. 상세 화면이 한 번만 마운트되도록, 목록이 보일 때만 고른다.
+    const reopen = async () => {
+      await openPanel();
+      await Promise.race([input.waitFor(), chat.getByRole("link", { name: /준비 대화/ }).waitFor()]).catch(() => {});
+      if (!(await input.isVisible())) await chat.getByRole("link", { name: /준비 대화/ }).click();
+      await input.waitFor();
+    };
+    let t = Date.now();
+    await page.reload();
+    await reopen();
+    check("N25. v1.2 idle while in progress: record confirmed", await appears(input.and(chat.locator(":enabled")), 10000));
+    check("N25. v1.2 idle recovered the answer", await appears(chat.getByText("모의 응답: idle 예외 질문")));
+    await page.waitForTimeout(2500);
+    let n = await sessionGetsSince(t);
+    check("N25. v1.2 idle while in progress: exactly one GET (stale mount GET was served by the test)", n === 1, String(n));
+    await page.unroute("**/api/research/sessions/*");
+    // ready에서 다시 열기: 상세 GET 1회(마운트)뿐, idle로는 GET하지 않는다.
+    t = Date.now();
+    await page.reload();
+    await reopen();
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 10000 });
+    await page.waitForTimeout(3000);
+    n = await sessionGetsSince(t);
+    check("N25. v1.2 idle while ready: mount GET only", n === 1, String(n));
+    await setMock("turnMs=6000");
+  }
+
   // 서버 알림·모르는 항목: 대화 전체는 그대로 보인다
   await setMock("turnMs=1500");
   await input.fill("/fixture/notice 알림 질문");

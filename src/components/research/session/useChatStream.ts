@@ -26,7 +26,8 @@ export interface StreamHandlers {
   /** 확정 신호(turn.completed·sync·끊김·runner 꺼짐): GET /sessions/{id} 1회 */
   onRefresh: () => void;
   onRunner: (status: Record<string, unknown>) => void;
-  onIdle: () => void;
+  /** 진행 중인 턴 없음. wasRunning: 스트림이 진행 중으로 보던 턴이 있었다. */
+  onIdle: (wasRunning: boolean) => void;
   onTurnRunning: (requestId: string) => void;
 }
 
@@ -72,7 +73,7 @@ export function useChatStream(sessionId: string, active: boolean, handlers: Stre
       for (const e of effects) {
         if (e.type === "refresh") h.onRefresh();
         else if (e.type === "runner") h.onRunner(e.status);
-        else if (e.type === "idle") h.onIdle();
+        else if (e.type === "idle") h.onIdle(e.wasRunning);
         else h.onTurnRunning(e.requestId);
       }
     };

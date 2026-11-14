@@ -85,7 +85,9 @@ export type StreamEffect =
   // 확정 신호: GET /sessions/{id} 1회
   | { type: "refresh" }
   | { type: "runner"; status: Record<string, unknown> }
-  | { type: "idle" }
+  // 진행 중인 턴이 없음. wasRunning: 이 화면이 진행 중이라고 보던 턴이 있었다(그 턴은 끊긴 사이 끝났다).
+  // 기록 확인 여부는 화면이 정한다(PM 결정 #90: 진행 중 상태일 때만, idle 1건당 GET 최대 1회).
+  | { type: "idle"; wasRunning: boolean }
   // 진행 중인 턴을 확인했다(중지 재요청 계기)
   | { type: "turnRunning"; requestId: string };
 
@@ -157,12 +159,9 @@ export function applyFrame(state: StreamState, frame: StreamFrame): { state: Str
       break;
     }
     case "idle": {
-      effects.push({ type: "idle" });
-      // 진행 중이라고 보던 턴이 없으면(끊긴 사이 끝남) 기록으로 확인한다.
-      if (state.turn?.running) {
-        next = { ...state, turn: { ...state.turn, running: false } };
-        effects.push({ type: "refresh" });
-      }
+      const wasRunning = state.turn?.running === true;
+      effects.push({ type: "idle", wasRunning });
+      if (state.turn?.running) next = { ...state, turn: { ...state.turn, running: false } };
       break;
     }
     case "sync": {

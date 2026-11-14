@@ -1237,6 +1237,7 @@ export function researchCounts() {
     streamConnects: streamStats.connects.length,
     streamAfter: streamStats.connects.filter((c) => c.after).length,
     streamOpen: streamStats.open,
+    lastStreamConnectAt: streamStats.connects.at(-1)?.at ?? null,
     interrupts: interrupts.length,
   };
 }
