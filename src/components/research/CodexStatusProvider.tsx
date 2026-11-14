@@ -25,8 +25,9 @@ import type { CodexStatus } from "@/lib/research/types";
 // - 진입 준비: 준비 요청 대상 계정(canPrepareRunner)이 이 탭에서 확인될 때마다(첫 로드·새로고침·로그인·계정 전환·
 //   자격 false→true) 한 번 보낸다. 대화창 열기·페이지 이동·조회·탭 표시 변화·시간 경과로는 보내지 않고, 실패해도
 //   자동으로 다시 보내지 않는다(상태 조회만). "대화 준비"·"다시 시도"·"환경 다시 켜기"는 새 key의 새 요청이다.
-// - 상태 조회는 읽기 전용이다. 일시 상태(환경 활성화 중·사용 대기·연결 확인)일 때만, 대화창이 열려 있고 탭이 보일
-//   때만 다시 조회한다. 조회는 환경을 만들거나 깨우지 않는다.
+// - 상태 조회는 읽기 전용이다. 대화창이 열려 있고 탭이 보일 때만 다시 조회한다: 일시 상태(환경 활성화 중·사용 대기·
+//   연결 확인)는 안내 간격으로, 이용 가능 상태는 느린 주기(#89)로. 탭 복귀·네트워크 복귀 때도 한 번 조회한다.
+//   조회는 환경을 만들거나 깨우지 않는다.
 // - 모든 결과는 시작 당시의 계정·자격 세대(epoch)에 묶는다. 로그아웃·계정 전환·자격 변화 뒤 늦게 온 결과는 버린다.
 //   준비 자격만 꺼지고 연구 권한이 남으면 기존(시험·정적) 상태 조회·대화창은 그대로 쓴다.
 // - 질문은 어떤 상태에서도 자동으로 보내지 않는다(전송은 Composer가 사용자 동작으로만).
@@ -37,6 +38,10 @@ const TRANSIENT: Record<string, number> = { provisioning: 2, capacity_wait: 15, 
 // 줄 때만 읽기 전용으로 다시 조회한다(30초에서 60초로). 조회는 토큰을 공급·갱신하지 않는다. 안내가 없는 이전 응답은 종료 상태다.
 const CREDENTIAL: Record<string, number> = { not_configured: 30, auth_expired: 30, auth_revoked: 30 };
 const MAX_DELAY_S = 60;
+// #89 이용 가능(available:true)인 동안에도 열린 대화창이 보이는 동안은 느리게 다시 조회해 idle 정지·만료를 늦지 않게 알아챈다.
+// 서버 부하: 대화창을 연 탭 하나에 45초(±15%)마다 상태 조회 한 번(`GET /research/codex/status`, 대화 상세 polling과 별개).
+// idle 정지는 30분 단위 운영 설정이라 이 간격이면 충분하다. 조회 실패가 이어지면 두 배로 늘린다.
+const AVAILABLE_RECHECK_S = 45;
 
 /** 운영자 토큰 오류를 다시 조회하는 중인지(서버 안내 간격이 있을 때만). */
 export function credentialWait(s: CodexStatus | null | undefined): boolean {
@@ -244,6 +249,24 @@ export function CodexStatusProvider({ children }: { children: ReactNode }) {
     const timer = setTimeout(() => void reload(), delay);
     return () => clearTimeout(timer);
   }, [polling, transientReason, fallbackDelay, shown, current.misses, current.refreshFailure, reload]);
+
+  const healthy = shown?.available === true;
+  const recheck = watchers.pollers > 0 && visible && healthy;
+  useEffect(() => {
+    if (!recheck) return;
+    const delay = AVAILABLE_RECHECK_S * (current.misses > 0 ? 2 : 1) * (0.85 + Math.random() * 0.3) * 1000;
+    const timer = setTimeout(() => void reload(), delay);
+    return () => clearTimeout(timer);
+  }, [recheck, current.result, current.refreshFailure, current.misses, reload]);
+
+  // 네트워크가 돌아오면(열린 대화창이 있을 때) 한 번 조회한다.
+  const pollers = watchers.pollers;
+  useEffect(() => {
+    if (pollers === 0) return;
+    const onOnline = () => void reload();
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [pollers, reload]);
 
   // 숨었던 탭이 다시 보이면(열린 대화창이 있을 때) 한 번 조회한다. 조회는 준비를 시작하지 않는다.
   const wasVisible = useRef(visible);
