@@ -8,7 +8,8 @@ survey refuses rc 3 when they are not).
 (config_tests/test_i90_vm.py checks every changed line): this header; the expected file i90rb-expected.json and its
 version i90rb-expected-r0; the evidence name and earlier-run regex i90rb-switch-<UTC>; the SQL tag i90rb; the container
 names issue90-i90rb-*; the pins of the current state back to the placeholder (GENERATION / REVISION, OLD_REF, LEDGERS),
-filled from this stage's survey only; GENERATION and REVISION are in pins_missing(). The targets (NEW_TAG / NEW_ID,
+filled from this stage's survey only; GENERATION and REVISION are in pins_missing(); the gen 29 / rev 116 texts of
+check_owners' docstring and the precheck line name / print GENERATION / REVISION. The targets (NEW_TAG / NEW_ID,
 API_TAG / API_ID: the stage C tags and stage A host ids) are stage C's lines, unchanged.
 
 The stage C header follows unchanged.
@@ -387,8 +388,8 @@ def clients(code):
 
 
 def check_owners(expected, code, where, want):
-    """Every owner stopped and idle with a proof and no pending work; the others at their pins; …5805 on gen 29 /
-    rev 116 with plan `want` ('old'/'new')."""
+    """Every owner stopped and idle with a proof and no pending work; the others at their pins; …5805 on GENERATION /
+    REVISION with plan `want` ('old'/'new')."""
     by = owners_state(code)
     for owner in OWNERS:
         row = by[owner]
@@ -616,9 +617,10 @@ def precheck(expected, readonly):
     say('precheck ok%s %s: host units disabled/inactive, no guest container, no runner Pod; %s and the new digest '
         'reference resolve to %s, the old reference to its recorded id; %s and %s 1/1 with the recorded UID, '
         'images and allowlist; six owners idle_stopped with proofs, no pending work, no live session, no running '
-        'conversation; the others at their pins; …5805 gen 29 rev 116 on the old plan; health 200; tool image ok; '
+        'conversation; the others at their pins; …5805 gen %s rev %s on the old plan; health 200; tool image ok; '
         'ledgers at their pins; client sessions now %d (%s)'
-        % (' (read-only)' if readonly else '', utc(), NEW_TAG, NEW_ID, CTRL[1], API[1], count, roles or 'none'))
+        % (' (read-only)' if readonly else '', utc(), NEW_TAG, NEW_ID, CTRL[1], API[1], GENERATION, REVISION, count,
+           roles or 'none'))
     for owner in OWNERS:
         say('  …%s fence %s plan %s' % (short(owner), json.dumps(fence_of(by[owner]), sort_keys=True),
                                        digest(by[owner]['plan'])))

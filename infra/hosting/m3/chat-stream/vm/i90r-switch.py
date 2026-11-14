@@ -6,7 +6,8 @@ the stage C runtime to the r4 runtime (same source), in one window. Both stream 
 (config_tests/test_i90_vm.py checks every changed line): this header; the expected file i90r-expected.json and its
 version i90r-expected-r0; the evidence name and earlier-run regex i90r-switch-<UTC>; the SQL tag i90r; the container
 names issue90-i90r-*; the tags 90-bb3aa97; every pin back to the placeholder (GENERATION / REVISION, OLD_REF, NEW_ID,
-API_ID, LEDGERS), filled from this stage's survey / build output only; GENERATION and REVISION are in pins_missing().
+API_ID, LEDGERS), filled from this stage's survey / build output only; GENERATION and REVISION are in pins_missing();
+the gen 29 / rev 116 texts of check_owners' docstring and the precheck line name / print GENERATION / REVISION.
 
 The stage C header follows unchanged.
 
@@ -58,26 +59,26 @@ EXPECTED_FILE = '/root/issue90/i90r-expected.json'
 VERSION = 'i90r-expected-r0'
 OWNER = '00000000-0000-4000-8000-000000005805'
 STATE = '75780e81-ef7f-4aec-a59c-ed9d71f4061a'
-GENERATION, REVISION = 'PIN', 'PIN'  # …5805's fence now (survey)
+GENERATION, REVISION = 33, 132  # …5805's fence, R-C1 survey
 OTHERS = ('00000000-0000-4000-8000-000000000048', '00000000-0000-4000-8000-000000005801',
           '00000000-0000-4000-8000-000000005802', '00000000-0000-4000-8000-000000005803',
           '00000000-0000-4000-8000-000000005804')
 OWNERS = OTHERS + (OWNER,)
 LIB = 'docker.io/library/'
 PIN = 'PIN'  # a placeholder: every mode but `survey` refuses while any pin below is still PIN
-OLD_REF = PIN  # …5805's current plan.image (the stage C runner reference, printed by `survey`)
+OLD_REF = 'docker.io/library/anxious-dev-runner@sha256:761b1ceb1c8264a14ccdf3d335be6abfba01a3da542331e01c70e97d2b67aa17'  # R-C1 survey
 NEW_TAG = LIB + 'anxious-dev-runner:90-bb3aa97'
-NEW_ID = PIN  # the runner host image id (stage R-A build output)
+NEW_ID = 'sha256:9ab78358414a17211b01276f016ece2f54468ddd611931d9bc428c32029e7a1e'  # runner id, R-A images.txt
 NEW_PREFIX = LIB + 'anxious-dev-runner@sha256:'
 API_TAG = LIB + 'anxious-dev-runtime:90-bb3aa97'
-API_ID = PIN  # the runtime host image id (stage R-A build output)
+API_ID = 'sha256:0b5a599c580adf1deffc39c3c4c5e9019967659ca62828e5c54836af0a7515f8'  # runtime id, R-A images.txt
 API_PREFIX = LIB + 'anxious-dev-runtime@sha256:'
 API_CONTAINER = 'api'
 TOOL_TAG = 'anxious-dev-runtime:68-42a1e8b'
 MODULES = {'/app/ops/runner_binding_image.py': '0a60c7d4f3b8765bb9fb7f204f47917e49d5a5b9c3bc5b0cd48eb8a6ed632d7e',
            '/app/app/runner_bindings.py': '0cc5706f8db9193d1b1ff61dac46533a62a09eb951dfff39f2d2b2d0160e5342'}
-LEDGERS = {'/root/native68/evidence/ledger-isolation-42.json': PIN,  # sha256 printed by `survey`
-           '/root/native68/evidence/ledger-resources-6.json': PIN}
+LEDGERS = {'/root/native68/evidence/ledger-isolation-42.json': '3fcf7c844caa46fcf5d2b0b579d2abfda9c973730aff542ee445268149752928',  # R-C1 survey
+           '/root/native68/evidence/ledger-resources-6.json': '51e7ae651e8dcb79213082362fef2bd6873c11f2000b9567719974c61b6eafeb'}
 # (namespace, name, recorded UID, Pod label, containers, init containers)
 CTRL = ('runner-control', 'runner-controller', '41564f26-95e7-4ad1-8af3-d73b93c4669a', 'app=runner-controller',
         ('controller',), ())
@@ -384,8 +385,8 @@ def clients(code):
 
 
 def check_owners(expected, code, where, want):
-    """Every owner stopped and idle with a proof and no pending work; the others at their pins; …5805 on gen 29 /
-    rev 116 with plan `want` ('old'/'new')."""
+    """Every owner stopped and idle with a proof and no pending work; the others at their pins; …5805 on GENERATION /
+    REVISION with plan `want` ('old'/'new')."""
     by = owners_state(code)
     for owner in OWNERS:
         row = by[owner]
@@ -613,9 +614,10 @@ def precheck(expected, readonly):
     say('precheck ok%s %s: host units disabled/inactive, no guest container, no runner Pod; %s and the new digest '
         'reference resolve to %s, the old reference to its recorded id; %s and %s 1/1 with the recorded UID, '
         'images and allowlist; six owners idle_stopped with proofs, no pending work, no live session, no running '
-        'conversation; the others at their pins; …5805 gen 29 rev 116 on the old plan; health 200; tool image ok; '
+        'conversation; the others at their pins; …5805 gen %s rev %s on the old plan; health 200; tool image ok; '
         'ledgers at their pins; client sessions now %d (%s)'
-        % (' (read-only)' if readonly else '', utc(), NEW_TAG, NEW_ID, CTRL[1], API[1], count, roles or 'none'))
+        % (' (read-only)' if readonly else '', utc(), NEW_TAG, NEW_ID, CTRL[1], API[1], GENERATION, REVISION, count,
+           roles or 'none'))
     for owner in OWNERS:
         say('  …%s fence %s plan %s' % (short(owner), json.dumps(fence_of(by[owner]), sort_keys=True),
                                        digest(by[owner]['plan'])))

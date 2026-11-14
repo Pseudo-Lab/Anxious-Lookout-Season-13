@@ -665,6 +665,15 @@ def stage_r_switch_from(text, tag="i90r"):
         elif line == "    pins = {'OLD_REF': OLD_REF, 'NEW_ID': NEW_ID, 'API_ID': API_ID}":
             line = ("    pins = {'OLD_REF': OLD_REF, 'NEW_ID': NEW_ID, 'API_ID': API_ID, 'GENERATION': GENERATION, "
                     "'REVISION': REVISION}")
+        # review minor (R-B/R-C1 evidence): the stage C gen 29 / rev 116 texts name / print the constants
+        line = line.replace("…5805 on gen 29 /", "…5805 on GENERATION /").replace(
+            "    rev 116 with plan `want`", "    REVISION with plan `want`").replace(
+            "…5805 gen 29 rev 116 on the old plan", "…5805 gen %s rev %s on the old plan")
+        if line == ("        % (' (read-only)' if readonly else '', utc(), NEW_TAG, NEW_ID, CTRL[1], API[1], count, "
+                    "roles or 'none'))"):
+            out.append("        % (' (read-only)' if readonly else '', utc(), NEW_TAG, NEW_ID, CTRL[1], API[1], "
+                       "GENERATION, REVISION, count,")
+            line = "           roles or 'none'))"
         out.append(line)
     out[0] = out[0][3:]  # the stage C header's first line, now under the stage R header
     return out
@@ -676,17 +685,53 @@ def test_stage_r_switch_is_stage_c_with_the_listed_changes_only(tag, title):
     new = (VM / (tag + "-switch.py")).read_text().splitlines()
     marker = new.index("The stage C header follows unchanged.")
     assert new[0].startswith(title) and new[marker + 1] == ""
-    assert new[marker + 2:] == stage_r_switch_from(old, tag)
+    assert blank_switch_pins(new[marker + 2:]) == blank_switch_pins(stage_r_switch_from(old, tag))
+    if tag == "i90rb":  # still placeholders: the exact placeholder lines
+        assert new[marker + 2:] == stage_r_switch_from(old, tag)
 
 
-def test_stage_r_switch_pins_block_every_mode_but_survey():
-    module = load("i90r-switch")
-    assert module.pins_missing() == ["API_ID", "GENERATION", "LEDGERS ledger-isolation-42.json",
-                                     "LEDGERS ledger-resources-6.json", "NEW_ID", "OLD_REF", "REVISION"]
+SWITCH_PIN_LINE = _re.compile(r"^(GENERATION, REVISION|OLD_REF|NEW_ID|API_ID) = .*$|"
+                              r"^(LEDGERS = \{'/root/native68/evidence/ledger-isolation-42\.json'|"
+                              r"           '/root/native68/evidence/ledger-resources-6\.json'): .*$")
+
+
+def blank_switch_pins(lines):
+    """The pin lines reduced to their names (R-C2 fills them from the R-A / R-C1 output; checked below)."""
+    return [SWITCH_PIN_LINE.sub(lambda m: (m.group(1) or m.group(2)) + " = <pin>", line) for line in lines]
+
+
+def test_stage_r_switch_pins_are_r_c1_and_r_a_shaped():
+    """R-C2: filled by sed from the R-C1 survey (fence, OLD_REF, LEDGERS) and R-A images.txt (ids). The values are
+    reviewed by hash; this checks their shape and their relation to the stage C record."""
+    module, stage_c = load("i90r-switch"), load("i90-switch")
+    expected_c = json.loads((VM / "i90-expected.json").read_text())
+    assert module.pins_missing() == []
+    assert type(module.GENERATION) is int and type(module.REVISION) is int
+    assert (module.GENERATION, module.REVISION) > (stage_c.GENERATION, stage_c.REVISION)
+    assert module.OLD_REF == expected_c["newImage"]  # …5805 is still on the stage C runner (stage C's new image)
+    assert _re.fullmatch(r"sha256:[0-9a-f]{64}", module.NEW_ID) and _re.fullmatch(r"sha256:[0-9a-f]{64}", module.API_ID)
+    assert module.NEW_ID != stage_c.NEW_ID and module.API_ID != stage_c.API_ID
+    assert module.LEDGERS == stage_c.LEDGERS  # native68's ledgers do not change in #90
     assert module.EXPECTED_FILE == "/root/issue90/i90r-expected.json" and module.VERSION == "i90r-expected-r0"
     assert module.NEW_TAG.endswith(":90-bb3aa97") and module.API_TAG.endswith(":90-bb3aa97")
-    assert module.main(["i90r-switch.py", "precheck", "0" * 64]) == 3
-    assert module.main(["i90r-switch.py", "run", "0" * 64]) == 3
+
+
+def test_stage_r_expected_file_is_the_survey_candidate_and_continues_stage_c():
+    module = load("i90r-switch")
+    text = (VM / "i90r-expected.json").read_text()
+    assert text.endswith("}\n") and text.count("\n") == 1  # the survey's `expected candidate:` line, as stage C
+    expected, stage_c = json.loads(text), json.loads((VM / "i90-expected.json").read_text())
+    assert module.expected_problem(expected) is None and expected["version"] == "i90r-expected-r0"
+    assert expected["oldImageId"] == load("i90-switch").NEW_ID  # the stage C runner
+    assert expected["oldPlanSha256"] == stage_c["newPlanSha256"]
+    assert expected["newImage"].startswith(module.NEW_PREFIX) and expected["newApiImage"].startswith(module.API_PREFIX)
+    assert expected["newImage"] != stage_c["newImage"] and expected["newApiImage"] != stage_c["newApiImage"]
+    assert expected["deployments"]["api"]["images"]["api"] == stage_c["newApiImage"]
+    for key in ("others", "apiTemplateSha256", "toolImage"):
+        assert expected[key] == stage_c[key]
+    assert expected["deployments"]["runner-controller"] == stage_c["deployments"]["runner-controller"]
+    assert (expected["deployments"]["api"]["images"]["runner-pool-input"]
+            == stage_c["deployments"]["api"]["images"]["runner-pool-input"])
 
 
 def test_stage_r_rollback_targets_are_stage_c_and_its_pins_block():
