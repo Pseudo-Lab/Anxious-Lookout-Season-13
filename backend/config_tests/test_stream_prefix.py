@@ -297,3 +297,36 @@ def test_service_install_fingerprints_the_current_token_and_an_older_one_stays_l
         auth.journal.remember(db, ["L" * 1676])
     assert policy(auth.journal, auth.control).legacy == 1676
     auth.close()
+
+
+def test_a_full_file_is_not_rewritten_and_the_generation_stays_stable(tmp_path, monkeypatch):
+    """Review 732e278 major: at LIMIT a new current literal stays legacy; the file must not be rewritten on every
+    remember, else every flush is discarded (before != after) and the final one drops the text."""
+    from runner.stream import Sanitizer
+    monkeypatch.setattr(stream_prefix, "LIMIT", 8)  # the same branch as 4096, quicker
+    fillers = [JWT_HEAD + "%040d" % i for i in range(8)]
+    current = JWT_HEAD + "z" * 60
+    journal = journal_with(fillers + [current])
+    control = control_dir(tmp_path)
+    assert stream_prefix.remember(control, journal, fillers) is True  # the file is now full
+
+    class Auth:
+        def __init__(self):
+            self.journal, self.secrets, self.control = journal, {current}, control
+
+        def refresh_projection_secrets(self):
+            stream_prefix.remember(self.control, self.journal, self.secrets)
+
+    path = control / stream_prefix.FILE
+    before_stat = os.stat(path)
+    sanitizer = Sanitizer(Auth())
+    first, second = sanitizer.generation(), sanitizer.generation()
+    assert first == second and first[2].legacy == len(current)
+    assert (os.stat(path).st_ino, os.stat(path).st_mtime_ns) == (before_stat.st_ino, before_stat.st_mtime_ns)
+    # The stream progresses on the legacy holdback: a plan emits all but L_legacy - 1 chars of ordinary text.
+    text = "ordinary text " * 10
+    emitted, consumed, _ = Holdback.plan(text, journal.spans(text), first[2], False, False)
+    assert consumed == max(0, len(text) - (len(current) - 1)) and emitted == text[:consumed]
+    text = "ordinary text " * 20
+    emitted, consumed, _ = Holdback.plan(text, journal.spans(text), second[2], False, False)
+    assert consumed == len(text) - (len(current) - 1) > 0

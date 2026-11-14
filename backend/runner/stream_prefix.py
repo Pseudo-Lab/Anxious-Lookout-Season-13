@@ -153,6 +153,10 @@ def remember(control, journal, literals):
                 return False
             room = max(LIMIT - len(known), 0)
             merged = known | set(sorted(new - known)[:room])  # over the limit: the rest stay legacy
+            if current is not None and merged == known:
+                # A valid file that would not change (full: the new literals stay legacy) is never rewritten, so the
+                # plan's generation stays stable and the stream progresses on the legacy holdback (review 732e278).
+                return False
             payload = {"version": VERSION, "owner": journal.owner, "trialId": journal.trial, "prefixLength": P,
                        "entries": sorted([list(item) for item in merged])}
             payload["mac"] = file_mac(journal.key, payload)
