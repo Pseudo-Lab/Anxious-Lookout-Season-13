@@ -667,19 +667,24 @@ def test_s5_r3_the_cap_is_a_printed_gap_not_a_criterion(m, monkeypatch, capsys):
 # --- r3: continuation after S0 False, S2 text criterion, S5 / S6 on prose -------------------------------------
 
 S0RUN = "i90-p5-s0-20261114T155956Z"
+S0_EXIT = {"rc": 0, "stepRc": 0, "verdicts": {"S0": False, "release": True}, "stoppedAt": "S0", "runnerReleased": None,
+           "clientsGone": True, "privateRemoved": None, "sessionRevoked": True, "finished": "2026-11-14T16:01:00Z"}
 
 
-def s0_state(m, tmp_path, monkeypatch, exit_doc=None, conversation=CUR, budget=1, decision=None):
+def s0_state(m, tmp_path, monkeypatch, exit_doc=None, conversation=CUR, budget=1, pins=None):
+    """The guest's s0 evidence as the decision was pinned from it (pins = the decision's two sha values: by default
+    from the original files, so a later change of a file is caught)."""
     folder = Path(m.EVIDENCE) / S0RUN
     folder.mkdir(exist_ok=True)
-    done = {"rc": 0, "stepRc": 0, "verdicts": {"S0": False, "release": True}, "runnerReleased": None,
-            "clientsGone": True, "privateRemoved": None, "sessionRevoked": True, "finished": "x"}
-    (folder / "exit.json").write_text(json.dumps(exit_doc if exit_doc is not None else done))
+    original = json.dumps(S0_EXIT, sort_keys=True, indent=1).encode()
+    (folder / "exit.json").write_bytes(original if exit_doc is None else
+                                       (exit_doc if isinstance(exit_doc, bytes) else json.dumps(exit_doc).encode()))
     (folder / "run.json").write_text(json.dumps({"conversation": conversation}))
     m.durable_json(m.BUDGET, {"cap": 8, "turns": [{"n": i + 1, "step": "S0", "outcome": "accepted"}
                                                   for i in range(budget)]})
-    value = decision or json.loads((VM / "i90-p5-continue.json").read_text())
-    value = dict(value, s0Run=S0RUN, conversationPrefix=CUR[:8])
+    value = json.loads((VM / "i90-p5-continue.json").read_text())
+    value.update(pins or {"conversationSha256": hashlib.sha256(CUR.encode()).hexdigest(),
+                          "exitSha256": hashlib.sha256(original).hexdigest()})
     data = json.dumps(value).encode()
     path = tmp_path / "continue.json"
     path.write_bytes(data)
@@ -692,11 +697,13 @@ def s0_state(m, tmp_path, monkeypatch, exit_doc=None, conversation=CUR, budget=1
     return path
 
 
-def test_the_committed_decision_binds_the_s0_run_facts(m):
+def test_the_committed_decision_binds_the_s0_facts_and_is_pinned(m):
     value = json.loads((VM / "i90-p5-continue.json").read_text())
-    assert value["s0Run"] == S0RUN and value["conversationPrefix"] == "9e504d3d"
-    assert value["recorded"] == {"rc": 0, "stepRc": 0, "S0": False, "runnerReleased": None, "clientsGone": True,
-                                 "privateRemoved": None, "sessionRevoked": True, "turnsUsed": 1}
+    assert value["version"] == "i90-p5-continue-r1" and value["s0Run"] == S0RUN and value["turnsUsed"] == 1
+    assert value["recorded"] == {"rc": 0, "stepRc": 0, "verdicts": {"S0": False, "release": True},
+                                 "runnerReleased": None, "clientsGone": True, "privateRemoved": None,
+                                 "sessionRevoked": True}
+    assert "conversationPrefix" not in value  # review r3 major: no prefix binding
     assert m.CONTINUE_SHA == hashlib.sha256((VM / "i90-p5-continue.json").read_bytes()).hexdigest()
 
 
@@ -707,22 +714,51 @@ def test_enable_continues_only_through_the_bound_decision(m, tmp_path, monkeypat
     assert len(m.budget_read()) == 1  # never changed
 
 
-@pytest.mark.parametrize("case", ["tampered", "other_run", "other_conversation", "unreadable_exit", "budget_two",
-                                  "other_facts", "rc_nonzero"])
+def test_the_committed_placeholders_refuse(m, tmp_path, monkeypatch):
+    s0_state(m, tmp_path, monkeypatch, pins={"conversationSha256": "PIN", "exitSha256": "PIN"})
+    with pytest.raises(m.Stop) as stopped:
+        m.s0_accepted()
+    assert stopped.value.code == 3 and "pins" in stopped.value.message
+
+
+SAME_PREFIX = CUR[:8] + "-9999-4999-8999-999999999999"
+
+
+@pytest.mark.parametrize("case", ["same_prefix_uuid", "short_prefix_only", "release_false", "missing_nullables",
+                                  "exit_bytes_changed", "tampered_decision", "other_run", "unreadable_exit",
+                                  "budget_two", "rc_nonzero", "clients_not_gone"])
 def test_the_continuation_refuses_anything_else(m, tmp_path, monkeypatch, case):
-    if case == "other_conversation":
-        s0_state(m, tmp_path, monkeypatch, conversation="aaaaaaaa" + CUR[8:])
+    """review r3 majors (same-prefix UUID, short id, release false, missing nullable fields) and the earlier cases."""
+    changed = dict(S0_EXIT)
+    if case == "same_prefix_uuid":
+        s0_state(m, tmp_path, monkeypatch, conversation=SAME_PREFIX)
+    elif case == "short_prefix_only":
+        s0_state(m, tmp_path, monkeypatch, conversation=CUR[:8],
+                 pins={"conversationSha256": hashlib.sha256(CUR[:8].encode()).hexdigest(),
+                       "exitSha256": hashlib.sha256(json.dumps(S0_EXIT, sort_keys=True, indent=1).encode())
+                       .hexdigest()})
+    elif case == "release_false":
+        changed["verdicts"] = {"S0": False, "release": False}
+        s0_state(m, tmp_path, monkeypatch, exit_doc=changed)
+    elif case == "missing_nullables":
+        del changed["runnerReleased"], changed["privateRemoved"]
+        raw = json.dumps(changed).encode()  # even with the exit bytes re-pinned, a missing key is not null
+        s0_state(m, tmp_path, monkeypatch, exit_doc=raw,
+                 pins={"conversationSha256": hashlib.sha256(CUR.encode()).hexdigest(),
+                       "exitSha256": hashlib.sha256(raw).hexdigest()})
+    elif case == "exit_bytes_changed":
+        s0_state(m, tmp_path, monkeypatch, exit_doc=json.dumps(S0_EXIT).encode())  # same facts, other bytes
     elif case == "budget_two":
         s0_state(m, tmp_path, monkeypatch, budget=2)
     elif case == "rc_nonzero":
-        s0_state(m, tmp_path, monkeypatch, exit_doc={"rc": 5, "verdicts": {"S0": False}})
-    elif case == "other_facts":
-        s0_state(m, tmp_path, monkeypatch, exit_doc={"rc": 0, "stepRc": 0, "verdicts": {"S0": False},
-                                                     "runnerReleased": None, "clientsGone": False,
-                                                     "privateRemoved": None, "sessionRevoked": True})
+        changed["rc"] = 5
+        s0_state(m, tmp_path, monkeypatch, exit_doc=changed)
+    elif case == "clients_not_gone":
+        changed["clientsGone"] = False
+        s0_state(m, tmp_path, monkeypatch, exit_doc=changed)
     else:
         path = s0_state(m, tmp_path, monkeypatch)
-        if case == "tampered":
+        if case == "tampered_decision":
             path.write_bytes(path.read_bytes().replace(b'"turnsUsed": 1', b'"turnsUsed": 2'))
         elif case == "other_run":
             (Path(m.EVIDENCE) / "i90-p5-s0-20261115T000000Z").mkdir()
@@ -731,6 +767,27 @@ def test_the_continuation_refuses_anything_else(m, tmp_path, monkeypatch, case):
     with pytest.raises(m.Stop) as stopped:
         m.s0_accepted()
     assert stopped.value.code == 3
+
+
+def test_the_pins_collector_prints_hashes_never_the_uuid(tmp_path, monkeypatch, capsys):
+    spec = importlib.util.spec_from_file_location("i90_p5_s0_pins", VM / "i90-p5-s0-pins.py")
+    pins = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pins)
+    folder = tmp_path / "evidence" / S0RUN
+    folder.mkdir(parents=True)
+    raw = json.dumps(S0_EXIT, sort_keys=True, indent=1).encode()
+    (folder / "exit.json").write_bytes(raw)
+    (folder / "run.json").write_text(json.dumps({"conversation": CUR}))
+    monkeypatch.setattr(pins, "EVIDENCE", str(tmp_path / "evidence"))
+    monkeypatch.setattr(pins.os, "geteuid", lambda: 0)
+    assert pins.main() == 0
+    out = capsys.readouterr().out
+    value = json.loads(out)
+    assert CUR not in out and value["conversationUuidShape"] is True
+    assert value["conversationSha256"] == hashlib.sha256(CUR.encode()).hexdigest()
+    assert value["exitSha256"] == hashlib.sha256(raw).hexdigest() and value["s0Run"] == S0RUN
+    assert value["runnerReleased"] == "null" and value["privateRemoved"] == "null"
+    assert value["verdictKeys"] == ["S0", "release"] and value["exitUnknownKeys"] == 0
 
 
 def test_s2_r3_passes_on_the_text_criterion_with_no_command_events(m, monkeypatch, capsys):

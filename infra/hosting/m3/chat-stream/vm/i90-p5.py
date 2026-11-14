@@ -100,6 +100,7 @@ import re
 import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -115,7 +116,7 @@ CLIENT_FILE = '/root/issue90/p5_client.py'
 CLIENT_SHA = 'e963d3986150fa3db031f5b4e32326b5206529080b8c812ceafa34edd8b51484'  # review's p5_client.py r1, from sha256sum (review 2026-11-15)
 SOURCE = 'bb3aa97070f175a74eec3a0c024cd158cd64fadd'  # IMAGE_SHA of the stage R images: /api/version must name it
 CONTINUE_FILE = '/root/issue90/i90-p5-continue.json'
-CONTINUE_SHA = 'dabc8a2ac0990cef38397cdb9a80caedfc596466a3c3b3d15bb64ece9d18aa6d'  # i90-p5-continue.json (r3 continuation decision), from sha256sum
+CONTINUE_SHA = 'ea77e21c500b0e2f2ba649731d87f2f89838af16fb22b469d48b0e9563702675'  # i90-p5-continue.json (r4 decision; its two pins are filled from i90-p5-s0-pins.py output), from sha256sum
 K3S, DOCKER = '/usr/local/bin/k3s', '/usr/bin/docker'
 EVIDENCE = '/root/issue90/evidence'
 LOCK = EVIDENCE + '/i90-d.lock'
@@ -147,7 +148,7 @@ PROMPTS = {
     'S2': "Run exactly one shell command: printf 'i90-p5-s2\\n'; uname -s. Then state its output in one sentence.",
     'S3': 'Write about 1500 words in plain prose (no lists, no headings) on the history of the printing press.',
     'S4': 'Write about 1200 words in plain prose (no lists, no headings) explaining how ocean tides work.',
-    # r3: long prose only - code mode streams no command output, so S5 / S6 no longer depend on a shell command
+    # r3: long prose only - command output streaming was not observed and is not guaranteed under code mode
     'S5': 'Write about 1500 words in plain prose (no lists, no headings) on why counting sequences are useful in '
           'programming.',
     'S6': 'Write about 2500 words in plain prose (no lists, no headings) on the history of number systems.',
@@ -1594,38 +1595,74 @@ def held():
     return None
 
 
+UUID_SHAPE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+
+
+def canonical(value):
+    """Type-strict comparison form (JSON keeps true apart from 1 and null apart from a missing key)."""
+    return json.dumps(value, sort_keys=True, separators=(',', ':'))
+
+
+def read_plain(path):
+    """A regular file's bytes (lstat first, O_NOFOLLOW | O_NONBLOCK), 1 MiB at most."""
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        raise OSError()
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        return os.read(fd, 1 << 20)
+    finally:
+        os.close(fd)
+
+
 def s0_accepted():
-    """r3 (review plan-r3 notes): the one s0 run ended rc 0, and either S0 True or the reviewed continuation decision
-    (CONTINUE_FILE at CONTINUE_SHA) binds exactly that run: its name, the conversation prefix, the recorded exit facts
-    (rc, stepRc, S0 False, cleanup) and one consumed reservation (S0, accepted). Nothing is rewritten: S0 stays False
-    and the budget file is only read. Anything missing or different: Stop(3), nothing sent."""
+    """r4 (review r3 majors): the one s0 run ended rc 0, and either S0 True or the reviewed continuation decision
+    (CONTINUE_FILE at CONTINUE_SHA) binds exactly that run: its name; the full conversation UUID (shape checked, its
+    sha256 compared - no prefix); the exit.json bytes (sha256) and, field by field, every recorded fact present with
+    its exact type and value (verdicts S0 false and release true, runnerReleased / privateRemoved null - a missing key
+    is not null); and the one consumed reservation. Nothing is rewritten: S0 stays False, the budget is only read.
+    Anything missing or different: Stop(3), nothing sent."""
     runs = runs_of('s0')
-    done = exit_of(runs[0]) if len(runs) == 1 else None
-    if not done or done['rc'] != 0:
-        raise Stop(3, 'enable needs exactly one s0 run that ended rc 0 (exit.json readable)')
-    if (done.get('verdicts') or {}).get('S0') is True:
+    if len(runs) != 1:
+        raise Stop(3, 'enable needs exactly one s0 run')
+    try:
+        raw = read_plain(os.path.join(EVIDENCE, runs[0], 'exit.json'))
+        done = json.loads(raw)
+        run = json.loads(read_plain(os.path.join(EVIDENCE, runs[0], 'run.json')))
+    except Exception:
+        raise Stop(3, 'the s0 exit.json or run.json is unreadable; nothing sent') from None
+    if not (isinstance(done, dict) and type(done.get('rc')) is int and done['rc'] == 0):
+        raise Stop(3, 'enable needs the s0 run to have ended rc 0')
+    if isinstance(done.get('verdicts'), dict) and done['verdicts'].get('S0') is True:
         return 'S0 True'
     try:
         decision = json.loads(read_pinned(CONTINUE_FILE, CONTINUE_SHA, 'i90-p5-continue.json'))
-        run = json.load(open(os.path.join(EVIDENCE, runs[0], 'run.json')))
     except Stop:
         raise
     except Exception:
-        raise Stop(3, 'the continuation decision or the s0 run.json is unreadable; nothing sent') from None
-    turns = budget_read()
-    facts = {'rc': done.get('rc'), 'stepRc': done.get('stepRc'), 'S0': (done.get('verdicts') or {}).get('S0'),
-             'runnerReleased': done.get('runnerReleased'), 'clientsGone': done.get('clientsGone'),
-             'privateRemoved': done.get('privateRemoved'), 'sessionRevoked': done.get('sessionRevoked'),
-             'turnsUsed': len(turns)}
+        raise Stop(3, 'the continuation decision is unreadable; nothing sent') from None
     conversation = run.get('conversation') if isinstance(run, dict) else None
-    bound = (isinstance(decision, dict) and decision.get('version') == 'i90-p5-continue-r0'
-             and decision.get('s0Run') == runs[0] and isinstance(conversation, str)
-             and conversation[:8] == decision.get('conversationPrefix') and decision.get('recorded') == facts
-             and len(turns) == 1 and turns[0].get('step') == 'S0' and turns[0].get('outcome') == 'accepted')
-    if not bound:
-        raise Stop(3, 'the continuation decision does not bind the recorded s0 run (name, conversation, exit facts, '
-                      'one consumed reservation); nothing sent')
-    return 'S0 False on record; continuation decision %s… binds %s' % (CONTINUE_SHA[:8], runs[0])
+    recorded = decision.get('recorded') if isinstance(decision, dict) else None
+    turns = budget_read()
+    checks = {
+        'version': isinstance(decision, dict) and decision.get('version') == 'i90-p5-continue-r1',
+        'run': isinstance(decision, dict) and decision.get('s0Run') == runs[0],
+        'pins': isinstance(decision, dict) and all(isinstance(decision.get(k), str) and
+                                                   re.fullmatch(r'[0-9a-f]{64}', decision[k])
+                                                   for k in ('conversationSha256', 'exitSha256')),
+        'conversation': isinstance(conversation, str) and UUID_SHAPE.fullmatch(conversation) is not None
+        and isinstance(decision, dict)
+        and hashlib.sha256(conversation.encode()).hexdigest() == decision.get('conversationSha256'),
+        'exitBytes': isinstance(decision, dict) and hashlib.sha256(raw).hexdigest() == decision.get('exitSha256'),
+        'facts': isinstance(recorded, dict) and bool(recorded) and all(
+            key in done and canonical(done[key]) == canonical(value) for key, value in recorded.items()),
+        'budget': isinstance(decision, dict) and decision.get('turnsUsed') == 1 and len(turns) == 1
+        and turns[0].get('step') == 'S0' and turns[0].get('outcome') == 'accepted'}
+    failed = sorted(k for k, ok in checks.items() if not ok)
+    if failed:
+        raise Stop(3, 'the continuation decision does not bind the recorded s0 run (%s); nothing sent'
+                   % ', '.join(failed))
+    return 'S0 False on record; continuation decision %s… binds %s (conversation, exit bytes, facts, budget)' % (
+        CONTINUE_SHA[:8], runs[0])
 
 
 def guard(action):
