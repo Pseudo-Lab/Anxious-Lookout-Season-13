@@ -267,13 +267,26 @@ class FakeClient:
 
     frames = None
 
+    def status(self, limit=20):
+        return 200
+
 
 for name in ("frames", "texts", "completed", "until"):
     setattr(FakeClient, name, getattr(load().Client, name))
 
+CUR, PREV = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+
 
 def item_hash(m, value):
     return hashlib.sha256((m.PRIVATE["salt"] + value).encode()).hexdigest()[:16]
+
+
+def fr(m, event, request=CUR, t=1, **fields):
+    """A client frame record as review's p5_client.py r1 writes it (salted request / item)."""
+    record = {"kind": "frame", "event": event, "unixNs": t, **fields}
+    if request is not None:
+        record["request"] = item_hash(m, request)
+    return record
 
 
 def body_with(m, text, status=None, display=False):
@@ -285,45 +298,116 @@ def body_with(m, text, status=None, display=False):
     return {"state": "idle", "items": [{"id": "u1", "type": "message", "role": "user", "text": "q"}, item]}
 
 
-def completed(m, text):
-    return {"kind": "frame", "event": "item.completed", "item": item_hash(m, "a1"), "textChars": len(text),
-            "textSha256": hashlib.sha256(text.encode()).hexdigest(), "unixNs": 2}
+def summary_of(m, text):
+    return {"textChars": len(text), "textSha256": hashlib.sha256(text.encode()).hexdigest()}
 
 
-def test_s3_reports_the_race_instead_of_an_interrupt(m, monkeypatch):
-    def fake_turn(ev, step, conversation, runner, prompt, readers, verdicts, db=False, during=None):
-        client = FakeClient([{"kind": "frame", "event": "turn.completed", "status": "completed", "unixNs": 1}])
-        during("r" * 36, {"hop3": client})
-        return {"body": body_with(m, "full answer"), "clients": {"hop3": client}}
+def completed(m, text, request=CUR, t=2):
+    return fr(m, "item.completed", request, t, item=item_hash(m, "a1"), **summary_of(m, text))
+
+
+def deltas(m, n, request=CUR, start=10):
+    return [fr(m, "item.delta", request, start + i, item=item_hash(m, "a1"), chars=3) for i in range(n)]
+
+
+# --- request scoping (review r0 majors) ------------------------------------------------------------------------
+
+def test_scoping_drops_the_previous_turns_replay_and_keeps_request_less_frames_of_the_current_one(m):
+    client = FakeClient([fr(m, "runner", None), fr(m, "snapshot.begin", PREV, turnState="completed"),
+                         fr(m, "snapshot.end", None), fr(m, "turn.completed", PREV, status="completed"),
+                         fr(m, "turn.started", CUR), fr(m, "snapshot.end", None, items={})])
+    events = [r["event"] for r in m.scoped(client, CUR)]
+    assert events == ["turn.started", "snapshot.end"] and m.completed_turn(client, CUR) is None
+
+
+def test_s3_previous_turns_completion_does_not_make_a_race(m, monkeypatch):
+    """review r0 adversarial: previous completion + 10 current deltas + an acknowledged interrupt = pass."""
+    previous = [fr(m, "snapshot.begin", PREV, 0, turnState="completed"), fr(m, "turn.completed", PREV, 1,
+                                                                             status="completed")]
+    posts = []
+
+    def fake_turn(ev, step, conversation, runner, prompt, readers, db=False, during=None):
+        client = FakeClient(previous + deltas(m, 10))
+        during(CUR, {"hop3": client})
+        client._records += [fr(m, "turn.completed", CUR, 99, status="interrupted")]
+        return {"body": body_with(m, "part", status="interrupted", display=True), "clients": {"hop3": client},
+                "request": CUR}
 
     monkeypatch.setattr(m, "turn", fake_turn)
-    monkeypatch.setattr(m, "call", lambda *a, **k: (409, {"error": {"code": "conflict"}}, ""))
+    monkeypatch.setattr(m, "call", lambda *a, **k: (posts.append(a[1]), (200, {"state": "interrupting"}, ""))[1])
     verdicts = {}
     m.step_s3("ev", "c" * 36, {}, verdicts)
-    assert verdicts["S3"] is False
+    assert verdicts["S3"] is True and len(posts) == 1
 
 
-def test_s3_passes_only_on_an_acknowledged_interrupt_and_an_interrupted_turn(m, monkeypatch):
-    texts = [{"kind": "frame", "event": "item.delta", "chars": 3, "unixNs": i} for i in range(10)]
+def test_s3_without_text_sends_no_interrupt_and_is_unknown(m, monkeypatch):
+    posts = []
 
-    def fake_turn(ev, step, conversation, runner, prompt, readers, verdicts, db=False, during=None):
-        client = FakeClient(texts)
-        during("r" * 36, {"hop3": client})
-        client._records = texts + [{"kind": "frame", "event": "turn.completed", "status": "interrupted", "unixNs": 99}]
-        return {"body": body_with(m, "part", status="interrupted", display=True), "clients": {"hop3": client}}
+    def fake_turn(ev, step, conversation, runner, prompt, readers, db=False, during=None):
+        client = FakeClient(deltas(m, 3))
+        during(CUR, {"hop3": client})
+        return {"body": body_with(m, "short"), "clients": {"hop3": client}, "request": CUR}
 
     monkeypatch.setattr(m, "turn", fake_turn)
-    monkeypatch.setattr(m, "call", lambda *a, **k: (200, {"state": "interrupting"}, ""))
+    monkeypatch.setattr(m, "call", lambda *a, **k: posts.append(a))
+    monkeypatch.setattr(m.time, "time", iter(range(0, 10 ** 6, 100)).__next__)
     verdicts = {}
     m.step_s3("ev", "c" * 36, {}, verdicts)
-    assert verdicts["S3"] is True
+    assert verdicts["S3"] is None and posts == []
 
+
+def test_s3_a_completion_of_this_turn_first_is_a_race_without_an_interrupt(m, monkeypatch):
+    posts = []
+
+    def fake_turn(ev, step, conversation, runner, prompt, readers, db=False, during=None):
+        client = FakeClient(deltas(m, 4) + [fr(m, "turn.completed", CUR, 50, status="completed")])
+        during(CUR, {"hop3": client})
+        return {"body": body_with(m, "answer"), "clients": {"hop3": client}, "request": CUR}
+
+    monkeypatch.setattr(m, "turn", fake_turn)
+    monkeypatch.setattr(m, "call", lambda *a, **k: posts.append(a))
+    verdicts = {}
+    m.step_s3("ev", "c" * 36, {}, verdicts)
+    assert verdicts["S3"] is False and posts == []
+
+
+def test_reconstruction_from_a_completed_snapshot(m):
+    """review r0 adversarial: a reader joining a completed turn gets snapshot.end items, no item.completed."""
+    client = FakeClient([fr(m, "snapshot.begin", CUR, turnState="completed"),
+                         fr(m, "snapshot.end", None, items={item_hash(m, "a1"): summary_of(m, "answer")}),
+                         fr(m, "turn.completed", CUR, status="completed")])
+    equal, detail = m.same_text(client, body_with(m, "answer"), CUR)
+    assert equal and "snapshot.end" in detail
+
+
+def test_reconstruction_needs_this_turns_completion(m):
+    client = FakeClient([completed(m, "answer", PREV), fr(m, "turn.completed", PREV, status="completed")])
+    equal, detail = m.same_text(client, body_with(m, "answer"), CUR)
+    assert not equal and "no turn.completed" in detail
+
+
+def test_the_send_time_is_taken_before_the_post(m, monkeypatch):
+    clock = {"t": 10.0}
+
+    def call(method, path, body=None, session=True):
+        if method == "GET":
+            return 200, {"state": "idle", "version": 1}, ""
+        clock["t"] = 15.0  # the POST takes 5 s
+        return 202, {"requestId": CUR}, ""
+
+    monkeypatch.setattr(m, "call", call)
+    monkeypatch.setattr(m.time, "time", lambda: clock["t"])
+    request, sent, answered = m.send("S1", "c" * 36, "p")
+    assert (request, sent, answered) == (CUR, 10.0, 15.0)
+
+
+# --- step verdicts ---------------------------------------------------------------------------------------------
 
 def test_s6_without_server_stall_evidence_is_unknown(m, monkeypatch):
-    normal = FakeClient([completed(m, "answer")])
+    normal = FakeClient([completed(m, "answer"), fr(m, "turn.completed", CUR, 3)])
     paused = FakeClient([{"kind": "reader_paused", "unixNs": 1}])
-    monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "clients": {"n": normal,
-                                                                                                "p": paused},
+    monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
+                                                   "clients": {"n": normal, "p": paused},
                                                    "api": [{"reason": None}, {"reason": None}]})
     verdicts = {}
     m.step_s6("ev", "c" * 36, {}, verdicts)
@@ -331,27 +415,68 @@ def test_s6_without_server_stall_evidence_is_unknown(m, monkeypatch):
 
 
 def test_s6_passes_with_ready_pause_later_output_one_stall_and_a_complete_normal_reader(m, monkeypatch):
-    normal = FakeClient([{"kind": "frame", "event": "item.output", "chars": 9, "unixNs": 5}, completed(m, "answer")])
+    normal = FakeClient([fr(m, "item.output", CUR, 5, item=item_hash(m, "c1"), chars=9), completed(m, "answer", t=6),
+                         fr(m, "turn.completed", CUR, 7)])
     paused = FakeClient([{"kind": "reader_paused", "unixNs": 1}])
-    monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "clients": {"n": normal,
-                                                                                                "p": paused},
+    monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
+                                                   "clients": {"n": normal, "p": paused},
                                                    "api": [{"reason": "stalled"}, {"reason": None}]})
     verdicts = {}
     m.step_s6("ev", "c" * 36, {}, verdicts)
     assert verdicts["S6"] is True
 
 
+def s5_turn(m, monkeypatch, b_records, summary):
+    """The fake turn runs S5's own `reload` (reader a's end, then reader b from a patched Client)."""
+    a = FakeClient([fr(m, "item.started", CUR, 2, item=item_hash(m, "c1"), itemKind="commandExecution"),
+                    fr(m, "item.output", CUR, 3, item=item_hash(m, "c1"), chars=16000),
+                    {"kind": "end", "reason": "local_close", "unixNs": 4}])
+    b = FakeClient(b_records)
+    monkeypatch.setattr(m, "Client", lambda *args, **kwargs: b)
+
+    def fake_turn(ev, step, conversation, runner, prompt, readers, db=False, during=None):
+        clients = {"a": a}
+        during(CUR, clients)
+        return {"body": body_with(m, "answer"), "clients": clients, "request": CUR,
+                "runner": [summary] if summary else []}
+    return fake_turn
+
+
+def b_mid_turn(m, text):
+    return [fr(m, "snapshot.begin", CUR, 10, turnState="running"), fr(m, "snapshot.end", None, 11, items={}),
+            fr(m, "item.delta", CUR, 12, item=item_hash(m, "a1"), chars=3), completed(m, text, t=13),
+            fr(m, "turn.completed", CUR, 14, status="completed")]
+
+
+def test_s5_passes_with_a_mid_turn_reload_reconstruction_and_output_cap_evidence(m, monkeypatch):
+    monkeypatch.setattr(m, "turn", s5_turn(m, monkeypatch, b_mid_turn(m, "answer"), {"outputDroppedBytes": 92000}))
+    verdicts = {}
+    m.step_s5("ev", "c" * 36, {}, verdicts)
+    assert verdicts["S5"] is True
+
+
 def test_s5_compares_reader_b_alone(m, monkeypatch):
-    a = FakeClient([{"kind": "end", "reason": "local_close"}])
-    b_wrong = FakeClient([{"kind": "frame", "event": "snapshot.begin", "unixNs": 1}, completed(m, "answ")])
-
-    def fake_turn(ev, step, conversation, runner, prompt, readers, verdicts, db=False, during=None):
-        return {"body": body_with(m, "answer"), "clients": {"a": a, "b": b_wrong}}
-
-    monkeypatch.setattr(m, "turn", fake_turn)
+    monkeypatch.setattr(m, "turn", s5_turn(m, monkeypatch, b_mid_turn(m, "answ"), {"outputDroppedBytes": 92000}))
     verdicts = {}
     m.step_s5("ev", "c" * 36, {}, verdicts)
     assert verdicts["S5"] is False  # b's own reconstruction differs from GET, whatever a saw
+
+
+def test_s5_without_runner_output_cap_evidence_is_unknown(m, monkeypatch):
+    monkeypatch.setattr(m, "turn", s5_turn(m, monkeypatch, b_mid_turn(m, "answer"), None))
+    verdicts = {}
+    m.step_s5("ev", "c" * 36, {}, verdicts)
+    assert verdicts["S5"] is None
+
+
+def test_s5_a_reader_b_that_joined_a_completed_turn_is_not_a_reload(m, monkeypatch):
+    records = [fr(m, "snapshot.begin", CUR, 10, turnState="completed"),
+               fr(m, "snapshot.end", None, 11, items={item_hash(m, "a1"): summary_of(m, "answer")}),
+               fr(m, "turn.completed", CUR, 12, status="completed")]
+    monkeypatch.setattr(m, "turn", s5_turn(m, monkeypatch, records, {"outputDroppedBytes": 92000}))
+    verdicts = {}
+    m.step_s5("ev", "c" * 36, {}, verdicts)
+    assert verdicts["S5"] is False
 
 
 def test_the_stop_policy_ends_turns_at_an_unknown_step(m, monkeypatch, tmp_path):
@@ -379,6 +504,18 @@ def test_the_stop_policy_ends_turns_at_an_unknown_step(m, monkeypatch, tmp_path)
     assert ran == ["S1", "S2"] and stopped == "S2" and verdicts["release"] is True
 
 
+@pytest.mark.parametrize("action,code,passed,want", [
+    ("turns", 7, False, "HELD"), ("enable", 8, False, "HELD"),
+    ("turns", 80, False, "prove read-only that no client container"), ("turns", 6, False, "runner release"),
+    ("turns", 70, False, "3 hours after it was created (expiry is not proof of a revoke)"),
+    ("turns", 9, False, "disable on PM go"), ("turns", 0, False, "stop here, the remaining turns unspent; disable"),
+    ("turns", 5, False, "disable next"), ("s0", 5, False, "stop here, the remaining turns unspent; report"),
+    ("s0", 0, True, "the next action: enable"), ("turns", 0, True, "the next action: disable"),
+    ("disable", 0, True, "P5 complete")])
+def test_the_printed_next_step_is_the_pm_stop_table(m, action, code, passed, want):
+    assert want in m.next_step(action, code, passed)
+
+
 # --- data scope -------------------------------------------------------------------------------------------------
 
 def test_facts_and_front_evidence_never_hold_text(m, tmp_path):
@@ -386,7 +523,7 @@ def test_facts_and_front_evidence_never_hold_text(m, tmp_path):
     body = body_with(m, secret_text)
     facts = m.facts_of(body)
     assert secret_text not in json.dumps(facts) and "a1" not in json.dumps(facts)
-    m.front(str(tmp_path), "S1", FakeClient([completed(m, secret_text)]), body, 0.0)
+    m.front(str(tmp_path), "S1", FakeClient([completed(m, secret_text)]), body, CUR, 0.0)
     written = (tmp_path / "front-evidence.json").read_text()
     assert secret_text not in written and json.loads(written)["steps"][0]["items"][1]["textChars"] == len(secret_text)
 

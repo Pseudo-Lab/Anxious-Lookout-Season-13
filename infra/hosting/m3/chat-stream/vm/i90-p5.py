@@ -26,8 +26,10 @@ controller moved: the controller is restored at once by the inverse patch and it
 recorded one (rc 4), else rc 8 (held). A template that is not the wanted one after a patch: rc 8; a rollout that does
 not finish 1/1 healthy: rc 7 (held). disable restores whatever enable's progress says moved (api first, then the
 controller) by inverse patches whose tests name every entry it removes, and proves both whole-template hashes equal to
-the recorded pre-enable ones (`equal: True`). PM: disable runs after every enable whatever `turns` gave; the only
-exception is a held state (rc 7 / 8 of any p5 action), which back and review decide; disable refuses then.
+the recorded pre-enable ones (`equal: True`). After enable, the PM stop table (2026-11-15; `next_step()`, printed
+with every result) decides: 7 / 8 hold everything (disable refuses); 80 / 6 need a read-only proof, then disable on PM
+go; 70 / 9 disable on PM go; any other nonzero or a False overall: stop, disable next; a missing or unreadable
+exit.json is an unknown result (disable refuses; read-only check, back / review decide).
 
 Turns: one browser session for …5805 (3 h: `turns` runs 7 turns; revoked in a `finally` that never raises), the P5 conversation (created by
 `s0`, POST /sessions is not a turn), an explicit runner entry before the first send of an action (POST /codex/runner,
@@ -50,15 +52,21 @@ the remaining budget unspent; PM judges rc and verdicts together):
   after the send and the runner-to-reader trace delays (end to end; not character holdback, not isolated link latency
   - review timing major). DB counters before / after.
 - S2: one shell command with output: a commandExecution item live and in GET, its output pieces, the delta methods.
-- S3: a long answer; after 10 text deltas POST …/interrupt with the requestId while the turn is running. Pass: the
-  interrupt answered 200 interrupting (not 409) and the turn ended interrupted (turn.completed status and GET
-  turnStatus). Completion winning the race is reported as such (False), never relabelled.
-- S4 (2 turns): a long answer each, readers at hop ② (api Service) and ③ (Traefik) at once (hop ④ only when
-  HOP4 is set, PM decision); per hop the runner-to-reader delay distribution by trace seq, aligned by request and seq.
+- S3: a long answer; after 10 text deltas of this request POST …/interrupt with the requestId. Pass: the interrupt
+  answered 200 interrupting (not 409) and this turn ended interrupted (turn.completed status and GET turnStatus).
+  This turn completing first is a race (False) and no interrupt is sent; fewer than 10 text deltas of this request in
+  300 s is unknown and no interrupt is sent (review r0 majors).
+- S4 (2 turns): a long answer each, readers at hop ② (api Service) and ③ (Traefik) at once (no hop ④: the dev VM
+  has no HTTP host forward, PM 2026-11-15); per hop the runner-to-reader delay distribution by trace seq, aligned by request and seq.
   DB counters.
 - S5: one large command output then prose; reader A closes after 5 text deltas, reader B opens at once (snapshot then
-  live). Pass: B's own reconstruction (snapshot + continuation) of the agentMessage equals GET's text sha256 (review:
-  never A and B joined). DB counters.
+  live). Pass: B's snapshot of this request is mid-turn (turnState running) with live text after it, B's own
+  reconstruction of the agentMessage equals GET's text sha256 (review: never A and B joined), A saw the command's
+  output pieces, and the runner's `outputDroppedBytes` > 0 (seq 1 20000 is above the 16 KiB per-item stream cap). No
+  runner summary or no command item of this request: unknown. B joining a completed turn is a race (False). DB counters.
+Every predicate reads only the frames of the turn's own request (review r0 major: a reader opened before the send
+replays the previous turn's snapshot and turn.completed); a reader's text comes from its item.completed or, when it
+joined a completed turn, its snapshot.end items; the send time is taken after the reservation, just before the POST.
 - S6: one large command output with prose; reader P pauses after its first text (`pause-after-text`, 1024-byte receive
   buffer, 30 s) next to a normal reader N. Pass only with: P reported `reader_paused`, enough output after the pause
   started (output pieces on N after P's pause > 0), the api's `api_stream_summary` reason `stalled` for exactly one
@@ -115,7 +123,7 @@ CTRL_ENV = ({'name': 'CODEX_RUNNER_STREAM_TEXT', 'value': 'true'}, {'name': 'COD
 STREAM_NAMES = {e['name'] for e in API_ENV + CTRL_ENV}
 POD_STREAM_ENV = {'RUNNER_STREAM_TEXT': 'true', 'STREAM_TRACE': 'true'}  # runner_kube.STREAM_FLAGS targets
 ORIGIN, API_HOST, API_PORT, HOST_HEADER = 'http://192.88.99.1', '10.0.0.107', 80, '192.88.99.1'
-HOP4 = None  # (address, port) of the host forward as seen from the guest; None = S4 measures hops ② and ③ only
+HOP4 = None  # PM 2026-11-15: no HTTP host forward on the dev VM (SSH only); S4 measures hops ② and ③ only
 BASE = '/api/research'
 READS = (5, 35, 65)
 RUNNER_GRACE = 20
@@ -1038,9 +1046,9 @@ def instant(stamp):
     return value
 
 
-def api_lines(since, until):
-    """(api_stream_summary payloads of the window, conversation_refresh_write count) from the live api Pod's log;
-    nothing else of the log is kept."""
+def api_lines(since, until, conversation):
+    """(api_stream_summary payloads of `conversation` in the window, conversation_refresh_write count) from the live
+    api Pod's log; nothing else of the log is kept."""
     start, end = instant(since), instant(until) + 1
     rc, out = run([K3S, 'kubectl', '-n', API[0], 'logs', '--timestamps', api_pod()['metadata']['name'],
                    '--since-time=' + since], 60)
@@ -1056,7 +1064,7 @@ def api_lines(since, until):
                 payload = json.loads(line.split('api_stream_summary ', 1)[1])
             except (ValueError, IndexError):
                 continue
-            if isinstance(payload, dict):
+            if isinstance(payload, dict) and payload.get('session') == conversation:
                 found.append(payload)
     return found, refresh
 
@@ -1082,6 +1090,7 @@ def runner_summaries(runner, request):
 
 # Turn machinery -------------------------------------------------------------------------------------------------
 def hashed(value):
+    """review P5-CLIENT.md r1: sha256(ASCII salt + UTF-8 id)[:16], the client's own formula."""
     return hashlib.sha256((PRIVATE['salt'] + value).encode()).hexdigest()[:16]
 
 
@@ -1092,7 +1101,7 @@ def record_of(conversation):
     return body
 
 
-def facts_of(body, request=None):
+def facts_of(body):
     """The record's items reduced in memory to (hashed id, type, role, text length, text sha256, turnStatus,
     displayOnly); the text itself is dropped here."""
     out = []
@@ -1121,23 +1130,27 @@ def others_updated(conversation, since):
 
 
 def send(step, conversation, prompt):
-    """Reserve, then POST the message: the requestId, or Stop(5) (the turn stays counted)."""
+    """Reserve, then POST the message: (requestId, the time just before the POST, the time its answer came), or
+    Stop(5) (the turn stays counted). review r0 major: the send time is taken after the reservation and before the
+    POST, never after the answer."""
     body = record_of(conversation)
     if body.get('state') == 'running':
         raise Stop(5, '%s: the conversation is running already; nothing sent' % step)
     n = reserve(step)
+    sent = time.time()
     try:
         status, answer, _ = call('POST', BASE + '/sessions/%s/messages' % conversation,
                                  {'text': prompt, 'expectedVersion': body.get('version')})
     except BaseException:
         settle(n, 'send raised')
         raise
+    answered = time.time()
     request = answer.get('requestId') if status == 202 and isinstance(answer, dict) else None
     settle(n, 'accepted' if request else 'answered %s' % status)
-    say('%s: POST …/messages answered %s (turn %d)' % (step, status, n))
+    say('%s: POST …/messages answered %s in %.0f ms (turn %d)' % (step, status, (answered - sent) * 1000, n))
     if not request:
         raise Stop(5, '%s: the send was not accepted or its answer was lost (the turn counts)' % step)
-    return request, time.time()
+    return request, sent, answered
 
 
 def wait_done(step, conversation, limit=TURN_LIMIT):
@@ -1151,18 +1164,81 @@ def wait_done(step, conversation, limit=TURN_LIMIT):
     raise Stop(5, '%s: the turn did not end within %d s' % (step, limit))
 
 
-def front(ev, step, client, body, sent):
-    """Front evidence (PM): the reader's frame sequence (event types, consecutive runs counted, no text),
-    firstTextMs after the send, and the final GET's item kinds and text lengths."""
+# Request scoping (review r0 major: a reader opened before the send replays the previous turn) --------------------
+def scoped(client, request, event=None):
+    """The reader's frames of `request` only, in stream order: a frame carrying a salted `request` sets the current
+    one; a frame without it (snapshot.end) belongs to the last one seen. Frames before any request (runner, idle) and
+    every frame of another request (the previous turn's replayed snapshot and turn.completed) are left out."""
+    if client is None:
+        return []
+    target, current, out = hashed(request), None, []
+    for r in client.records():
+        if r.get('kind') != 'frame':
+            continue
+        if r.get('request'):
+            current = r['request']
+        if current == target and (event is None or r.get('event') == event):
+            out.append(r)
+    return out
+
+
+def live_texts(client, request):
+    return [r for r in scoped(client, request, 'item.delta') if (r.get('chars') or 0) > 0]
+
+
+def completed_turn(client, request):
+    done = scoped(client, request, 'turn.completed')
+    return done[-1] if done else None
+
+
+def reconstruction(client, request, item):
+    """The reader's own summary of `item` for `request` (review r0 major): its item.completed, else (a reader that
+    joined a completed turn gets no replayed item.completed) the item in its last snapshot.end; either only with that
+    request's turn.completed seen. (summary, source) or (None, why)."""
+    if completed_turn(client, request) is None:
+        return None, 'no turn.completed of this request on the reader'
+    done = [r for r in scoped(client, request, 'item.completed') if r.get('item') == item]
+    if done:
+        return done[-1], 'item.completed'
+    snaps = [r for r in scoped(client, request, 'snapshot.end') if item in (r.get('items') or {})]
+    if snaps:
+        return snaps[-1]['items'][item], 'snapshot.end'
+    return None, 'no summary of the item on the reader'
+
+
+def last_agent(facts):
+    found = [f for f in facts if f['type'] == 'message' and f['role'] == 'assistant' and not f['displayOnly']]
+    return found[-1] if found else None
+
+
+def same_text(client, body, request):
+    """The reader's reconstructed final assistant message against GET's: (equal, detail)."""
+    agent = last_agent(facts_of(body))
+    if agent is None:
+        return False, 'no assistant message in GET'
+    mine, source = reconstruction(client, request, agent['item'])
+    if not mine:
+        return False, source
+    equal = mine.get('textSha256') == agent['textSha256'] and mine.get('textChars') == agent['textChars']
+    return equal, 'reader %s chars (%s) vs GET %s chars, sha equal %s' % (
+        mine.get('textChars'), source, agent['textChars'], mine.get('textSha256') == agent['textSha256'])
+
+
+def first_text_ms(client, request, sent):
+    texts = live_texts(client, request)
+    return round(texts[0]['unixNs'] / 1e6 - sent * 1000, 1) if texts else None
+
+
+def front(ev, step, client, body, request, sent):
+    """Front evidence (PM): the reader's frame sequence of this request (event types, consecutive runs counted, no
+    text), its first text after the send, and the final GET's item kinds and text lengths."""
     sequence = []
-    for r in client.frames() if client else []:
+    for r in scoped(client, request):
         if sequence and sequence[-1][0] == r.get('event'):
             sequence[-1][1] += 1
         else:
             sequence.append([r.get('event'), 1])
-    first = client.texts()[0] if client and client.texts() else None
-    entry = {'step': step, 'frames': sequence,
-             'firstTextAfterSendMs': round(first['unixNs'] / 1e6 - sent * 1000, 1) if first else None,
+    entry = {'step': step, 'frames': sequence, 'firstTextAfterSendMs': first_text_ms(client, request, sent),
              'items': [{k: f[k] for k in ('type', 'role', 'textChars', 'turnStatus', 'displayOnly')}
                        for f in facts_of(body)]}
     path = os.path.join(ev, 'front-evidence.json')
@@ -1174,11 +1250,12 @@ def front(ev, step, client, body, sent):
         OUT['failed'] = True
 
 
-def delays(client, request_sent):
-    """Runner-to-reader delays (ms) by trace seq: end to end, not link latency (review timing major)."""
+def delays(client, sent):
+    """Runner-to-reader delays (ms) of the trace lines received after the send: end to end (path, queue, parse and
+    clock offset), not link latency (review timing major)."""
     values = [r['unixNs'] / 1e6 - r['runnerUnixMs'] for r in client.records()
               if r.get('kind') == 'trace' and isinstance(r.get('runnerUnixMs'), (int, float))
-              and isinstance(r.get('unixNs'), int) and r['unixNs'] / 1e9 >= request_sent]
+              and isinstance(r.get('unixNs'), int) and r['unixNs'] / 1e9 >= sent]
     values.sort()
     if not values:
         return {'n': 0}
@@ -1194,12 +1271,7 @@ def service_hop():
     return found[0]['spec']['clusterIP'], int(found[0]['spec']['ports'][0]['port'])
 
 
-def last_agent(facts):
-    found = [f for f in facts if f['type'] == 'message' and f['role'] == 'assistant' and not f['displayOnly']]
-    return found[-1] if found else None
-
-
-def turn(ev, step, conversation, runner, prompt, readers, verdicts, db=False, during=None):
+def turn(ev, step, conversation, runner, prompt, readers, db=False, during=None):
     """One turn: readers opened (headers 200), DB counters, the send, `during` (the step's action while it runs), the
     end, the readers' end, the api / runner summaries of the window, DB counters after. Returns the facts."""
     since = now_utc()
@@ -1209,11 +1281,11 @@ def turn(ev, step, conversation, runner, prompt, readers, verdicts, db=False, du
         if clients[label].status() != 200:
             raise Stop(5, '%s: reader %s did not open (%s)' % (step, label, clients[label].status(1)))
     before = db_counters(conversation) if db else None
-    request, sent = send(step, conversation, prompt)
+    request, sent, answered = send(step, conversation, prompt)
     extra = during(request, clients) if during else None
     body = wait_done(step, conversation)
     for client in clients.values():
-        client.wait(lambda r: r.get('kind') == 'frame' and r.get('event') == 'turn.completed', 60)
+        client.until(lambda c=client: completed_turn(c, request) or c.process.poll() is not None, 60)
         client.process.send_signal(signal.SIGINT)  # the client writes its end record (rc 130); SIGTERM leaves none
         client.end(30)
     after, others = None, None
@@ -1223,10 +1295,10 @@ def turn(ev, step, conversation, runner, prompt, readers, verdicts, db=False, du
         others = others_updated(conversation, since)
     until = now_utc()
     time.sleep(2)
-    api, refresh = api_lines(since, until)
+    api, refresh = api_lines(since, until, conversation)
     summary = runner_summaries(runner, request)
-    facts = {'request': request, 'sent': sent, 'body': body, 'clients': clients, 'api': api, 'refresh': refresh,
-             'runner': summary, 'extra': extra}
+    facts = {'request': request, 'sent': sent, 'answered': answered, 'body': body, 'clients': clients, 'api': api,
+             'refresh': refresh, 'runner': summary, 'extra': extra}
     say('%s: api_stream_summary %d line(s), reasons %s; conversation_refresh_write %d; runner_stream_summary %d'
         % (step, len(api), json.dumps(sorted(str(p.get('reason')) for p in api)), refresh, len(summary)))
     if db:
@@ -1236,23 +1308,9 @@ def turn(ev, step, conversation, runner, prompt, readers, verdicts, db=False, du
                 step, json.dumps(before), json.dumps(after), json.dumps(delta), STATS_IDLE, others,
                 '' if others == 0 else ' - the delta is not attributable to this turn alone'))
         facts['db'] = {'delta': delta, 'others': others}
-    first = list(clients.values())[0] if clients else None
-    front(ev, step, first, body, sent)
+    front(ev, step, list(clients.values())[0] if clients else None, body, request, sent)
     step_end(step)
     return facts
-
-
-def same_text(client, body):
-    """The reader's reconstructed final agentMessage (by hashed id) against GET's: (equal, detail)."""
-    agent = last_agent(facts_of(body))
-    if agent is None:
-        return False, 'no assistant message in GET'
-    mine = client.completed().get(agent['item'])
-    if not mine:
-        return False, 'the reader has no completed item with the GET id'
-    equal = mine.get('textSha256') == agent['textSha256'] and mine.get('textChars') == agent['textChars']
-    return equal, 'reader %s chars vs GET %s chars, sha equal %s' % (mine.get('textChars'), agent['textChars'],
-                                                                     mine.get('textSha256') == agent['textSha256'])
 
 
 def ended_ok(body, status='idle'):
@@ -1262,7 +1320,7 @@ def ended_ok(body, status='idle'):
 # Steps ----------------------------------------------------------------------------------------------------------
 def step_s0(ev, conversation, runner, verdicts):
     n_before = len(budget_read())
-    request, sent = send('S0', conversation, PROMPTS['S0'])
+    request, sent, _ = send('S0', conversation, PROMPTS['S0'])
     body = wait_done('S0', conversation)
     facts = facts_of(body)
     kinds = sorted({str(f['type']) for f in facts})
@@ -1271,7 +1329,7 @@ def step_s0(ev, conversation, runner, verdicts):
     tool = [f for f in facts if f['type'] not in ('message', 'notice')]
     say('S0: items %d, kinds %s, assistant message %s, tool item %s; events %s %s' % (
         len(facts), kinds, last_agent(facts) is not None, bool(tool), status, code))
-    front(ev, 'S0', None, body, sent)
+    front(ev, 'S0', None, body, request, sent)
     verdicts['S0'] = bool(ended_ok(body) and last_agent(facts) and tool and status == 404 and code == 'stream_disabled'
                           and len(budget_read()) == n_before + 1)
 
@@ -1281,65 +1339,86 @@ def hop3():
 
 
 def step_s1(ev, conversation, runner, verdicts):
-    f = turn(ev, 'S1', conversation, runner, PROMPTS['S1'], [('hop3', hop3(), ())], verdicts, db=True)
-    client = f['clients']['hop3']
-    live = {r.get('item') for r in client.frames('item.started') if r.get('item')}
+    f = turn(ev, 'S1', conversation, runner, PROMPTS['S1'], [('hop3', hop3(), ())], db=True)
+    client, request = f['clients']['hop3'], f['request']
+    live = {r.get('item') for r in scoped(client, request, 'item.started') if r.get('item')}
     stored = {x['item'] for x in facts_of(f['body']) if x['type'] != 'message' or x['role'] == 'assistant'}
-    equal, detail = same_text(client, f['body'])
+    equal, detail = same_text(client, f['body'], request)
     summary = f['runner'][-1] if f['runner'] else {}
-    first = client.texts()[0] if client.texts() else None
-    say('S1 V1: live streamed item ids %d, all in GET %s; final text: %s' % (len(live), live <= stored, detail))
+    say('S1 V1: live streamed item ids of this request %d, all in GET %s; final text: %s' % (
+        len(live), live <= stored, detail))
     say('S1 runtime: runner_stream_summary %s' % json.dumps(
         {k: summary.get(k) for k in ('legacyL', 'cutDelayPeakChars', 'holdbackPeakChars', 'text', 'stopped',
-                                     'discarded', 'items', 'samples') if k in summary}, sort_keys=True))
-    say('S1 measured: first text %s ms after the send (includes entry, subscription and production; not holdback); '
-        'runner-to-reader delays at hop ③ %s' % (
-            round(first['unixNs'] / 1e6 - f['sent'] * 1000, 1) if first else None,
+                                     'discarded', 'items', 'samples', 'firstDeltaMs', 'firstEventMs')
+         if k in summary}, sort_keys=True))
+    say('S1 measured: first text %s ms after the send (send = just before the POST, which answered after %.0f ms; '
+        'includes entry, subscription and production; not holdback); runner-to-reader delays at hop ③ %s' % (
+            first_text_ms(client, request, f['sent']), (f['answered'] - f['sent']) * 1000,
             json.dumps(delays(client, f['sent']), sort_keys=True)))
     verdicts['S1'] = bool(ended_ok(f['body']) and live and live <= stored and equal
                           and type(summary.get('legacyL')) is int)
 
 
 def step_s2(ev, conversation, runner, verdicts):
-    f = turn(ev, 'S2', conversation, runner, PROMPTS['S2'], [('hop3', hop3(), ())], verdicts)
-    client = f['clients']['hop3']
-    commands = [r for r in client.frames('item.started') if r.get('itemKind') == 'commandExecution']
-    outputs = [r for r in client.frames('item.output') if (r.get('chars') or 0) > 0]
-    methods = sorted({str(r.get('method')) for r in client.frames('item.delta') if r.get('method')})
+    f = turn(ev, 'S2', conversation, runner, PROMPTS['S2'], [('hop3', hop3(), ())])
+    client, request = f['clients']['hop3'], f['request']
+    commands = [r for r in scoped(client, request, 'item.started') if r.get('itemKind') == 'commandExecution']
+    outputs = [r for r in scoped(client, request, 'item.output') if (r.get('chars') or 0) > 0]
+    methods = sorted({str(r.get('method')) for r in scoped(client, request, 'item.delta') if r.get('method')})
     stored = {x['item'] for x in facts_of(f['body'])}
-    say('S2: commandExecution items live %d (in GET %s); output pieces %d; delta methods %s; item kinds %s' % (
-        len(commands), all(r.get('item') in stored for r in commands), len(outputs), methods,
-        sorted({str(r.get('itemKind')) for r in client.frames('item.started')})))
+    summary = f['runner'][-1] if f['runner'] else {}
+    say('S2: commandExecution items of this request %d (in GET %s); output pieces %d; SSE delta methods %s; item '
+        'kinds %s; runner deltaIn %s' % (
+            len(commands), all(r.get('item') in stored for r in commands), len(outputs), methods,
+            sorted({str(r.get('itemKind')) for r in scoped(client, request, 'item.started')}),
+            json.dumps(summary.get('deltaIn'), sort_keys=True)))
     verdicts['S2'] = bool(ended_ok(f['body']) and commands and all(r.get('item') in stored for r in commands)
                           and outputs)
+
+
+INTERRUPT_AFTER = 10
 
 
 def step_s3(ev, conversation, runner, verdicts):
     state = {}
 
     def interrupt(request, clients):
+        """review r0 majors: only this request's text and completion count; no text in time or this turn already
+        completed means no interrupt is sent (unknown / race), never a blind POST."""
         reader = clients['hop3']
-        reader.until(lambda: len(reader.texts()) >= 10 or reader.frames('turn.completed'), 300)
-        completed_first = bool(reader.frames('turn.completed'))
-        status, answer, _ = call('POST', BASE + '/sessions/%s/interrupt' % conversation, {'requestId': request})
-        state.update(status=status, state=(answer or {}).get('state') if isinstance(answer, dict) else None,
-                     completedFirst=completed_first, deltas=len(reader.texts()))
-        say('S3: interrupt after %d text deltas answered %s %s (turn already completed on the reader: %s)' % (
-            state['deltas'], status, state['state'], completed_first))
+        reader.until(lambda: len(live_texts(reader, request)) >= INTERRUPT_AFTER or completed_turn(reader, request),
+                     300)
+        texts, done = len(live_texts(reader, request)), completed_turn(reader, request)
+        state.update(deltas=texts)
+        if done:
+            state['outcome'] = 'race: this turn completed before %d text deltas; no interrupt sent' % INTERRUPT_AFTER
+        elif texts < INTERRUPT_AFTER:
+            state['outcome'] = 'no %d text deltas of this turn within 300 s; no interrupt sent' % INTERRUPT_AFTER
+        else:
+            status, answer, _ = call('POST', BASE + '/sessions/%s/interrupt' % conversation, {'requestId': request})
+            state.update(status=status, state=(answer or {}).get('state') if isinstance(answer, dict) else None,
+                         completedBefore=bool(completed_turn(reader, request)))
+            state['outcome'] = 'sent'
+        say('S3: %s (text deltas of this turn %d)%s' % (
+            state['outcome'], texts, '; interrupt answered %s %s' % (state.get('status'), state.get('state'))
+            if state['outcome'] == 'sent' else ''))
         return state
 
-    f = turn(ev, 'S3', conversation, runner, PROMPTS['S3'], [('hop3', hop3(), ())], verdicts, during=interrupt)
-    client = f['clients']['hop3']
-    done = client.frames('turn.completed')
-    status = done[-1].get('status') if done else None
+    f = turn(ev, 'S3', conversation, runner, PROMPTS['S3'], [('hop3', hop3(), ())], during=interrupt)
+    client, request = f['clients']['hop3'], f['request']
+    done = completed_turn(client, request)
+    status = done.get('status') if done else None
     facts = facts_of(f['body'])
     marked = [x for x in facts if x['turnStatus'] == 'interrupted']
     partial = [x for x in marked if x['displayOnly']]
-    say('S3: turn.completed status %s; GET items marked interrupted %d (display-only partial %d); state %s' % (
-        status, len(marked), len(partial), f['body'].get('state')))
-    race = state.get('completedFirst') or state.get('status') == 409
+    say('S3: turn.completed status of this turn %s; GET items marked interrupted %d (display-only partial %d); '
+        'state %s' % (status, len(marked), len(partial), f['body'].get('state')))
+    if state.get('outcome', '').startswith('no '):
+        verdicts['S3'] = None  # the experiment did not happen: unknown, no extra turn
+        return
+    race = state.get('outcome', '').startswith('race') or state.get('status') == 409
     if race:
-        say('S3: the turn completed before the interrupt (race), reported as such; not relabelled interrupted')
+        say('S3: reported as a race (the turn completed first); not relabelled interrupted')
     verdicts['S3'] = bool(not race and state.get('status') == 200 and state.get('state') == 'interrupting'
                           and status == 'interrupted' and marked)
 
@@ -1348,18 +1427,22 @@ def step_s4(ev, conversation, runner, verdicts, name):
     readers = [('hop2', service_hop(), ()), ('hop3', hop3(), ())]
     if HOP4 is not None:
         readers.append(('hop4', HOP4, ()))
-    f = turn(ev, name, conversation, runner, PROMPTS['S4'], readers, verdicts, db=(name == 'S4a'))
-    found = {}
+    f = turn(ev, name, conversation, runner, PROMPTS['S4'], readers, db=(name == 'S4a'))
+    found, texts = {}, {}
     for label, client in f['clients'].items():
         found[label] = delays(client, f['sent'])
-        equal, detail = same_text(client, f['body'])
+        texts[label] = same_text(client, f['body'], f['request'])
         say('%s %s: runner-to-reader delays %s; final text %s' % (name, label, json.dumps(found[label],
-                                                                                        sort_keys=True), detail))
+                                                                                        sort_keys=True),
+                                                                  texts[label][1]))
     clock = run(['/usr/bin/chronyc', 'tracking'], 10)[1].splitlines()
     say('%s guest clock: %s' % (name, '; '.join(x for x in clock if 'System time' in x or 'Last offset' in x)
                                 or 'chronyc tracking unavailable'))
     verdicts[name] = bool(ended_ok(f['body']) and all(v['n'] > 0 for v in found.values())
-                          and all(same_text(c, f['body'])[0] for c in f['clients'].values()))
+                          and all(equal for equal, _ in texts.values()))
+
+
+OUTPUT_ITEM_LIMIT = 16 * 1024  # runner/stream.py: command output streamed per item (S5 expects the cap to apply)
 
 
 def step_s5(ev, conversation, runner, verdicts):
@@ -1367,39 +1450,56 @@ def step_s5(ev, conversation, runner, verdicts):
 
     def reload(request, clients):
         first = clients['a']
-        first.until(lambda: first.process.poll() is not None, 600)
+        first.until(lambda: first.process.poll() is not None or completed_turn(first, request), 600)
         second = Client(ev, 'S5', 'b', conversation, hop3(), TURN_LIMIT, ())
         clients['b'] = second
         state['bStatus'] = second.status()
-        say('S5: reader a ended (%s); reader b opened %s' % (
+        say('S5: reader a ended %s; reader b opened %s' % (
             json.dumps([r.get('reason') for r in first.records() if r.get('kind') == 'end']), state['bStatus']))
         return state
 
-    f = turn(ev, 'S5', conversation, runner, PROMPTS['S5'], [('a', hop3(), ('--close-after-text', '5'))], verdicts,
+    f = turn(ev, 'S5', conversation, runner, PROMPTS['S5'], [('a', hop3(), ('--close-after-text', '5'))],
              db=True, during=reload)
-    b = f['clients'].get('b')
-    a_end = [r.get('reason') for r in f['clients']['a'].records() if r.get('kind') == 'end']
-    snap = b.frames('snapshot.begin') if b else []
-    equal, detail = same_text(b, f['body']) if b else (False, 'no reader b')
-    outputs = len(b.frames('item.output')) + sum(1 for r in b.frames('snapshot.item') if r.get('output')) if b else 0
-    say('S5: reader a end %s; reader b snapshot %d, output pieces %d; b final text %s; events a %d b %d' % (
-        a_end, len(snap), outputs, detail, len(f['clients']['a'].frames()), len(b.frames()) if b else 0))
-    verdicts['S5'] = bool(ended_ok(f['body']) and a_end == ['local_close'] and state.get('bStatus') == 200 and snap
-                          and equal)
+    a, b, request = f['clients']['a'], f['clients'].get('b'), f['request']
+    a_end = [r.get('reason') for r in a.records() if r.get('kind') == 'end']
+    begin = scoped(b, request, 'snapshot.begin')
+    mid_turn = bool(begin) and begin[-1].get('turnState') == 'running'
+    continued = [r for r in live_texts(b, request) if begin and r['unixNs'] > begin[-1]['unixNs']]
+    equal, detail = same_text(b, f['body'], request) if b else (False, 'no reader b')
+    commands = {r.get('item') for r in scoped(a, request, 'item.started') if r.get('itemKind') == 'commandExecution'}
+    output = [r for r in scoped(a, request, 'item.output') if r.get('item') in commands]
+    out_chars = sum(r.get('chars') or 0 for r in output)
+    summary = f['runner'][-1] if f['runner'] else None
+    dropped = summary.get('outputDroppedBytes') if isinstance(summary, dict) else None
+    say('S5: reader a end %s; command items %d, output pieces %d, %d chars on a (cap %d bytes per item); runner '
+        'outputDroppedBytes %s, deltaIn %s, eventsOut %s, eventBytes %s' % (
+            a_end, len(commands), len(output), out_chars, OUTPUT_ITEM_LIMIT, dropped,
+            json.dumps((summary or {}).get('deltaIn'), sort_keys=True), (summary or {}).get('eventsOut'),
+            (summary or {}).get('eventBytes')))
+    say('S5: reader b snapshot of this turn %d (turnState %s: mid-turn %s), live text after it %d; b final text %s' % (
+        len(begin), begin[-1].get('turnState') if begin else None, mid_turn, len(continued), detail))
+    if type(dropped) is not int or not commands:
+        say('S5: no runner output-cap evidence or no command item of this turn: unknown, no extra turn')
+        verdicts['S5'] = None
+        return
+    if begin and not mid_turn:
+        say('S5: reader b joined a completed turn (race); not counted as a mid-turn reload')
+    verdicts['S5'] = bool(ended_ok(f['body']) and a_end == ['local_close'] and state.get('bStatus') == 200
+                          and mid_turn and continued and equal and output and dropped > 0)
 
 
 def step_s6(ev, conversation, runner, verdicts):
     readers = [('n', hop3(), ()), ('p', hop3(), ('--mode', 'pause-after-text', '--pause', '30',
                                                  '--receive-buffer', '1024'))]
-    f = turn(ev, 'S6', conversation, runner, PROMPTS['S6'], readers, verdicts)
-    normal, paused = f['clients']['n'], f['clients']['p']
+    f = turn(ev, 'S6', conversation, runner, PROMPTS['S6'], readers)
+    normal, paused, request = f['clients']['n'], f['clients']['p'], f['request']
     ready = [r for r in paused.records() if r.get('kind') == 'reader_paused']
-    after = [r for r in normal.frames() if r.get('event') in ('item.output', 'item.delta')
+    after = [r for r in scoped(normal, request) if r.get('event') in ('item.output', 'item.delta')
              and ready and r['unixNs'] > ready[0]['unixNs']]
     stalled = [p for p in f['api'] if p.get('reason') == 'stalled']
-    equal, detail = same_text(normal, f['body'])
-    say('S6: paused reader ready %s; pieces on the normal reader after the pause %d; api summaries %d, stalled %d; '
-        'normal reader final text %s' % (bool(ready), len(after), len(f['api']), len(stalled), detail))
+    equal, detail = same_text(normal, f['body'], request)
+    say('S6: paused reader ready %s; pieces of this turn on the normal reader after the pause %d; api summaries %d, '
+        'stalled %d; normal reader final text %s' % (bool(ready), len(after), len(f['api']), len(stalled), detail))
     if not stalled:
         say('S6: no server-side stall evidence (api_stream_summary reason stalled): unknown, no extra turn')
         verdicts['S6'] = None
@@ -1661,12 +1761,11 @@ def main(argv):
         say('turns used %d of %d' % (len(budget_read()), TURN_CAP))
     except Stop:
         say('turns used: THE BUDGET FILE IS UNREADABLE (report)')
-    if action in ('enable', 'turns', 'disable') and code != 0:
-        say('next (PM rule): disable after every enable, whatever this result; rc 7 / 8 hold it (back and review)')
     code = final_rc(step_rc, facts, OUT.get('failed'))
+    passed = not [n for n in items + ('release',) if verdicts.get(n) is not True] and code == 0
     if items:
-        say('verdict overall pass: %s' % (not [n for n in items + ('release',) if verdicts.get(n) is not True]
-                                          and code == 0))
+        say('verdict overall pass: %s' % passed)
+    say('next (PM stop table 2026-11-15): %s' % next_step(action, code, passed if items else code == 0))
     say('result rc=%d' % code)
     written = False
     if ev:
@@ -1683,6 +1782,33 @@ def main(argv):
     if final != code:
         say('result rc=%d (an evidence write failed after the result line)' % final)
     return final
+
+
+NEXT = ('s0', 'enable', 'turns', 'disable')
+
+
+def next_step(action, code, passed):
+    """The PM stop table (2026-11-15, review-accepted) for this action's result: one rule, printed with every result.
+    A result missing from disk (no exit.json) is not covered here: unknown, read-only check, back / review decide."""
+    enabled = action in ('enable', 'turns')
+    if code in (7, 8):
+        return 'HELD: report at once; nothing else is run, disable included; back and review decide'
+    if code == 80:
+        return ('report at once; no further turn or measurement; prove read-only that no client container or private '
+                'file is left, then %s' % ('disable on PM go' if enabled else 'PM decides'))
+    if code == 6:
+        return ('report at once; prove the runner release read-only, then %s'
+                % ('disable on PM go' if enabled else 'PM decides'))
+    if code == 70:
+        return ('report; the session expires 3 hours after it was created (expiry is not proof of a revoke); %s'
+                % ('disable on PM go' if enabled else 'PM decides'))
+    if code == 9:
+        return 'report; %s' % ('disable on PM go' if enabled else 'PM decides')
+    if code != 0 or not passed:
+        return ('stop here, the remaining turns unspent; %s' % ('disable next' if enabled else 'report'))
+    if action == 'disable':
+        return 'P5 complete: report the results'
+    return 'the next action: %s' % NEXT[NEXT.index(action) + 1] if action in NEXT[:-1] else 'report'
 
 
 def final_rc(step, facts, evidence_failed):

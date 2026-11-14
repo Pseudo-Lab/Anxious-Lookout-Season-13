@@ -331,7 +331,7 @@ PM decisions Q1–Q5, review plan notes; its docstring is the specification). In
   - The api gets `RESEARCH_STREAM_ENABLE`, `CODEX_RUNNER_STREAM_TEXT`, `CODEX_RUNNER_STREAM_TRACE` and `STREAM_TRACE`.
   - Trace stays on for all of S1–S6 (Q1).
   - `disable` returns the controller to its pre-#90 image (Q3).
-- **Readers:** review's `p5_client.py` r1 (`P5-CLIENT.md`), with salted id hashes. Hop ② is the api Service, hop ③ is Traefik. Hop ④ runs only when `HOP4` is set (PM; Q2).
+- **Readers:** review's `p5_client.py` r1 (`P5-CLIENT.md`), with salted id hashes. Hop ② is the api Service, hop ③ is Traefik. Hop ④ is not measured (r19, PM 2026-11-15: the dev VM's only host forward is SSH; `HOP4` stays `None`). Hop ① has no separate reader.
 - **Data scope:** no answer text, command output or raw log is written anywhere. Runner logs are filtered to the summary and shutdown lines. The api log is reduced to `api_stream_summary` payloads and a `conversation_refresh_write` count. GET text is hashed in memory.
 - **Evidence for front:** each step writes a `front-evidence.json` entry (frame sequence, first text after the send, GET item kinds and lengths). It does not replace the real UI gate before the PR.
 - **Timing labels:** S1 prints `S1 runtime:` (runner_stream_summary `legacyL`, `cutDelayPeakChars`, `holdbackPeakChars`) apart from `S1 measured:` (the first text after the send, and runner-to-reader trace delays). The measured numbers are end to end; they are neither holdback nor link latency.
@@ -354,7 +354,7 @@ PM decisions Q1–Q5, review plan notes; its docstring is the specification). In
 | S1 | V1 live item ids vs `thread/read` ids; first text time; `runner_stream_summary` incl. `legacyL` (= L from the live journal) | 1 | text on |
 | S2 | V3 delta methods and the tool items code-mode actually emits (a turn that runs one shell command with output) | 1 | text on |
 | S3 | V2 Stop mid-answer: partial answer in `thread/read` or display-only; `turnStatus: interrupted`; GET = resume record | 1 | text on |
-| S4 | D7 per-hop delay (① API Pod→runner, ② API Service, ③ Traefik `web`, ④ host forward) on one long answer; `STREAM_TRACE` | 2 | text on; repeat once for spread |
+| S4 | D7 runner-to-reader delay at ② API Service and ③ Traefik `web` (r19: ① has no separate reader; ④ does not exist on this VM, PM 2026-11-15) on one long answer; `STREAM_TRACE` | 2 | text on; repeat once for spread |
 | S5 | §8 large command output (output caps, event count/bytes) and reload mid-turn (snapshot → continue) | 1 | text on |
 | S6 | Slow reader with a real runner: browser stops reading mid-answer → relay stall 10 s → runner connection closed → runner SIGTERM/drain completes inside 20 s grace | 1 | text on |
 | | **Total** | **8** | PM's suggested cap was 10 |
