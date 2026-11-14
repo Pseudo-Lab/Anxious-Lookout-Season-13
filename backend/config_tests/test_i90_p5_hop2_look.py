@@ -34,11 +34,12 @@ def repo_cnp():
                     {"fromEndpoints": [{"matchLabels": RUNNER}], "toPorts": [{"ports": [{"port": "8081", "protocol": "TCP"}]}]}]}}
 
 
-def cluster(cnps=None, ccnps=(), ceps=None, config=None, fail=()):
+def cluster(cnps=None, ccnps=(), ceps=None, config=None, fail=(), k8s=()):
     tables = {
         "configmap": {"data": config if config is not None else {"allow-localhost": "policy", "kube-proxy-replacement": "false"}},
         "ciliumnetworkpolicies": {"items": list(cnps if cnps is not None else [repo_cnp()])},
         "ciliumclusterwidenetworkpolicies": {"items": list(ccnps)},
+        "networkpolicies": {"items": list(k8s)},
         "ciliumendpoints": {"items": list(ceps if ceps is not None else [
             {"metadata": {"name": "SECRET-pod"}, "status": {"identity": {"id": 12345, "labels": API_LABELS},
                                                              "policy": {"ingress": {"enforcing": True, "state": "enforcing"}}}},
@@ -68,10 +69,18 @@ def outputs(raw):
     return {x["kind"]: x for x in (json.loads(y) for y in raw.splitlines())}
 
 
+def verdict(h, monkeypatch, capsys, **kwargs):
+    monkeypatch.setattr(h.subprocess, "run", cluster(**kwargs))
+    assert h.main() == 0
+    raw = capsys.readouterr().out
+    assert "SECRET" not in raw
+    return outputs(raw)
+
+
 def test_repo_policy_and_connect_timeout_show_no_host_rule(h, tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(h.subprocess, "run", cluster())
     client_file(tmp_path, [{"kind": "end", "reason": "probe_error", "errorType": "TimeoutError", "elapsedMs": 5003.4,
                             "unixNs": 1}])
+    monkeypatch.setattr(h.subprocess, "run", cluster())
     assert h.main() == 0
     raw = capsys.readouterr().out
     assert "SECRET" not in raw and "12345" in raw
@@ -84,27 +93,71 @@ def test_repo_policy_and_connect_timeout_show_no_host_rule(h, tmp_path, monkeypa
     assert out["endpoint"]["items"] == [{"identity": 12345, "enforcing": True, "state": "enforcing"}]
     assert out["policies"]["items"] == [{"kind": "CNP", "name": "hosting-api-ingress", "selectsApi": True,
                                          "nodeSelector": False, "enableDefaultDeny": "missing", "rules": [
-        {"direction": "ingress", "from": ["endpoints:traefik"], "ports": [8080]},
-        {"direction": "ingress", "from": ["endpoints:user-runner"], "ports": [8081]}]}]
-    assert out["hostTo8080"] == {"kind": "hostTo8080", "admitted": False, "rules": []}
+        {"direction": "ingress", "from": ["endpoints:traefik"], "ports": [{"port": 8080, "protocol": "TCP"}],
+         "hostSource": False, "tcp8080": True, "match": False},
+        {"direction": "ingress", "from": ["endpoints:user-runner"], "ports": [{"port": 8081, "protocol": "TCP"}],
+         "hostSource": False, "tcp8080": False, "match": False}]}]
+    assert out["policies"]["unparsed"] == 0 and out["policies"]["k8sNetworkPolicies"] == 0
+    assert {k: out["hostTcp8080"][k] for k in ("allowRule", "denyRule", "reasons")} == {
+        "allowRule": False, "denyRule": False, "reasons": []}
 
 
-@pytest.mark.parametrize("rule, admitted", [
-    ({"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "8080"}]}]}, True),
+H8080 = {"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "8080", "protocol": "TCP"}]}]}
+
+
+@pytest.mark.parametrize("rule, allow", [
+    (H8080, True),
     ({"fromEntities": ["all"]}, True),
-    ({"toPorts": [{"ports": [{"port": "8080"}]}]}, True),            # no peer field: every source
-    ({"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "8081"}]}]}, False),
+    ({"fromEntities": ["cluster"]}, True),                                       # cluster includes the host
+    ({"toPorts": [{"ports": [{"port": "8080"}]}]}, True),                        # no peer field; protocol missing = ANY
+    ({"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "0", "protocol": "TCP"}]}]}, True),   # every port
+    ({"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "8000", "endPort": 8100}]}]}, True),
+    ({"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "8081", "protocol": "TCP"}]}]}, False),
+    ({"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "8000", "endPort": 8079}]}]}, False),
     ({"fromEntities": ["world"], "toPorts": [{"ports": [{"port": "8080"}]}]}, False),
+    ({"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "8080", "protocol": "UDP"}]}]}, False),  # review r0
+    ({"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "http", "protocol": "TCP"}]}]}, "unknown"),  # review r0
+    ({"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "8080", "protocol": "QUIC"}]}]}, "unknown"),
+    ({"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "8080"}], "rules": {"http": [{}]}}]}, "unknown"),
+    ({"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "8000", "endPort": "x"}]}]}, "unknown"),
+    ({"fromEntities": ["kube-apiserver"]}, "unknown"),
+    ({"fromEndpoints": [{"matchLabels": {"reserved:host": ""}}]}, "unknown"),
+    ({"fromEndpoints": [{}]}, "unknown"),
+    ({"fromCIDR": ["10.0.0.0/24"]}, "unknown"),
+    ({"fromNodes": [{}], "toPorts": [{"ports": [{"port": "8080"}]}]}, "unknown"),
+    ({"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "http"}]}, {"ports": [{"port": "8080"}]}]}, True),
+    ({"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "http"}]}, {"ports": [{"port": "9"}]}]}, "unknown"),
 ])
-def test_host_rules_on_8080_are_found(h, tmp_path, monkeypatch, capsys, rule, admitted):
+def test_host_tcp_8080_allow_rule_is_tri_state(h, monkeypatch, capsys, rule, allow):
     cnp = repo_cnp()
     cnp["spec"]["ingress"].append(rule)
-    monkeypatch.setattr(h.subprocess, "run", cluster(cnps=[cnp]))
-    assert h.main() == 0
-    assert outputs(capsys.readouterr().out)["hostTo8080"]["admitted"] is admitted
+    out = verdict(h, monkeypatch, capsys, cnps=[cnp])
+    assert out["hostTcp8080"]["allowRule"] == allow
+    assert out["hostTcp8080"]["allowRule"] is not (not allow)  # never a bare True/False standing for "unknown"
 
 
-def test_a_clusterwide_deny_or_unrelated_selector_is_not_an_admission(h, tmp_path, monkeypatch, capsys):
+def test_unknown_selector_with_a_host_rule_is_unknown_not_admitted(h, monkeypatch, capsys):  # review r0
+    cnp = repo_cnp()
+    cnp["spec"] = {"endpointSelector": {"matchExpressions": [{"key": "app", "operator": "Exists"}]},
+                   "ingress": [{"fromEntities": ["host"]}]}
+    out = verdict(h, monkeypatch, capsys, cnps=[cnp])
+    assert out["policies"]["items"][0]["selectsApi"] == "unknown"
+    assert out["hostTcp8080"]["allowRule"] == "unknown"
+    cnp["spec"]["ingress"] = [{"fromEntities": ["world"]}]
+    assert verdict(h, monkeypatch, capsys, cnps=[cnp])["hostTcp8080"]["allowRule"] is False
+
+
+def test_protocol_is_kept_in_the_output(h, monkeypatch, capsys):
+    cnp = repo_cnp()
+    cnp["spec"]["ingress"] = [{"fromEntities": ["host"], "toPorts": [{"ports": [
+        {"port": "8080", "protocol": "UDP"}, {"port": "8080"}, {"port": "SECRET-name", "protocol": "SECRET"}]}]}]
+    rule = verdict(h, monkeypatch, capsys, cnps=[cnp])["policies"]["items"][0]["rules"][0]
+    assert rule["ports"] == [{"port": 8080, "protocol": "UDP"}, {"port": 8080, "protocol": "ANY"},
+                             {"port": "named", "protocol": "other"}]
+    assert rule["tcp8080"] is True and rule["hostSource"] is True
+
+
+def test_clusterwide_policies_deny_rules_and_unrelated_selectors(h, monkeypatch, capsys):
     ccnps = [
         {"metadata": {"name": "anxious-lookout-tenant-boundary"}, "spec": {
             "endpointSelector": {"matchLabels": {"k8s:io.kubernetes.pod.namespace": "tenant-example"}},
@@ -115,20 +168,32 @@ def test_a_clusterwide_deny_or_unrelated_selector_is_not_an_admission(h, tmp_pat
             "nodeSelector": {}, "ingress": [{"fromEntities": ["host"]}]}},
         {"metadata": {"name": "expr"}, "spec": {
             "endpointSelector": {"matchExpressions": [{"key": "app", "operator": "Exists"}]},
-            "ingress": [{"fromEntities": ["cluster"]}]}},
+            "ingress": [{"fromEntities": ["world"]}]}},
     ]
-    monkeypatch.setattr(h.subprocess, "run", cluster(ccnps=ccnps))
-    assert h.main() == 0
-    raw = capsys.readouterr().out
-    assert "SECRET" not in raw
-    out = outputs(raw)
+    out = verdict(h, monkeypatch, capsys, ccnps=ccnps)
     chosen = {(x["kind"], x["name"]): x["selectsApi"] for x in out["policies"]["items"]}
     assert chosen[("CCNP", "anxious-lookout-tenant-boundary")] is False
-    assert chosen[("CCNP", "other")] in (True, "unknown")
     assert chosen[("CCNP", "anxious-lookout-node-protection")] is False
-    assert out["hostTo8080"]["admitted"] is False
-    assert out["hostTo8080"]["rules"] == [{"policy": "other", "direction": "ingressDeny", "selects": True,
-                                           "from": ["entities:host"]}]
+    assert sorted(str(x["selectsApi"]) for x in out["policies"]["items"]) == ["False", "False", "True", "True", "unknown"]
+    assert out["hostTcp8080"]["allowRule"] is False
+    assert out["hostTcp8080"]["denyRule"] is True
+
+
+@pytest.mark.parametrize("change, reason", [
+    (dict(k8s=[{"metadata": {"name": "SECRET-np"}}]), "Kubernetes NetworkPolicies not interpreted"),
+    (dict(cnps=[repo_cnp(), {"metadata": {"name": "x"}, "spec": "SECRET"}]), "unparsed policy parts"),
+    (dict(cnps=[dict(repo_cnp(), spec=dict(repo_cnp()["spec"], ingress=["SECRET"]))]), "unparsed policy parts"),
+])
+def test_unread_parts_make_a_false_unknown(h, monkeypatch, capsys, change, reason):
+    out = verdict(h, monkeypatch, capsys, **change)
+    assert out["hostTcp8080"]["allowRule"] == "unknown" and reason in out["hostTcp8080"]["reasons"]
+
+
+def test_a_host_allow_stays_true_despite_unread_parts(h, monkeypatch, capsys):
+    cnp = repo_cnp()
+    cnp["spec"]["ingress"].append(H8080)
+    out = verdict(h, monkeypatch, capsys, cnps=[cnp], k8s=[{}])
+    assert out["hostTcp8080"]["allowRule"] is True and out["hostTcp8080"]["reasons"]
 
 
 @pytest.mark.parametrize("selector, want", [
@@ -148,12 +213,12 @@ def test_selector_matching_uses_the_endpoint_labels(h, selector, want):
 
 def test_selection_is_unknown_without_exactly_one_api_endpoint(h, tmp_path, monkeypatch, capsys):
     two = {"status": {"identity": {"id": 1, "labels": API_LABELS}}}
-    monkeypatch.setattr(h.subprocess, "run", cluster(ceps=[two, two]))
-    assert h.main() == 0
-    out = outputs(capsys.readouterr().out)
+    out = verdict(h, monkeypatch, capsys, ceps=[two, two])
     assert out["endpoint"]["count"] == 2
     assert out["endpoint"]["items"][0] == {"identity": 1, "enforcing": "missing", "state": "missing"}
     assert [x["selectsApi"] for x in out["policies"]["items"]] == ["unknown"]
+    assert out["hostTcp8080"]["allowRule"] == "unknown"
+    assert out["hostTcp8080"]["reasons"] == ["not exactly one api endpoint"]
 
 
 def test_client_record_variants_and_unknown_values_are_bucketed(h, tmp_path, monkeypatch, capsys):

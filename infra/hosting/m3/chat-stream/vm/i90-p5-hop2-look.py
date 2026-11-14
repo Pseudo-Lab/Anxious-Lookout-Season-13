@@ -16,12 +16,23 @@ Output, JSON lines, fixed keys only (no URL, cookie, conversation id, Pod name o
   endpoint (not printed) decide which policies select it;
 - `policies`: every CiliumNetworkPolicy in m2-hosting and every CiliumClusterwideNetworkPolicy: its name (fixed list, else
   `other`), whether it selects the api endpoint (`true` / `false` / `unknown`: matchExpressions, another label source,
-  or not exactly one api endpoint), and per ingress / ingressDeny rule its sources (`endpoints:traefik`,
-  `endpoints:user-runner`, `endpoints:other`, `entities:<fixed>`, `cidr`, `other`, or `any-source` for a rule with no
-  peer field) and ports (numbers, or `any`);
-- `hostTo8080`: the rules of policies that select (or may select) the api endpoint whose sources include the host
-  (`entities:host`, `entities:all` or `any-source`) on 8080 or any port; `admitted` counts ingress (allow) rules only.
-This reads the policy objects; it does not read the datapath (no cilium-dbg, no flow log: hubble is disabled).
+  no selector, or not exactly one api endpoint), and per ingress / ingressDeny rule:
+  - its sources (`endpoints:traefik`, `endpoints:user-runner`, `endpoints:other`, `entities:<fixed>`, `cidr`, `other`,
+    or `any-source` for a rule with no peer field) and `hostSource` (true for host / all / cluster / any-source; false
+    for traefik, user-runner and the non-host entities; unknown for any other endpoint selector, CIDR, kube-apiserver
+    or an unknown field);
+  - its ports (`any`, or entries with port number / `named` / `other`, endPort, protocol from a fixed list; protocol
+    missing = ANY) and `tcp8080` (true when TCP or ANY covers 8080, port 0 included; false for UDP / SCTP / ICMP or
+    another port; unknown for a named port, an unknown protocol or field, or a toPorts block with more than `ports`);
+  - `match` = hostSource AND tcp8080, tri-state;
+  plus the count of parts that could not be read (`unparsed`) and of Kubernetes NetworkPolicies in m2-hosting (not
+  interpreted);
+- `hostTcp8080`: `allowRule` / `denyRule` = true when a rule of a policy that selects the api endpoint matches; unknown
+  when any relevant rule or selection is unknown, or there are unparsed parts, Kubernetes NetworkPolicies, or not
+  exactly one api endpoint (`reasons`); false only when every relevant rule was decided and none matches.
+  review r0 (2026-11-15): an unresolved form is never folded into false or true.
+This is an observation of the policy objects, not effective access: no deny precedence, no datapath (no cilium-dbg, no
+flow log: hubble is disabled), no source identity of the real connection.
 rc: 0 printed; 3 refused (not root, or a cluster lookup failed).
 """
 import json
@@ -161,62 +172,143 @@ def selects_api(selector, labels):
     return True
 
 
+UNKNOWN = 'unknown'
+HOST_ENTITIES = ('host', 'all', 'cluster')          # each of these includes the reserved host identity
+NOT_HOST_ENTITIES = ('world', 'remote-node', 'init', 'health', 'ingress', 'unmanaged')
+PROTOCOLS = ('TCP', 'UDP', 'SCTP', 'ICMP', 'ICMPV6', 'ANY')
+
+
+def any3(values):
+    """Tri-state OR: True if one is True, else unknown if one is unknown, else False (also for none)."""
+    values = list(values)
+    return True if True in values else UNKNOWN if UNKNOWN in values else False
+
+
+def all3(values):
+    """Tri-state AND: False if one is False, else unknown if one is unknown, else True."""
+    values = list(values)
+    return False if False in values else UNKNOWN if UNKNOWN in values else True
+
+
 def sources(rule):
-    found = []
+    """(tags, host): fixed source tags and whether the rule's peers include the host. A peer form this does not
+    interpret (another endpoint selector, CIDR, kube-apiserver, an unknown field) makes `host` unknown, never False."""
+    tags, host = [], []
     for peer in rule.get('fromEndpoints') or []:
-        labels = (peer or {}).get('matchLabels') or {}
-        found.append('endpoints:traefik' if labels == TRAEFIK else 'endpoints:user-runner' if labels == RUNNER
-                     else 'endpoints:other')
+        peer = peer if isinstance(peer, dict) else {}
+        labels = peer.get('matchLabels') if set(peer) == {'matchLabels'} else None
+        if labels == TRAEFIK:
+            tags.append('endpoints:traefik')
+            host.append(False)
+        elif labels == RUNNER:
+            tags.append('endpoints:user-runner')
+            host.append(False)
+        else:
+            tags.append('endpoints:other')
+            host.append(UNKNOWN)
     for entity in rule.get('fromEntities') or []:
-        found.append('entities:%s' % (entity if entity in ENTITIES else 'other'))
-    if rule.get('fromCIDR') or rule.get('fromCIDRSet'):
-        found.append('cidr')
-    known = {'fromEndpoints', 'fromEntities', 'fromCIDR', 'fromCIDRSet', 'toPorts'}
-    if set(rule) - known:
-        found.append('other')
-    if not found:
-        found.append('any-source')
-    return sorted(set(found))
+        tags.append('entities:%s' % (entity if entity in ENTITIES else 'other'))
+        host.append(True if entity in HOST_ENTITIES else False if entity in NOT_HOST_ENTITIES else UNKNOWN)
+    if 'fromCIDR' in rule or 'fromCIDRSet' in rule:
+        tags.append('cidr')
+        host.append(UNKNOWN)
+    if set(rule) - {'fromEndpoints', 'fromEntities', 'fromCIDR', 'fromCIDRSet', 'toPorts'}:
+        tags.append('other')
+        host.append(UNKNOWN)
+    if not tags:
+        tags.append('any-source')  # no peer field: every source, the host included
+        host.append(True)
+    return sorted(set(tags)), any3(host)
+
+
+def port_entry(entry):
+    """(shown, tcp8080) for one toPorts.ports entry. Protocol missing = ANY. Port 0 = every port; endPort a range;
+    a named or malformed port, an unknown protocol or field: unknown."""
+    if not isinstance(entry, dict):
+        return {'port': 'other', 'protocol': 'other'}, UNKNOWN
+    protocol = str(entry.get('protocol', 'ANY')).upper()
+    shown = {'protocol': protocol if protocol in PROTOCOLS else 'other'}
+    proto = True if protocol in ('TCP', 'ANY') else False if protocol in PROTOCOLS else UNKNOWN
+    raw = entry.get('port')
+    raw = str(raw) if type(raw) in (str, int) else ''
+    end = entry.get('endPort', None)
+    if not raw.isdigit():
+        shown['port'] = 'named' if raw else 'other'
+        port = UNKNOWN
+    else:
+        number = int(raw)
+        shown['port'] = number
+        if 'endPort' in entry:
+            shown['endPort'] = end if type(end) is int else 'other'
+        if number == 0:
+            port = True
+        elif 'endPort' not in entry:
+            port = number == 8080
+        elif type(end) is int:
+            port = number <= 8080 <= end
+        else:
+            port = UNKNOWN
+    if set(entry) - {'port', 'protocol', 'endPort'}:
+        shown['extra'] = True
+        port = all3([port, UNKNOWN]) if port is not False else False
+    return shown, all3([proto, port])
 
 
 def ports(rule):
+    """(shown, tcp8080): whether the rule's ports include TCP 8080. No toPorts = every port. A block with more than
+    `ports` (L7 rules, listener, TLS) or without ports is unknown."""
     if not rule.get('toPorts'):
-        return 'any'
-    found = []
-    for block in rule['toPorts']:
-        for port in (block or {}).get('ports') or []:
-            raw = str((port or {}).get('port', ''))
-            found.append(int(raw) if raw.isdigit() else 'other')
-    return sorted(set(found), key=str)
+        return 'any', True
+    shown, verdicts = [], []
+    for block in rule['toPorts'] if isinstance(rule['toPorts'], list) else [None]:
+        if not isinstance(block, dict) or set(block) - {'ports'} or not block.get('ports'):
+            shown.append({'block': 'other'})
+            verdicts.append(UNKNOWN)
+            continue
+        for entry in block['ports'] if isinstance(block['ports'], list) else [None]:
+            seen, verdict = port_entry(entry)
+            shown.append(seen)
+            verdicts.append(verdict)
+    return shown, any3(verdicts)
 
 
 def policies(labels):
+    """Allow / deny rules from the host to TCP 8080 on policies that select (or may select) the api endpoint, as an
+    observation of the policy objects only: no deny precedence, no datapath. Anything not interpreted stays unknown."""
     items = [(x, 'CNP') for x in kjson(['-n', 'm2-hosting', 'get', 'ciliumnetworkpolicies']).get('items', [])]
     items += [(x, 'CCNP') for x in kjson(['get', 'ciliumclusterwidenetworkpolicies']).get('items', [])]
-    listed, host8080 = [], []
+    k8s = len(kjson(['-n', 'm2-hosting', 'get', 'networkpolicies']).get('items', []))
+    listed, found, unparsed = [], {'ingress': [], 'ingressDeny': []}, 0
     for item, kind in items:
+        item = item if isinstance(item, dict) else {}
         name = (item.get('metadata') or {}).get('name')
-        specs = [item.get('spec')] if item.get('spec') else []
-        specs += list(item.get('specs') or [])
+        specs = [item.get('spec')] if 'spec' in item else []
+        specs += list(item.get('specs') or []) if isinstance(item.get('specs'), list) else (
+            [None] if 'specs' in item else [])
         for spec in specs:
             if not isinstance(spec, dict):
+                unparsed += 1
                 continue
             if 'endpointSelector' in spec:
                 chosen = selects_api(spec.get('endpointSelector'), labels)
+            elif 'nodeSelector' in spec:
+                chosen = False  # a host policy, not the api endpoint
             else:
-                chosen = False  # nodeSelector: a host policy, not the api endpoint
+                chosen = UNKNOWN
             rules = []
             for direction in ('ingress', 'ingressDeny'):
-                for rule in spec.get(direction) or []:
+                listed_rules = spec.get(direction) or []
+                for rule in listed_rules if isinstance(listed_rules, list) else [None]:
                     if not isinstance(rule, dict):
+                        unparsed += 1
                         continue
-                    entry = {'direction': direction, 'from': sources(rule), 'ports': ports(rule)}
-                    rules.append(entry)
-                    # a rule with no peer field (toPorts only) admits every source, the host included
-                    hostish = {'entities:host', 'entities:all', 'any-source'} & set(entry['from'])
-                    if chosen is not False and hostish and (entry['ports'] == 'any' or 8080 in entry['ports']):
-                        host8080.append({'policy': name if name in POLICY_NAMES else 'other', 'direction': direction,
-                                         'selects': chosen, 'from': sorted(hostish)})
+                    tags, host = sources(rule)
+                    shown, tcp = ports(rule)
+                    match = all3([host, tcp])
+                    rules.append({'direction': direction, 'from': tags, 'ports': shown, 'hostSource': host,
+                                  'tcp8080': tcp, 'match': match})
+                    if chosen is not False:
+                        found[direction].append(all3([chosen, match]))
             deny = spec.get('enableDefaultDeny')
             listed.append({'kind': kind, 'name': name if name in POLICY_NAMES else 'other', 'selectsApi': chosen,
                            'nodeSelector': 'nodeSelector' in spec,
@@ -224,8 +316,22 @@ def policies(labels):
                            if isinstance(deny, dict) else 'missing' if deny is None else 'other',
                            'rules': rules})
     out('policies', items=sorted(listed, key=lambda x: (x['kind'], x['name'], str(x['selectsApi']))),
-        count=len(listed))
-    out('hostTo8080', admitted=any(x['direction'] == 'ingress' for x in host8080), rules=host8080)
+        count=len(listed), unparsed=unparsed, k8sNetworkPolicies=k8s)
+    why = []
+    if labels is None:
+        why.append('not exactly one api endpoint')
+    if unparsed:
+        why.append('unparsed policy parts')
+    if k8s:
+        why.append('Kubernetes NetworkPolicies not interpreted')
+    allow = any3(found['ingress'])
+    if allow is not True and why:
+        allow = UNKNOWN
+    deny = any3(found['ingressDeny'])
+    if deny is not True and why:
+        deny = UNKNOWN
+    out('hostTcp8080', allowRule=allow, denyRule=deny, reasons=why,
+        note='policy objects only: an allow rule observation, not effective access (no deny precedence, no datapath)')
 
 
 def endpoint():
