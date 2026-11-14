@@ -141,6 +141,30 @@ RUNNER_REF = "docker.io/library/anxious-dev-runner:90-159e271"
 RUNTIME_REF = "docker.io/library/anxious-dev-runtime:90-159e271"
 
 
+IMPORT_PINS = ("SOURCE", "RUNNER_TAG_REF", "RUNNER_FILE", "RUNNER_ARCHIVE_SHA", "RUNNER_HOST_ID",
+               "RUNTIME_TAG_REF", "RUNTIME_FILE", "RUNTIME_ARCHIVE_SHA", "RUNTIME_HOST_ID")
+
+
+def import_pins(script):
+    """The committed pin values: each pin is exactly one `KEY=value` line."""
+    found = {}
+    for key in IMPORT_PINS:
+        lines = [line for line in script.splitlines() if line.startswith(key + "=")]
+        assert len(lines) == 1, key
+        found[key] = lines[0][len(key) + 1:]
+    return found
+
+
+def with_pins(script, pins):
+    """The script with each named pin line replaced (the committed value, whatever it is, is never matched)."""
+    committed = import_pins(script)
+    for key, value in pins.items():
+        old = "\n%s=%s\n" % (key, committed[key])
+        assert script.count(old) == 1, key
+        script = script.replace(old, "\n%s=%s\n" % (key, value))
+    return script
+
+
 def import_setup(tmp_path, archive_bytes=(b"runner", b"runtime")):
     import hashlib
     images, evidence = tmp_path / "images", tmp_path / "evidence"
@@ -161,9 +185,7 @@ def import_setup(tmp_path, archive_bytes=(b"runner", b"runtime")):
             "RUNNER_ARCHIVE_SHA": hashlib.sha256(b"runner").hexdigest(), "RUNNER_HOST_ID": RUNNER_ID,
             "RUNTIME_TAG_REF": RUNTIME_REF, "RUNTIME_FILE": "anxious-dev-runtime-90-159e271.tar",
             "RUNTIME_ARCHIVE_SHA": hashlib.sha256(b"runtime").hexdigest(), "RUNTIME_HOST_ID": RUNTIME_ID}
-    for key, value in pins.items():
-        assert script.count("\n%s=PIN\n" % key) == 1
-        script = script.replace("\n%s=PIN\n" % key, "\n%s=%s\n" % (key, value))
+    script = with_pins(script, pins)
     script = (script.replace("K3S=/usr/local/bin/k3s", "K3S=" + str(fake))
               .replace("EVIDENCE=/root/issue90/evidence", "EVIDENCE=" + str(evidence))
               .replace("IMAGES=/home/opc/issue90-images", "IMAGES=" + str(images))
@@ -181,8 +203,35 @@ def run_import(script, state, stamp="20261114T000000Z"):
 
 
 def test_import_refuses_while_a_pin_is_the_placeholder(tmp_path):
-    result = subprocess.run(["sh", "-c", (VM / "i90-import.sh").read_text()], capture_output=True, text=True)
-    assert result.returncode == 3 and "a pin is still the placeholder" in result.stdout
+    """The guard stays: any one pin put back to PIN refuses before the evidence file or k3s is touched."""
+    script, state, evidence = import_setup(tmp_path)
+    before = state.read_text()
+    for key in IMPORT_PINS:
+        code, out = run_import(with_pins(script, {key: "PIN"}), state)
+        assert code == 3 and "a pin is still the placeholder" in out, key
+        assert state.read_text() == before and list(evidence.iterdir()) == [], key
+
+
+def test_import_committed_pins_are_one_stage_a_build():
+    """Stage B pins (filled from the stage A images.txt / archives.sha256): no placeholder left, the formats hold,
+    and they agree with i90-switch.py's tags and host ids. The values themselves are checked by review against the
+    build output, by hash."""
+    pins = import_pins((VM / "i90-import.sh").read_text())
+    assert "PIN" not in pins.values()
+    hexdigits = set("0123456789abcdef")
+    source = pins["SOURCE"]
+    assert len(source) == 40 and set(source) <= hexdigits
+    module = switch()
+    for name, tag, ident in (("runner", module.NEW_TAG, module.NEW_ID), ("runtime", module.API_TAG, module.API_ID)):
+        key = name.upper()
+        assert pins[key + "_TAG_REF"] == tag == "docker.io/library/anxious-dev-%s:90-%s" % (name, source[:7])
+        assert pins[key + "_FILE"] == "anxious-dev-%s-90-%s.tar" % (name, source[:7])
+        sha = pins[key + "_ARCHIVE_SHA"]
+        assert len(sha) == 64 and set(sha) <= hexdigits
+        assert pins[key + "_HOST_ID"] == ident
+        assert ident.startswith("sha256:") and len(ident) == 71 and set(ident[7:]) <= hexdigits
+    assert pins["RUNNER_HOST_ID"] != pins["RUNTIME_HOST_ID"]
+    assert pins["RUNNER_ARCHIVE_SHA"] != pins["RUNTIME_ARCHIVE_SHA"]
 
 
 def test_import_both_chains_and_digest_references(tmp_path):
@@ -251,8 +300,8 @@ def expected_doc(module, **changes):
 
 def test_switch_pins_are_placeholders_and_block_every_mode_but_survey():
     module = switch()
-    assert module.pins_missing() == ["API_ID", "LEDGERS ledger-isolation-42.json", "LEDGERS ledger-resources-6.json",
-                                     "NEW_ID", "OLD_REF"]
+    # NEW_ID / API_ID are filled from stage A; OLD_REF and LEDGERS wait for `survey`.
+    assert module.pins_missing() == ["LEDGERS ledger-isolation-42.json", "LEDGERS ledger-resources-6.json", "OLD_REF"]
     with pytest.raises(module.Stop) as stopped:
         module.load_expected("0" * 64)
     assert stopped.value.code == 3 and "pins are still placeholders" in stopped.value.message

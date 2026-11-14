@@ -21,15 +21,15 @@ umask 077
 K3S=/usr/local/bin/k3s
 EVIDENCE=/root/issue90/evidence
 IMAGES=/home/opc/issue90-images
-SOURCE=PIN
-RUNNER_TAG_REF=PIN
-RUNNER_FILE=PIN
-RUNNER_ARCHIVE_SHA=PIN
-RUNNER_HOST_ID=PIN
-RUNTIME_TAG_REF=PIN
-RUNTIME_FILE=PIN
-RUNTIME_ARCHIVE_SHA=PIN
-RUNTIME_HOST_ID=PIN
+SOURCE=159e271c33853e93740c213db331103dd9359622
+RUNNER_TAG_REF=docker.io/library/anxious-dev-runner:90-159e271
+RUNNER_FILE=anxious-dev-runner-90-159e271.tar
+RUNNER_ARCHIVE_SHA=19ff92c8ed5aa515db711d21a8ca47aa507a0cdb22f20966797b9fc08a6eaa31
+RUNNER_HOST_ID=sha256:d0c261e4a7981d209115685e341fa40550413609bff051a8a7cef25b793faf57
+RUNTIME_TAG_REF=docker.io/library/anxious-dev-runtime:90-159e271
+RUNTIME_FILE=anxious-dev-runtime-90-159e271.tar
+RUNTIME_ARCHIVE_SHA=5ef3b6cbe0cdbcda3da01abc6853d7c99fdd8fa5968c667cb8ca01b91ecfbc08
+RUNTIME_HOST_ID=sha256:2af56f1366e7815a4273f95686e311d16e907112fbe25cbf53cad1e831d90d5f
 
 image_id() { timeout 30 "$K3S" crictl inspecti -o go-template --template '{{.status.id}}' "$1" 2>/dev/null; }
 
