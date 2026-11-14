@@ -348,6 +348,11 @@ PM decisions Q1–Q5, review plan notes; its docstring is the specification). In
   - Contract v1.4: ids are not guaranteed; turn-level replacement is the rule.
   - r5 adds `enable-r5` → `turns-r5` (S2–S6, six turns) → `disable-r5`. Text is matched by kind and order; V1 is printed as an observation.
   - `enable-r5` continues through the reviewed decision `vm/i90-p5-continue-r5.json`. S0 and S1 stay False; budget 2 used, 6 left.
+- **r22 (2026-11-15, r6):**
+  - `turns-r5` passed S2 (text) and S3 (interrupt), then stopped at S4a before its turn: hop ② found two Services sharing the api selector (`api` and `api-internal`, confirmed by the read-only r6a listing).
+  - r6 selects hop ② explicitly: the Service named `api`, a valid cluster IP, and one `http` port 8080.
+  - r6 adds `enable-r6` → `turns-r6` (S4a, S4b, S5, S6) → `disable-r6`. `enable-r6` continues through `vm/i90-p5-continue-r6.json`.
+  - Budget: 4 used, 4 left.
 - The rest of this section is the original P5 design that the script implements.
 
 **Prerequisite P5-0 (code, separate review)**: the runner Pod env must be able to carry `RUNNER_STREAM_TEXT=true` and `STREAM_TRACE=true`.

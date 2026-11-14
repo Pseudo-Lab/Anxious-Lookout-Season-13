@@ -8,6 +8,7 @@ root on the guest, each action other than `check` once, as a systemd unit, after
     systemd-run … python3 -I -B /root/issue90/i90-p5.py turns    # S1-S6: 7 turns, stops at the first False step
     systemd-run … python3 -I -B /root/issue90/i90-p5.py disable  # both templates back to enable's recorded ones
     systemd-run … python3 -I -B /root/issue90/i90-p5.py enable-r5 / turns-r5 / disable-r5  # r5: S2-S6 (see below)
+    systemd-run … python3 -I -B /root/issue90/i90-p5.py enable-r6 / turns-r6 / disable-r6  # r6: S4a-S6 (see below)
 
 r5 (2026-11-15, after turns stopped at S1 on V1 and disable restored the templates; PM r5 decision, review notes):
 the second round enable-r5 -> turns-r5 (S2-S6, six turns, S1 not repeated) -> disable-r5 does what enable / turns /
@@ -18,6 +19,14 @@ False on record. Text is matched by kind and order, never by id (contract v1.4: 
 final agentMessage of the request (first appearance via item.started or snapshot.item, reset by snapshot.begin;
 summary from item.completed or snapshot.end with observed text) against GET's final assistant message (`final_agent`,
 `same_text`); the id overlap is printed as `V1 observation` only.
+
+r6 (2026-11-15, after turns-r5 stopped at S4a before its turn: two Services share selector app=hosting-api, api
+:8080 http and api-internal :8081 internal - r6a read-only listing): hop ② is now exactly the Service named api with that
+selector, a valid non-headless cluster IP and one http port 8080 (`service_hop`, HOP2; no fallback). The third round
+enable-r6 -> turns-r6 (S4a, S4b, S5, S6; four turns) -> disable-r6 continues only through CONTINUE_R6_FILE at
+CONTINUE_R6_SHA, which binds the turns-r5 / disable-r5 runs, their exit bytes and typed facts (the r6a pins; JSON null
+kept, no release key added), the budget S0-S3 accepted and the S0 conversation. Later rounds share one code path
+(ROUNDS, `round_accepted`, `bound_conversation`).
 
 Budget (PM: 8 turns, hard cap 8, a failed turn counts, no retry; a 9th needs the user through PM). Review plan-notes
 major: a turn is **reserved durably before its POST**, under the shared lock (evidence/i90-p5-budget.json, written and
@@ -105,6 +114,7 @@ import calendar
 import fcntl
 import hashlib
 import http.client
+import ipaddress
 import json
 import os
 import re
@@ -129,6 +139,8 @@ SOURCE = 'bb3aa97070f175a74eec3a0c024cd158cd64fadd'  # IMAGE_SHA of the stage R 
 CONTINUE_FILE = '/root/issue90/i90-p5-continue.json'
 CONTINUE_R5_FILE = '/root/issue90/i90-p5-continue-r5.json'
 CONTINUE_R5_SHA = '79055b18abb511944b04b64d9364bf210176fca8343e6df879afb9440b30fcf7'  # i90-p5-continue-r5.json (r5 decision), from sha256sum
+CONTINUE_R6_FILE = '/root/issue90/i90-p5-continue-r6.json'
+CONTINUE_R6_SHA = 'd4d422ad315aa5bb88d1ff19e44d0d1db9f9f885ae5a38f2a665d83ac09ba5f8'  # i90-p5-continue-r6.json (r6 decision), from sha256sum
 CONTINUE_SHA = '72995355c4534891b93ad633045eeefbeb7815974ebb10224f487795cf9a44bd'  # i90-p5-continue.json (r4 decision, pins from i90-p5-s0-pins.py output), from sha256sum
 K3S, DOCKER = '/usr/local/bin/k3s', '/usr/bin/docker'
 EVIDENCE = '/root/issue90/evidence'
@@ -152,8 +164,10 @@ RUNNER_GRACE = 20
 SUMMARY_WAIT = 30
 TURN_LIMIT = 900             # seconds a turn may run before the step gives up (the turn is not stopped by this)
 STATS_IDLE = 12              # > the 10 s a PostgreSQL backend may keep pending statistics while idle
-ACTIONS = ('check', 's0', 'enable', 'turns', 'disable', 'enable-r5', 'turns-r5', 'disable-r5')
+ACTIONS = ('check', 's0', 'enable', 'turns', 'disable', 'enable-r5', 'turns-r5', 'disable-r5', 'enable-r6', 'turns-r6',
+           'disable-r6')
 R5_ACTIONS = ('enable-r5', 'turns-r5', 'disable-r5')  # r5: S2-S6 after the S1-stopped round (own once-guards)
+R6_ACTIONS = ('enable-r6', 'turns-r6', 'disable-r6')  # r6: S4a-S6 after turns-r5 stopped at S4a (own once-guards)
 PROMPTS = {
     'S0': 'Use the research_list tool once to list my research items, then reply with one short sentence saying how '
           'many items there are.',
@@ -169,6 +183,18 @@ PROMPTS = {
 }
 TURN_STEPS = ('S1', 'S2', 'S3', 'S4a', 'S4b', 'S5', 'S6')
 TURN_STEPS_R5 = TURN_STEPS[1:]  # S1 is not repeated (PM r5 decision)
+TURN_STEPS_R6 = TURN_STEPS[3:]  # S4a, S4b, S5, S6: S2 / S3 passed in r5 and are not repeated (PM)
+# Later rounds: their decision (module constant names, read at call time), its version, the previous round's turns /
+# disable actions, the exact budget so far and the steps they run.
+ROUNDS = {
+    '-r5': {'file': 'CONTINUE_R5_FILE', 'sha': 'CONTINUE_R5_SHA', 'name': 'i90-p5-continue-r5.json',
+            'version': 'i90-p5-continue-r5-r0', 'previous': ('turns', 'disable'),
+            'budget': [[1, 'S0', 'accepted'], [2, 'S1', 'accepted']], 'steps': TURN_STEPS_R5},
+    '-r6': {'file': 'CONTINUE_R6_FILE', 'sha': 'CONTINUE_R6_SHA', 'name': 'i90-p5-continue-r6.json',
+            'version': 'i90-p5-continue-r6-r0', 'previous': ('turns-r5', 'disable-r5'),
+            'budget': [[1, 'S0', 'accepted'], [2, 'S1', 'accepted'], [3, 'S2', 'accepted'], [4, 'S3', 'accepted']],
+            'steps': TURN_STEPS_R6},
+}
 SESSION, OUT, STOPPING, CLIENTS, FOLLOWERS, ENTERED, PRIVATE = {}, {'stream': None}, {'requested': False}, [], [], {}, {}
 
 
@@ -527,9 +553,19 @@ def enable(ev, doc):
         % (template_sha(deployment(CTRL, 8)), template_sha(deployment(API, 8))))
 
 
+def suffix(action):
+    """'-r5' / '-r6' for a later round's action, '' for the first round's."""
+    return action[-3:] if action in R5_ACTIONS + R6_ACTIONS else ''
+
+
+def round_actions(sfx):
+    return tuple(a + sfx for a in ('enable', 'turns', 'disable'))
+
+
 def base(action):
-    """The behaviour of an action: an r5 action does what its first-round namesake does (own evidence and once-guard)."""
-    return action[:-3] if action in R5_ACTIONS else action
+    """The behaviour of an action: a later round's action does what its first-round namesake does (own evidence and
+    once-guard)."""
+    return action[:-3] if suffix(action) else action
 
 
 def enable_record(enable_action='enable'):
@@ -1344,12 +1380,28 @@ def delays(client, sent):
             'p95': round(values[min(len(values) - 1, int(len(values) * 0.95))], 1), 'max': round(values[-1], 1)}
 
 
+HOP2 = ('api', 'http', 8080)  # r6 (r6a: Services api :8080 http and api-internal :8081 internal share the selector)
+
+
 def service_hop():
+    """Hop ②: exactly the Service named `api` in m2-hosting, selector exactly {app: hosting-api}, a valid non-headless
+    cluster IP, and exactly one port named `http` with port 8080 (review r6a: no fallback to api-internal or to the first
+    Service / port; anything ambiguous refuses). Stop(5) before the turn is reserved."""
     items = kjson(['-n', API[0], 'get', 'services'], 5, 'api Service lookup failed')['items']
-    found = [s for s in items if (s.get('spec') or {}).get('selector') == {'app': 'hosting-api'}]
-    if len(found) != 1 or not found[0]['spec'].get('clusterIP') or not found[0]['spec'].get('ports'):
-        raise Stop(5, 'not exactly one api Service with a cluster IP')
-    return found[0]['spec']['clusterIP'], int(found[0]['spec']['ports'][0]['port'])
+    named = [s for s in items if (s.get('metadata') or {}).get('name') == HOP2[0]]
+    if len(named) != 1:
+        raise Stop(5, 'hop ②: not exactly one Service named %s (%d)' % (HOP2[0], len(named)))
+    spec = named[0].get('spec') or {}
+    if spec.get('selector') != {'app': 'hosting-api'}:
+        raise Stop(5, 'hop ②: the %s Service selector is not exactly app=hosting-api' % HOP2[0])
+    try:
+        address = ipaddress.ip_address(spec.get('clusterIP') or '')
+    except ValueError:
+        raise Stop(5, 'hop ②: the %s Service has no valid cluster IP (headless or missing)' % HOP2[0]) from None
+    ports = [p for p in spec.get('ports') or [] if isinstance(p, dict) and p.get('name') == HOP2[1]]
+    if len(ports) != 1 or ports[0].get('port') != HOP2[2] or type(ports[0].get('port')) is not int:
+        raise Stop(5, 'hop ②: the %s Service has not exactly one %s port %d' % HOP2)
+    return str(address), HOP2[2]
 
 
 def turn(ev, step, conversation, runner, prompt, readers, db=False, during=None):
@@ -1638,30 +1690,35 @@ def conversation_of_s0():
     return conversation
 
 
-def r5_conversation(decision=None):
-    """review r5 major: the r5 POST target is the original S0 conversation, bound by the r5 decision - the one s0 run
-    by name and the sha256 of the full conversation UUID (shape checked; a prefix is not enough). Checked by the
-    enable-r5 guard and again right before turns-r5 uses the target. Stop(3) otherwise."""
+def bound_conversation(sfx, decision=None):
+    """review r5 major: a later round's POST target is the original S0 conversation, bound by that round's decision -
+    the one s0 run by name and the sha256 of the full conversation UUID (shape checked; a prefix is not enough).
+    Checked by the round's enable guard and again right before its turns action uses the target. Stop(3) otherwise."""
+    config = ROUNDS[sfx]
     if decision is None:
         try:
-            decision = json.loads(read_pinned(CONTINUE_R5_FILE, CONTINUE_R5_SHA, 'i90-p5-continue-r5.json'))
+            decision = json.loads(read_pinned(globals()[config['file']], globals()[config['sha']], config['name']))
         except Stop:
             raise
         except Exception:
-            raise Stop(3, 'the r5 continuation decision is unreadable; nothing sent') from None
+            raise Stop(3, 'the %s continuation decision is unreadable; nothing sent' % sfx[1:]) from None
     runs = runs_of('s0')
     if not isinstance(decision, dict) or len(runs) != 1 or runs[0] != decision.get('s0Run'):
-        raise Stop(3, 'the r5 target: not exactly the bound s0 run; nothing sent')
+        raise Stop(3, 'the %s target: not exactly the bound s0 run; nothing sent' % sfx[1:])
     try:
         run = json.loads(read_plain(os.path.join(EVIDENCE, runs[0], 'run.json')))
     except Exception:
-        raise Stop(3, 'the r5 target: the s0 run.json is unreadable; nothing sent') from None
+        raise Stop(3, 'the %s target: the s0 run.json is unreadable; nothing sent' % sfx[1:]) from None
     conversation = run.get('conversation') if isinstance(run, dict) else None
     want = decision.get('conversationSha256')
     if not (isinstance(conversation, str) and UUID_SHAPE.fullmatch(conversation) and isinstance(want, str)
             and re.fullmatch(r'[0-9a-f]{64}', want) and hashlib.sha256(conversation.encode()).hexdigest() == want):
-        raise Stop(3, 'the r5 target: the s0 conversation is not the bound full UUID; nothing sent')
+        raise Stop(3, 'the %s target: the s0 conversation is not the bound full UUID; nothing sent' % sfx[1:])
     return conversation
+
+
+def r5_conversation(decision=None):
+    return bound_conversation('-r5', decision)
 
 
 def held():
@@ -1762,46 +1819,50 @@ def guard(action):
         if name:
             raise Stop(3, 'a held state (rc 7 / 8, or an unreadable exit) of %s: back and review decide; nothing sent'
                        % name)
-    if action == 'enable-r5':
-        say('enable-r5 precondition: %s' % r5_accepted())
-    if action == 'turns-r5':
-        done = [exit_of(n) for n in runs_of('enable-r5')]
-        if len(done) != 1 or not done[0] or done[0]['rc'] != 0:
-            raise Stop(3, 'turns-r5 needs exactly one enable-r5 that ended rc 0')
-        if runs_of('disable-r5'):
-            raise Stop(3, 'turns-r5 after disable-r5 is refused')
-    if action == 'disable-r5':
-        if len(runs_of('enable-r5')) != 1:
-            raise Stop(3, 'disable-r5 needs exactly one enable-r5 run')
-        name = held()
-        if name:
-            raise Stop(3, 'a held state (rc 7 / 8, or an unreadable exit) of %s: back and review decide; nothing sent'
-                       % name)
+    if suffix(action):
+        sfx = suffix(action)
+        enable_a, turns_a, disable_a = round_actions(sfx)
+        if action == enable_a:
+            say('%s precondition: %s' % (action, round_accepted(sfx)))
+        if action == turns_a:
+            done = [exit_of(n) for n in runs_of(enable_a)]
+            if len(done) != 1 or not done[0] or done[0]['rc'] != 0:
+                raise Stop(3, '%s needs exactly one %s that ended rc 0' % (turns_a, enable_a))
+            if runs_of(disable_a):
+                raise Stop(3, '%s after %s is refused' % (turns_a, disable_a))
+        if action == disable_a:
+            if len(runs_of(enable_a)) != 1:
+                raise Stop(3, '%s needs exactly one %s run' % (disable_a, enable_a))
+            name = held()
+            if name:
+                raise Stop(3, 'a held state (rc 7 / 8, or an unreadable exit) of %s: back and review decide; nothing '
+                              'sent' % name)
 
 
-def r5_accepted():
-    """r5 continuation (PM r5 decision; review r5 notes): the reviewed decision CONTINUE_R5_FILE at CONTINUE_R5_SHA binds
-    the first round's end exactly - the one `turns` run and the one `disable` run by name, the sha256 of each exit.json's
-    bytes and, field by field (type-strict, a missing key is not null), their recorded facts (turns: rc 0, S1 False,
-    release True, stopped at S1, cleanup; disable: rc 0) - and the budget (exactly S0 and S1, both accepted). No r5 run
-    may exist yet. Nothing is rewritten. Anything missing or different: Stop(3), nothing sent."""
+def round_accepted(sfx):
+    """A later round's continuation (r5: PM r5 decision, review r5 notes; r6: PM / review after turns-r5 stopped at
+    S4a): the reviewed decision ROUNDS[sfx] file at its pinned sha binds the previous round's end exactly - its turns
+    run and its disable run by name, the sha256 of each exit.json's bytes and, field by field (type-strict, a missing
+    key is not null), their recorded facts - the budget (exactly the listed accepted turns) and the S0 conversation.
+    No run of this round may exist yet. Nothing is rewritten. Anything missing or different: Stop(3), nothing sent."""
+    config = ROUNDS[sfx]
     try:
-        decision = json.loads(read_pinned(CONTINUE_R5_FILE, CONTINUE_R5_SHA, 'i90-p5-continue-r5.json'))
+        decision = json.loads(read_pinned(globals()[config['file']], globals()[config['sha']], config['name']))
     except Stop:
         raise
     except Exception:
-        raise Stop(3, 'the r5 continuation decision is unreadable; nothing sent') from None
+        raise Stop(3, 'the %s continuation decision is unreadable; nothing sent' % sfx[1:]) from None
     if not isinstance(decision, dict):
-        raise Stop(3, 'the r5 continuation decision is not an object; nothing sent')
+        raise Stop(3, 'the %s continuation decision is not an object; nothing sent' % sfx[1:])
     try:
-        r5_conversation(decision)
+        bound_conversation(sfx, decision)
         bound = True
     except Stop:
         bound = False
-    checks = {'version': decision.get('version') == 'i90-p5-continue-r5-r0', 'conversation': bound,
-              'noR5Run': not any(runs_of(a) for a in R5_ACTIONS)}
-    for action in ('turns', 'disable'):
-        want = decision.get(action) if isinstance(decision.get(action), dict) else {}
+    checks = {'version': decision.get('version') == config['version'], 'conversation': bound,
+              'noRoundRun': not any(runs_of(a) for a in round_actions(sfx))}
+    for key, action in zip(('turns', 'disable'), config['previous']):
+        want = decision.get(key) if isinstance(decision.get(key), dict) else {}
         runs = runs_of(action)
         try:
             raw = read_plain(os.path.join(EVIDENCE, runs[0], 'exit.json')) if len(runs) == 1 else None
@@ -1809,22 +1870,26 @@ def r5_accepted():
         except Exception:
             raw, done = None, None
         recorded = want.get('recorded') if isinstance(want.get('recorded'), dict) else None
-        checks[action] = (len(runs) == 1 and runs[0] == want.get('run') and raw is not None
-                          and isinstance(want.get('exitSha256'), str)
-                          and re.fullmatch(r'[0-9a-f]{64}', want['exitSha256']) is not None
-                          and hashlib.sha256(raw).hexdigest() == want['exitSha256']
-                          and isinstance(done, dict) and bool(recorded)
-                          and all(k in done and canonical(done[k]) == canonical(v) for k, v in recorded.items()))
+        checks[key] = (len(runs) == 1 and runs[0] == want.get('run') and raw is not None
+                       and isinstance(want.get('exitSha256'), str)
+                       and re.fullmatch(r'[0-9a-f]{64}', want['exitSha256']) is not None
+                       and hashlib.sha256(raw).hexdigest() == want['exitSha256']
+                       and isinstance(done, dict) and bool(recorded)
+                       and all(k in done and canonical(done[k]) == canonical(v) for k, v in recorded.items()))
     turns = budget_read()
-    checks['budget'] = (decision.get('turnsUsed') == 2 and canonical(
-        [[t.get('n'), t.get('step'), t.get('outcome')] for t in turns]) == canonical(
-        [[1, 'S0', 'accepted'], [2, 'S1', 'accepted']]))
+    checks['budget'] = (decision.get('turnsUsed') == len(config['budget']) and canonical(
+        [[t.get('n'), t.get('step'), t.get('outcome')] for t in turns]) == canonical(config['budget']))
     failed = sorted(k for k, ok in checks.items() if not ok)
     if failed:
-        raise Stop(3, 'the r5 continuation decision does not bind the first round (%s); nothing sent'
-                   % ', '.join(failed))
-    return 'S1 False on record; r5 decision %s… binds %s and %s (exit bytes, facts) and budget 2/8' % (
-        CONTINUE_R5_SHA[:8], decision['turns']['run'], decision['disable']['run'])
+        raise Stop(3, 'the %s continuation decision does not bind the previous round (%s); nothing sent'
+                   % (sfx[1:], ', '.join(failed)))
+    return '%s decision %s… binds %s and %s (exit bytes, facts), the S0 conversation and budget %d/8' % (
+        sfx[1:], globals()[config['sha']][:8], decision['turns']['run'], decision['disable']['run'],
+        len(config['budget']))
+
+
+def r5_accepted():
+    return round_accepted('-r5')
 
 
 def precheck(doc, action):
@@ -1888,7 +1953,7 @@ def measure(ev, doc, action, verdicts):
         record_required(ev, 5, 'the conversation id could not be saved; no turn sent', conversation=conversation)
         say('P5 conversation %s created (not a turn)' % conversation[:8])
     else:
-        conversation = r5_conversation() if action in R5_ACTIONS else conversation_of_s0()
+        conversation = bound_conversation(suffix(action)) if suffix(action) else conversation_of_s0()
         say('P5 conversation %s (from s0)' % conversation[:8])
     if base(action) == 'turns':
         prepare_private(ev, doc['toolImage'])
@@ -1906,8 +1971,8 @@ def measure(ev, doc, action, verdicts):
                  ('S4b', lambda: step_s4(ev, conversation, runner, verdicts, 'S4b')),
                  ('S5', lambda: step_s5(ev, conversation, runner, verdicts)),
                  ('S6', lambda: step_s6(ev, conversation, runner, verdicts)))
-        if action == 'turns-r5':  # S1 is not repeated (PM r5 decision)
-            steps = steps[1:]
+        if suffix(action):  # a later round runs only its listed steps (S1 not repeated in r5; S1-S3 not in r6)
+            steps = tuple(s for s in steps if s[0] in ROUNDS[suffix(action)]['steps'])
     stopped_at = None
     for name, step in steps:
         time.sleep(1.1)
@@ -1983,7 +2048,7 @@ def main(argv):
             if base(action) == 'enable':
                 enable(ev, doc)
             elif base(action) == 'disable':
-                disable(ev, doc, 'enable-r5' if action == 'disable-r5' else 'enable')
+                disable(ev, doc, 'enable' + suffix(action))
             else:
                 stopped_at = measure(ev, doc, action, verdicts)
         except Stop as stop:
@@ -2006,8 +2071,8 @@ def main(argv):
     say('cleanup: runner released %s; client containers gone %s; private files removed %s; session revoked %s'
         % ({None: 'n/a'}.get(runner, runner), gone, {None: 'n/a'}.get(private, private),
            {None: 'n/a'}.get(revoked, revoked)))
-    items = ('S0',) if action == 's0' else TURN_STEPS if action == 'turns' else TURN_STEPS_R5 if action == 'turns-r5' \
-        else ()
+    items = ('S0',) if action == 's0' else TURN_STEPS if action == 'turns' else \
+        tuple(ROUNDS[suffix(action)]['steps']) if suffix(action) and base(action) == 'turns' else ()
     for name in items:
         say('verdict %s: %s' % (name, {True: 'True', False: 'False'}.get(verdicts.get(name), 'unknown')))
     if items:
@@ -2045,7 +2110,6 @@ def main(argv):
 
 
 NEXT = ('s0', 'enable', 'turns', 'disable')
-NEXT_R5 = ('enable-r5', 'turns-r5', 'disable-r5')
 
 
 def next_step(action, code, passed):
@@ -2053,7 +2117,7 @@ def next_step(action, code, passed):
     A result missing from disk (no exit.json) is not covered here: unknown, read-only check, back / review decide.
     r5 actions follow the same table with their own round (disable-r5 after enable-r5)."""
     enabled = base(action) in ('enable', 'turns')
-    off = 'disable-r5' if action in R5_ACTIONS else 'disable'
+    off = 'disable' + suffix(action)
     if code in (7, 8):
         return 'HELD: report at once; nothing else is run, %s included; back and review decide' % off
     if code == 80:
@@ -2071,7 +2135,7 @@ def next_step(action, code, passed):
         return ('stop here, the remaining turns unspent; %s' % ('%s next' % off if enabled else 'report'))
     if base(action) == 'disable':
         return 'P5 complete: report the results'
-    order = NEXT_R5 if action in R5_ACTIONS else NEXT
+    order = round_actions(suffix(action)) if suffix(action) else NEXT
     return 'the next action: %s' % order[order.index(action) + 1] if action in order[:-1] else 'report'
 
 

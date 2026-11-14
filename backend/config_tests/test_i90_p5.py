@@ -980,7 +980,7 @@ def test_turns_r5_skips_s1_and_follows_the_stop_policy(m, monkeypatch, tmp_path)
         monkeypatch.setattr(m, "step_" + name, fake(name.upper()))
     monkeypatch.setattr(m, "step_s4", fake("S4"))
     for name, value in (("create_session", lambda ev: None), ("conversation_of_s0", lambda: "c" * 36),
-                        ("r5_conversation", lambda: "c" * 36),
+                        ("r5_conversation", lambda: "c" * 36), ("bound_conversation", lambda sfx: "c" * 36),
                         ("prepare_private", lambda ev, image: None), ("probe_private", lambda: None),
                         ("start_runner", lambda *a: {}), ("stop_runner", lambda *a: True)):
         monkeypatch.setattr(m, name, value)
@@ -1040,3 +1040,157 @@ def test_r5_target_is_the_bound_conversation(m, tmp_path, monkeypatch):
     value = json.loads((VM / "i90-p5-continue-r5.json").read_text())
     s0 = json.loads((VM / "i90-p5-continue.json").read_text())
     assert value["s0Run"] == s0["s0Run"] and value["conversationSha256"] == s0["conversationSha256"]
+
+
+# --- r6: hop ② selects the api Service explicitly; the r6 continuation; turns-r6 ---------------------------------
+
+def svc6(name, selector=None, ip="10.43.0.10", ports=None):
+    return {"metadata": {"name": name}, "spec": {"selector": {"app": "hosting-api"} if selector is None else selector,
+                                                 "clusterIP": ip,
+                                                 "ports": [{"name": "http", "port": 8080}] if ports is None else ports}}
+
+
+def hop2_with(m, monkeypatch, *items):
+    monkeypatch.setattr(m, "kjson", lambda args, code, message: {"items": list(items)})
+
+
+def test_r6_hop2_picks_the_api_service_never_api_internal(m, monkeypatch):
+    hop2_with(m, monkeypatch, svc6("api-internal", ports=[{"name": "internal", "port": 8081}]), svc6("api"))
+    assert m.service_hop() == ("10.43.0.10", 8080)
+
+
+@pytest.mark.parametrize("items", [
+    [svc6("api-internal", ports=[{"name": "internal", "port": 8081}])],               # no api Service
+    [svc6("api"), svc6("api")],                                                        # two named api
+    [svc6("api", selector={"app": "hosting-api", "tier": "x"})],                      # extra selector key
+    [svc6("api", ip="None")],                                                          # headless
+    [svc6("api", ip="")],                                                              # no IP
+    [svc6("api", ip="not-an-ip")],                                                     # invalid IP
+    [svc6("api", ports=[{"name": "http", "port": 8081}])],                             # wrong port
+    [svc6("api", ports=[{"name": "http", "port": 8080}, {"name": "http", "port": 8080}])],  # two http ports
+    [svc6("api", ports=[{"name": "web", "port": 8080}])],                              # no port named http
+])
+def test_r6_hop2_refuses_anything_ambiguous(m, monkeypatch, items):
+    hop2_with(m, monkeypatch, *items)
+    with pytest.raises(m.Stop) as stopped:
+        m.service_hop()
+    assert stopped.value.code == 5
+
+
+R6_TURNS_EXIT = {"rc": 5, "stepRc": 5, "verdicts": {"S2": True, "S3": True}, "stoppedAt": None, "runnerReleased": True,
+                 "clientsGone": True, "privateRemoved": True, "sessionRevoked": True, "finished": "x"}
+R6_DISABLE_EXIT = {"rc": 0, "stepRc": 0, "verdicts": {}, "stoppedAt": None, "runnerReleased": None, "clientsGone": True,
+                   "privateRemoved": None, "sessionRevoked": None, "finished": "y"}
+TURNS_R5_RUN, DISABLE_R5_RUN = "i90-p5-turns-r5-20261114T170503Z", "i90-p5-disable-r5-20261114T170745Z"
+R6_BUDGET = [{"n": i + 1, "step": s, "outcome": "accepted"} for i, s in enumerate(("S0", "S1", "S2", "S3"))]
+
+
+def r6_state(m, tmp_path, monkeypatch, turns_exit=None, disable_exit=None, budget=None, conversation=CUR, s0=True):
+    if s0:
+        folder = Path(m.EVIDENCE) / S0RUN
+        folder.mkdir(exist_ok=True)
+        (folder / "run.json").write_text(json.dumps({"conversation": conversation}))
+    for run, doc in ((TURNS_R5_RUN, turns_exit or R6_TURNS_EXIT), (DISABLE_R5_RUN, disable_exit or R6_DISABLE_EXIT)):
+        folder = Path(m.EVIDENCE) / run
+        folder.mkdir(exist_ok=True)
+        (folder / "exit.json").write_bytes(json.dumps(doc, sort_keys=True, indent=1).encode())
+    m.durable_json(m.BUDGET, {"cap": 8, "turns": budget or R6_BUDGET})
+    value = json.loads((VM / "i90-p5-continue-r6.json").read_text())
+    value["turns"]["exitSha256"] = hashlib.sha256(json.dumps(R6_TURNS_EXIT, sort_keys=True, indent=1).encode()).hexdigest()
+    value["disable"]["exitSha256"] = hashlib.sha256(json.dumps(R6_DISABLE_EXIT, sort_keys=True, indent=1).encode()
+                                                    ).hexdigest()
+    value["conversationSha256"] = hashlib.sha256(CUR.encode()).hexdigest()
+    data = json.dumps(value).encode()
+    path = tmp_path / "continue-r6.json"
+    path.write_bytes(data)
+    monkeypatch.setattr(m, "CONTINUE_R6_FILE", str(path))
+    monkeypatch.setattr(m, "CONTINUE_R6_SHA", hashlib.sha256(data).hexdigest())
+    monkeypatch.setattr(m, "read_pinned", lambda p, want, name: (
+        open(p, "rb").read() if hashlib.sha256(open(p, "rb").read()).hexdigest() == want
+        else (_ for _ in ()).throw(m.Stop(3, "%s is not the reviewed root file" % name))))
+    return path
+
+
+def test_r6_the_committed_decision_binds_the_r5b_round_with_real_nulls(m):
+    value = json.loads((VM / "i90-p5-continue-r6.json").read_text())
+    assert value["turns"]["run"] == TURNS_R5_RUN and value["disable"]["run"] == DISABLE_R5_RUN
+    assert value["turns"]["recorded"] == {k: v for k, v in R6_TURNS_EXIT.items() if k != "finished"}
+    assert "release" not in value["turns"]["recorded"]["verdicts"] and value["turns"]["recorded"]["stoppedAt"] is None
+    assert value["disable"]["recorded"] == {k: v for k, v in R6_DISABLE_EXIT.items() if k != "finished"}
+    assert value["turnsUsed"] == 4 and value["s0Run"] == json.loads((VM / "i90-p5-continue.json").read_text())["s0Run"]
+    assert m.CONTINUE_R6_SHA == hashlib.sha256((VM / "i90-p5-continue-r6.json").read_bytes()).hexdigest()
+
+
+def test_r6_enable_continues_through_the_bound_decision(m, tmp_path, monkeypatch):
+    r6_state(m, tmp_path, monkeypatch)
+    out = m.round_accepted("-r6")
+    assert "binds %s and %s" % (TURNS_R5_RUN, DISABLE_R5_RUN) in out and "budget 4/8" in out
+    assert m.bound_conversation("-r6") == CUR
+
+
+@pytest.mark.parametrize("case", ["tampered", "release_added", "stopped_at_s4a", "missing_nullable", "budget_five",
+                                  "r6_run_exists", "conversation_changed", "s0_missing", "other_turns_r5_run"])
+def test_r6_continuation_refuses_anything_else(m, tmp_path, monkeypatch, case):
+    if case == "release_added":
+        r6_state(m, tmp_path, monkeypatch, turns_exit=dict(R6_TURNS_EXIT, verdicts={"S2": True, "S3": True,
+                                                                                     "release": True}))
+    elif case == "stopped_at_s4a":
+        r6_state(m, tmp_path, monkeypatch, turns_exit=dict(R6_TURNS_EXIT, stoppedAt="S4a"))
+    elif case == "missing_nullable":
+        r6_state(m, tmp_path, monkeypatch, disable_exit={k: v for k, v in R6_DISABLE_EXIT.items()
+                                                         if k != "sessionRevoked"})
+    elif case == "budget_five":
+        r6_state(m, tmp_path, monkeypatch, budget=R6_BUDGET + [{"n": 5, "step": "S4a", "outcome": "accepted"}])
+    elif case == "conversation_changed":
+        r6_state(m, tmp_path, monkeypatch, conversation="22222222-2222-4222-8222-222222222222")
+    elif case == "s0_missing":
+        r6_state(m, tmp_path, monkeypatch, s0=False)
+    else:
+        path = r6_state(m, tmp_path, monkeypatch)
+        if case == "tampered":
+            path.write_bytes(path.read_bytes().replace(b'"turnsUsed": 4', b'"turnsUsed": 5'))
+        elif case == "r6_run_exists":
+            (Path(m.EVIDENCE) / "i90-p5-enable-r6-20261115T000000Z").mkdir()
+        elif case == "other_turns_r5_run":
+            (Path(m.EVIDENCE) / "i90-p5-turns-r5-20261115T000000Z").mkdir()
+    with pytest.raises(m.Stop) as stopped:
+        m.round_accepted("-r6")
+    assert stopped.value.code == 3
+
+
+def test_turns_r6_runs_s4a_to_s6_only(m, monkeypatch, tmp_path):
+    ran = []
+
+    def fake(step):
+        def run(ev, conversation, runner, verdicts, *rest):
+            name = rest[0] if rest else step
+            ran.append(name)
+            verdicts[name] = True
+        return run
+
+    for name in ("s1", "s2", "s3", "s5", "s6"):
+        monkeypatch.setattr(m, "step_" + name, fake(name.upper()))
+    monkeypatch.setattr(m, "step_s4", fake("S4"))
+    for name, value in (("create_session", lambda ev: None), ("bound_conversation", lambda sfx: "c" * 36),
+                        ("prepare_private", lambda ev, image: None), ("probe_private", lambda: None),
+                        ("start_runner", lambda *a: {}), ("stop_runner", lambda *a: True)):
+        monkeypatch.setattr(m, name, value)
+    verdicts = {}
+    assert m.measure(str(tmp_path), {"toolImage": "x"}, "turns-r6", verdicts) is None
+    assert ran == ["S4a", "S4b", "S5", "S6"]
+
+
+def test_r6_guards_and_next_steps(m):
+    assert m.base("enable-r6") == "enable" and m.suffix("turns-r6") == "-r6" and m.suffix("turns") == ""
+    assert m.next_step("enable-r6", 0, True) == "the next action: turns-r6"
+    assert "disable-r6 next" in m.next_step("turns-r6", 5, False)
+    assert m.next_step("disable-r6", 0, True) == "P5 complete: report the results"
+    with pytest.raises(m.Stop):
+        m.guard("turns-r6")
+    folder = Path(m.EVIDENCE) / "i90-p5-enable-r6-20261115T000000Z"
+    folder.mkdir()
+    (folder / "exit.json").write_text(json.dumps({"rc": 0, "verdicts": {}}))
+    m.guard("turns-r6")
+    (Path(m.EVIDENCE) / "i90-p5-disable-r6-20261115T010000Z").mkdir()
+    with pytest.raises(m.Stop):
+        m.guard("turns-r6")
