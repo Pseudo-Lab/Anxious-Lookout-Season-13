@@ -409,7 +409,7 @@ def test_the_send_time_is_taken_before_the_post(m, monkeypatch):
 # --- step verdicts ---------------------------------------------------------------------------------------------
 
 def test_s6_without_server_stall_evidence_is_unknown(m, monkeypatch):
-    normal = FakeClient([started(m), completed(m, "answer"), fr(m, "turn.completed", CUR, 3)])
+    normal = FakeClient([started(m), completed(m, "answer"), fr(m, "turn.completed", CUR, 3, status="completed")])
     paused = FakeClient([{"kind": "reader_paused", "unixNs": 1}])
     monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
                                                    "clients": {"n": normal, "p": paused},
@@ -421,7 +421,7 @@ def test_s6_without_server_stall_evidence_is_unknown(m, monkeypatch):
 
 def test_s6_passes_with_ready_pause_later_output_one_stall_and_a_complete_normal_reader(m, monkeypatch):
     normal = FakeClient([started(m), fr(m, "item.output", CUR, 5, item=item_hash(m, "c1"), chars=9), completed(m, "answer", t=6),
-                         fr(m, "turn.completed", CUR, 7)])
+                         fr(m, "turn.completed", CUR, 7, status="completed")])
     paused = FakeClient([{"kind": "reader_paused", "unixNs": 1}])
     monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
                                                    "clients": {"n": normal, "p": paused},
@@ -605,7 +605,7 @@ def test_apply_patch_never_mutates_the_patch(m):
 def test_a_snapshot_without_its_end_is_not_finished_nor_trusted(m):
     """runner/stream.py snapshot_rest: turn.completed comes before snapshot.end."""
     records = [fr(m, "snapshot.begin", CUR, 1, turnState="completed"), started(m, t=1, event="snapshot.item"),
-               fr(m, "turn.completed", CUR, 2)]
+               fr(m, "turn.completed", CUR, 2, status="completed")]
     client = FakeClient(records)
     assert m.completed_turn(client, CUR) and m.snapshot_open(client, CUR) and not m.finished(client, CUR)
     equal, detail = m.same_text(client, body_with(m, "answer"), CUR)
@@ -617,7 +617,7 @@ def test_a_snapshot_without_its_end_is_not_finished_nor_trusted(m):
 def test_turn_waits_for_a_delayed_snapshot_end_before_closing_the_reader(m, monkeypatch, tmp_path):
     """review r1 probe through the real turn(): snapshot.end arrives some polls after turn.completed."""
     records = [fr(m, "snapshot.begin", CUR, 1, turnState="completed"), started(m, t=1, event="snapshot.item"),
-               fr(m, "turn.completed", CUR, 2)]
+               fr(m, "turn.completed", CUR, 2, status="completed")]
     polls, signalled = {"n": 0}, []
 
     class Proc:
@@ -801,7 +801,7 @@ def test_the_pins_collector_prints_hashes_never_the_uuid(tmp_path, monkeypatch, 
 
 
 def test_s2_r3_passes_on_the_text_criterion_with_no_command_events(m, monkeypatch, capsys):
-    client = FakeClient([started(m), completed(m, "answer"), fr(m, "turn.completed", CUR, 3)])
+    client = FakeClient([started(m), completed(m, "answer"), fr(m, "turn.completed", CUR, 3, status="completed")])
     monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
                                                    "clients": {"hop3": client}, "runner": []})
     verdicts = {}
@@ -811,7 +811,7 @@ def test_s2_r3_passes_on_the_text_criterion_with_no_command_events(m, monkeypatc
 
 
 def test_s2_r3_fails_when_the_text_differs(m, monkeypatch):
-    client = FakeClient([started(m), completed(m, "answ"), fr(m, "turn.completed", CUR, 3)])
+    client = FakeClient([started(m), completed(m, "answ"), fr(m, "turn.completed", CUR, 3, status="completed")])
     monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
                                                    "clients": {"hop3": client}, "runner": []})
     verdicts = {}
@@ -825,7 +825,7 @@ def test_s5_r3_prompts_are_prose_only(m):
 
 
 def test_s6_r3_unknown_prints_the_gap(m, monkeypatch, capsys):
-    normal = FakeClient([started(m), completed(m, "answer"), fr(m, "turn.completed", CUR, 3)])
+    normal = FakeClient([started(m), completed(m, "answer"), fr(m, "turn.completed", CUR, 3, status="completed")])
     paused = FakeClient([{"kind": "reader_paused", "unixNs": 1}])
     monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
                                                    "clients": {"n": normal, "p": paused}, "api": [{"reason": None}]})
@@ -891,8 +891,13 @@ R5_DISABLE_EXIT = {"rc": 0, "stepRc": 0, "verdicts": {}, "stoppedAt": None, "run
 TURNS_RUN, DISABLE_RUN = "i90-p5-turns-20261114T163034Z", "i90-p5-disable-20261114T163347Z"
 
 
-def r5_state(m, tmp_path, monkeypatch, turns_exit=None, disable_exit=None, budget=None, decision=None):
+def r5_state(m, tmp_path, monkeypatch, turns_exit=None, disable_exit=None, budget=None, decision=None,
+             conversation=CUR, s0=False):
     raws = {}
+    if s0:  # the bound S0 run and its conversation (review r5 major: the r5 target is bound by the full UUID sha)
+        s0_folder = Path(m.EVIDENCE) / S0RUN
+        s0_folder.mkdir(exist_ok=True)
+        (s0_folder / "run.json").write_text(json.dumps({"conversation": conversation}))
     for run, doc in ((TURNS_RUN, turns_exit or R5_TURNS_EXIT), (DISABLE_RUN, disable_exit or R5_DISABLE_EXIT)):
         folder = Path(m.EVIDENCE) / run
         folder.mkdir(exist_ok=True)
@@ -904,6 +909,7 @@ def r5_state(m, tmp_path, monkeypatch, turns_exit=None, disable_exit=None, budge
     value["turns"]["exitSha256"] = hashlib.sha256(json.dumps(R5_TURNS_EXIT, sort_keys=True, indent=1).encode()).hexdigest()
     value["disable"]["exitSha256"] = hashlib.sha256(json.dumps(R5_DISABLE_EXIT, sort_keys=True, indent=1).encode()
                                                     ).hexdigest()
+    value["conversationSha256"] = hashlib.sha256(CUR.encode()).hexdigest()  # the test conversation
     value.update(decision or {})
     data = json.dumps(value).encode()
     path = tmp_path / "continue-r5.json"
@@ -926,7 +932,7 @@ def test_r5_the_committed_decision_binds_the_first_round(m):
 
 
 def test_r5_enable_continues_through_the_bound_decision(m, tmp_path, monkeypatch):
-    r5_state(m, tmp_path, monkeypatch)
+    r5_state(m, tmp_path, monkeypatch, s0=True)
     assert "binds %s and %s" % (TURNS_RUN, DISABLE_RUN) in m.r5_accepted()
     assert len(m.budget_read()) == 2
 
@@ -935,20 +941,20 @@ def test_r5_enable_continues_through_the_bound_decision(m, tmp_path, monkeypatch
                                   "disable_rc", "budget_three", "r5_run_exists", "other_turns_run"])
 def test_r5_continuation_refuses_anything_else(m, tmp_path, monkeypatch, case):
     if case == "turns_exit_changed":
-        r5_state(m, tmp_path, monkeypatch, turns_exit=dict(R5_TURNS_EXIT, finished="other"))
+        r5_state(m, tmp_path, monkeypatch, s0=True, turns_exit=dict(R5_TURNS_EXIT, finished="other"))
     elif case == "release_false":
-        r5_state(m, tmp_path, monkeypatch, turns_exit=dict(R5_TURNS_EXIT, verdicts={"S1": False, "release": False}))
+        r5_state(m, tmp_path, monkeypatch, s0=True, turns_exit=dict(R5_TURNS_EXIT, verdicts={"S1": False, "release": False}))
     elif case == "missing_nullable":
-        r5_state(m, tmp_path, monkeypatch, turns_exit={k: v for k, v in R5_TURNS_EXIT.items()
+        r5_state(m, tmp_path, monkeypatch, s0=True, turns_exit={k: v for k, v in R5_TURNS_EXIT.items()
                                                        if k != "runnerReleased"})
     elif case == "disable_rc":
-        r5_state(m, tmp_path, monkeypatch, disable_exit=dict(R5_DISABLE_EXIT, rc=8))
+        r5_state(m, tmp_path, monkeypatch, s0=True, disable_exit=dict(R5_DISABLE_EXIT, rc=8))
     elif case == "budget_three":
-        r5_state(m, tmp_path, monkeypatch, budget=[{"n": 1, "step": "S0", "outcome": "accepted"},
+        r5_state(m, tmp_path, monkeypatch, s0=True, budget=[{"n": 1, "step": "S0", "outcome": "accepted"},
                                                    {"n": 2, "step": "S1", "outcome": "accepted"},
                                                    {"n": 3, "step": "S2", "outcome": "accepted"}])
     else:
-        path = r5_state(m, tmp_path, monkeypatch)
+        path = r5_state(m, tmp_path, monkeypatch, s0=True)
         if case == "tampered":
             path.write_bytes(path.read_bytes().replace(b'"turnsUsed": 2', b'"turnsUsed": 3'))
         elif case == "r5_run_exists":
@@ -974,6 +980,7 @@ def test_turns_r5_skips_s1_and_follows_the_stop_policy(m, monkeypatch, tmp_path)
         monkeypatch.setattr(m, "step_" + name, fake(name.upper()))
     monkeypatch.setattr(m, "step_s4", fake("S4"))
     for name, value in (("create_session", lambda ev: None), ("conversation_of_s0", lambda: "c" * 36),
+                        ("r5_conversation", lambda: "c" * 36),
                         ("prepare_private", lambda ev, image: None), ("probe_private", lambda: None),
                         ("start_runner", lambda *a: {}), ("stop_runner", lambda *a: True)):
         monkeypatch.setattr(m, name, value)
@@ -997,3 +1004,39 @@ def test_r5_guards_and_next_steps(m, tmp_path, monkeypatch):
     (Path(m.EVIDENCE) / "i90-p5-disable-r5-20261115T010000Z").mkdir()
     with pytest.raises(m.Stop):
         m.guard("turns-r5")
+
+
+# --- review r5 majors: the completed terminal for success text, the bound r5 target ------------------------------
+
+@pytest.mark.parametrize("status", ["failed", None, "interrupted"])
+def test_r5_success_text_needs_a_completed_terminal(m, monkeypatch, status):
+    client = FakeClient(live(m, "live-x", "answer") + [fr(m, "turn.completed", CUR, 9, status=status)])
+    equal, detail = m.same_text(client, body_with(m, "answer"), CUR)
+    assert equal is False and "not completed" in detail
+    monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
+                                                   "clients": {"hop3": client}, "runner": []})
+    verdicts = {}
+    m.step_s2("ev", "c" * 36, {}, verdicts)
+    assert verdicts["S2"] is False
+
+
+@pytest.mark.parametrize("case", ["s0_missing", "uuid_changed", "same_prefix"])
+def test_r5_target_and_guard_refuse_an_unbound_conversation(m, tmp_path, monkeypatch, case):
+    if case == "s0_missing":
+        r5_state(m, tmp_path, monkeypatch, s0=False)
+    elif case == "uuid_changed":
+        r5_state(m, tmp_path, monkeypatch, s0=True, conversation="22222222-2222-4222-8222-222222222222")
+    else:
+        r5_state(m, tmp_path, monkeypatch, s0=True, conversation=CUR[:8] + "-9999-4999-8999-999999999999")
+    for check in (m.r5_accepted, m.r5_conversation):
+        with pytest.raises(m.Stop) as stopped:
+            check()
+        assert stopped.value.code == 3
+
+
+def test_r5_target_is_the_bound_conversation(m, tmp_path, monkeypatch):
+    r5_state(m, tmp_path, monkeypatch, s0=True)
+    assert m.r5_conversation() == CUR
+    value = json.loads((VM / "i90-p5-continue-r5.json").read_text())
+    s0 = json.loads((VM / "i90-p5-continue.json").read_text())
+    assert value["s0Run"] == s0["s0Run"] and value["conversationSha256"] == s0["conversationSha256"]

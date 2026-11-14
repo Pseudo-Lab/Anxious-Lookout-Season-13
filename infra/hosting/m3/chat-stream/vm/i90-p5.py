@@ -128,7 +128,7 @@ CLIENT_SHA = 'e963d3986150fa3db031f5b4e32326b5206529080b8c812ceafa34edd8b51484' 
 SOURCE = 'bb3aa97070f175a74eec3a0c024cd158cd64fadd'  # IMAGE_SHA of the stage R images: /api/version must name it
 CONTINUE_FILE = '/root/issue90/i90-p5-continue.json'
 CONTINUE_R5_FILE = '/root/issue90/i90-p5-continue-r5.json'
-CONTINUE_R5_SHA = 'f43a64e6904f2a683072e128c1d56e0807fe87029b5aafff4ca0233259162450'  # i90-p5-continue-r5.json (r5 decision), from sha256sum
+CONTINUE_R5_SHA = '79055b18abb511944b04b64d9364bf210176fca8343e6df879afb9440b30fcf7'  # i90-p5-continue-r5.json (r5 decision), from sha256sum
 CONTINUE_SHA = '72995355c4534891b93ad633045eeefbeb7815974ebb10224f487795cf9a44bd'  # i90-p5-continue.json (r4 decision, pins from i90-p5-s0-pins.py output), from sha256sum
 K3S, DOCKER = '/usr/local/bin/k3s', '/usr/bin/docker'
 EVIDENCE = '/root/issue90/evidence'
@@ -1245,8 +1245,13 @@ def final_agent(client, request):
     reset by a snapshot.begin (a snapshot replaces the request's state); the LAST one; its summary from item.completed,
     else the last snapshot.end items; observed text required. Only with this request's turn.completed seen and no
     snapshot left open. (summary, source) or (None, why)."""
-    if completed_turn(client, request) is None:
+    terminal = completed_turn(client, request)
+    if terminal is None:
         return None, 'no turn.completed of this request on the reader'
+    if terminal.get('status') != 'completed':
+        # review r5 major: a success text needs a valid completed terminal (S3's interrupted check is its own)
+        return None, 'the last terminal status of this request is %s, not completed' % (
+            terminal.get('status') if terminal.get('status') in ('interrupted', 'failed') else 'missing or unknown')
     if snapshot_open(client, request):
         return None, 'a snapshot of this request has no snapshot.end on the reader (incomplete, not a pass)'
     order, done, snap = [], {}, {}
@@ -1633,6 +1638,32 @@ def conversation_of_s0():
     return conversation
 
 
+def r5_conversation(decision=None):
+    """review r5 major: the r5 POST target is the original S0 conversation, bound by the r5 decision - the one s0 run
+    by name and the sha256 of the full conversation UUID (shape checked; a prefix is not enough). Checked by the
+    enable-r5 guard and again right before turns-r5 uses the target. Stop(3) otherwise."""
+    if decision is None:
+        try:
+            decision = json.loads(read_pinned(CONTINUE_R5_FILE, CONTINUE_R5_SHA, 'i90-p5-continue-r5.json'))
+        except Stop:
+            raise
+        except Exception:
+            raise Stop(3, 'the r5 continuation decision is unreadable; nothing sent') from None
+    runs = runs_of('s0')
+    if not isinstance(decision, dict) or len(runs) != 1 or runs[0] != decision.get('s0Run'):
+        raise Stop(3, 'the r5 target: not exactly the bound s0 run; nothing sent')
+    try:
+        run = json.loads(read_plain(os.path.join(EVIDENCE, runs[0], 'run.json')))
+    except Exception:
+        raise Stop(3, 'the r5 target: the s0 run.json is unreadable; nothing sent') from None
+    conversation = run.get('conversation') if isinstance(run, dict) else None
+    want = decision.get('conversationSha256')
+    if not (isinstance(conversation, str) and UUID_SHAPE.fullmatch(conversation) and isinstance(want, str)
+            and re.fullmatch(r'[0-9a-f]{64}', want) and hashlib.sha256(conversation.encode()).hexdigest() == want):
+        raise Stop(3, 'the r5 target: the s0 conversation is not the bound full UUID; nothing sent')
+    return conversation
+
+
 def held():
     """A held state (rc 7 / 8) of any earlier p5 action."""
     for action in ACTIONS[1:]:
@@ -1762,7 +1793,12 @@ def r5_accepted():
         raise Stop(3, 'the r5 continuation decision is unreadable; nothing sent') from None
     if not isinstance(decision, dict):
         raise Stop(3, 'the r5 continuation decision is not an object; nothing sent')
-    checks = {'version': decision.get('version') == 'i90-p5-continue-r5-r0',
+    try:
+        r5_conversation(decision)
+        bound = True
+    except Stop:
+        bound = False
+    checks = {'version': decision.get('version') == 'i90-p5-continue-r5-r0', 'conversation': bound,
               'noR5Run': not any(runs_of(a) for a in R5_ACTIONS)}
     for action in ('turns', 'disable'):
         want = decision.get(action) if isinstance(decision.get(action), dict) else {}
@@ -1852,7 +1888,7 @@ def measure(ev, doc, action, verdicts):
         record_required(ev, 5, 'the conversation id could not be saved; no turn sent', conversation=conversation)
         say('P5 conversation %s created (not a turn)' % conversation[:8])
     else:
-        conversation = conversation_of_s0()
+        conversation = r5_conversation() if action in R5_ACTIONS else conversation_of_s0()
         say('P5 conversation %s (from s0)' % conversation[:8])
     if base(action) == 'turns':
         prepare_private(ev, doc['toolImage'])

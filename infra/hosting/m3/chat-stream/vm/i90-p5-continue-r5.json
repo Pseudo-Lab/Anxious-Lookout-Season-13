@@ -1,5 +1,7 @@
 {
  "version": "i90-p5-continue-r5-r0",
+ "s0Run": "i90-p5-s0-20261114T155956Z",
+ "conversationSha256": "29480c65ee8cd9ac5d0ff78b9e807b902ca82d63000df73595b977faa4d84fe9",
  "turns": {"run": "i90-p5-turns-20261114T163034Z", "exitSha256": "2a2d98ecff7c8506d7ff802584000db603ee394c120ccb29c62d0dee768f03af", "recorded": {"rc": 0, "stepRc": 0, "verdicts": {"S1": false, "release": true}, "stoppedAt": "S1", "runnerReleased": null, "clientsGone": true, "privateRemoved": true, "sessionRevoked": true}},
  "disable": {"run": "i90-p5-disable-20261114T163347Z", "exitSha256": "bc6a7c048f19b1e09d6a0e663de2de8068d492af0c14c34144e64035cc4e2498", "recorded": {"rc": 0, "stepRc": 0}},
  "turnsUsed": 2,
