@@ -704,6 +704,8 @@ def test_the_committed_decision_binds_the_s0_facts_and_is_pinned(m):
                                  "runnerReleased": None, "clientsGone": True, "privateRemoved": None,
                                  "sessionRevoked": True}
     assert "conversationPrefix" not in value  # review r3 major: no prefix binding
+    import re
+    assert all(re.fullmatch(r"[0-9a-f]{64}", value[k]) for k in ("conversationSha256", "exitSha256"))  # filled (r4b)
     assert m.CONTINUE_SHA == hashlib.sha256((VM / "i90-p5-continue.json").read_bytes()).hexdigest()
 
 
