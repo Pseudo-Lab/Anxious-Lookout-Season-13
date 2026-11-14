@@ -50,6 +50,8 @@ class Guest:
         self.requests = []
         self.idle_at = None
         self.patches = []
+        self.clients_started = 0
+        self.restarts = 0
 
     # clock
     def time(self):
@@ -64,6 +66,8 @@ class Guest:
         if cmd[0] == self.m.DOCKER:
             if cmd[1:3] == ["image", "inspect"]:
                 return 0, TOOL
+            if cmd[1] == "run":  # the private-file probe container
+                return (1, "") if self.faults.get("probe_fails") else (0, "readable")
             if cmd[1:3] == ["ps", "-a"]:
                 return 0, "leftover" if self.faults.get("leftover") and "^issue90-i90-d3-" in " ".join(cmd) else ""
             return 0, ""
@@ -86,6 +90,7 @@ class Guest:
             if rest[:2] == ["rollout", "status"]:
                 return 0, ""
             if rest[:2] == ["rollout", "restart"]:
+                self.restarts += 1
                 meta = self.api["spec"]["template"].setdefault("metadata", {})
                 meta.setdefault("annotations", {})[self.m.RESTARTED] = "2026-11-14T07:00:00Z"
                 self.bump()
@@ -172,6 +177,8 @@ class Guest:
             ready = not self.faults.get("never_ready")
             return 200, {"available": ready, "reason": None if ready else "runner_unreachable"}, ""
         if path == self.m.BASE + "/codex/runner" and method == "DELETE":
+            if self.faults.get("delete_503"):
+                return 503, None, ""
             self.stop_runner()
             return 200, {"terminationRequested": True}, ""
         return 500, None, ""
@@ -182,8 +189,10 @@ class Guest:
 
 
 class FakeProcess:
+    """A client container (records written as the client would, its `end` only once it ended) or a log follower."""
+
     def __init__(self, guest, cmd, stream):
-        self.guest, self.cmd, self.stream, self.returncode = guest, cmd, stream, None
+        self.guest, self.cmd, self.stream, self.returncode, self.ended = guest, cmd, stream, None, False
         g = guest
         if cmd[0] != g.m.DOCKER:  # a log follower
             stream.write(b"2026-11-14T07:00:00Z INFO: Application shutdown complete.\n")
@@ -194,36 +203,49 @@ class FakeProcess:
         duration = float(cmd[cmd.index("--duration") + 1])
         assert cmd[cmd.index("--connect-address") + 1] == g.m.API_HOST
         assert cmd[cmd.index("--url") + 1].startswith("http://192.88.99.1/api/research/sessions/")
+        assert "label=disable" in cmd and cmd[cmd.index("--user") + 1] == "10001:10001"
+        g.clients_started += 1
         live = [s for s in g.open if s[0] <= g.clock < s[1]]
-        status = 200 if len(live) < 3 else 429
+        status = 200 if len(live) < 3 or g.faults.get("no_cap") else 429
         records = [{"kind": "headers", "status": status}]
         if status == 200:
             self.end_at = g.clock + duration
+            if g.faults.get("dies_early"):
+                self.end_at = g.clock + 1
             g.open.append((g.clock, self.end_at))
             self.slot = len(g.summary_at)
             g.summary_at.append(self.end_at + 1)
             if mode == "no-read":
-                records.append({"kind": "reader_paused"})
+                if not g.faults.get("no_pause"):
+                    records.append({"kind": "reader_paused"})
             else:
                 records.append({"kind": "frame", "event": "runner", "available": False})
-            records.append({"kind": "end", "reason": "local_deadline"})
-            self.code = 0
+            self.code, self.reason = 0, "local_deadline"
         else:
             self.end_at = g.clock
-            records.append({"kind": "end", "reason": "http_error"})
-            self.code = 2
-        stream.write(("\n".join(json.dumps(r) for r in records) + "\n").encode())
-        stream.flush()
+            self.code, self.reason = 2, "http_error"
+        self.write(records)
+
+    def write(self, records):
+        self.stream.write(("\n".join(json.dumps(r) for r in records) + "\n").encode())
+        self.stream.flush()
+
+    def finish(self):
+        if not self.ended and self.end_at is not None:
+            self.ended = True
+            self.write([{"kind": "end", "reason": self.reason}])
 
     def poll(self):
         if self.end_at is None or self.guest.clock < self.end_at:
             return None
+        self.finish()
         self.returncode = self.code
         return self.code
 
     def wait(self, timeout=None):
         if self.end_at is not None:
             self.guest.clock = max(self.guest.clock, self.end_at)
+            self.finish()
             self.returncode = self.code
         else:
             self.returncode = 0
@@ -234,6 +256,7 @@ class FakeProcess:
             self.end_at = min(self.end_at, self.guest.clock)
             if hasattr(self, 'slot'):  # a closed stream logs its summary at the close
                 self.guest.summary_at[self.slot] = min(self.guest.summary_at[self.slot], self.guest.clock + 1)
+            self.finish()
         else:
             self.end_at = self.guest.clock
             self.code = 0
@@ -329,23 +352,101 @@ def test_flag_off_refuses_when_the_annotation_was_changed_by_someone_else(guest)
     assert m.main(["i90-d3.py", "flag-off"]) == 3 and len(g.patches) == before  # nothing sent
 
 
-def test_a_fourth_stream_accepted_is_a_false_verdict_not_a_pass(guest, monkeypatch):
-    m, g, evidence, doc = guest()
+def test_a_false_p4_0_stops_before_any_runner_entry(guest):
+    """PM stop policy: P4-0 False (a 4th stream accepted) -> no runner entry, no restart, no later client."""
+    m, g, evidence, doc = guest(no_cap=True)
     assert m.main(["i90-d3.py", "flag-on"]) == 0
-    real = g.popen
-    def popen(cmd, stdout=None, stderr=None):
-        process = real(cmd, stdout, stderr)
-        return process
-    monkeypatch.setattr(m.subprocess, "Popen", popen)
-    g.open = []
-    original = FakeProcess.__init__
-    def no_cap(self, guest_, cmd, stream):
-        guest_.open = []  # every stream accepted: the cap is not enforced
-        original(self, guest_, cmd, stream)
-    monkeypatch.setattr(FakeProcess, "__init__", no_cap)
     assert m.main(["i90-d3.py", "p4"]) == 0
     out = out_of(evidence, "p4")
-    assert "verdict P4-0: False" in out and "verdict overall pass: False" in out
+    assert "verdict P4-0: False" in out and "verdict overall pass: False" in out and "stopped at: P4-0" in out
+    for item in ("P4-1", "P4-3", "P4-4"):
+        assert "verdict %s: unknown" % item in out
+    assert not [p for _, p in g.requests if p.endswith("/codex/runner")] and g.restarts == 0
+    assert g.clients_started == 5 and not any(g.sessions.values())
+
+
+def test_no_reader_paused_skips_the_restart_and_stops(guest):
+    """Review major: a missing reader_paused is not a pass: P4-3 False, no restart, P4-4 never starts."""
+    m, g, evidence, doc = guest(no_pause=True)
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    assert m.main(["i90-d3.py", "p4"]) == 0
+    out = out_of(evidence, "p4")
+    assert "verdict P4-1: True" in out and "verdict P4-3: False" in out and "verdict P4-4: unknown" in out
+    assert g.restarts == 0 and sum(1 for c, p in g.requests if c == "POST" and p.endswith("/codex/runner")) == 1
+
+
+def test_a_client_gone_before_the_stop_is_false(guest):
+    m, g, evidence, doc = guest(dies_early=True)
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    assert m.main(["i90-d3.py", "p4"]) == 0
+    assert "verdict overall pass: False" in out_of(evidence, "p4")
+
+
+def test_check_and_flag_on_enforce_the_baseline(guest):
+    m, g, evidence, doc = guest()
+    g.api["metadata"]["uid"] = "another"
+    assert m.main(["i90-d3.py", "check"]) == 3
+    g.api["metadata"]["uid"] = m.API[2]
+    g.sessions["x" * 64] = True  # a live session
+    assert m.main(["i90-d3.py", "check"]) == 3 and m.main(["i90-d3.py", "flag-on"]) == 3 and g.patches == []
+    g.sessions.clear()
+    g.registry["pod"] = "pod"
+    assert m.main(["i90-d3.py", "check"]) == 3
+
+
+def test_a_baseline_that_cannot_be_saved_sends_nothing(guest, monkeypatch):
+    m, g, evidence, doc = guest()
+    real = m.durable_json
+    def failing(path, value):
+        if "restartedAtBefore" in value:
+            raise OSError(28, "No space left on device")
+        return real(path, value)
+    monkeypatch.setattr(m, "durable_json", failing)
+    assert m.main(["i90-d3.py", "flag-on"]) == 3 and g.patches == [] and m.flag_state(g.api) == "absent"
+
+
+def test_a_failed_cleanup_stop_is_rc6_with_the_step_rc_kept(guest):
+    m, g, evidence, doc = guest(never_ready=True, delete_503=True)
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    assert m.main(["i90-d3.py", "p4"]) == 6
+    done = json.loads((run_dir(evidence, "p4") / "exit.json").read_text())
+    assert done["stepRc"] == 5 and done["runnerReleased"] is False and g.runner  # the runner still runs
+    assert "verdict overall pass: False" in out_of(evidence, "p4")
+
+
+def test_private_files_left_are_rc80_and_not_a_pass(guest, monkeypatch):
+    m, g, evidence, doc = guest()
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    monkeypatch.setattr(m.shutil, "rmtree", lambda path: (_ for _ in ()).throw(OSError("busy")))
+    assert m.main(["i90-d3.py", "p4"]) == 80
+    out = out_of(evidence, "p4")
+    assert "NOT REMOVED" in out and "verdict overall pass: False" in out
+    assert json.loads((run_dir(evidence, "p4") / "exit.json").read_text())["privateRemoved"] is False
+
+
+def test_an_unreadable_private_file_stops_before_any_change(guest):
+    m, g, evidence, doc = guest(probe_fails=True)
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    assert m.main(["i90-d3.py", "p4"]) == 5
+    assert g.clients_started == 0 and not [p for _, p in g.requests if p.endswith("/codex/runner")]
+    assert not (run_dir(evidence, "p4") / "private").exists() and not any(g.sessions.values())
+
+
+def test_a_lost_restarted_value_is_rc9_and_flag_off_refuses(guest, monkeypatch, capsys):
+    m, g, evidence, doc = guest()
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    real = m.durable_json
+    def failing(path, value):
+        if "restartedAtAfter" in value:
+            raise OSError(28, "No space left on device")
+        return real(path, value)
+    monkeypatch.setattr(m, "durable_json", failing)
+    assert m.main(["i90-d3.py", "p4"]) == 9
+    out = capsys.readouterr().out  # out.txt stops at the failed write; the journal (stdout) has the rest
+    assert "P4-3: restartedAt now 2026-11-14T07:00:00Z" in out and "verdict P4-4: unknown" in out
+    monkeypatch.setattr(m, "durable_json", real)
+    before = len(g.patches)
+    assert m.main(["i90-d3.py", "flag-off"]) == 3 and len(g.patches) == before
 
 
 def test_a_failed_start_still_stops_the_runner_and_reports_the_open_flag(guest):

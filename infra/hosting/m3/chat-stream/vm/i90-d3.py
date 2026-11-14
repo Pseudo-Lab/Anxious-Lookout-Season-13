@@ -30,11 +30,18 @@ Pod's log from before the restart).
 Every step prints `verdict <step>: True|False`; rc 0 means every step ran and its evidence was recorded, not that
 every verdict is True (a last line names the False ones). PM judges rc and the verdict lines together.
 
-rc: 0 ran to its end; 3 refused before any change; 4 a flag patch was refused (nothing changed); 5 a measurement
-step could not run (cleanup ran: clients gone, runner stopped, session revoked); 6 runner stop/release not proved;
+rc (the step's own rc is kept in exit.json `stepRc`; cleanup failures override it, 7/8 excepted):
+0 ran to its end (the verdicts decide the pass); 3 refused before any change (each action's conditions, see
+precheck); 4 a flag patch was refused (nothing changed); 5 a measurement step could not run, or the client container
+cannot read its private files (cleanup ran and proved); 6 runner stop/release not proved, in a step or in the cleanup;
 7 the api is not 1/1 healthy after a rollout (held); 8 the api template is not the wanted one after a patch (held);
-9 every step ran but an evidence write failed; 70 every step ran but the session revoke is not proved; 80 a client
-container was not proved gone; 130 interrupted twice. The result is the last `result rc=` line.
+9 an evidence write failed (also: the restartedAt value after P4-3 not saved, flag-off then refuses until back
+records it from the printed value); 70 the session revoke is not proved; 80 a client container or the private files
+(client copy, cookie) not proved gone; 130 interrupted twice. The result is the last `result rc=` line.
+
+Stop policy (PM 2026-11-14): inside `p4`, a step whose verdict is False or unknown ends the action after its own
+cleanup; the remaining steps (clients, runner entries, the API restart) are not started; `stopped at:` and
+`verdict overall pass: False` are printed.
 """
 import calendar
 import fcntl
@@ -176,6 +183,22 @@ def record(ev, **items):
         durable_json(path, value)
     except Exception:
         OUT['failed'] = True
+
+
+def record_required(ev, code, message, **items):
+    """Like record, but a failed durable write raises Stop(code): for values a later step depends on."""
+    try:
+        path = os.path.join(ev, 'run.json')
+        value = json.load(open(path)) if os.path.exists(path) else {}
+        value.update(items)
+        durable_json(path, value)
+        if {k: v for k, v in json.load(open(path)).items() if k in items} != items:
+            raise OSError()
+    except Stop:
+        raise
+    except Exception:
+        OUT['failed'] = True
+        raise Stop(code, message) from None
 
 
 def read_pinned(path, want, name):
@@ -364,7 +387,9 @@ def flag_change(ev, doc, direction):
     if direction == 'on':
         if template_sha(d) != want:
             raise Stop(3, 'api template is not the stage C one (apiTemplateSha256)')
-        record(ev, restartedAtBefore=encode(restarted_of(d)))  # flag-off restores exactly this state
+        # flag-off restores exactly this state: it must be on disk before anything changes (review 9e6704e major)
+        record_required(ev, 3, 'the restartedAt baseline could not be saved; nothing sent',
+                        restartedAtBefore=encode(restarted_of(d)))
         candidates = flag_patches(d, 'on')
     else:
         baseline = recorded('flag-on', 'restartedAtBefore')
@@ -590,24 +615,43 @@ def stop_runner(ev, runner, step):
     say('%s DELETE /codex/runner answered %s' % (step, status))
     if status != 200 or not isinstance(body, dict) or body.get('terminationRequested') is not True:
         raise Stop(6, '%s: stop request refused or unknown (%s)' % (step, status))
-    ENTERED.clear()
     gone, deleted = wait_release(runner, step, 120)
+    ENTERED.clear()  # only once the release is proved; otherwise the cleanup sends the stop again and checks it
     return runner_evidence(runner, step, gone, deleted)
 
 
 ENTERED = {}
 
 
+def released():
+    state = registry()
+    return (state['phase'], state['pod']) == ('idle_stopped', None) and \
+        not [p for p in runner_pods(6) if p['metadata']['name'] == POD_NAME]
+
+
 def ensure_stopped(step):
-    """After an entry: whatever happened, the stop is sent (never raises)."""
+    """After an entry whose release was not proved: send the stop and prove the release (120 s). None = nothing to
+    do, True = released, False = not proved (final rc 6, the step rc kept; review 9e6704e major). Never raises."""
     if not ENTERED:
-        return
+        return None
     try:
-        status, _, _ = call('DELETE', BASE + '/codex/runner')
+        status, body, _ = call('DELETE', BASE + '/codex/runner')
         say('%s cleanup: DELETE /codex/runner answered %s' % (step, status))
-        ENTERED.clear()
-    except Exception:
-        say('%s cleanup: DELETE /codex/runner not sent (report)' % step)
+        if status != 200 or not isinstance(body, dict) or body.get('terminationRequested') is not True:
+            say('%s cleanup: the stop was not accepted; RUNNER RELEASE NOT PROVED (report)' % step)
+            return False
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            if released():
+                ENTERED.clear()
+                say('%s cleanup: runner released (idle_stopped, no Pod)' % step)
+                return True
+            time.sleep(1)
+        say('%s cleanup: RUNNER RELEASE NOT PROVED within 120 s (report)' % step)
+        return False
+    except BaseException:
+        say('%s cleanup: the stop or its check failed; RUNNER RELEASE NOT PROVED (report)' % step)
+        return False
 
 
 # Measuring client -------------------------------------------------------------------------------------------
@@ -637,13 +681,38 @@ def prepare_private(ev, image):
 
 
 def remove_private():
+    """None = nothing was created, True = removed and proved absent, False = not (final rc 80; never raises)."""
     folder = PRIVATE.get('folder')
-    if folder and os.path.isdir(folder):
-        try:
+    if not folder:
+        return None
+    try:
+        if os.path.lexists(folder):
             shutil.rmtree(folder)
-            say('private directory (client copy, cookie) removed')
-        except Exception:
-            say('PRIVATE DIRECTORY NOT REMOVED: %s (report)' % folder)
+        gone = not os.path.lexists(folder)
+    except BaseException:
+        gone = False
+    say('private directory (client copy, cookie) %s' % ('removed' if gone else 'NOT REMOVED (report): ' + folder))
+    return gone
+
+
+def probe_private():
+    """A gate before any runner start or measurement (review 9e6704e question): one throwaway container, the same
+    image, user, mounts and security options as a client, reads both private files. Its failure stops `p4`/`p4-2`
+    with rc 5 before anything changes."""
+    name = 'issue90-i90-d3-probe-%d' % os.getpid()
+    folder = PRIVATE['folder']
+    rc, out = run([DOCKER, 'run', '--rm', '--name', name, '--pull=never', '--network', 'none', '--read-only',
+                   '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--security-opt', 'label=disable',
+                   '--user', '10001:10001', '-v', folder + '/p4_client.py:/probe/p4_client.py:ro',
+                   '-v', folder + '/cookie:/run/probe-cookie:ro', '--entrypoint', 'python3', PRIVATE['image'], '-I',
+                   '-c', "import sys; [open(p, 'rb').read() for p in sys.argv[1:]]; print('readable')",
+                   '/probe/p4_client.py', '/run/probe-cookie'], 60)
+    gone = proved_gone(name)
+    say('private files readable by 10001 in the client container: %s (probe rc %d)' % (out == 'readable', rc))
+    if not gone:
+        raise Stop(80, 'the probe container was not proved gone')
+    if rc != 0 or out != 'readable':
+        raise Stop(5, 'the client container cannot read its private files; nothing measured')
 
 
 def present(name):
@@ -677,7 +746,8 @@ class Client:
         CLIENTS.append(self)
         self.process = subprocess.Popen(
             [DOCKER, 'run', '--rm', '--name', self.name, '--pull=never', '--network', 'host', '--read-only',
-             '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', '10001:10001',
+             '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--security-opt', 'label=disable',
+             '--user', '10001:10001',
              '-v', folder + '/p4_client.py:/probe/p4_client.py:ro', '-v', folder + '/cookie:/run/probe-cookie:ro',
              '--entrypoint', 'python3', PRIVATE['image'], '-I', '-B', '/probe/p4_client.py', '--url', url,
              '--connect-address', API_HOST, '--cookie-file', '/run/probe-cookie', '--mode', mode,
@@ -704,6 +774,10 @@ class Client:
     def status(self, limit=20):
         item = self.wait(lambda r: r.get('kind') == 'headers', limit)
         return item.get('status') if item else None
+
+    def alive(self):
+        """The client process still runs and has not reported its end."""
+        return self.process.poll() is None and not [r for r in self.records() if r.get('kind') == 'end']
 
     def end(self, limit):
         try:
@@ -831,15 +905,20 @@ def p4_0(ev, conversation, verdicts):
 
 
 def p4_runner_stop(ev, conversation, verdicts, step, mode):
-    """P4-1 (read) / P4-4 (no-read): a stream open, the runner stopped with DELETE. A no-read client's local deadline
-    is never evidence of the server closing (P4-CLIENT.md); P4-4 is judged on the runner side and the summary line."""
+    """P4-1 (read) / P4-4 (no-read): a stream open, the runner stopped with DELETE. Required before the stop: the
+    stream answered 200, (no-read) `reader_paused` seen, and the client still running at the stop; required after:
+    one completed clean stop with the Pod gone inside the grace and the shutdown log line, (read) runner{available:
+    false} seen, and exactly one summary line in the step's window. A no-read client's local deadline is never
+    evidence of the server closing (P4-CLIENT.md). The stop is sent whatever the preconditions showed."""
     runner = start_runner(ev, step)
     since = now_utc()
     client = Client(ev, step, 1, conversation, mode, 90 if mode == 'read' else 45)
     opened = client.status()
-    if mode == 'no-read':
-        client.wait(lambda r: r.get('kind') == 'reader_paused', 20)
+    paused = mode == 'read' or client.wait(lambda r: r.get('kind') == 'reader_paused', 20) is not None
     time.sleep(10)
+    alive = client.alive()
+    say('%s: before the stop: stream %s, %s, client running %s' % (
+        step.upper(), opened, 'reading' if mode == 'read' else 'reader_paused seen %s' % paused, alive))
     runner_ok = stop_runner(ev, runner, step)
     unavailable = None
     if mode == 'read':
@@ -849,21 +928,33 @@ def p4_runner_stop(ev, conversation, verdicts, step, mode):
     until = now_utc()
     step_end(step.upper())
     count = summaries(conversation, since, until)
-    say('%s: window %s..%s; stream %s; runner{available:false} seen %s; summaries %s'
-        % (step.upper(), since, until, opened, unavailable, count))
-    verdicts[step.upper()] = opened == 200 and runner_ok and unavailable is not False and len(count) == 1
+    say('%s: window %s..%s; runner side %s; runner{available:false} seen %s; summaries %s'
+        % (step.upper(), since, until, runner_ok, unavailable, count))
+    verdicts[step.upper()] = opened == 200 and paused and alive and runner_ok \
+        and (mode == 'no-read' or unavailable is True) and len(count) == 1
 
 
 def p4_3(ev, conversation, verdicts):
-    """A stream held without reading; `rollout restart deploy/api`: the old Pod gone inside its live grace (seconds and
-    margin reported), no lasting `Waiting for connections to close`, the new Pod healthy."""
+    """A stream held without reading; `rollout restart deploy/api`. Required before the restart: the stream answered
+    200, `reader_paused` seen, the client still running (else the restart is not issued and the verdict is False).
+    Required after: the old Pod gone inside its live grace (seconds and margin reported), the old Pod's log captured,
+    exactly one summary line in the step's window (the old Pod's log included), the new Pod 1/1 with /api/health 200.
+    Reference only (printed, not judged): the count of `Waiting for connections to close` lines."""
     since = now_utc()
     old = api_pod()
     grace = old['spec'].get('terminationGracePeriodSeconds', 30)
     old_log = follow(API[0], old['metadata']['name'], os.path.join(ev, 'api-old-%s.log' % old['metadata']['name']))
     client = Client(ev, 'p4-3', 1, conversation, 'no-read', 45)
     opened = client.status()
-    client.wait(lambda r: r.get('kind') == 'reader_paused', 20)
+    paused = client.wait(lambda r: r.get('kind') == 'reader_paused', 20) is not None
+    alive = client.alive()
+    say('P4-3: before the restart: stream %s, reader_paused seen %s, client running %s' % (opened, paused, alive))
+    if not (opened == 200 and paused and alive):
+        client.end(120)
+        step_end('P4-3')
+        say('P4-3: a precondition is not met: the restart is not issued')
+        verdicts['P4-3'] = False
+        return
     issued = time.time()
     rc, _ = run([K3S, 'kubectl', '-n', API[0], 'rollout', 'restart', 'deployment/' + API[1]], 60)
     say('P4-3: rollout restart rc %d; old Pod %s, terminationGracePeriodSeconds %s' % (rc, old['metadata']['name'], grace))
@@ -878,7 +969,12 @@ def p4_3(ev, conversation, verdicts):
             gone = time.time()
         time.sleep(1)
     after = api_ready(7, 'P4-3')
-    record(ev, restartedAtAfter=encode(restarted_of(after)))  # flag-off's compare-and-set value
+    value = restarted_of(after)
+    say('P4-3: restartedAt now %s' % ('absent' if value is ABSENT else value))
+    # flag-off's compare-and-set value: if it cannot be saved, nothing else runs (rc 9) and flag-off refuses until
+    # back records it from the value printed above (review 9e6704e major).
+    record_required(ev, 9, 'the restartedAt value after P4-3 could not be saved (printed above); flag-off needs it',
+                    restartedAtAfter=encode(value))
     client.end(120)
     time.sleep(2)
     stop_followers()
@@ -892,13 +988,12 @@ def p4_3(ev, conversation, verdicts):
     step_end('P4-3')
     count = summaries(conversation, since, until, extra_logs=(old_log,))
     elapsed = None if gone is None or deleted is None else gone - deleted
-    say('P4-3: stream %s; old Pod deletion seen %s s after the restart; gone %s s after its deletion; grace %s s; '
-        'margin %s s (poll 1 s); "Waiting for connections to close" lines %d; new Pod 1/1, /api/health 200; '
-        'summaries %s (the old Pod log included)'
-        % (opened, None if deleted is None else round(deleted - issued, 1),
-           None if elapsed is None else round(elapsed, 1), grace,
-           None if elapsed is None else round(grace - elapsed, 1), waiting, count))
-    verdicts['P4-3'] = rc == 0 and opened == 200 and elapsed is not None and elapsed < grace
+    say('P4-3: old Pod deletion seen %s s after the restart; gone %s s after its deletion; grace %s s; margin %s s '
+        '(poll 1 s); old Pod log captured %s; new Pod 1/1, /api/health 200; summaries %s (the old Pod log included); '
+        'reference: "Waiting for connections to close" lines %d'
+        % (None if deleted is None else round(deleted - issued, 1), None if elapsed is None else round(elapsed, 1),
+           grace, None if elapsed is None else round(grace - elapsed, 1), bool(text), count, waiting))
+    verdicts['P4-3'] = rc == 0 and elapsed is not None and elapsed < grace and bool(text) and len(count) == 1
 
 
 def p4_2(ev, conversation, verdicts):
@@ -931,26 +1026,42 @@ def p4_2(ev, conversation, verdicts):
 
 # Checks, guards, main ----------------------------------------------------------------------------------------
 def precheck(doc, action):
+    """Prints the state and enforces each action's conditions (rc 3, nothing changed; review 9e6704e major):
+    `check` and `flag-on` - the stage C baseline: the recorded api UID, 1/1 ready, the stage C image, no flag entry,
+    the stage C template; …5805 idle_stopped with no runner Pod; no live session. `p4` / `p4-2` - the same with the
+    flag entry present (p4: the template is stage C plus the flag only). `flag-off` - the recorded UID and the stage C
+    image (its patch is checked against the stage C template hash itself)."""
     d = api_object(3)
     index = flag_index(d)
-    say('api: uid %s, %s/%s ready, image is stage C %s, flag entry %s, template = stage C (flag taken out) %s'
-        % (d['metadata']['uid'] == API[2], (d.get('status') or {}).get('readyReplicas'), d['spec'].get('replicas'),
-           d['spec']['template']['spec']['containers'][0].get('image') == doc['newApiImage'],
-           flag_state(d),
-           template_sha(d, without_flag=True) == doc['apiTemplateSha256']))
+    uid = d['metadata']['uid'] == API[2]
+    ready = (d.get('status') or {}).get('readyReplicas') == 1 and d['spec'].get('replicas') == 1
+    image = d['spec']['template']['spec']['containers'][0].get('image') == doc['newApiImage']
+    exact = template_sha(d) == doc['apiTemplateSha256']
+    flagless = template_sha(d, without_flag=True) == doc['apiTemplateSha256']
+    say('api: uid %s, 1/1 ready %s, image is stage C %s, flag entry %s, template = stage C %s, = stage C plus the '
+        'flag only %s' % (uid, ready, image, flag_state(d), exact, flagless and index is not None and index >= 0))
     state = registry()
-    say('…5805 registry %s; runner Pods %d' % (json.dumps(state, sort_keys=True), len(runner_pods(3))))
+    pods = runner_pods(3)
+    say('…5805 registry %s; runner Pods %d' % (json.dumps(state, sort_keys=True), len(pods)))
     live = sql('sessions', "SELECT json_build_object('n',count(*)) FROM auth.sessions WHERE expires_at>now();", 3)[0]
     say('live sessions %s' % live['n'])
-    if action == 'check':
+    quiet = (state['phase'], state['pod']) == ('idle_stopped', None) and not pods and live['n'] == 0
+    if not (uid and image):
+        raise Stop(3, 'the api is not the recorded Deployment on the stage C image')
+    if action == 'flag-off':
         return
-    if action in ('p4', 'p4-2'):
-        if index is None or index < 0:
-            raise Stop(3, '%s needs the flag on (run flag-on first)' % action)
-        if (state['phase'], state['pod']) != ('idle_stopped', None) or runner_pods(3) or live['n']:
-            raise Stop(3, '%s needs …5805 idle_stopped, no runner Pod and no live session' % action)
-        if template_sha(d, without_flag=True) != doc['apiTemplateSha256'] and action == 'p4':
-            raise Stop(3, 'p4 needs the api template = stage C plus the flag only')
+    if not ready:
+        raise Stop(3, 'the api is not 1/1 ready')
+    if not quiet:
+        raise Stop(3, '…5805 is not idle_stopped with no runner Pod, or a live session exists')
+    if action in ('check', 'flag-on'):
+        if index is not None or not exact:
+            raise Stop(3, 'the api is not the stage C baseline (flag entry absent, stage C template)')
+        return
+    if index is None or index < 0:
+        raise Stop(3, '%s needs the flag on (run flag-on first)' % action)
+    if action == 'p4' and not flagless:
+        raise Stop(3, 'p4 needs the api template = stage C plus the flag only')
 
 
 def flag_line(action, code):
@@ -993,6 +1104,7 @@ def measure(ev, doc, action, verdicts):
     record(ev, conversation=conversation)
     say('conversation %s (the newest, read only)' % conversation)
     prepare_private(ev, doc['toolImage'])
+    probe_private()
     if action == 'p4':
         steps = (('P4-0', lambda: p4_0(ev, conversation, verdicts)),
                  ('P4-1', lambda: p4_runner_stop(ev, conversation, verdicts, 'p4-1', 'read')),
@@ -1003,6 +1115,35 @@ def measure(ev, doc, action, verdicts):
     for name, step in steps:
         say('--- %s %s' % (name, now_utc()))
         step()
+        if verdicts.get(name) is not True:
+            # PM stop policy (2026-11-14): a False or unknown step ends the action; its own cleanup is done, the
+            # remaining steps are not started (no client, runner entry or API restart after this point).
+            say('stopped after %s (verdict %s): the remaining steps are not run' % (
+                name, {False: 'False'}.get(verdicts.get(name), 'unknown')))
+            return name
+    return None
+
+
+def cleanup(action):
+    """Never raises. (runner released: None/True/False, clients and containers gone, private files removed: None/True/
+    False). The followers are stopped and the session revoked by the caller."""
+    try:
+        runner = ensure_stopped(action)
+    except BaseException:
+        runner = False
+    try:
+        gone = clients_gone()
+    except BaseException:
+        gone = False
+    try:
+        stop_followers()
+    except BaseException:
+        pass
+    try:
+        private = remove_private()
+    except BaseException:
+        private = False
+    return runner, gone, private
 
 
 def main(argv):
@@ -1024,7 +1165,8 @@ def main(argv):
         return 0
     for each in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(each, on_signal)
-    ev, code, verdicts, revoked, gone, lock = None, 0, {}, None, True, None
+    ev, code, verdicts, revoked, lock, stopped_at = None, 0, {}, None, None, None
+    runner, gone, private = None, True, None
     try:
         try:
             doc = expected()
@@ -1040,7 +1182,7 @@ def main(argv):
             if action in ('flag-on', 'flag-off'):
                 flag_change(ev, doc, action[5:])
             else:
-                measure(ev, doc, action, verdicts)
+                stopped_at = measure(ev, doc, action, verdicts)
         except Stop as stop:
             code = stop.code
             say('STOPPED (%d): %s' % (stop.code, stop.message))
@@ -1051,40 +1193,38 @@ def main(argv):
             code = 5 if ev else 3
             say('STOPPED (%d): unexpected %s' % (code, type(error).__name__))
     finally:
-        # Never raises: the runner stop (after an entry), clients gone, followers, private files, session revoke.
-        try:
-            ensure_stopped(action)
-        except BaseException:
-            pass
-        try:
-            gone = clients_gone()
-        except BaseException:
-            gone = False
-        try:
-            stop_followers()
-        except BaseException:
-            pass
-        try:
-            remove_private()
-        except BaseException:
-            pass
+        # Never raises: the runner stop and its release (after an entry), clients gone, followers, private files,
+        # the session revoke, the lock.
+        runner, gone, private = cleanup(action)
         revoked = revoke_session(ev)
         if lock is not None:
             os.close(lock)  # releases the flock
     step_rc = code
+    # Cleanup failures are their own final rc, the step rc kept (PM/review D3): 7 / 8 (held) stay; then runner
+    # release not proved 6; a client container or the private files left 80; the session revoke 70; evidence 9.
+    if code not in (7, 8):
+        if runner is False:
+            code = 6
+        elif not gone or private is False:
+            code = 80
+        elif code == 0 and revoked is False:
+            code = 70
+        elif code == 0 and OUT.get('failed'):
+            code = 9
+    say('cleanup: runner released %s; client containers gone %s; private files removed %s; session revoked %s'
+        % ({None: 'n/a'}.get(runner, runner), gone, {None: 'n/a'}.get(private, private),
+           {None: 'n/a'}.get(revoked, revoked)))
     items = {'p4': ('P4-0', 'P4-1', 'P4-3', 'P4-4'), 'p4-2': ('P4-2',)}.get(action, ())
     for name in items:  # a step that did not run is `unknown`, never a pass (review/PM D3 major)
         say('verdict %s: %s' % (name, {True: 'True', False: 'False'}.get(verdicts.get(name), 'unknown')))
     if items:
         failing = [name for name in items if verdicts.get(name) is not True]
+        if stopped_at:
+            say('stopped at: %s' % stopped_at)
         say('verdict overall pass: %s' % (not failing and code == 0))
         if failing:
             say('verdicts False or unknown: %s' % ', '.join(failing))
     say(flag_line(action, code))
-    if code == 0 and not gone:
-        code = 80
-    if code == 0 and revoked is False:
-        code = 70
     if code == 0 and OUT.get('failed'):
         code = 9
     said = code
@@ -1094,12 +1234,15 @@ def main(argv):
     if ev:
         try:
             durable_json(os.path.join(ev, 'exit.json'), {'rc': code, 'stepRc': step_rc, 'verdicts': verdicts,
-                                                        'sessionRevoked': revoked, 'finished': now_utc()})
+                                                        'stoppedAt': stopped_at, 'runnerReleased': runner,
+                                                        'privateRemoved': private, 'sessionRevoked': revoked,
+                                                        'finished': now_utc()})
         except Exception:
             if code == 0:
                 code = 9
             say('exit.json not written: the result is unknown on disk')
     if code != said:
+        say('verdict overall pass: False (an evidence write failed after the result line)')
         say('result rc=%d (an evidence write failed after the result line)' % code)
     return code
 

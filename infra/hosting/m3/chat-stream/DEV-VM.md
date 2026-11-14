@@ -188,6 +188,23 @@ table).
   (`runner_registry` / `lifecycle`); the runner's `idle_since` at app start and turn start/end. A `/codex/status` read
   or an SSE stream (heartbeats) touches neither, and `p4-2` makes no status read after the three ready reads. The
   release time after the entry is reported; release outside [idle, idle + 600 s] is a False verdict and a finding.
+- r10 (review 9e6704e request-changes, PM stop policy 2026-11-14):
+  - `check` and every mutation enforce their conditions (rc 3, nothing changed): `check` / `flag-on` the stage C
+    baseline (UID, 1/1, image, no flag, stage C template, …5805 idle_stopped, no runner Pod, no live session);
+    `p4` / `p4-2` the same with the flag; `flag-off` UID and image (its patch is hash-checked).
+  - `flag-on` saves the restartedAt baseline durably **before** the patch (else rc 3, nothing sent); the value P4-3
+    leaves is printed and saved; if that save fails the action stops with rc 9 and `flag-off` refuses until back
+    records it.
+  - Required evidence per step: P4-1/P4-4 the stream at 200, (no-read) `reader_paused`, the client still running at
+    the stop; P4-3 the same before the restart (else no restart, False), then the old Pod gone inside its grace, its
+    log captured, exactly one summary. Reference only: `Waiting for connections to close` lines.
+  - **Stop policy**: in `p4`, a False or unknown step ends the action after its own cleanup; no later client, runner
+    entry or API restart; `stopped at:` and `verdict overall pass: False`.
+  - Cleanup results decide the final rc after the step rc (kept as `stepRc`; 7/8 stay): runner release not proved 6
+    (the cleanup sends the stop and proves the release), a client container or the private files left 80, the
+    session revoke 70, evidence 9. `verdict overall pass` is computed after them.
+  - The client containers run with `--security-opt label=disable` (as D2); before any runner start a probe container
+    with the same image, user and mounts must read both private files (else rc 5, nothing changed).
 
 ## P5 — measurements with real Codex turns (only after the user's turn budget)
 
