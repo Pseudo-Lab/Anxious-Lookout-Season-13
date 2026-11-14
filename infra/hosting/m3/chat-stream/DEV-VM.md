@@ -46,8 +46,29 @@ echo "rc=$?"
 - **Output**: both images and their archives (`anxious-dev-runner:90-<short>`, `anxious-dev-runtime:90-<short>`), the runner gate and content checks, and the runtime's `/app/release.json` sha.
 - **Send back to back**: the final lines (host ids, archive sha256s) and the output directory.
 
+**Evidence directory (once, before stage B; r4)**: `i90-import.sh` and `i90-switch.py` (stage C precheck) both
+refuse rc 3 while `/root/issue90/evidence` is missing, and neither creates it. Before the first stage B run, in a guest
+root shell, once (the block review cleared on 2026-11-14 after the first import refused rc 3 with nothing imported):
+
+```sh
+set -eu
+[ "$(id -u)" = 0 ]
+[ -d /root/issue90 ] && [ ! -L /root/issue90 ]
+[ "$(stat -c '%u:%g:%a' /root/issue90)" = '0:0:700' ]
+[ ! -e /root/issue90/evidence ] && [ ! -L /root/issue90/evidence ]
+install -d -m 0700 -o root -g root /root/issue90/evidence
+[ "$(stat -c '%u:%g:%a' /root/issue90/evidence)" = '0:0:700' ]
+stat -c '%u:%g:%a %n' /root/issue90/evidence
+```
+
+- rc 0 and the last line `0:0:700 /root/issue90/evidence` → stage B may run. Anything else: stop and report. An
+  existing path, a symlink, or a parent that is not root:root 0700 is never changed or reused by this block.
+- Run it once only: the directory then stays for stage C, whose precheck also needs it with no earlier
+  `i90-switch-*` entry.
+
 **Import (stage B)**:
-- Copy the two archives to `/home/opc/issue90-images/` (the native68 path pattern). Then run `i90-import.sh` (pa-import.sh pattern, both archives).
+- Copy the two archives to `/home/opc/issue90-images/` (the native68 path pattern). Check the evidence directory
+  above. Then run `i90-import.sh` (pa-import.sh pattern, both archives).
 - It checks the chain: source sha → host id → archive sha256 → import digest → CRI id = host id, then the digest reference.
 - back writes it with the stage A output pins; review clears it by hash.
 
