@@ -1152,6 +1152,40 @@ def runs_of(action):
     return sorted(x for x in os.listdir(EVIDENCE) if re.fullmatch(r'i90-d3-%s-\d{8}T\d{6}Z' % re.escape(action), x))
 
 
+def exit_of(name):
+    """The exit.json of evidence directory `name`, validated (review 62d67fe): a JSON object whose `verdicts` (when
+    present) is an object of strings to true / false / null. Anything else - unreadable, not an object, a list, a
+    number, malformed verdicts - is None. Every reader (guards, combined_p4, the final report) uses this."""
+    try:
+        done = json.load(open(os.path.join(EVIDENCE, name, 'exit.json')))
+    except Exception:
+        return None
+    if not isinstance(done, dict):
+        return None
+    verdicts = done.get('verdicts', {})
+    if not isinstance(verdicts, dict) or not all(isinstance(key, str) and (value is True or value is False
+                                                                           or value is None)
+                                                 for key, value in verdicts.items()):
+        return None
+    return done
+
+
+def verdicts_of(done):
+    return done.get('verdicts', {}) if done else {}
+
+
+def rc0(done):
+    return bool(done) and type(done.get('rc')) is int and done['rc'] == 0
+
+
+def cleaned(done):
+    """The cleanup facts of an exit.json, each present and with its exact value (missing is not proven)."""
+    return (bool(done) and all(key in done for key in ('sessionRevoked', 'privateRemoved', 'clientsGone',
+                                                        'runnerReleased'))
+            and done['sessionRevoked'] is True and done['privateRemoved'] is True and done['clientsGone'] is True
+            and (done['runnerReleased'] is None or done['runnerReleased'] is True))
+
+
 def guard(action):
     if runs_of(action):
         raise Stop(3, 'i90-d3 %s already ran; a second run is a PM decision' % action)
@@ -1159,28 +1193,20 @@ def guard(action):
         # Once, only after exactly one p4 that ended (exit.json present) without a pass: rc 0 with a False or unknown
         # verdict (PM 2026-11-14, after the D3-d log-timestamp finding); never after a cleanup failure (6/7/8/80/70/9).
         earlier = runs_of('p4')
-        try:
-            done = json.load(open(os.path.join(EVIDENCE, earlier[0], 'exit.json'))) if len(earlier) == 1 else None
-        except Exception:
-            done = None
-        verdicts = (done or {}).get('verdicts') or {}
-        if not (done and done.get('rc') == 0
-                and any(verdicts.get(name) is not True for name in ('P4-0', 'P4-1', 'P4-3', 'P4-4'))):
+        done = exit_of(earlier[0]) if len(earlier) == 1 else None
+        verdicts = verdicts_of(done)
+        if not (rc0(done) and any(verdicts.get(name) is not True for name in ('P4-0', 'P4-1', 'P4-3', 'P4-4'))):
             raise Stop(3, 'p4-rerun needs exactly one earlier p4 that ended rc 0 without a pass')
     if action == 'p4-tail':
         # Once, only after exactly one p4-rerun that ended rc 0 with P4-0 and P4-1 True, P4-3 False, P4-4 not run and
-        # stopped at P4-3 (the r4 shared-second outcome of 2026-11-14; PM decision): only P4-3 and P4-4 run.
+        # stopped at P4-3 (the r4 shared-second outcome of 2026-11-14; PM decision), its cleanup facts present and
+        # proved: only P4-3 and P4-4 run.
         earlier = runs_of('p4-rerun')
-        try:
-            done = json.load(open(os.path.join(EVIDENCE, earlier[0], 'exit.json'))) if len(earlier) == 1 else None
-        except Exception:
-            done = None
-        verdicts = (done or {}).get('verdicts') or {}
-        if not (done and done.get('rc') == 0 and done.get('stoppedAt') == 'P4-3'
+        done = exit_of(earlier[0]) if len(earlier) == 1 else None
+        verdicts = verdicts_of(done)
+        if not (rc0(done) and done.get('stoppedAt') == 'P4-3'
                 and verdicts.get('P4-0') is True and verdicts.get('P4-1') is True
-                and verdicts.get('P4-3') is False and 'P4-4' not in verdicts
-                and done.get('sessionRevoked') is True and done.get('privateRemoved') is True
-                and done.get('clientsGone') is True and done.get('runnerReleased') in (None, True)):
+                and verdicts.get('P4-3') is False and 'P4-4' not in verdicts and cleaned(done)):
             raise Stop(3, 'p4-tail needs exactly one p4-rerun that ended rc 0, P4-0/P4-1 True, stopped at P4-3, its '
                           'cleanup proved')
     if action == 'p4-2':
@@ -1189,29 +1215,21 @@ def guard(action):
             raise Stop(3, 'p4-2 needs a P4 pass from the evidence (%s)' % combined)
 
 
-def exit_of(name):
-    try:
-        return json.load(open(os.path.join(EVIDENCE, name, 'exit.json')))
-    except Exception:
-        return None
-
-
 def combined_p4():
     """True, or why not: one P4 action whose four verdicts are all True, or (review/PM 2026-11-14) the one p4-rerun
     that stopped at P4-3 with P4-0/P4-1 True combined with the one p4-tail whose P4-3/P4-4 are True. Every exit.json
-    involved must be rc 0."""
+    involved must be valid and rc 0."""
     for action in P4_ACTIONS:
         for name in runs_of(action):
-            done = exit_of(name) or {}
-            if done.get('rc') == 0 and all((done.get('verdicts') or {}).get(item) is True
-                                           for item in ('P4-0', 'P4-1', 'P4-3', 'P4-4')):
+            done = exit_of(name)
+            if rc0(done) and all(verdicts_of(done).get(item) is True for item in ('P4-0', 'P4-1', 'P4-3', 'P4-4')):
                 return True
     rerun, tail = runs_of('p4-rerun'), runs_of('p4-tail')
     if len(rerun) != 1 or len(tail) != 1:
         return 'no single P4 action passed and no p4-rerun + p4-tail pair'
-    first, second = exit_of(rerun[0]) or {}, exit_of(tail[0]) or {}
-    a, b = first.get('verdicts') or {}, second.get('verdicts') or {}
-    if first.get('rc') == 0 and second.get('rc') == 0 and a.get('P4-0') is True and a.get('P4-1') is True \
+    first, second = exit_of(rerun[0]), exit_of(tail[0])
+    a, b = verdicts_of(first), verdicts_of(second)
+    if rc0(first) and rc0(second) and a.get('P4-0') is True and a.get('P4-1') is True \
             and b.get('P4-3') is True and b.get('P4-4') is True:
         return True
     return 'p4-rerun P4-0 %s P4-1 %s, p4-tail P4-3 %s P4-4 %s' % (a.get('P4-0'), a.get('P4-1'), b.get('P4-3'),
@@ -1365,7 +1383,7 @@ def main(argv):
         if failing:
             say('verdicts False or unknown: %s' % ', '.join(failing))
     if action == 'p4-tail':  # the retained P4-0/P4-1 of the p4-rerun, combined explicitly (review 2026-11-14)
-        rerun = (exit_of(runs_of('p4-rerun')[0]) or {}).get('verdicts') or {} if len(runs_of('p4-rerun')) == 1 else {}
+        rerun = verdicts_of(exit_of(runs_of('p4-rerun')[0])) if len(runs_of('p4-rerun')) == 1 else {}
         say('P4 combined: P4-0 %s and P4-1 %s (p4-rerun), P4-3 %s and P4-4 %s (this p4-tail)' % (
             rerun.get('P4-0'), rerun.get('P4-1'), verdicts.get('P4-3'), verdicts.get('P4-4')))
     say(flag_line(action, code))

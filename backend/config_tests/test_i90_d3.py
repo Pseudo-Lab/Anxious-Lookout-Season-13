@@ -869,3 +869,49 @@ def test_p4_tail_refused_after_a_rerun_whose_cleanup_failed(guest, monkeypatch):
     monkeypatch.setattr(m, "p4_3", real)
     g.sessions.clear()
     assert m.main(["i90-d3.py", "p4-tail"]) == 3
+
+
+# --- review 62d67fe: the prior evidence is validated, missing cleanup facts are not proof ----------------------------
+
+def tamper_exit(evidence, action, change):
+    folder = run_dir(evidence, action)
+    path = folder / "exit.json"
+    value = json.loads(path.read_text())
+    value = change(value)
+    path.write_text(json.dumps(value))
+
+
+@pytest.mark.parametrize("change", [
+    lambda v: [v],                                            # a list
+    lambda v: 0,                                              # a number
+    lambda v: "rc 0",                                         # a string
+    lambda v: {**v, "verdicts": [v["verdicts"]]},             # verdicts not an object
+    lambda v: {**v, "verdicts": {**v["verdicts"], "P4-0": 1}},   # 1 is not True
+    lambda v: {k: x for k, x in v.items() if k != "runnerReleased"},   # a missing cleanup fact
+    lambda v: {**v, "runnerReleased": 1},
+    lambda v: {**v, "sessionRevoked": "true"},
+    lambda v: {**v, "rc": "0"},
+    lambda v: {**v, "rc": 0.0},
+], ids=["list", "number", "string", "verdicts-list", "verdict-1", "no-runnerReleased", "runnerReleased-1",
+        "revoked-string", "rc-string", "rc-float"])
+def test_p4_tail_refuses_malformed_or_incomplete_prior_evidence(guest, monkeypatch, capsys, change):
+    m, g, evidence, doc = guest()
+    rerun_stopped_at_p43(m, g, monkeypatch)
+    tamper_exit(evidence, "p4-rerun", change)
+    starts, restarts, patches = g.clients_started, g.restarts, len(g.patches)
+    capsys.readouterr()
+    assert m.main(["i90-d3.py", "p4-tail"]) == 3
+    out = capsys.readouterr().out
+    assert [l for l in out.splitlines() if l.startswith("result rc=")][-1] == "result rc=3"
+    assert "verdict overall pass: False" in out and "P4 combined" in out
+    assert (g.clients_started, g.restarts, len(g.patches)) == (starts, restarts, patches)
+
+
+def test_p4_2_refuses_a_malformed_p4_tail_exit(guest, monkeypatch):
+    m, g, evidence, doc = guest(idle=True)
+    rerun_stopped_at_p43(m, g, monkeypatch)
+    g.faults["idle"] = False
+    assert m.main(["i90-d3.py", "p4-tail"]) == 0
+    tamper_exit(evidence, "p4-tail", lambda v: {**v, "verdicts": {**v["verdicts"], "P4-4": 1}})
+    g.faults["idle"] = True
+    assert m.main(["i90-d3.py", "p4-2"]) == 3
