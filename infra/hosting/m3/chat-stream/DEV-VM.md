@@ -214,6 +214,9 @@ table).
     `p4-rerun` (own evidence directory and guard: only after exactly one `p4` that ended rc 0 without a pass; the
     earlier evidence is kept) repeats P4-0..P4-4; `flag-off` takes the restartedAt value of the newest of p4 /
     p4-rerun.
+  - r14 (D3-L recount, 2026-11-14): with the r4 parser the D3-d P4-0 window holds exactly the 4 summary lines (reason
+    null, as the deployed image writes them). Each step's window is [since, until + 1 s) by the second; the script
+    now waits 1.1 s before each step so two steps never share a second.
   - The client containers run with `--security-opt label=disable` (as D2); before any runner start a probe container
     with the same image, user and mounts must read both private files (else rc 5, nothing changed).
 

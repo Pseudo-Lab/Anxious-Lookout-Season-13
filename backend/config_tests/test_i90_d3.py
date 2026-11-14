@@ -744,3 +744,43 @@ def test_p4_rerun_refused_after_a_passing_p4(guest):
     assert m.main(["i90-d3.py", "flag-on"]) == 0
     assert m.main(["i90-d3.py", "p4"]) == 0
     assert m.main(["i90-d3.py", "p4-rerun"]) == 3
+
+
+# D3-L raw summary lines (artifacts/pm/issue90/i90-d3-p4-summaries-20261114T071324Z.log, copied by grep, never typed)
+D3L_LINES = [
+    '2026-11-14T16:01:39.460086233+09:00 INFO:     api_stream_summary {"bytes": 0, "dropped": 0, "durationMs": 30021.783, "eventsRelayed": 0, "reason": null, "rebinds": 0, "session": "30b98127-90bf-49cc-9931-0a1a47c9f468", "upstreamReconnects": 0}',
+    '2026-11-14T16:02:00.053033854+09:00 INFO:     api_stream_summary {"bytes": 0, "dropped": 0, "durationMs": 20021.238, "eventsRelayed": 0, "reason": null, "rebinds": 0, "session": "30b98127-90bf-49cc-9931-0a1a47c9f468", "upstreamReconnects": 0}',
+    '2026-11-14T16:02:09.496344919+09:00 INFO:     api_stream_summary {"bytes": 0, "dropped": 0, "durationMs": 60059.087, "eventsRelayed": 0, "reason": null, "rebinds": 0, "session": "30b98127-90bf-49cc-9931-0a1a47c9f468", "upstreamReconnects": 0}',
+    '2026-11-14T16:02:09.497798462+09:00 INFO:     api_stream_summary {"bytes": 0, "dropped": 0, "durationMs": 60060.141, "eventsRelayed": 0, "reason": null, "rebinds": 0, "session": "30b98127-90bf-49cc-9931-0a1a47c9f468", "upstreamReconnects": 0}',
+]
+
+
+def test_d3l_recount_of_the_d3_d_p4_0_window(guest, monkeypatch, capsys):
+    """Recount (PM D3-L, review d3r4): the four real lines of the P4-0 window 07:01:08Z..07:02:09Z (UTC) with the r4
+    parser. The window is [since, until + 1 s): the last two lines (07:02:09.496 / .497 UTC) are inside it."""
+    m, g, evidence, doc = guest()
+    monkeypatch.setattr(m, "run", lambda cmd, timeout=60, stdin=None: (0, "\n".join(D3L_LINES)) if "logs" in cmd
+                        else g.run(cmd))
+    session = "30b98127-90bf-49cc-9931-0a1a47c9f468"
+    found = m.summaries(session, "2026-11-14T07:01:08Z", "2026-11-14T07:02:09Z")
+    for stamp, reason in found:
+        print("recount %s reason %s" % (stamp, reason))
+    assert len(found) == 4 and all(reason is None for _, reason in found)
+    # the first close (client 1, 30 s) is the earliest line; the P4-0 "summary after the first close" check holds
+    first = m.summaries(session, "2026-11-14T07:01:08Z", None)
+    assert first and first[0][0].startswith("2026-11-14T16:01:39")
+    # outside the window: nothing from before 07:01:08Z, and the boundary second is the last one counted
+    assert m.summaries(session, "2026-11-14T07:02:10Z", None) == []
+    assert len(m.summaries(session, "2026-11-14T07:01:08Z", "2026-11-14T07:02:08Z")) == 2
+
+
+def test_consecutive_step_windows_never_share_a_second(guest):
+    """Each step's since is taken after waiting past the previous step's until second (D3-L recount finding)."""
+    m, g, evidence, doc = guest()
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    assert m.main(["i90-d3.py", "p4"]) == 0
+    out = out_of(evidence, "p4")
+    windows = re.findall(r"window (\S+)\.\.(\S+);", out)
+    assert len(windows) >= 3
+    for (_, previous_until), (next_since, _) in zip(windows, windows[1:]):
+        assert m.instant(next_since) >= m.instant(previous_until) + 1

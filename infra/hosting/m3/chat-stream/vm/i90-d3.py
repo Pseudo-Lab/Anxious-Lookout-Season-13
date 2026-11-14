@@ -1175,6 +1175,9 @@ def measure(ev, doc, action, verdicts):
     else:
         steps = (('P4-2', lambda: p4_2(ev, conversation, verdicts)),)
     for name, step in steps:
+        # A step's window is [since, until + 1 s) by the second: waiting past the previous step's last second keeps
+        # two steps from ever sharing a second (a line there would count in both; D3-L recount, 2026-11-14).
+        time.sleep(1.1)
         say('--- %s %s' % (name, now_utc()))
         step()
         if verdicts.get(name) is not True:
