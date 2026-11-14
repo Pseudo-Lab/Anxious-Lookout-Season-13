@@ -75,10 +75,18 @@ function snapshot(res, t) {
   write(res, { id: `${t.requestId}:${t.seq}`, event: "snapshot.end", data: { requestId: t.requestId, seq: t.seq } });
 }
 
+const all = new Set(); // 열린 응답 전체
+
+/** 열린 스트림을 모두 닫는다(중간 끊김 흉내). */
+export function kickAll() {
+  for (const res of all) res.destroy();
+}
+
 /** GET /sessions/{id}/events. runner는 `/codex/status`와 같은 값. */
 export function openStream(req, res, sessionId, after, runner) {
   streamStats.connects.push({ sessionId, after, at: Date.now() });
   streamStats.open++;
+  all.add(res);
   res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store", "X-Accel-Buffering": "no" });
   write(res, { event: "runner", data: runner });
   const t = turns.get(sessionId);
@@ -97,6 +105,7 @@ export function openStream(req, res, sessionId, after, runner) {
   req.on("close", () => {
     clearInterval(heartbeat);
     set.delete(res);
+    all.delete(res);
     streamStats.open--;
   });
 }

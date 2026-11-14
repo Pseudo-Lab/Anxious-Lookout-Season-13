@@ -1088,6 +1088,25 @@ await step("N25", async () => {
     await setMock("turnMs=6000");
   }
 
+  // review(d02c691): 받는 중에 연결이 끊기고 다시 연결이 404(플래그 꺼짐)로 polling으로 돌아가도, polling이 받은 완료 기록으로
+  // 끝난다(끊긴 스트림의 running이 기록보다 앞서지 않는다). 끊긴 동안 실제 진행 중인 턴은 polling으로 이어진다.
+  {
+    await setMock("stream=on&turnMs=5000");
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
+    await input.fill("중간 끊김 질문");
+    await input.press("Enter");
+    await appears(chat.locator("li[data-role=assistant]", { hasText: "중간" }), 5000);
+    await setMock("stream=off&streamKick=1");
+    await page.waitForTimeout(1500);
+    check("N25. after drop -> 404 fallback, still in progress while the turn runs", await input.isDisabled());
+    check("N25. drop fallback: completed via polling, input unlocked", await appears(input.and(chat.locator(":enabled")), 12000));
+    check("N25. drop fallback: final answer recorded", await appears(chat.getByText("모의 응답: 중간 끊김 질문")));
+    check("N25. drop fallback: no thinking / stop left", (await chat.locator("[data-chat-thinking]").count()) === 0 && (await chat.getByRole("button", { name: /^중지/ }).count()) === 0);
+    await setMock("stream=on");
+    await page.reload();
+    await openSession();
+  }
+
   // 서버 알림·모르는 항목: 대화 전체는 그대로 보인다
   await setMock("turnMs=1500");
   await input.fill("/fixture/notice 알림 질문");

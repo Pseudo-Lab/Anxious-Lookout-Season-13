@@ -3,6 +3,7 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import { handleResearch, researchCounts, researchMode, runnerMode, setRunnerAll } from "./mock-research.mjs";
+import { kickAll } from "./mock-stream.mjs";
 
 const BASE = process.env.BASE_PATH ?? "";
 const NEXT = { host: "127.0.0.1", port: Number(process.env.NEXT_PORT ?? 3000) };
@@ -196,6 +197,8 @@ http
       if (url.searchParams.has("readyMs")) runnerMode.readyMs = Number(url.searchParams.get("readyMs"));
       if (url.searchParams.has("runnerAll")) setRunnerAll(url.searchParams.get("runnerAll"));
       if (url.searchParams.has("turnMs")) researchMode.turnMs = Number(url.searchParams.get("turnMs"));
+      // #90 streamKick=1: 열린 대화 스트림을 모두 끊는다(중간 끊김 흉내). stream 값 변경 뒤에 적용된다.
+      if (url.searchParams.get("streamKick") === "1") setImmediate(kickAll);
       // demote=<accountId>: 그 계정을 승인 해제된 commenter로 바꾼다(연구 권한 상실 검증용, 기존 session에도 반영)
       if (url.searchParams.get("demote")) {
         const u = users.get(url.searchParams.get("demote"));

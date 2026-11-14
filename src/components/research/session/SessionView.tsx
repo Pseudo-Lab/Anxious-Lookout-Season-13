@@ -944,12 +944,15 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
   const items = result?.ok === true ? result.data.items : null;
   const recordRequestId = items?.find(isPendingInput)?.id.replace(/^pending-/, "") ?? null;
   const liveTurn = stream.turn;
-  const showLive = liveTurn !== null && (liveTurn.running || (running && (recordRequestId === null || recordRequestId === liveTurn.requestId)));
+  // 스트림이 진행 중이라고 보는 턴은 연결돼 있을 때만 믿는다. 끊겼거나 polling으로 돌아갔으면 기록(polling)이 정한다
+  // (review d02c691: 끊긴 뒤 남은 running이 완료 기록보다 앞서 입력이 영구 잠김). 연결 중에는 이전 idle 기록이 새 턴을 지우지 않는다.
+  const liveRunning = liveTurn !== null && liveTurn.running && streamLive;
+  const showLive = liveTurn !== null && (liveRunning || (running && (recordRequestId === null || recordRequestId === liveTurn.requestId)));
 
   // #89 화면 상태: 보내는 중(submitted) → 서버 실행 중(waiting, "생각 중") → #90 받는 중(streaming) → 완료(ready) / 오류(error).
   // 한 번에 하나다. 보내기 요청이 끝나도 다음 조회가 끝날 때까지 submitted로 둔다(입력창이 잠깐 열렸다 닫히지 않게).
   // 스트림이 턴 끝(turn.completed)을 알렸지만 기록 GET이 아직이면 받는 중으로 둔다("생각 중"이 잠깐 다시 보이지 않게).
-  const status = chatStatus(send !== null, result?.ok === true ? result.data.state : "idle", showLive && (liveTurn.running || liveTurn.outcome !== null));
+  const status = chatStatus(send !== null, result?.ok === true ? result.data.state : "idle", showLive && (liveRunning || liveTurn.outcome !== null));
   const awaiting = awaitingReply(status);
   if (stopping && !awaiting) setStopping(null);
   // 턴이 끝나 중지 상태를 지웠으면 진행 중이던 중지 요청의 늦은 응답은 버린다(커밋 직후, 다른 응답 처리보다 먼저).
@@ -974,11 +977,11 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
   const liveItems = showLive ? liveTurn.items.filter((i) => !recordIds.has(i.itemId) && !(i.kind === "agentMessage" && i.text === "")) : [];
   const lastLive = liveItems.at(-1);
   // "생각 중"은 답변 조각을 받는 동안과, 끝난 턴의 기록을 기다리는 동안에는 보이지 않는다.
-  const answering = showLive && (liveTurn.outcome !== null || (!!lastLive && lastLive.kind === "agentMessage" && lastLive.status !== "completed"));
+  const answering = showLive && (liveTurn.outcome !== null || (liveRunning && !!lastLive && lastLive.kind === "agentMessage" && lastLive.status !== "completed"));
 
   // #90 중지 대상: 스트림의 진행 중 턴 → 기록의 실행 중 턴 → 막 접수한 턴(202 응답).
   const stopRequestId =
-    (showLive && liveTurn.running ? liveTurn.requestId : null) ?? (running ? recordRequestId : null) ?? (send !== null ? lastAccepted : null);
+    (liveRunning ? liveTurn.requestId : null) ?? (running ? recordRequestId : null) ?? (send !== null ? lastAccepted : null);
   // 버튼은 지금 턴의 중지 작업만 반영한다(다른 턴의 상태로 잠기지 않게).
   const turnStop = stopping && stopping.requestId === stopRequestId ? stopping : null;
   const stop: StopControl | null =
