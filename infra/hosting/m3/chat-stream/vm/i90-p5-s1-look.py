@@ -15,6 +15,8 @@ Output, one JSON line per kind, fixed keys only, no text, no ids (salted or raw)
 - `record`: the native record's turns (status) and, for the LAST turn, its agentMessage items in order as
   (textChars, textSha256), computed in memory;
 - `front`: front-evidence.json's S1 items (type, role, textChars);
+- `pins`: for the r5 continuation decision - the turns and disable run names, the sha256 of their exit.json bytes,
+  their rc, and the budget entries (n, step, outcome from fixed lists);
 - `compare`: by the fixed selection rule (the reader's last completed request, no open snapshot, its final agentMessage by
   first appearance; the record's final agentMessage of the fresh S1 turn - exactly two turns): `equal` / `different` /
   `unknown` with a fixed reason, the selected positions and candidate counts,
@@ -164,6 +166,36 @@ def record(conversation):
     return agent, fresh
 
 
+def pins():
+    """For the r5 continuation decision (review: bind the accepted S1 evidence, the completed disable and the budget):
+    the turns and disable run names (fixed patterns), the sha256 of their exit.json bytes, their rc, and the budget
+    entries' steps / outcomes (fixed lists). Hashes and fixed values only."""
+    value = {}
+    for action in ('turns', 'disable'):
+        found = sorted(x for x in os.listdir(EVIDENCE) if re.fullmatch(r'i90-p5-%s-\d{8}T\d{6}Z' % action, x))
+        if len(found) != 1:
+            value[action] = {'runs': len(found)}
+            continue
+        try:
+            raw = read(os.path.join(EVIDENCE, found[0], 'exit.json'))
+            done = json.loads(raw)
+            rc = done.get('rc') if isinstance(done, dict) and type(done.get('rc')) is int else None
+        except Exception:
+            raw, rc = None, None
+        value[action] = {'run': found[0], 'exitSha256': hashlib.sha256(raw).hexdigest() if raw is not None else None,
+                         'rc': rc}
+    try:
+        turns = json.loads(read(os.path.join(EVIDENCE, 'i90-p5-budget.json'))).get('turns')
+        value['budget'] = [{'n': t.get('n') if type(t.get('n')) is int else None,
+                            'step': t.get('step') if t.get('step') in ('S0', 'S1', 'S2', 'S3', 'S4a', 'S4b', 'S5', 'S6')
+                            else 'unknown',
+                            'outcome': t.get('outcome') if t.get('outcome') in ('accepted', 'reserved', 'send raised')
+                            else 'other'} for t in turns if isinstance(t, dict)]
+    except Exception:
+        value['budget'] = None
+    out('pins', **value)
+
+
 def front(folder):
     try:
         value = json.loads(read(os.path.join(folder, 'front-evidence.json')))
@@ -220,6 +252,7 @@ def main():
         listed = reader(os.path.join(turns, 'client-S1-hop3.jsonl'))
         agent, fresh = record(conversation)
         front(turns)
+        pins()
     except Refused as error:
         out('refused', reason=str(error))
         return 3

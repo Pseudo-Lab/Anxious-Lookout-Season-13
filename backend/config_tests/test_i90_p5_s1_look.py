@@ -137,3 +137,25 @@ def test_refuses_without_the_reader_file_or_root(look, monkeypatch, capsys):
     assert look.main() == 3
     monkeypatch.setattr(look.os, "geteuid", lambda: 1000)
     assert look.main() == 3
+
+
+def test_pins_for_r5_hash_the_turns_and_disable_exits_and_list_the_budget(look, monkeypatch, capsys):
+    setup(look, monkeypatch)
+    evidence = look.turns.parent
+    turns_exit = json.dumps({"rc": 0, "verdicts": {"S1": False}}).encode()
+    (look.turns / "exit.json").write_bytes(turns_exit)
+    disable = evidence / "i90-p5-disable-20261114T163347Z"
+    disable.mkdir()
+    (disable / "exit.json").write_bytes(b'{"rc": 0}')
+    (evidence / "i90-p5-budget.json").write_text(json.dumps({"cap": 8, "turns": [
+        {"n": 1, "step": "S0", "outcome": "accepted", "reservedAt": "x"},
+        {"n": 2, "step": "S1", "outcome": "accepted", "reservedAt": "y"}]}))
+    look.main()
+    out = lines(capsys)["pins"]
+    assert out["turns"] == {"run": look.turns.name, "exitSha256": sha256_bytes(turns_exit), "rc": 0}
+    assert out["disable"] == {"run": disable.name, "exitSha256": sha256_bytes(b'{"rc": 0}'), "rc": 0}
+    assert out["budget"] == [{"n": 1, "step": "S0", "outcome": "accepted"}, {"n": 2, "step": "S1", "outcome": "accepted"}]
+
+
+def sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
