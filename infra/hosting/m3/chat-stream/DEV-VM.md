@@ -208,6 +208,12 @@ table).
     again after the last writes (out.txt's result line, exit.json); a changed code prints a last `verdict overall
     pass: False` and `result rc=`. A signal inside the cleanup never skips the rest of it. p4 / p4-2 also count any
     leftover `issue90-i90-d3-*` container (the probe included) as 80.
+  - r13 (D3-d 2026-11-14: P4-0 False from a parser defect): `kubectl logs --timestamps` prints the node's local offset
+    (+09:00); the window compared text against UTC and dropped every line. Summary lines are now compared as instants
+    (RFC 3339 with Z or ±HH:MM) and their payload parsed as JSON (`session` exact, `reason` may be null). A one-time
+    `p4-rerun` (own evidence directory and guard: only after exactly one `p4` that ended rc 0 without a pass; the
+    earlier evidence is kept) repeats P4-0..P4-4; `flag-off` takes the restartedAt value of the newest of p4 /
+    p4-rerun.
   - The client containers run with `--security-opt label=disable` (as D2); before any runner start a probe container
     with the same image, user and mounts must read both private files (else rc 5, nothing changed).
 

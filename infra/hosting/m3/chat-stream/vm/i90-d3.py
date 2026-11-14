@@ -5,6 +5,7 @@ Run as root on the guest, each action other than `check` once, as a systemd unit
     python3 -I -B /root/issue90/i90-d3.py check      # read-only: changes nothing, writes no file
     systemd-run … python3 -I -B /root/issue90/i90-d3.py flag-on   # api env RESEARCH_STREAM_ENABLE=true, rollout
     systemd-run … python3 -I -B /root/issue90/i90-d3.py p4        # P4-0, P4-1, P4-3, P4-4
+    systemd-run … python3 -I -B /root/issue90/i90-d3.py p4-rerun  # once, only after one p4 that ended rc 0 without a pass
     systemd-run … python3 -I -B /root/issue90/i90-d3.py p4-2      # idle stop (CODEX_USER_RUNNER_IDLE_SECONDS)
     systemd-run … python3 -I -B /root/issue90/i90-d3.py flag-off  # env entry and P4-3's restartedAt removed
 
@@ -80,7 +81,8 @@ READS = (5, 35, 65)          # runner ready reads after the container start (D1)
 RUNNER_GRACE = 20            # the runner Pod's stop grace (DEV-VM P4)
 IDLE_SECONDS = 1800          # CODEX_USER_RUNNER_IDLE_SECONDS on this VM (PM 2026-11-14); checked in the api env
 SUMMARY_WAIT = 30
-ACTIONS = ('check', 'flag-on', 'p4', 'p4-2', 'flag-off')
+ACTIONS = ('check', 'flag-on', 'p4', 'p4-rerun', 'p4-2', 'flag-off')
+P4_ACTIONS = ('p4', 'p4-rerun')  # p4-rerun: once, after a p4 whose overall verdict was not a pass (PM decision)
 SESSION, OUT, STOPPING, CLIENTS, FOLLOWERS = {}, {'stream': None}, {'requested': False}, [], []
 
 
@@ -316,6 +318,20 @@ def recorded(action, key):
     return None if value is None else decode(value)
 
 
+def recorded_latest(actions, key):
+    """`key` from the newest run (by its UTC stamp) of any of `actions` that recorded it, or None."""
+    runs = sorted((x[-16:], x) for x in os.listdir(EVIDENCE) for action in actions
+                  if re.fullmatch(r'i90-d3-%s-\d{8}T\d{6}Z' % re.escape(action), x))
+    for _, name in reversed(runs):
+        try:
+            value = json.load(open(os.path.join(EVIDENCE, name, 'run.json'))).get(key)
+        except Exception:
+            raise Stop(3, '%s run.json unreadable' % name) from None
+        if value is not None:
+            return decode(value)
+    return None
+
+
 ANNOTATIONS = '/spec/template/metadata/annotations'
 RESTARTED_PATH = ANNOTATIONS + '/' + RESTARTED.replace('~', '~0').replace('/', '~1')
 ABSENT = object()
@@ -397,7 +413,7 @@ def flag_change(ev, doc, direction):
         baseline = recorded('flag-on', 'restartedAtBefore')
         if baseline is None:
             raise Stop(3, 'no flag-on run recorded the restartedAt baseline; nothing sent')
-        after_p43 = recorded('p4', 'restartedAtAfter')
+        after_p43 = recorded_latest(P4_ACTIONS, 'restartedAtAfter')
         current = baseline if after_p43 is None else after_p43
         say('flag-off: restartedAt baseline %s, expected now %s' % (
             'absent' if baseline is ABSENT else 'a value', 'absent' if current is ABSENT else
@@ -830,10 +846,31 @@ def api_pod(code=5):
     return live[0]
 
 
+STAMP = re.compile(r'(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})')
+
+
+def instant(stamp):
+    """Epoch seconds of an RFC 3339 timestamp with `Z` or a `±HH:MM` offset (kubectl --timestamps prints the node's
+    local offset, e.g. +09:00: D3-d 2026-11-14), or None. Never compared as text."""
+    match = STAMP.fullmatch(stamp or '')
+    if not match:
+        return None
+    parts = [int(x) for x in match.groups()[:6]]
+    value = calendar.timegm((parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], 0, 0, 0))
+    value += float('0.' + match.group(7)) if match.group(7) else 0.0
+    zone = match.group(8)
+    if zone != 'Z':
+        offset = int(zone[1:3]) * 3600 + int(zone[4:6]) * 60
+        value -= offset if zone[0] == '+' else -offset
+    return value
+
+
 def summaries(conversation, since, until=None, extra_logs=()):
-    """The api_stream_summary lines of `conversation` whose log timestamp (second) is in [since, until], from the live
-    api Pod's log (`--timestamps`) and the given followed logs: [(timestamp, reason), …]. Each step counts only its
-    own window (review/PM D3 major)."""
+    """The api_stream_summary lines of `conversation` whose log instant is in [since, until + 1 s), from the live api
+    Pod's log (`--timestamps`) and the given followed logs: [(timestamp, reason), …]. The payload after the marker is
+    parsed as JSON: `session` must be the conversation (exactly), `reason` may be null (the relay leaves it null on a
+    plain close). Each step counts only its own window (review/PM D3 major)."""
+    start, end = instant(since), (instant(until) + 1 if until is not None else None)
     texts = []
     rc, out = run([K3S, 'kubectl', '-n', API[0], 'logs', '--timestamps', api_pod()['metadata']['name'],
                    '--since-time=' + since], 60)
@@ -847,14 +884,21 @@ def summaries(conversation, since, until=None, extra_logs=()):
     found = []  # one entry per line: the live Pod and a followed (old) Pod are different logs, never merged
     for text in texts:
         for line in text.splitlines():
-            if 'api_stream_summary' not in line or '"session": "%s"' % conversation not in line:
+            if 'api_stream_summary ' not in line:
                 continue
             stamp = line.split(' ', 1)[0]
-            if stamp[:19] < since[:19] or (until is not None and stamp[:19] > until[:19]):
+            moment = instant(stamp)
+            try:
+                payload = json.loads(line.split('api_stream_summary ', 1)[1])
+            except (ValueError, IndexError):
                 continue
-            match = re.search(r'"reason": "([a-z_]+)"', line)
-            found.append((stamp, match.group(1) if match else None))
-    return sorted(found)
+            if not isinstance(payload, dict) or payload.get('session') != conversation or moment is None:
+                continue
+            if moment < start or (end is not None and moment >= end):
+                continue
+            reason = payload.get('reason')
+            found.append((stamp, reason if isinstance(reason, str) else None))
+    return sorted(found, key=lambda item: instant(item[0]))
 
 
 def wait_summaries(conversation, since, count, limit=SUMMARY_WAIT, extra_logs=()):
@@ -1062,7 +1106,7 @@ def precheck(doc, action):
         return
     if index is None or index < 0:
         raise Stop(3, '%s needs the flag on (run flag-on first)' % action)
-    if action == 'p4' and not flagless:
+    if action in P4_ACTIONS and not flagless:
         raise Stop(3, 'p4 needs the api template = stage C plus the flag only')
 
 
@@ -1081,9 +1125,25 @@ def flag_line(action, code):
     return line
 
 
+def runs_of(action):
+    return sorted(x for x in os.listdir(EVIDENCE) if re.fullmatch(r'i90-d3-%s-\d{8}T\d{6}Z' % re.escape(action), x))
+
+
 def guard(action):
-    if [x for x in os.listdir(EVIDENCE) if re.fullmatch(r'i90-d3-%s-\d{8}T\d{6}Z' % re.escape(action), x)]:
+    if runs_of(action):
         raise Stop(3, 'i90-d3 %s already ran; a second run is a PM decision' % action)
+    if action == 'p4-rerun':
+        # Once, only after exactly one p4 that ended (exit.json present) without a pass: rc 0 with a False or unknown
+        # verdict (PM 2026-11-14, after the D3-d log-timestamp finding); never after a cleanup failure (6/7/8/80/70/9).
+        earlier = runs_of('p4')
+        try:
+            done = json.load(open(os.path.join(EVIDENCE, earlier[0], 'exit.json'))) if len(earlier) == 1 else None
+        except Exception:
+            done = None
+        verdicts = (done or {}).get('verdicts') or {}
+        if not (done and done.get('rc') == 0
+                and any(verdicts.get(name) is not True for name in ('P4-0', 'P4-1', 'P4-3', 'P4-4'))):
+            raise Stop(3, 'p4-rerun needs exactly one earlier p4 that ended rc 0 without a pass')
 
 
 def take_lock():
@@ -1107,7 +1167,7 @@ def measure(ev, doc, action, verdicts):
     say('conversation %s (the newest, read only)' % conversation)
     prepare_private(ev, doc['toolImage'])
     probe_private()
-    if action == 'p4':
+    if action in P4_ACTIONS:
         steps = (('P4-0', lambda: p4_0(ev, conversation, verdicts)),
                  ('P4-1', lambda: p4_runner_stop(ev, conversation, verdicts, 'p4-1', 'read')),
                  ('P4-3', lambda: p4_3(ev, conversation, verdicts)),
@@ -1138,7 +1198,7 @@ def cleanup(action):
     except BaseException:
         gone = False
     try:  # p4 / p4-2: any container of this script (clients, the probe) left counts, whatever stopped the action
-        if action in ('p4', 'p4-2'):
+        if action in P4_ACTIONS + ('p4-2',):
             rc, out = run([DOCKER, 'ps', '-a', '--filter', 'name=^issue90-i90-d3-', '--format', '{{.Names}}'], 30)
             gone = gone and rc == 0 and not out
     except BaseException:
@@ -1213,7 +1273,7 @@ def main(argv):
     say('cleanup: runner released %s; client containers gone %s; private files removed %s; session revoked %s'
         % ({None: 'n/a'}.get(runner, runner), gone, {None: 'n/a'}.get(private, private),
            {None: 'n/a'}.get(revoked, revoked)))
-    items = {'p4': ('P4-0', 'P4-1', 'P4-3', 'P4-4'), 'p4-2': ('P4-2',)}.get(action, ())
+    items = ('P4-0', 'P4-1', 'P4-3', 'P4-4') if action in P4_ACTIONS else ('P4-2',) if action == 'p4-2' else ()
     for name in items:  # a step that did not run is `unknown`, never a pass (review/PM D3 major)
         say('verdict %s: %s' % (name, {True: 'True', False: 'False'}.get(verdicts.get(name), 'unknown')))
     failing = [name for name in items if verdicts.get(name) is not True]

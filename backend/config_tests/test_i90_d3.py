@@ -23,8 +23,13 @@ def load():
     return module
 
 
-def stamp(m, t):
-    return m.time.strftime("%Y-%m-%dT%H:%M:%S", m.time.gmtime(t)) + ".000000000Z"
+def stamp(m, t, tz=None):
+    """RFC 3339 of instant t: UTC with Z, or local with an offset like kubectl --timestamps prints (+09:00)."""
+    if not tz:
+        return m.time.strftime("%Y-%m-%dT%H:%M:%S", m.time.gmtime(t)) + ".000000000Z"
+    sign, hours, minutes = tz[0], int(tz[1:3]), int(tz[4:6])
+    shift = (hours * 3600 + minutes * 60) * (1 if sign == "+" else -1)
+    return m.time.strftime("%Y-%m-%dT%H:%M:%S", m.time.gmtime(t + shift)) + ".460086233" + tz
 
 
 class Guest:
@@ -105,9 +110,11 @@ class Guest:
                 return 0, json.dumps({"items": self.api_pods})
             if rest[0] == "logs":
                 since = [a for a in rest if a.startswith("--since-time=")][0].split("=", 1)[1]
-                lines = ["%s INFO api_stream_summary {\"reason\": \"client_closed\", \"session\": \"%s\"}"
-                         % (stamp(self.m, t), CONVERSATION) for t in self.summary_at
-                         if t <= self.clock and stamp(self.m, t)[:19] >= since[:19]]
+                tz = self.faults.get("tz")  # kubectl prints the node's local offset (D3-d: +09:00)
+                lines = ["%s INFO:     api_stream_summary {\"bytes\": 10, \"reason\": %s, \"session\": \"%s\"}"
+                         % (stamp(self.m, t, tz), "null" if self.faults.get("null_reason") else '"closed"',
+                            CONVERSATION) for t in self.summary_at
+                         if t <= self.clock and t >= self.m.instant(since)]
                 return 0, "\n".join(lines)
         if args[:2] == ["-n", "codex-runner"]:
             return 0, json.dumps({"items": self.runner})
@@ -679,3 +686,61 @@ def test_a_signal_during_the_cleanup_stop_still_runs_the_rest_of_the_cleanup(gue
     assert not any(g.sessions.values()) and not (run_dir(evidence, "p4") / "private").exists()
     done = json.loads((run_dir(evidence, "p4") / "exit.json").read_text())
     assert done["stepRc"] == 5 and done["runnerReleased"] is False and done["sessionRevoked"] is True
+
+
+# --- log timestamps with offsets and the summary payload (D3-d 2026-11-14 finding) -------------------------------
+
+@pytest.mark.parametrize("text,fraction", [
+    ("2026-11-14T07:01:39Z", 0.0), ("2026-11-14T16:01:39+09:00", 0.0),
+    ("2026-11-14T16:01:39.460086233+09:00", 0.460086233), ("2026-11-14T01:31:39-05:30", 0.0),
+    ("2026-11-14 07:01:39Z", None), ("2026-11-14T07:01:39", None), ("", None)])
+def test_instant_compares_moments_not_text(text, fraction):
+    import calendar
+    m = load()
+    got = m.instant(text)
+    if fraction is None:
+        assert got is None
+    else:  # every form is the same moment as 07:01:39 UTC (the expected value is computed, never typed)
+        assert abs(got - (calendar.timegm((2026, 11, 14, 7, 1, 39, 0, 0, 0)) + fraction)) < 1e-6
+
+
+def test_the_d3_d_line_is_counted_in_its_window(guest, monkeypatch):
+    """The P4-0 line of D3-d (+09:00, reason null) inside the UTC window 07:01:08Z..07:02:09Z."""
+    m, g, evidence, doc = guest()
+    line = ('2026-11-14T16:01:39.460086233+09:00 INFO:     api_stream_summary {"bytes": 0, "reason": null, '
+            '"session": "%s"}' % CONVERSATION)
+    monkeypatch.setattr(m, "run", lambda cmd, timeout=60, stdin=None: (0, line) if "logs" in cmd else g.run(cmd))
+    found = m.summaries(CONVERSATION, "2026-11-14T07:01:08Z", "2026-11-14T07:02:09Z")
+    assert found == [("2026-11-14T16:01:39.460086233+09:00", None)]
+    assert m.summaries(CONVERSATION, "2026-11-14T07:01:40Z", "2026-11-14T07:02:09Z") == []
+    assert m.summaries("another-session", "2026-11-14T07:01:08Z", "2026-11-14T07:02:09Z") == []
+
+
+@pytest.mark.parametrize("tz", ["+09:00", "Z", "-05:30"])
+def test_p4_passes_with_local_offset_log_timestamps_and_null_reasons(guest, tz):
+    m, g, evidence, doc = guest(tz=None if tz == "Z" else tz, null_reason=True)
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    assert m.main(["i90-d3.py", "p4"]) == 0
+    out = out_of(evidence, "p4")
+    assert "verdict overall pass: True" in out, out
+
+
+def test_p4_rerun_once_and_only_after_a_p4_without_a_pass(guest, monkeypatch):
+    m, g, evidence, doc = guest(no_cap=True)
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    assert m.main(["i90-d3.py", "p4-rerun"]) == 3  # no p4 yet
+    assert m.main(["i90-d3.py", "p4"]) == 0 and "verdict P4-0: False" in out_of(evidence, "p4")
+    g.faults["no_cap"] = False
+    assert m.main(["i90-d3.py", "p4-rerun"]) == 0
+    out = out_of(evidence, "p4-rerun")
+    assert "verdict overall pass: True" in out
+    assert m.main(["i90-d3.py", "p4-rerun"]) == 3  # once
+    # flag-off uses the restartedAt value P4-3 left in the rerun
+    assert m.main(["i90-d3.py", "flag-off"]) == 0 and m.template_sha(g.api) == doc["apiTemplateSha256"]
+
+
+def test_p4_rerun_refused_after_a_passing_p4(guest):
+    m, g, evidence, doc = guest()
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    assert m.main(["i90-d3.py", "p4"]) == 0
+    assert m.main(["i90-d3.py", "p4-rerun"]) == 3
