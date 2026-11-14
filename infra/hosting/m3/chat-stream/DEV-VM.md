@@ -319,6 +319,25 @@ rollback needs them. Nothing prunes images in #90.
 
 ## P5 — measurements with real Codex turns (only after the user's turn budget)
 
+**r18 (2026-11-15): P5 is run by `vm/i90-p5.py`** (plan r0 `artifacts/back/issue90/p5-plan/P5-PLAN.md` 9ffd2ba6…,
+PM decisions Q1–Q5, review plan notes; its docstring is the specification). In short:
+- **Order of actions:** `check` → `s0` (flags off, 1 turn) → `enable` → `turns` (S1–S6, 7 turns) → `disable`.
+- **`disable` always runs after `enable`.** The one exception is a held state (rc 7 / 8 of any p5 action), which back and review decide.
+- **Budget:** 8 turns, hard cap 8. Each turn is reserved durably before its POST (`evidence/i90-p5-budget.json`, under the shared lock). Every reservation counts, whatever followed it; the 9th refuses.
+- **`enable`:** two patches, controller then api. The pre-enable whole-template hashes and the progress marker are on disk before anything is sent. A refused api patch restores the controller and proves it.
+- **`disable`:** inverse patches, then the hashes must be `equal: True` to the pre-enable ones.
+- **Base and flags:**
+  - The controller moves to the r4 runtime `newApiImage` with `CODEX_RUNNER_STREAM_TEXT` / `CODEX_RUNNER_STREAM_TRACE`.
+  - The api gets `RESEARCH_STREAM_ENABLE`, `CODEX_RUNNER_STREAM_TEXT`, `CODEX_RUNNER_STREAM_TRACE` and `STREAM_TRACE`.
+  - Trace stays on for all of S1–S6 (Q1).
+  - `disable` returns the controller to its pre-#90 image (Q3).
+- **Readers:** review's `p5_client.py` r1 (`P5-CLIENT.md`), with salted id hashes. Hop ② is the api Service, hop ③ is Traefik. Hop ④ runs only when `HOP4` is set (PM; Q2).
+- **Data scope:** no answer text, command output or raw log is written anywhere. Runner logs are filtered to the summary and shutdown lines. The api log is reduced to `api_stream_summary` payloads and a `conversation_refresh_write` count. GET text is hashed in memory.
+- **Evidence for front:** each step writes a `front-evidence.json` entry (frame sequence, first text after the send, GET item kinds and lengths). It does not replace the real UI gate before the PR.
+- **Timing labels:** S1 prints `S1 runtime:` (runner_stream_summary `legacyL`, `cutDelayPeakChars`, `holdbackPeakChars`) apart from `S1 measured:` (the first text after the send, and runner-to-reader trace delays). The measured numbers are end to end; they are neither holdback nor link latency.
+- **S6** needs the server's `stalled` evidence, else its verdict is unknown. **S3** reports a completion race as such.
+- The rest of this section is the original P5 design that the script implements.
+
 **Prerequisite P5-0 (code, separate review)**: the runner Pod env must be able to carry `RUNNER_STREAM_TEXT=true` and `STREAM_TRACE=true`.
 - **What checks the Pod env**: `runner_kube.py` renders a fixed env, and its Pod verification (`KubePods._pod`) requires the live Pod spec to equal the render exactly. The runner admission draft (`user-runner-policy-draft`) is gated and not applied. An earlier version of this file said "the runner policy checks it"; the check is the code.
 - **The change** (its own commit):

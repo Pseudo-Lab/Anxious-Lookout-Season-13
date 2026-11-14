@@ -816,3 +816,9 @@ def test_stage_r_d1_is_stage_d1_with_the_listed_changes_only():
 def test_install_accepts_the_stage_r_d1_script(tmp_path):
     code, out, d = install_run(tmp_path, "i90r-d1.py", b"print('rd1')\n")
     assert code == 0 and (d / "i90r-d1.py").read_bytes() == b"print('rd1')\n"
+
+
+@pytest.mark.parametrize("name", ["i90-p5.py", "p5_client.py"])
+def test_install_accepts_the_p5_files(tmp_path, name):
+    code, out, d = install_run(tmp_path, name, b"print('p5')\n")
+    assert code == 0 and (d / name).read_bytes() == b"print('p5')\n"
