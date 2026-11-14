@@ -704,18 +704,37 @@ def test_stage_r_import_is_stage_b_with_the_listed_changes_only():
     old = (VM / "i90-import.sh").read_text().splitlines()
     new = (VM / "i90r-import.sh").read_text().splitlines()
     assert all(line.startswith("# ") for line in new[:3]) and "stage R import" in new[0]
-    expected = []
-    for line in old:
-        line = (line.replace("i90-import-", "i90r-import-").replace("i90-import: ", "i90r-import: ")
-                .replace('"i90 $1 digest reference', '"i90r $1 digest reference'))
-        match = _re.match(r"^(SOURCE|RUNNER_TAG_REF|RUNNER_FILE|RUNNER_ARCHIVE_SHA|RUNNER_HOST_ID|RUNTIME_TAG_REF|"
-                          r"RUNTIME_FILE|RUNTIME_ARCHIVE_SHA|RUNTIME_HOST_ID)=", line)
-        expected.append(match.group(1) + "=PIN" if match else line)
-    assert new[3:] == expected
+    pin_line = _re.compile(r"^(SOURCE|RUNNER_TAG_REF|RUNNER_FILE|RUNNER_ARCHIVE_SHA|RUNNER_HOST_ID|RUNTIME_TAG_REF|"
+                           r"RUNTIME_FILE|RUNTIME_ARCHIVE_SHA|RUNTIME_HOST_ID)=.*$")
+    expected = [pin_line.sub(r"\1=", line.replace("i90-import-", "i90r-import-").replace("i90-import: ", "i90r-import: ")
+                             .replace('"i90 $1 digest reference', '"i90r $1 digest reference')) for line in old]
+    assert [pin_line.sub(r"\1=", line) for line in new[3:]] == expected
+    pins = stage_r_import_pins()
+    assert len(pins) == 9 and "PIN" not in pins.values()
+
+
+def stage_r_import_pins():
+    return dict(_re.findall(r"(?m)^(SOURCE|RUNNER_[A-Z_]+|RUNTIME_[A-Z_]+)=(.*)$", (VM / "i90r-import.sh").read_text()))
+
+
+def test_stage_r_import_pins_have_the_r_a_shapes():
+    """The values are R-A's (sed from images.txt / archives.sha256 / the log, reviewed by hash); this checks their
+    shape and that they name the 90-bb3aa97 pair, not stage B's pins."""
+    pins, stage_b = stage_r_import_pins(), dict(_re.findall(r"(?m)^(SOURCE|RUNNER_[A-Z_]+|RUNTIME_[A-Z_]+)=(.*)$",
+                                                            (VM / "i90-import.sh").read_text()))
+    assert _re.fullmatch(r"[0-9a-f]{40}", pins["SOURCE"]) and pins["SOURCE"].startswith("bb3aa97")
+    for kind in ("RUNNER", "RUNTIME"):
+        name = "anxious-dev-" + kind.lower()
+        assert pins[kind + "_TAG_REF"] == "docker.io/library/%s:90-bb3aa97" % name
+        assert pins[kind + "_FILE"] == "%s-90-bb3aa97.tar" % name
+        assert _re.fullmatch(r"[0-9a-f]{64}", pins[kind + "_ARCHIVE_SHA"])
+        assert _re.fullmatch(r"sha256:[0-9a-f]{64}", pins[kind + "_HOST_ID"])
+    assert all(pins[key] != stage_b[key] for key in pins)
 
 
 def test_stage_r_import_refuses_while_a_pin_is_the_placeholder():
-    result = subprocess.run(["sh", "-c", (VM / "i90r-import.sh").read_text()], capture_output=True, text=True)
+    text = _re.sub(r"(?m)^RUNTIME_HOST_ID=.*$", "RUNTIME_HOST_ID=PIN", (VM / "i90r-import.sh").read_text())
+    result = subprocess.run(["sh", "-c", text], capture_output=True, text=True)
     assert result.returncode == 3 and "a pin is still the placeholder" in result.stdout
 
 

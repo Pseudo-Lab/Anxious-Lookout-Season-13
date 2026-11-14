@@ -1,6 +1,6 @@
 # #90 stage R import (the r4 redeploy): i90-import.sh (stage B, sha256 a7aea286…, approved and run 2026-11-14) with only
-# this line, the evidence name i90r-import-<UTC>, the printed i90r labels and every pin back to the placeholder
-# (filled from the stage R-A build output only; config_tests/test_i90_vm.py checks every changed line).
+# this line, the evidence name i90r-import-<UTC>, the printed i90r labels and its 9 pins, filled by sed from the stage R-A
+# output only (/home/infmedix/issue90-build-20261114T145718Z images.txt, archives.sha256; log source line; test_i90_vm.py).
 # #90 stage B import (chat-stream/DEV-VM.md P1; guest, as root, sent as the argument of `sh -c`; never installed): import
 # the runner and the runtime archive built by i90-host-build.sh (stage A) into k3s containerd and add their digest
 # references, each with the evidence chain source SHA -> host image ID -> archive SHA-256 -> import reference / digest
@@ -24,15 +24,15 @@ umask 077
 K3S=/usr/local/bin/k3s
 EVIDENCE=/root/issue90/evidence
 IMAGES=/home/opc/issue90-images
-SOURCE=PIN
-RUNNER_TAG_REF=PIN
-RUNNER_FILE=PIN
-RUNNER_ARCHIVE_SHA=PIN
-RUNNER_HOST_ID=PIN
-RUNTIME_TAG_REF=PIN
-RUNTIME_FILE=PIN
-RUNTIME_ARCHIVE_SHA=PIN
-RUNTIME_HOST_ID=PIN
+SOURCE=bb3aa97070f175a74eec3a0c024cd158cd64fadd
+RUNNER_TAG_REF=docker.io/library/anxious-dev-runner:90-bb3aa97
+RUNNER_FILE=anxious-dev-runner-90-bb3aa97.tar
+RUNNER_ARCHIVE_SHA=833603c05384d7ea838c7ff590e50ba7a50436463c7fdcab39d8050e275b9994
+RUNNER_HOST_ID=sha256:9ab78358414a17211b01276f016ece2f54468ddd611931d9bc428c32029e7a1e
+RUNTIME_TAG_REF=docker.io/library/anxious-dev-runtime:90-bb3aa97
+RUNTIME_FILE=anxious-dev-runtime-90-bb3aa97.tar
+RUNTIME_ARCHIVE_SHA=6c52e4ac0a637b20988023d2266476566549b75804f768a80851de931f4a82f2
+RUNTIME_HOST_ID=sha256:0b5a599c580adf1deffc39c3c4c5e9019967659ca62828e5c54836af0a7515f8
 
 image_id() { timeout 30 "$K3S" crictl inspecti -o go-template --template '{{.status.id}}' "$1" 2>/dev/null; }
 
