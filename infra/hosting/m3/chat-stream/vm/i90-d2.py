@@ -37,7 +37,7 @@ OWNER = '00000000-0000-4000-8000-000000005805'
 EXPECTED_FILE = '/root/issue90/i90-expected.json'
 EXPECTED_SHA = '2476bdb2535e7733a58494fbac63057a02d8724b6b9f599b94fbfb07efa31b9f'  # i90-expected.json, from sha256sum
 SCRIPT = '/root/issue90/journal_lengths.py'
-JOURNAL_LENGTHS_SHA = '118737fd767a0ad441f8412957d2a90272f228d3125360ab2d375a96a2ac1128'  # journal_lengths.py, from sha256sum
+JOURNAL_LENGTHS_SHA = 'fd1d9f7fdc34262db1d1d73a33ebc9fb87c219c1bf2fda321f8e3d750a1a924c'  # journal_lengths.py, from sha256sum
 K3S, DOCKER = '/usr/local/bin/k3s', '/usr/bin/docker'
 RUNNER_NS = 'codex-runner'
 

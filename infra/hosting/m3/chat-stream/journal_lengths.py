@@ -6,9 +6,13 @@ directory of an access-service runner (`service-access.sqlite3`, backend/runner/
 
 v2 (design r4 / r4.1): also the `snapshots` row count and a **structural** covered / legacy split of the long
 literals (length > P = 16, runner/stream_prefix.py) against `stream-prefixes.json`: a literal row counts as covered
-when an entry of that file names its (length, journal digest). The file's MAC is **not** verified (this tool never
-reads the key) and no value from it is printed; the runtime `legacyL` (runner_stream_summary) is the authoritative
-answer (review r4 minor). `prefixFile` is absent / unreadable / malformed / present.
+when an entry of that file names its (length, journal digest). v2 r1 (review acb6c57 major): an entry is credited
+only when the whole file has the runtime's public shape (stream_prefix.py `_valid`: exact top-level fields, version,
+prefixLength = P, at most LIMIT entries, four-element entries, filter in [0, MASK], hex digests, P < length <= 65536);
+any other shape is `malformed` and every long literal legacy. The file's MAC and its owner / trialId binding are **not**
+verified (this tool never reads the key or the ledger metadata) and no value from it is printed; the runtime
+`legacyL` (runner_stream_summary) is the authoritative answer (review r4 minor). `prefixFile` is absent / unreadable /
+malformed / present.
 
 Read only: the directory and files are checked with lstat (regular, not a symlink) before any open; the database is
 opened as `file:...?mode=ro&immutable=1` (no lock, no journal, nothing written); the prefix file is read through an
@@ -25,7 +29,11 @@ from urllib.parse import quote
 
 LEDGER = "service-access.sqlite3"
 PREFIXES = "stream-prefixes.json"
-P = 16  # runner/stream_prefix.py P (this tool imports nothing from the runner)
+P = 16  # runner/stream_prefix.py P, VERSION, FIELDS, LIMIT; projection.py MASK (this tool imports nothing from the runner)
+VERSION = 1
+FIELDS = {"version", "owner", "trialId", "prefixLength", "entries", "mac"}
+LIMIT = 4096
+MASK = (1 << 64) - 1
 PREFIX_LIMIT = 2_000_000
 
 
@@ -56,17 +64,35 @@ def prefix_entries(directory):
     except OSError:
         return "unreadable", set()
     try:
-        payload = json.loads(data)
-        entries = payload["entries"]
-        found = set()
-        for item in entries:
-            length, digest = item[2], item[3]
-            if type(length) is not int or not isinstance(digest, str):
-                raise ValueError()
-            found.add((length, digest))
-        return "present", found
+        found = public_schema(json.loads(data))
     except Exception:
-        return "malformed", set()
+        found = None
+    return ("malformed", set()) if found is None else ("present", found)
+
+
+def hex64(value):
+    return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
+def public_schema(payload):
+    """{(length, digest)} when `payload` has the runtime's public shape (runner/stream_prefix.py `_valid`), else None.
+    Not checked (they need the journal key or its metadata): the MAC value and owner / trialId equality."""
+    if not (isinstance(payload, dict) and set(payload) == FIELDS and type(payload["version"]) is int
+            and payload["version"] == VERSION and isinstance(payload["owner"], str) and payload["owner"]
+            and isinstance(payload["trialId"], str) and payload["trialId"]
+            and type(payload["prefixLength"]) is int and payload["prefixLength"] == P
+            and isinstance(payload["entries"], list) and len(payload["entries"]) <= LIMIT and hex64(payload["mac"])):
+        return None
+    found = set()
+    for item in payload["entries"]:
+        if not (isinstance(item, list) and len(item) == 4):
+            return None
+        prefix_filter, digest, length, literal = item
+        if not (type(prefix_filter) is int and 0 <= prefix_filter <= MASK and hex64(digest)
+                and type(length) is int and P < length <= 65536 and hex64(literal)):
+            return None
+        found.add((length, literal))
+    return found
 
 
 def measure(directory):

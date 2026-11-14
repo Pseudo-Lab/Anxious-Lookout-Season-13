@@ -84,7 +84,7 @@ def prefix_file(directory, literals, raw=None):
     if raw is not None:
         path.write_text(raw)
         return path
-    entries = [[1, "p" * 64, len(value), hashlib.sha256(value.encode()).hexdigest()] for value in literals]
+    entries = [[1, "c" * 64, len(value), hashlib.sha256(value.encode()).hexdigest()] for value in literals]
     path.write_text(json.dumps({"version": 1, "owner": "o", "trialId": "t", "prefixLength": 16, "entries": entries,
                                 "mac": "0" * 64}))
     return path
@@ -106,7 +106,7 @@ def test_structural_coverage_and_snapshots(control):
     assert value["structural"] == {"macVerified": False, "covered": {"1676": 1, "43": 1}, "legacy": {"43": 1},
                                    "LLegacy": 43}
     assert value["L"] == 1676  # the v1 L is unchanged: every literal
-    assert token not in out and hashlib.sha256(token.encode()).hexdigest() not in out and "p" * 64 not in out
+    assert token not in out and hashlib.sha256(token.encode()).hexdigest() not in out and "c" * 64 not in out
     after = {path.name: (path.stat().st_mtime_ns, path.read_bytes()) for path in control.iterdir()}
     assert after == before
 
@@ -133,3 +133,82 @@ def test_a_bad_prefix_file_counts_everything_legacy(control, tmp_path, case, sta
     value = json.loads(out)
     assert code == 0 and value["prefixFile"] == state
     assert value["structural"]["covered"] == {} and value["structural"]["LLegacy"] == len(token)
+
+
+# --- v2 r1 (review acb6c57 major): only the runtime's public shape credits coverage -------------------------------
+
+def shaped(token, change):
+    entry = [1, "c" * 64, len(token), hashlib.sha256(token.encode()).hexdigest()]
+    payload = {"version": 1, "owner": "o", "trialId": "t", "prefixLength": 16, "entries": [entry], "mac": "0" * 64}
+    change(payload, entry)
+    return payload
+
+
+SHAPES = {
+    "missing_metadata": lambda p, e: [p.pop(k) for k in ("version", "owner", "trialId", "prefixLength", "mac")],
+    "extra_top_field": lambda p, e: p.update(extra=1),
+    "version_2": lambda p, e: p.update(version=2),
+    "version_true": lambda p, e: p.update(version=True),
+    "owner_empty": lambda p, e: p.update(owner=""),
+    "trial_not_str": lambda p, e: p.update(trialId=7),
+    "prefix_length_8": lambda p, e: p.update(prefixLength=8),
+    "prefix_length_str": lambda p, e: p.update(prefixLength="16"),
+    "entries_not_list": lambda p, e: p.update(entries={"0": e}),
+    "entries_over_limit": lambda p, e: p.update(entries=[e] * 4097),
+    "mac_not_hex": lambda p, e: p.update(mac="not-a-mac"),
+    "entry_five": lambda p, e: e.append("unexpected"),
+    "entry_three": lambda p, e: e.pop(0),
+    "entry_tuple_like": lambda p, e: p.update(entries=[dict(enumerate(e))]),
+    "filter_str": lambda p, e: e.__setitem__(0, "not-a-filter"),
+    "filter_bool": lambda p, e: e.__setitem__(0, True),
+    "filter_negative": lambda p, e: e.__setitem__(0, -1),
+    "filter_over_mask": lambda p, e: e.__setitem__(0, 1 << 64),
+    "prefix_not_hex": lambda p, e: e.__setitem__(1, "not-a-digest"),
+    "prefix_upper_hex": lambda p, e: e.__setitem__(1, "C" * 64),
+    "literal_not_hex": lambda p, e: e.__setitem__(3, e[3][:63] + "z"),
+    "length_bool": lambda p, e: e.__setitem__(2, True),
+    "length_over": lambda p, e: e.__setitem__(2, 65537),
+    # one bad entry spoils the file, even next to a good one (the runtime discards the whole file)
+    "one_bad_of_two": lambda p, e: p["entries"].append([1, "c" * 64, 16, "d" * 64]),
+}
+
+
+@pytest.mark.skipif(not SCRIPT.exists(), reason="infra/ not mounted (the unit command mounts backend/ only)")
+@pytest.mark.parametrize("bad", sorted(SHAPES))
+def test_a_structurally_invalid_file_credits_nothing(control, bad):
+    token = "eyJ" + "v" * 100
+    ledger(control, [token])
+    prefix_file(control, [], raw=json.dumps(shaped(token, SHAPES[bad])))
+    code, out = run(control)
+    value = json.loads(out)
+    assert code == 0 and value["prefixFile"] == "malformed"
+    assert value["structural"] == {"macVerified": False, "covered": {}, "legacy": {"103": 1}, "LLegacy": 103}
+
+
+@pytest.mark.skipif(not SCRIPT.exists(), reason="infra/ not mounted (the unit command mounts backend/ only)")
+def test_the_public_shape_bounds_are_inclusive(control):
+    tokens = ["eyJ" + "w" * 14, "eyJ" + "x" * 100]  # 17 chars (P + 1, the shortest long literal) and 103
+    ledger(control, tokens)
+
+    def change(payload, entry):
+        entry[0] = (1 << 64) - 1  # MASK
+        payload["entries"] = [entry, [0, "e" * 64, 17, hashlib.sha256(tokens[0].encode()).hexdigest()]]
+
+    prefix_file(control, [], raw=json.dumps(shaped(tokens[1], change)))
+    code, out = run(control)
+    value = json.loads(out)
+    assert code == 0 and value["prefixFile"] == "present"
+    assert value["structural"] == {"macVerified": False, "covered": {"17": 1, "103": 1}, "legacy": {}, "LLegacy": 0}
+
+
+def test_the_mirrored_constants_match_the_runtime():
+    if not SCRIPT.exists():
+        pytest.skip("infra/ not mounted (the unit command mounts backend/ only)")
+    import importlib.util
+    from runner import projection, stream_prefix
+
+    spec = importlib.util.spec_from_file_location("journal_lengths_under_test", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert (module.P, module.VERSION, module.FIELDS, module.LIMIT, module.MASK) == (
+        stream_prefix.P, stream_prefix.VERSION, stream_prefix.FIELDS, stream_prefix.LIMIT, projection.MASK)
