@@ -1012,6 +1012,28 @@ await step("N25", async () => {
   check("N25. stop is not a failure", (await chat.getByText("마지막 요청이 실패했습니다").count()) === 0);
   check("N25. input unlocked after stop", await appears(input.and(chat.locator(":enabled")), 5000));
 
+  // review(62e0406): A 턴 중지 → A 종료로 입력 해제 → B 턴 전송 → A 중지 응답이 늦게 도착해도 B의 중지 버튼은 잠기지 않는다.
+  {
+    await page.route("**/api/research/sessions/*/interrupt", async (route) => {
+      const r = await route.fetch(); // 서버(모의)는 바로 중지하고 기록을 남긴다
+      await sleep(3000); // 응답 전달만 늦춘다
+      return route.fulfill({ response: r }).catch(() => {});
+    });
+    await input.fill("늦은 중지 A");
+    await input.press("Enter");
+    await appears(chat.locator("li[data-role=assistant]", { hasText: "늦은" }), 5000);
+    await chat.getByRole("button", { name: "중지" }).click();
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 8000 });
+    await input.fill("다음 턴 B");
+    await input.press("Enter");
+    await chat.getByRole("button", { name: /^중지/ }).waitFor({ timeout: 5000 });
+    await page.waitForTimeout(3500); // A의 늦은 응답이 도착한 뒤(B 턴 6초 안)
+    const b = chat.getByRole("button", { name: /^중지/ });
+    check("N25. late stop reply of turn A does not lock turn B's stop button", (await b.textContent())?.trim() === "중지" && (await b.isEnabled()), `${await b.textContent()} enabled=${await b.isEnabled()}`);
+    await page.unroute("**/api/research/sessions/*/interrupt");
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
+  }
+
   // 서버 알림·모르는 항목: 대화 전체는 그대로 보인다
   await setMock("turnMs=1500");
   await input.fill("/fixture/notice 알림 질문");

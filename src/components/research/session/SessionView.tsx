@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from "react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import type { FetchFailure } from "@/lib/api/client";
@@ -753,6 +753,8 @@ interface StopState {
   // failed: 확인하지 못함(다시 누를 수 있음)
   phase: "sending" | "requested" | "awaitStart" | "failed";
   resent: boolean;
+  // 이 중지 요청의 순번. 응답이 올 때 지금 화면의 중지 작업과 같을 때만 반영한다(review 62e0406: 이전 턴의 늦은 응답).
+  token: number;
 }
 
 export default function SessionView({ id, onArchived }: { id: string; onArchived: (id: string) => void }) {
@@ -782,29 +784,48 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
 
   // #90 중지 요청. 결과는 스트림의 확정 신호(turn.completed{interrupted})나 기록으로 확인한다. 자동으로 다시 보내지 않는다
   // (단, runner가 아직 턴을 받기 전이라 not_running이면 턴이 시작될 때 같은 requestId로 한 번만 더 보낸다 — 계약 §2).
+  // 지금 화면의 중지 작업 순번(0이면 없음). 턴이 끝나 중지 상태를 지우면 0이 되어, 그 뒤에 온 이전 요청의 응답은 버린다.
+  const stopToken = useRef(0);
+  const activeStop = useRef(0);
+  // 스트림에서 시작(turn.started·진행 중 snapshot)을 확인한 턴. not_running 응답보다 시작이 먼저 온 경합에서 바로 한 번 더 보낸다.
+  const startedTurns = useRef(new Set<string>());
   const requestStop = async (requestId: string, resent: boolean) => {
     if (!csrfToken) return;
-    setStopping({ requestId, phase: "sending", resent });
+    const token = ++stopToken.current;
+    activeStop.current = token;
+    setStopping({ requestId, phase: "sending", resent, token });
     const res = await interruptSession(id, requestId, csrfToken);
-    if (!alive.current) return;
+    // 화면을 떠났거나, 그사이 턴이 끝났거나, 다른 중지 요청(다른 턴·다시 누름)이 시작됐으면 이 응답은 버린다.
+    if (!alive.current || activeStop.current !== token) return;
     if (res.ok) {
-      setStopping({ requestId, phase: res.data.state === "not_running" && !resent ? "awaitStart" : "requested", resent });
+      if (res.data.state === "not_running" && !resent) {
+        // runner가 아직 턴을 받기 전이었다. 그사이 이미 시작됐으면 지금, 아니면 시작될 때 같은 requestId로 한 번만 더 보낸다(계약 §2).
+        if (startedTurns.current.has(requestId)) {
+          void requestStop(requestId, true);
+          return;
+        }
+        setStopping({ requestId, phase: "awaitStart", resent, token });
+        return;
+      }
+      setStopping({ requestId, phase: "requested", resent, token });
       return;
     }
     const f = res.failure;
     if (f.kind === "http" && f.status === 409) {
       // 서버 기록에서 그 턴이 이미 끝났다. 기록으로 확정한다.
+      activeStop.current = 0;
       setStopping(null);
-      void reload();
+      void refreshRecord();
       return;
     }
     if (f.kind === "http" && f.status === 404) {
+      activeStop.current = 0;
       setStopping(null);
       setStopUnsupported(true);
       return;
     }
     if (f.kind === "http" && (f.status === 401 || f.code === "csrf_invalid")) void refreshAuth();
-    setStopping({ requestId, phase: "failed", resent });
+    setStopping({ requestId, phase: "failed", resent, token });
   };
 
   // #90 확정 신호(turn.completed·sync·끊김 등)의 기록 GET. 스트림이 연결된 동안은 polling이 멈춰 있으므로, 이 GET이 일시
@@ -848,7 +869,9 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
       if (running && send === null) void refreshRecord();
     },
     onTurnRunning: (requestId) => {
-      if (stopping?.phase === "awaitStart" && stopping.requestId === requestId && !stopping.resent) void requestStop(requestId, true);
+      startedTurns.current.add(requestId);
+      if (stopping?.phase === "awaitStart" && stopping.requestId === requestId && !stopping.resent && activeStop.current === stopping.token)
+        void requestStop(requestId, true);
     },
   });
   const streamLive = stream.live;
@@ -927,6 +950,10 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
   const status = chatStatus(send !== null, result?.ok === true ? result.data.state : "idle", showLive && (liveTurn.running || liveTurn.outcome !== null));
   const awaiting = awaitingReply(status);
   if (stopping && !awaiting) setStopping(null);
+  // 턴이 끝나 중지 상태를 지웠으면 진행 중이던 중지 요청의 늦은 응답은 버린다(커밋 직후, 다른 응답 처리보다 먼저).
+  useLayoutEffect(() => {
+    if (!awaiting) activeStop.current = 0;
+  }, [awaiting]);
 
   // 서버 기록이 바뀌어도(보낸 말풍선 → 접수 항목 → 기록 항목) 같은 말풍선으로 잇는다. 화면에 있는 동안의 key 별칭을 둔다.
   const local = send?.local ?? null;
@@ -950,12 +977,14 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
   // #90 중지 대상: 스트림의 진행 중 턴 → 기록의 실행 중 턴 → 막 접수한 턴(202 응답).
   const stopRequestId =
     (showLive && liveTurn.running ? liveTurn.requestId : null) ?? (running ? recordRequestId : null) ?? (send !== null ? lastAccepted : null);
+  // 버튼은 지금 턴의 중지 작업만 반영한다(다른 턴의 상태로 잠기지 않게).
+  const turnStop = stopping && stopping.requestId === stopRequestId ? stopping : null;
   const stop: StopControl | null =
     stream.supported && !stopUnsupported && awaiting && stopRequestId && !(showLive && liveTurn.outcome)
       ? {
-          label: stopping?.phase === "sending" ? "중지 요청 중..." : stopping && stopping.phase !== "failed" ? "중지하는 중..." : "중지",
-          disabled: !!stopping && stopping.phase !== "failed",
-          note: stopping?.phase === "failed" ? "중지를 확인하지 못했습니다. 응답은 계속 진행 중일 수 있습니다. 다시 눌러 주세요." : null,
+          label: turnStop?.phase === "sending" ? "중지 요청 중..." : turnStop && turnStop.phase !== "failed" ? "중지하는 중..." : "중지",
+          disabled: !!turnStop && turnStop.phase !== "failed",
+          note: turnStop?.phase === "failed" ? "중지를 확인하지 못했습니다. 응답은 계속 진행 중일 수 있습니다. 다시 눌러 주세요." : null,
           onStop: () => void requestStop(stopRequestId, false),
         }
       : null;
