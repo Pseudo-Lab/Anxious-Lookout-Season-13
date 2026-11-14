@@ -22,9 +22,11 @@ and CSRF value are never printed or written; only the first 16 hex characters of
 rc: 0 every check passed; 3 refused before any change; 4 a regression check failed before the entry (the runner
 was not started); 5 the runner start was not proved, by a failed check or any other exception after the entry (the
 stop still runs); 6 stop/release not proved; 7 session not created; 8 every step passed but the final invariants
-failed or could not be checked; 9 every step passed but an evidence write failed (out.txt / run.json); 70 every step
-passed but the session revoke is not proved; 130 interrupted twice (after the entry: no stop is sent, the runner is
-left to its idle stop). exit.json holds rc, stepRc, sessionRevoked, finalInvariants.
+failed or could not be checked; 9 every step passed but an evidence write failed (out.txt, run.json or exit.json,
+also after the result line); 70 every step passed but the session revoke is not proved; 130 interrupted twice (after
+the entry: no stop is sent, the runner is left to its idle stop). exit.json holds rc, stepRc, sessionRevoked,
+finalInvariants. **The result is the last `result rc=` line** (a second one follows only when a write failed after
+the first; exit.json may then be missing).
 
 Cleanup (review 518c088): the session revoke runs in a `finally` once a session hash exists and never raises; an
 evidence write failure (say / record) is remembered, never raised into a cleanup step.
@@ -590,17 +592,26 @@ def main(argv):
         code = 8
     if code == 0 and revoked is False:
         code = 70
-    if code == 0 and OUT.get('failed'):
-        code = 9
     for name, value in verdicts.items():
         say('verdict %s: %s' % (name, value))
+    if code == 0 and OUT.get('failed'):
+        code = 9
+    said = code
+    say('result rc=%d' % code)
+    # A write that fails after the result line (out.txt's own result line, then exit.json) never stays a success
+    # (review 7d80875 major): the code becomes 9 and a last result line goes to the journal.
+    if code == 0 and OUT.get('failed'):
+        code = 9
     if ev:
         try:
             durable_json(os.path.join(ev, 'exit.json'), {'rc': code, 'stepRc': step_rc, 'sessionRevoked': revoked,
                                                         'finalInvariants': final, 'finished': now_utc()})
         except Exception:
+            if code == 0:
+                code = 9
             say('exit.json not written: the result is unknown on disk')
-    say('result rc=%d' % code)
+    if code != said:
+        say('result rc=%d (an evidence write failed after the result line)' % code)
     return code
 
 

@@ -113,7 +113,8 @@ docstring; the stage C facts (images, the five other owners) come from `i90-expe
   stop with drain receipt 1.
 - Cleanup (r7, review 518c088): after the entry, any exception the process can handle in the start check still sends
   the stop (rc 5); only a second interrupt does not (rc 130, the runner left to its idle stop). The session revoke
-  runs in a `finally` and never raises; an evidence write failure is remembered (rc 9 when every step passed).
+  runs in a `finally` and never raises; an evidence write failure is remembered (rc 9 when every step passed, also
+  for out.txt or exit.json after the result line, r8: the last `result rc=` line is the result).
 - "The same items as before": no GET was recorded under the old API before stage C, so D1 checks the shape and
   records each of the three newest conversations' item count and items digest. Those are the baseline P4/P5
   compare against; an old-vs-new comparison is not claimed.

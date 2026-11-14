@@ -292,3 +292,32 @@ def test_evidence_failure_after_a_full_pass_is_rc9(vm, monkeypatch):
         return real_fsync(fd)
     monkeypatch.setattr(module.os, "fsync", failing_fsync)
     assert module.main(["i90-d1.py", "run"]) == 9
+
+
+# Review 7d80875 major: a write failing after the result line never stays a success -------------------------------
+
+def test_an_exit_json_failure_after_a_full_pass_is_rc9(vm, monkeypatch, capsys):
+    module, fake, evidence = vm()
+    real = module.durable_json
+    def failing(path, value):
+        if path.endswith("exit.json"):
+            raise OSError(28, "No space left on device")
+        return real(path, value)
+    monkeypatch.setattr(module, "durable_json", failing)
+    assert module.main(["i90-d1.py", "run"]) == 9
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.startswith("result rc=")]
+    assert lines[0] == "result rc=0" and lines[-1].startswith("result rc=9")
+    assert not (run_dir(evidence) / "exit.json").exists()
+
+
+def test_an_out_txt_failure_after_the_revoke_is_rc9(vm, monkeypatch):
+    module, fake, evidence = vm()
+    real_fsync = module.os.fsync
+    def failing_fsync(fd):
+        if module.OUT["stream"] is not None and fd == module.OUT["stream"].fileno() and fake.sessions \
+                and not any(fake.sessions.values()) and ("DELETE", module.BASE + "/codex/runner") in fake.requests:
+            raise OSError(28, "No space left on device")  # out.txt writes after the revoke fail
+        return real_fsync(fd)
+    monkeypatch.setattr(module.os, "fsync", failing_fsync)
+    assert module.main(["i90-d1.py", "run"]) == 9
+    assert json.loads((run_dir(evidence) / "exit.json").read_text())["rc"] == 9
