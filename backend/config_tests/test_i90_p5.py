@@ -464,11 +464,11 @@ def test_s5_compares_reader_b_alone(m, monkeypatch):
     assert verdicts["S5"] is False  # b's own reconstruction differs from GET, whatever a saw
 
 
-def test_s5_without_runner_output_cap_evidence_is_unknown(m, monkeypatch):
+def test_s5_r3_without_runner_cap_evidence_still_judges_the_reload(m, monkeypatch, capsys):
     monkeypatch.setattr(m, "turn", s5_turn(m, monkeypatch, b_mid_turn(m, "answer"), None))
     verdicts = {}
     m.step_s5("ev", "c" * 36, {}, verdicts)
-    assert verdicts["S5"] is None
+    assert verdicts["S5"] is True and "S5 gap: output cap not measured" in capsys.readouterr().out
 
 
 def test_s5_a_reader_b_that_joined_a_completed_turn_is_not_a_reload(m, monkeypatch):
@@ -657,8 +657,112 @@ def test_s5_gross_output_overflow_fails_even_with_dropped_bytes(m, monkeypatch):
     assert verdicts["S5"] is False
 
 
-def test_s5_without_the_runner_byte_evidence_is_unknown(m, monkeypatch):
+def test_s5_r3_the_cap_is_a_printed_gap_not_a_criterion(m, monkeypatch, capsys):
     monkeypatch.setattr(m, "turn", s5_turn(m, monkeypatch, b_mid_turn(m, "answer"), {"outputDroppedBytes": 92000}))
     verdicts = {}
     m.step_s5("ev", "c" * 36, {}, verdicts)
-    assert verdicts["S5"] is None
+    assert verdicts["S5"] is True and "S5 gap: output cap not measured" in capsys.readouterr().out
+
+
+# --- r3: continuation after S0 False, S2 text criterion, S5 / S6 on prose -------------------------------------
+
+S0RUN = "i90-p5-s0-20261114T155956Z"
+
+
+def s0_state(m, tmp_path, monkeypatch, exit_doc=None, conversation=CUR, budget=1, decision=None):
+    folder = Path(m.EVIDENCE) / S0RUN
+    folder.mkdir(exist_ok=True)
+    done = {"rc": 0, "stepRc": 0, "verdicts": {"S0": False, "release": True}, "runnerReleased": None,
+            "clientsGone": True, "privateRemoved": None, "sessionRevoked": True, "finished": "x"}
+    (folder / "exit.json").write_text(json.dumps(exit_doc if exit_doc is not None else done))
+    (folder / "run.json").write_text(json.dumps({"conversation": conversation}))
+    m.durable_json(m.BUDGET, {"cap": 8, "turns": [{"n": i + 1, "step": "S0", "outcome": "accepted"}
+                                                  for i in range(budget)]})
+    value = decision or json.loads((VM / "i90-p5-continue.json").read_text())
+    value = dict(value, s0Run=S0RUN, conversationPrefix=CUR[:8])
+    data = json.dumps(value).encode()
+    path = tmp_path / "continue.json"
+    path.write_bytes(data)
+    monkeypatch.setattr(m, "CONTINUE_FILE", str(path))
+    monkeypatch.setattr(m, "CONTINUE_SHA", hashlib.sha256(data).hexdigest())
+    # the root-ownership part of read_pinned cannot hold in a test; the sha check is kept
+    monkeypatch.setattr(m, "read_pinned", lambda p, want, name: (
+        open(p, "rb").read() if hashlib.sha256(open(p, "rb").read()).hexdigest() == want
+        else (_ for _ in ()).throw(m.Stop(3, "%s is not the reviewed root file" % name))))
+    return path
+
+
+def test_the_committed_decision_binds_the_s0_run_facts(m):
+    value = json.loads((VM / "i90-p5-continue.json").read_text())
+    assert value["s0Run"] == S0RUN and value["conversationPrefix"] == "9e504d3d"
+    assert value["recorded"] == {"rc": 0, "stepRc": 0, "S0": False, "runnerReleased": None, "clientsGone": True,
+                                 "privateRemoved": None, "sessionRevoked": True, "turnsUsed": 1}
+    assert m.CONTINUE_SHA == hashlib.sha256((VM / "i90-p5-continue.json").read_bytes()).hexdigest()
+
+
+def test_enable_continues_only_through_the_bound_decision(m, tmp_path, monkeypatch):
+    s0_state(m, tmp_path, monkeypatch)
+    assert "continuation decision" in m.s0_accepted()
+    assert json.load(open(Path(m.EVIDENCE) / S0RUN / "exit.json"))["verdicts"]["S0"] is False  # never rewritten
+    assert len(m.budget_read()) == 1  # never changed
+
+
+@pytest.mark.parametrize("case", ["tampered", "other_run", "other_conversation", "unreadable_exit", "budget_two",
+                                  "other_facts", "rc_nonzero"])
+def test_the_continuation_refuses_anything_else(m, tmp_path, monkeypatch, case):
+    if case == "other_conversation":
+        s0_state(m, tmp_path, monkeypatch, conversation="aaaaaaaa" + CUR[8:])
+    elif case == "budget_two":
+        s0_state(m, tmp_path, monkeypatch, budget=2)
+    elif case == "rc_nonzero":
+        s0_state(m, tmp_path, monkeypatch, exit_doc={"rc": 5, "verdicts": {"S0": False}})
+    elif case == "other_facts":
+        s0_state(m, tmp_path, monkeypatch, exit_doc={"rc": 0, "stepRc": 0, "verdicts": {"S0": False},
+                                                     "runnerReleased": None, "clientsGone": False,
+                                                     "privateRemoved": None, "sessionRevoked": True})
+    else:
+        path = s0_state(m, tmp_path, monkeypatch)
+        if case == "tampered":
+            path.write_bytes(path.read_bytes().replace(b'"turnsUsed": 1', b'"turnsUsed": 2'))
+        elif case == "other_run":
+            (Path(m.EVIDENCE) / "i90-p5-s0-20261115T000000Z").mkdir()
+        elif case == "unreadable_exit":
+            (Path(m.EVIDENCE) / S0RUN / "exit.json").write_text("{")
+    with pytest.raises(m.Stop) as stopped:
+        m.s0_accepted()
+    assert stopped.value.code == 3
+
+
+def test_s2_r3_passes_on_the_text_criterion_with_no_command_events(m, monkeypatch, capsys):
+    client = FakeClient([completed(m, "answer"), fr(m, "turn.completed", CUR, 3)])
+    monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
+                                                   "clients": {"hop3": client}, "runner": []})
+    verdicts = {}
+    m.step_s2("ev", "c" * 36, {}, verdicts)
+    out = capsys.readouterr().out
+    assert verdicts["S2"] is True and "0 (not observed in this run)" in out and "not emitted" not in out
+
+
+def test_s2_r3_fails_when_the_text_differs(m, monkeypatch):
+    client = FakeClient([completed(m, "answ"), fr(m, "turn.completed", CUR, 3)])
+    monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
+                                                   "clients": {"hop3": client}, "runner": []})
+    verdicts = {}
+    m.step_s2("ev", "c" * 36, {}, verdicts)
+    assert verdicts["S2"] is False
+
+
+def test_s5_r3_prompts_are_prose_only(m):
+    assert "shell command" not in m.PROMPTS["S5"] and "seq 1 " not in m.PROMPTS["S5"]
+    assert "shell command" not in m.PROMPTS["S6"] and "seq 1 " not in m.PROMPTS["S6"]
+
+
+def test_s6_r3_unknown_prints_the_gap(m, monkeypatch, capsys):
+    normal = FakeClient([completed(m, "answer"), fr(m, "turn.completed", CUR, 3)])
+    paused = FakeClient([{"kind": "reader_paused", "unixNs": 1}])
+    monkeypatch.setattr(m, "turn", lambda *a, **k: {"body": body_with(m, "answer"), "request": CUR,
+                                                   "clients": {"n": normal, "p": paused}, "api": [{"reason": None}]})
+    verdicts = {"S1": True}
+    m.step_s6("ev", "c" * 36, {}, verdicts)
+    assert verdicts == {"S1": True, "S6": None} and "S6 gap: stall and upstream cleanup not exercised" in \
+        capsys.readouterr().out

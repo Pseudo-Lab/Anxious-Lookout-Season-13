@@ -336,6 +336,12 @@ PM decisions Q1–Q5, review plan notes; its docstring is the specification). In
 - **Evidence for front:** each step writes a `front-evidence.json` entry (frame sequence, first text after the send, GET item kinds and lengths). It does not replace the real UI gate before the PR.
 - **Timing labels:** S1 prints `S1 runtime:` (runner_stream_summary `legacyL`, `cutDelayPeakChars`, `holdbackPeakChars`) apart from `S1 measured:` (the first text after the send, and runner-to-reader trace delays). The measured numbers are end to end; they are neither holdback nor link latency.
 - **S6** needs the server's `stalled` evidence, else its verdict is unknown. **S3** reports a completion race as such.
+- **r20 (2026-11-15, after S0 False):**
+  - S0 ran once on r2 and ended False: the GET record had no tool item. The S0 observation r1 (`vm/i90-p5-diag.py`, read only) found one custom-tool-call record and one output record in the rollout, plus a `research_list` reference; invocation is unproven.
+  - S0 stays False and is not re-run. `enable` continues through the reviewed decision `vm/i90-p5-continue.json`, pinned in `i90-p5.py` r3, which binds that exact s0 run.
+  - S2 passes on the text criterion; command and tool streaming is an observation.
+  - S5 and S6 use long prose: S5's output cap and S6's stall cleanup are printed as gaps, never passes.
+  - Budget: 1 used, 7 left (S1–S6).
 - The rest of this section is the original P5 design that the script implements.
 
 **Prerequisite P5-0 (code, separate review)**: the runner Pod env must be able to carry `RUNNER_STREAM_TEXT=true` and `STREAM_TRACE=true`.

@@ -44,33 +44,39 @@ with a per-action random salt the client shares (--id-salt-file).
 
 Steps (each prints `verdict <step>: True|False|unknown`; a False or unknown step ends `turns` after its own cleanup,
 the remaining budget unspent; PM judges rc and verdicts together):
-- S0 (flags off): research_list tool call + a short answer: 202, the turn ends idle, an assistant message and a tool
-  item in GET, /events still 404 stream_disabled.
+- S0 (flags off; ran once on r2 and ended **False**: no tool item in GET): research_list tool call + a short answer:
+  202, the turn ends idle, an assistant message and a tool item in GET, /events still 404 stream_disabled. r3 never
+  re-runs or rewrites it: `enable` continues only through the reviewed continuation decision (CONTINUE_FILE at
+  CONTINUE_SHA, `s0_accepted()`), which binds that exact s0 run (name, conversation prefix, its recorded exit facts and
+  the one consumed reservation); the tool-item criterion stays unresolved (product observation, follow-up issue).
 - S1: one long answer, one reader (hop ③ Traefik). V1: the hashed live item ids of the streamed items equal those of
   GET; the reconstructed agentMessage text sha256 equals GET's. Printed apart (PM): `S1 runtime:` runner_stream_summary
   legacyL / cutDelayPeakChars / holdbackPeakChars as the runner logged them, and `S1 measured:` the reader's first text
   after the send and the runner-to-reader trace delays (end to end; not character holdback, not isolated link latency
   - review timing major). DB counters before / after.
-- S2: one shell command with output: a commandExecution item live and in GET, its output pieces, the delta methods.
+- S2 (r3): one shell command, then prose. Pass = the **text criterion**: the turn completed and the reader's
+  reconstruction equals GET. Command / tool streaming (commandExecution items, output pieces, delta methods, runner
+  deltaIn) is printed as an observation; a zero reads "not observed in this run", never a property of code mode.
 - S3: a long answer; after 10 text deltas of this request POST …/interrupt with the requestId. Pass: the interrupt
   answered 200 interrupting (not 409) and this turn ended interrupted (turn.completed status and GET turnStatus).
   This turn completing first is a race (False) and no interrupt is sent; fewer than 10 text deltas of this request in
   300 s is unknown and no interrupt is sent (review r0 majors).
 - S4 (2 turns): a long answer each, readers at hop ② (api Service) and ③ (Traefik) at once (no hop ④: the dev VM
-  has no HTTP host forward, PM 2026-11-15); per hop the runner-to-reader delay distribution by trace seq, aligned by request and seq.
-  DB counters.
-- S5: one large command output then prose; reader A closes after 5 text deltas, reader B opens at once (snapshot then
-  live). Pass: B's snapshot of this request is mid-turn (turnState running) with live text after it, B's own
-  reconstruction of the agentMessage equals GET's text sha256 (review: never A and B joined), A saw the command's
-  output pieces, and the runner's `outputDroppedBytes` > 0 (seq 1 20000 is above the 16 KiB per-item stream cap). No
-  runner summary or no command item of this request: unknown. B joining a completed turn is a race (False). DB counters.
+  has no HTTP host forward, PM 2026-11-15); per hop the runner-to-reader delay distribution by trace seq, aligned by
+  request and seq. DB counters.
+- S5 (r3): long prose; reader A closes after 5 text deltas, reader B opens at once (snapshot then live). Pass: B's
+  snapshot of this request is mid-turn (turnState running) with live text after it and B's own reconstruction equals
+  GET's (review: never A and B joined). The **output cap is not measured** by this workload and is printed as a gap
+  (`S5 gap:`) even when S5 is True; streamed command output above the byte limit would still fail. B joining a
+  completed turn is a race (False). DB counters.
+- S6 (r3): long prose; reader P pauses after its first text (`pause-after-text`, 1024-byte receive buffer, 30 s) next
+  to a normal reader N. Pass only with: P reported `reader_paused`, pieces on N after P's pause, the api's
+  `api_stream_summary` reason `stalled` for exactly one connection of this window, N complete (its reconstruction =
+  GET) and the turn completed. No stall evidence: unknown, printed as `S6 gap:` (stall and upstream cleanup not
+  exercised); it never becomes a pass and never changes an earlier step's verdict.
 Every predicate reads only the frames of the turn's own request (review r0 major: a reader opened before the send
 replays the previous turn's snapshot and turn.completed); a reader's text comes from its item.completed or, when it
 joined a completed turn, its snapshot.end items; the send time is taken after the reservation, just before the POST.
-- S6: one large command output with prose; reader P pauses after its first text (`pause-after-text`, 1024-byte receive
-  buffer, 30 s) next to a normal reader N. Pass only with: P reported `reader_paused`, enough output after the pause
-  started (output pieces on N after P's pause > 0), the api's `api_stream_summary` reason `stalled` for exactly one
-  connection of this window, N complete (its reconstruction = GET) and the turn completed. No stall evidence: unknown.
 DB counters (review question): `pg_stat_user_tables` of research.conversations read with pg_stat_clear_snapshot()
 first, the 'after' read 12 s after the turn ended (a backend flushes its pending stats when idle within 10 s); other
 conversations updated inside the window are counted and reported (a non-zero count makes the delta unattributable);
@@ -108,6 +114,8 @@ EXPECTED_SHA = '65d375777fac533edf2f62d392bf69c8858ba71b627e5eb114b0b0194587d46e
 CLIENT_FILE = '/root/issue90/p5_client.py'
 CLIENT_SHA = 'e963d3986150fa3db031f5b4e32326b5206529080b8c812ceafa34edd8b51484'  # review's p5_client.py r1, from sha256sum (review 2026-11-15)
 SOURCE = 'bb3aa97070f175a74eec3a0c024cd158cd64fadd'  # IMAGE_SHA of the stage R images: /api/version must name it
+CONTINUE_FILE = '/root/issue90/i90-p5-continue.json'
+CONTINUE_SHA = 'dabc8a2ac0990cef38397cdb9a80caedfc596466a3c3b3d15bb64ece9d18aa6d'  # i90-p5-continue.json (r3 continuation decision), from sha256sum
 K3S, DOCKER = '/usr/local/bin/k3s', '/usr/bin/docker'
 EVIDENCE = '/root/issue90/evidence'
 LOCK = EVIDENCE + '/i90-d.lock'
@@ -139,9 +147,10 @@ PROMPTS = {
     'S2': "Run exactly one shell command: printf 'i90-p5-s2\\n'; uname -s. Then state its output in one sentence.",
     'S3': 'Write about 1500 words in plain prose (no lists, no headings) on the history of the printing press.',
     'S4': 'Write about 1200 words in plain prose (no lists, no headings) explaining how ocean tides work.',
-    'S5': 'Run exactly one shell command: seq 1 20000. Then write about 500 words in plain prose on why counting '
-          'sequences are useful in programming.',
-    'S6': 'Run exactly one shell command: seq 1 200000. Then write about 400 words in plain prose on number systems.',
+    # r3: long prose only - code mode streams no command output, so S5 / S6 no longer depend on a shell command
+    'S5': 'Write about 1500 words in plain prose (no lists, no headings) on why counting sequences are useful in '
+          'programming.',
+    'S6': 'Write about 2500 words in plain prose (no lists, no headings) on the history of number systems.',
 }
 TURN_STEPS = ('S1', 'S2', 'S3', 'S4a', 'S4b', 'S5', 'S6')
 SESSION, OUT, STOPPING, CLIENTS, FOLLOWERS, ENTERED, PRIVATE = {}, {'stream': None}, {'requested': False}, [], [], {}, {}
@@ -1388,13 +1397,21 @@ def step_s2(ev, conversation, runner, verdicts):
     methods = sorted({str(r.get('method')) for r in scoped(client, request, 'item.delta') if r.get('method')})
     stored = {x['item'] for x in facts_of(f['body'])}
     summary = f['runner'][-1] if f['runner'] else {}
-    say('S2: commandExecution items of this request %d (in GET %s); output pieces %d; SSE delta methods %s; item '
-        'kinds %s; runner deltaIn %s' % (
-            len(commands), all(r.get('item') in stored for r in commands), len(outputs), methods,
+    equal, detail = same_text(client, f['body'], request)
+
+    def seen(n):
+        return '%d' % n if n else '0 (not observed in this run)'
+
+    # r3 (PM / review plan-r3 notes): the pass is the text criterion only; command / tool streaming is an observation,
+    # and a zero is "not observed in this run", never a property of code mode.
+    say('S2 observation: commandExecution items of this request %s (in GET %s); output pieces %s; SSE delta methods '
+        '%s; item kinds %s; runner deltaIn %s' % (
+            seen(len(commands)), all(r.get('item') in stored for r in commands) if commands else 'n/a',
+            seen(len(outputs)), methods or '0 (not observed in this run)',
             sorted({str(r.get('itemKind')) for r in scoped(client, request, 'item.started')}),
             json.dumps(summary.get('deltaIn'), sort_keys=True)))
-    verdicts['S2'] = bool(ended_ok(f['body']) and commands and all(r.get('item') in stored for r in commands)
-                          and outputs)
+    say('S2 text criterion: the turn completed %s; final text %s' % (ended_ok(f['body']), detail))
+    verdicts['S2'] = bool(ended_ok(f['body']) and equal)
 
 
 INTERRUPT_AFTER = 10
@@ -1493,37 +1510,27 @@ def step_s5(ev, conversation, runner, verdicts):
     per_item = {}
     for r in output:
         per_item[r.get('item')] = per_item.get(r.get('item'), 0) + (r.get('chars') or 0)
-    out_chars = sum(per_item.values())
     summary = f['runner'][-1] if f['runner'] else None
-    dropped = summary.get('outputDroppedBytes') if isinstance(summary, dict) else None
-    raw = (((summary or {}).get('deltaIn') or {}).get('commandExecution') or {}).get('bytes')
-    # review r1 major: the cap is enforced, not inferred from "something was dropped". A Unicode code point is at least
-    # one UTF-8 byte, so streamed chars above a byte limit are a certain overflow; chars at or under it are necessary,
-    # not sufficient (no per-item byte count is in the client's or the runner's evidence; seq prints ASCII only).
-    over_item = {k: v for k, v in per_item.items() if v > OUTPUT_ITEM_LIMIT}
-    over_turn = out_chars > OUTPUT_TURN_LIMIT
-    say('S5: reader a end %s; command items %d, output pieces %d, output chars per item %s (cap %d bytes per item, %d '
-        'per turn; chars <= cap is necessary, not a byte-exact proof); runner outputDroppedBytes %s, deltaIn '
-        'commandExecution bytes %s, eventsOut %s, eventBytes %s' % (
-            a_end, len(commands), len(output), json.dumps(sorted(per_item.values())), OUTPUT_ITEM_LIMIT,
-            OUTPUT_TURN_LIMIT, dropped, raw, (summary or {}).get('eventsOut'), (summary or {}).get('eventBytes')))
-    say('S5: reader b snapshot of this turn %d (turnState %s: mid-turn %s), live text after it %d; b final text %s' % (
-        len(begin), begin[-1].get('turnState') if begin else None, mid_turn, len(continued), detail))
-    if over_item or over_turn:
-        say('S5: CAP EXCEEDED on the reader (items over %d chars: %d; turn total %d chars): False' % (
-            OUTPUT_ITEM_LIMIT, len(over_item), out_chars))
+    say('S5: reader a end %s; reader b snapshot of this turn %d (turnState %s: mid-turn %s), live text after it %d; '
+        'b final text %s' % (a_end, len(begin), begin[-1].get('turnState') if begin else None, mid_turn,
+                             len(continued), detail))
+    # r3 (PM / review plan-r3 notes): the reload on long prose is the criterion; the output cap is NOT MEASURED by this
+    # workload (no streamed command output) and stays a gap in the evidence and the PR notes even when S5 is True.
+    # Should command output stream after all, a certain overflow (chars above the byte limit) still fails.
+    over = {k: v for k, v in per_item.items() if v > OUTPUT_ITEM_LIMIT} or sum(per_item.values()) > OUTPUT_TURN_LIMIT
+    say('S5 gap: output cap not measured by this workload (command items of this turn %s, output chars %s); runner '
+        'outputDroppedBytes %s, deltaIn %s, eventsOut %s, eventBytes %s (observations)' % (
+            len(commands) or '0 (not observed in this run)', sum(per_item.values()),
+            (summary or {}).get('outputDroppedBytes'), json.dumps((summary or {}).get('deltaIn'), sort_keys=True),
+            (summary or {}).get('eventsOut'), (summary or {}).get('eventBytes')))
+    if over:
+        say('S5: CAP EXCEEDED on the reader (streamed output chars above the byte limit): False')
         verdicts['S5'] = False
-        return
-    if type(dropped) is not int or type(raw) is not int or not commands:
-        say('S5: required cap evidence missing (runner outputDroppedBytes / deltaIn commandExecution bytes) or no '
-            'command item of this turn: unknown, no extra turn')
-        verdicts['S5'] = None
         return
     if begin and not mid_turn:
         say('S5: reader b joined a completed turn (race); not counted as a mid-turn reload')
     verdicts['S5'] = bool(ended_ok(f['body']) and a_end == ['local_close'] and state.get('bStatus') == 200
-                          and mid_turn and continued and equal and output and dropped > 0
-                          and raw > OUTPUT_ITEM_LIMIT)
+                          and mid_turn and continued and equal)
 
 
 def step_s6(ev, conversation, runner, verdicts):
@@ -1539,7 +1546,8 @@ def step_s6(ev, conversation, runner, verdicts):
     say('S6: paused reader ready %s; pieces of this turn on the normal reader after the pause %d; api summaries %d, '
         'stalled %d; normal reader final text %s' % (bool(ready), len(after), len(f['api']), len(stalled), detail))
     if not stalled:
-        say('S6: no server-side stall evidence (api_stream_summary reason stalled): unknown, no extra turn')
+        say('S6: no server-side stall evidence (api_stream_summary reason stalled): unknown, no extra turn; S6 gap: '
+            'stall and upstream cleanup not exercised by this run (text-only volume; PR notes)')
         verdicts['S6'] = None
         return
     verdicts['S6'] = bool(ended_ok(f['body']) and ready and after and len(stalled) == 1 and equal)
@@ -1586,13 +1594,45 @@ def held():
     return None
 
 
+def s0_accepted():
+    """r3 (review plan-r3 notes): the one s0 run ended rc 0, and either S0 True or the reviewed continuation decision
+    (CONTINUE_FILE at CONTINUE_SHA) binds exactly that run: its name, the conversation prefix, the recorded exit facts
+    (rc, stepRc, S0 False, cleanup) and one consumed reservation (S0, accepted). Nothing is rewritten: S0 stays False
+    and the budget file is only read. Anything missing or different: Stop(3), nothing sent."""
+    runs = runs_of('s0')
+    done = exit_of(runs[0]) if len(runs) == 1 else None
+    if not done or done['rc'] != 0:
+        raise Stop(3, 'enable needs exactly one s0 run that ended rc 0 (exit.json readable)')
+    if (done.get('verdicts') or {}).get('S0') is True:
+        return 'S0 True'
+    try:
+        decision = json.loads(read_pinned(CONTINUE_FILE, CONTINUE_SHA, 'i90-p5-continue.json'))
+        run = json.load(open(os.path.join(EVIDENCE, runs[0], 'run.json')))
+    except Stop:
+        raise
+    except Exception:
+        raise Stop(3, 'the continuation decision or the s0 run.json is unreadable; nothing sent') from None
+    turns = budget_read()
+    facts = {'rc': done.get('rc'), 'stepRc': done.get('stepRc'), 'S0': (done.get('verdicts') or {}).get('S0'),
+             'runnerReleased': done.get('runnerReleased'), 'clientsGone': done.get('clientsGone'),
+             'privateRemoved': done.get('privateRemoved'), 'sessionRevoked': done.get('sessionRevoked'),
+             'turnsUsed': len(turns)}
+    conversation = run.get('conversation') if isinstance(run, dict) else None
+    bound = (isinstance(decision, dict) and decision.get('version') == 'i90-p5-continue-r0'
+             and decision.get('s0Run') == runs[0] and isinstance(conversation, str)
+             and conversation[:8] == decision.get('conversationPrefix') and decision.get('recorded') == facts
+             and len(turns) == 1 and turns[0].get('step') == 'S0' and turns[0].get('outcome') == 'accepted')
+    if not bound:
+        raise Stop(3, 'the continuation decision does not bind the recorded s0 run (name, conversation, exit facts, '
+                      'one consumed reservation); nothing sent')
+    return 'S0 False on record; continuation decision %s… binds %s' % (CONTINUE_SHA[:8], runs[0])
+
+
 def guard(action):
     if action != 'check' and runs_of(action):
         raise Stop(3, 'i90-p5 %s already ran; a second run is a PM decision' % action)
     if action == 'enable':
-        done = [exit_of(n) for n in runs_of('s0')]
-        if len(done) != 1 or not done[0] or done[0]['rc'] != 0 or done[0].get('verdicts', {}).get('S0') is not True:
-            raise Stop(3, 'enable needs exactly one s0 that ended rc 0 with S0 True')
+        say('enable precondition: %s' % s0_accepted())
     if action == 'turns':
         done = [exit_of(n) for n in runs_of('enable')]
         if len(done) != 1 or not done[0] or done[0]['rc'] != 0:
