@@ -351,8 +351,10 @@ export default function ChatDock() {
               </svg>
             </button>
           </div>
-          {/* 세로로만 스크롤한다. 넓은 표·코드는 각자 안에서 가로로 스크롤한다. */}
-          <div data-chat-scroll className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4">
+          {/* 세로로만 스크롤한다. 넓은 표·코드는 각자 안에서 가로로 스크롤한다.
+              브라우저 scroll anchoring은 끈다(#89): 스크롤 위치는 useStickToBottom이 정한다. 켜 두면 화면 위쪽이 잘린 도구 항목을
+              펼칠 때 브라우저가 그 아래 답변을 기준점으로 잡아 펼친 높이만큼 아래로 스크롤해, 읽던 위치(누른 머리글)가 위로 밀린다. */}
+          <div data-chat-scroll className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 [overflow-anchor:none]">
             {/* 계정이 바뀌면 이전 계정의 조회 결과·입력·늦은 응답을 버리고 새로 그린다. */}
             <ChatPanel key={accountKey} />
           </div>
