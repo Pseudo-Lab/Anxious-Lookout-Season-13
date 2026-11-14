@@ -9,6 +9,7 @@ root on the guest, each action other than `check` once, as a systemd unit, after
     systemd-run … python3 -I -B /root/issue90/i90-p5.py disable  # both templates back to enable's recorded ones
     systemd-run … python3 -I -B /root/issue90/i90-p5.py enable-r5 / turns-r5 / disable-r5  # r5: S2-S6 (see below)
     systemd-run … python3 -I -B /root/issue90/i90-p5.py enable-r6 / turns-r6 / disable-r6  # r6: S4a-S6 (see below)
+    systemd-run … python3 -I -B /root/issue90/i90-p5.py enable-r7 / turns-r7 / disable-r7  # r7: S5, S6 (see below)
 
 r5 (2026-11-15, after turns stopped at S1 on V1 and disable restored the templates; PM r5 decision, review notes):
 the second round enable-r5 -> turns-r5 (S2-S6, six turns, S1 not repeated) -> disable-r5 does what enable / turns /
@@ -27,6 +28,13 @@ enable-r6 -> turns-r6 (S4a, S4b, S5, S6; four turns) -> disable-r6 continues onl
 CONTINUE_R6_SHA, which binds the turns-r5 / disable-r5 runs, their exit bytes and typed facts (the r6a pins; JSON null
 kept, no release key added), the budget S0-S3 accepted and the S0 conversation. Later rounds share one code path
 (ROUNDS, `round_accepted`, `bound_conversation`).
+
+r7 (2026-11-15, after turns-r6 stopped at S4a before its turn: the hop ② reader got no headers; PM decision: S4a / S4b
+stay unmeasured, the cause is assessed separately and never a pass): enable-r7 -> turns-r7 (S5, S6 only; both read at
+hop ③) -> disable-r7 continues only through CONTINUE_R7_FILE at CONTINUE_R7_SHA, binding the turns-r6 / disable-r6
+evidence runs (their exit bytes and typed facts from the r7 pins, verdicts {} as written), the budget S0-S3 accepted and
+the S0 conversation. review r7 pins ack: a round may reserve only its own steps' turns (`round_cap`: 4 + 2 = 6 here,
+within TURN_CAP); the remaining 2 turns are not used.
 
 Budget (PM: 8 turns, hard cap 8, a failed turn counts, no retry; a 9th needs the user through PM). Review plan-notes
 major: a turn is **reserved durably before its POST**, under the shared lock (evidence/i90-p5-budget.json, written and
@@ -141,6 +149,8 @@ CONTINUE_R5_FILE = '/root/issue90/i90-p5-continue-r5.json'
 CONTINUE_R5_SHA = '79055b18abb511944b04b64d9364bf210176fca8343e6df879afb9440b30fcf7'  # i90-p5-continue-r5.json (r5 decision), from sha256sum
 CONTINUE_R6_FILE = '/root/issue90/i90-p5-continue-r6.json'
 CONTINUE_R6_SHA = 'd4d422ad315aa5bb88d1ff19e44d0d1db9f9f885ae5a38f2a665d83ac09ba5f8'  # i90-p5-continue-r6.json (r6 decision), from sha256sum
+CONTINUE_R7_FILE = '/root/issue90/i90-p5-continue-r7.json'
+CONTINUE_R7_SHA = '440df25205131bb07876b3929504401a656ebf162e453a25460010e47c406ee9'  # i90-p5-continue-r7.json (r7 decision), from sha256sum
 CONTINUE_SHA = '72995355c4534891b93ad633045eeefbeb7815974ebb10224f487795cf9a44bd'  # i90-p5-continue.json (r4 decision, pins from i90-p5-s0-pins.py output), from sha256sum
 K3S, DOCKER = '/usr/local/bin/k3s', '/usr/bin/docker'
 EVIDENCE = '/root/issue90/evidence'
@@ -165,9 +175,10 @@ SUMMARY_WAIT = 30
 TURN_LIMIT = 900             # seconds a turn may run before the step gives up (the turn is not stopped by this)
 STATS_IDLE = 12              # > the 10 s a PostgreSQL backend may keep pending statistics while idle
 ACTIONS = ('check', 's0', 'enable', 'turns', 'disable', 'enable-r5', 'turns-r5', 'disable-r5', 'enable-r6', 'turns-r6',
-           'disable-r6')
+           'disable-r6', 'enable-r7', 'turns-r7', 'disable-r7')
 R5_ACTIONS = ('enable-r5', 'turns-r5', 'disable-r5')  # r5: S2-S6 after the S1-stopped round (own once-guards)
 R6_ACTIONS = ('enable-r6', 'turns-r6', 'disable-r6')  # r6: S4a-S6 after turns-r5 stopped at S4a (own once-guards)
+R7_ACTIONS = ('enable-r7', 'turns-r7', 'disable-r7')  # r7: S5, S6 after turns-r6 stopped at S4a (own once-guards)
 PROMPTS = {
     'S0': 'Use the research_list tool once to list my research items, then reply with one short sentence saying how '
           'many items there are.',
@@ -184,6 +195,7 @@ PROMPTS = {
 TURN_STEPS = ('S1', 'S2', 'S3', 'S4a', 'S4b', 'S5', 'S6')
 TURN_STEPS_R5 = TURN_STEPS[1:]  # S1 is not repeated (PM r5 decision)
 TURN_STEPS_R6 = TURN_STEPS[3:]  # S4a, S4b, S5, S6: S2 / S3 passed in r5 and are not repeated (PM)
+TURN_STEPS_R7 = TURN_STEPS[5:]  # S5, S6: S4a / S4b stay unmeasured (PM 2026-11-15, hop ② decoupled)
 # Later rounds: their decision (module constant names, read at call time), its version, the previous round's turns /
 # disable actions, the exact budget so far and the steps they run.
 ROUNDS = {
@@ -194,7 +206,12 @@ ROUNDS = {
             'version': 'i90-p5-continue-r6-r0', 'previous': ('turns-r5', 'disable-r5'),
             'budget': [[1, 'S0', 'accepted'], [2, 'S1', 'accepted'], [3, 'S2', 'accepted'], [4, 'S3', 'accepted']],
             'steps': TURN_STEPS_R6},
+    '-r7': {'file': 'CONTINUE_R7_FILE', 'sha': 'CONTINUE_R7_SHA', 'name': 'i90-p5-continue-r7.json',
+            'version': 'i90-p5-continue-r7-r0', 'previous': ('turns-r6', 'disable-r6'),
+            'budget': [[1, 'S0', 'accepted'], [2, 'S1', 'accepted'], [3, 'S2', 'accepted'], [4, 'S3', 'accepted']],
+            'steps': TURN_STEPS_R7},
 }
+LIMIT = {'cap': TURN_CAP}  # the reservations this action may reach (`round_cap`), set by main before the guard
 SESSION, OUT, STOPPING, CLIENTS, FOLLOWERS, ENTERED, PRIVATE = {}, {'stream': None}, {'requested': False}, [], [], {}, {}
 
 
@@ -554,8 +571,17 @@ def enable(ev, doc):
 
 
 def suffix(action):
-    """'-r5' / '-r6' for a later round's action, '' for the first round's."""
-    return action[-3:] if action in R5_ACTIONS + R6_ACTIONS else ''
+    """'-r5' / '-r6' / '-r7' for a later round's action, '' for the first round's."""
+    return action[-3:] if action in R5_ACTIONS + R6_ACTIONS + R7_ACTIONS else ''
+
+
+def round_cap(action):
+    """review r7 pins ack: a later round may reserve only its own steps' turns - its starting budget plus its steps,
+    within TURN_CAP (r5 8, r6 8, r7 6). The first round's actions keep TURN_CAP."""
+    sfx = suffix(action)
+    if not sfx:
+        return TURN_CAP
+    return min(TURN_CAP, len(ROUNDS[sfx]['budget']) + len(ROUNDS[sfx]['steps']))
 
 
 def round_actions(sfx):
@@ -689,11 +715,15 @@ def budget_read():
 
 
 def reserve(step):
-    """Writes the reservation durably and reads it back before the send; the 9th refuses (rc 3)."""
+    """Writes the reservation durably and reads it back before the send; the 9th refuses (rc 3), and so does a
+    reservation beyond this round's own turns (LIMIT, `round_cap`)."""
     turns = budget_read()
     if len(turns) >= TURN_CAP:
         raise Stop(3, '%s: the turn budget is used (%d of %d); a further turn needs the user through PM'
                    % (step, len(turns), TURN_CAP))
+    if len(turns) >= LIMIT['cap']:
+        raise Stop(3, '%s: this round\'s turns are used (%d of the %d it may reach; overall cap %d); nothing sent'
+                   % (step, len(turns), LIMIT['cap'], TURN_CAP))
     entry = {'n': len(turns) + 1, 'step': step, 'reservedAt': now_utc(), 'outcome': 'reserved'}
     try:
         durable_json(BUDGET, {'cap': TURN_CAP, 'turns': turns + [entry]})
@@ -2035,6 +2065,7 @@ def main(argv):
     runner, gone, private = None, True, None
     try:
         try:
+            LIMIT['cap'] = round_cap(action)
             doc = expected()
             lock = take_lock()
             guard(action)

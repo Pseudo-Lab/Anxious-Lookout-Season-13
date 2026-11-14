@@ -353,6 +353,11 @@ PM decisions Q1–Q5, review plan notes; its docstring is the specification). In
   - r6 selects hop ② explicitly: the Service named `api`, a valid cluster IP, and one `http` port 8080.
   - r6 adds `enable-r6` → `turns-r6` (S4a, S4b, S5, S6) → `disable-r6`. `enable-r6` continues through `vm/i90-p5-continue-r6.json`.
   - Budget: 4 used, 4 left.
+- **r23 (2026-11-15, r7):**
+  - `turns-r6` stopped at S4a before its turn: the hop ② reader (a `--network host` container, connecting to the api cluster IP :8080) got no headers. No turn was spent. `disable-r6` restored both templates.
+  - The cause is assessed separately by the read-only `vm/i90-p5-hop2-look.py`: an observation of the policy objects only, not of the datapath. S4a and S4b stay unmeasured, never passes, and the policy is not widened.
+  - r7 adds `enable-r7` → `turns-r7` (S5, S6 only; both read at hop ③) → `disable-r7`. `enable-r7` continues through `vm/i90-p5-continue-r7.json`, which binds the turns-r6 / disable-r6 evidence runs from the read-only r7 pins.
+  - A round may reserve only its own steps' turns (`round_cap`): r7 reaches 6 of 8. The remaining 2 turns are not used.
 - The rest of this section is the original P5 design that the script implements.
 
 **Prerequisite P5-0 (code, separate review)**: the runner Pod env must be able to carry `RUNNER_STREAM_TEXT=true` and `STREAM_TRACE=true`.

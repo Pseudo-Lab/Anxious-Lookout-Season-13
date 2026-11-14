@@ -1194,3 +1194,161 @@ def test_r6_guards_and_next_steps(m):
     (Path(m.EVIDENCE) / "i90-p5-disable-r6-20261115T010000Z").mkdir()
     with pytest.raises(m.Stop):
         m.guard("turns-r6")
+
+
+# --- r7 (PM 2026-11-15: S5 / S6 only after turns-r6 stopped at S4a; review r7 pins ack) ---------------------------
+R7_TURNS_EXIT = {"rc": 5, "stepRc": 5, "verdicts": {}, "stoppedAt": None, "runnerReleased": True, "clientsGone": True,
+                 "privateRemoved": True, "sessionRevoked": True, "finished": "x"}
+R7_DISABLE_EXIT = {"rc": 0, "stepRc": 0, "verdicts": {}, "stoppedAt": None, "runnerReleased": None, "clientsGone": True,
+                   "privateRemoved": None, "sessionRevoked": None, "finished": "y"}
+TURNS_R6_RUN, DISABLE_R6_RUN = "i90-p5-turns-r6-20261114T172503Z", "i90-p5-disable-r6-20261114T172648Z"
+
+
+def r7_state(m, tmp_path, monkeypatch, turns_exit=None, disable_exit=None, budget=None, conversation=CUR, s0=True):
+    if s0:
+        folder = Path(m.EVIDENCE) / S0RUN
+        folder.mkdir(exist_ok=True)
+        (folder / "run.json").write_text(json.dumps({"conversation": conversation}))
+    for run, doc in ((TURNS_R6_RUN, turns_exit or R7_TURNS_EXIT), (DISABLE_R6_RUN, disable_exit or R7_DISABLE_EXIT)):
+        folder = Path(m.EVIDENCE) / run
+        folder.mkdir(exist_ok=True)
+        (folder / "exit.json").write_bytes(json.dumps(doc, sort_keys=True, indent=1).encode())
+    m.durable_json(m.BUDGET, {"cap": 8, "turns": budget or R6_BUDGET})
+    value = json.loads((VM / "i90-p5-continue-r7.json").read_text())
+    value["turns"]["exitSha256"] = hashlib.sha256(json.dumps(R7_TURNS_EXIT, sort_keys=True, indent=1).encode()).hexdigest()
+    value["disable"]["exitSha256"] = hashlib.sha256(json.dumps(R7_DISABLE_EXIT, sort_keys=True, indent=1).encode()
+                                                    ).hexdigest()
+    value["conversationSha256"] = hashlib.sha256(CUR.encode()).hexdigest()
+    data = json.dumps(value).encode()
+    path = tmp_path / "continue-r7.json"
+    path.write_bytes(data)
+    monkeypatch.setattr(m, "CONTINUE_R7_FILE", str(path))
+    monkeypatch.setattr(m, "CONTINUE_R7_SHA", hashlib.sha256(data).hexdigest())
+    monkeypatch.setattr(m, "read_pinned", lambda p, want, name: (
+        open(p, "rb").read() if hashlib.sha256(open(p, "rb").read()).hexdigest() == want
+        else (_ for _ in ()).throw(m.Stop(3, "%s is not the reviewed root file" % name))))
+    return path
+
+
+def test_r7_the_committed_decision_binds_the_r6_round_as_written(m):
+    value = json.loads((VM / "i90-p5-continue-r7.json").read_text())
+    assert value["version"] == "i90-p5-continue-r7-r0"
+    assert value["turns"]["run"] == TURNS_R6_RUN and value["disable"]["run"] == DISABLE_R6_RUN
+    assert value["turns"]["recorded"] == {k: v for k, v in R7_TURNS_EXIT.items() if k != "finished"}
+    assert value["turns"]["recorded"]["verdicts"] == {}  # no S4a-S6 / release keys invented from "unknown"
+    assert value["disable"]["recorded"] == {k: v for k, v in R7_DISABLE_EXIT.items() if k != "finished"}
+    r6 = json.loads((VM / "i90-p5-continue-r6.json").read_text())
+    assert value["turnsUsed"] == 4 and value["roundTurns"] == 2
+    assert (value["s0Run"], value["conversationSha256"]) == (r6["s0Run"], r6["conversationSha256"])
+    assert m.CONTINUE_R7_SHA == hashlib.sha256((VM / "i90-p5-continue-r7.json").read_bytes()).hexdigest()
+    assert m.ROUNDS["-r7"]["steps"] == ("S5", "S6") and m.ROUNDS["-r7"]["previous"] == ("turns-r6", "disable-r6")
+
+
+def test_r7_enable_continues_through_the_bound_decision(m, tmp_path, monkeypatch):
+    r7_state(m, tmp_path, monkeypatch)
+    out = m.round_accepted("-r7")
+    assert "binds %s and %s" % (TURNS_R6_RUN, DISABLE_R6_RUN) in out and "budget 4/8" in out
+    assert m.bound_conversation("-r7") == CUR
+
+
+@pytest.mark.parametrize("case", ["tampered", "verdicts_invented", "stopped_at_s4a", "missing_nullable", "budget_five",
+                                  "r7_run_exists", "conversation_changed", "s0_missing", "other_turns_r6_run",
+                                  "unit_name_instead"])
+def test_r7_continuation_refuses_anything_else(m, tmp_path, monkeypatch, case):
+    if case == "verdicts_invented":
+        r7_state(m, tmp_path, monkeypatch, turns_exit=dict(R7_TURNS_EXIT, verdicts={"S4a": None, "release": None}))
+    elif case == "stopped_at_s4a":
+        r7_state(m, tmp_path, monkeypatch, turns_exit=dict(R7_TURNS_EXIT, stoppedAt="S4a"))
+    elif case == "missing_nullable":
+        r7_state(m, tmp_path, monkeypatch, disable_exit={k: v for k, v in R7_DISABLE_EXIT.items()
+                                                         if k != "runnerReleased"})
+    elif case == "budget_five":
+        r7_state(m, tmp_path, monkeypatch, budget=R6_BUDGET + [{"n": 5, "step": "S5", "outcome": "accepted"}])
+    elif case == "conversation_changed":
+        r7_state(m, tmp_path, monkeypatch, conversation=PREV)
+    elif case == "s0_missing":
+        r7_state(m, tmp_path, monkeypatch, s0=False)
+    else:
+        path = r7_state(m, tmp_path, monkeypatch)
+        if case == "tampered":
+            path.write_bytes(path.read_bytes().replace(b'"turnsUsed": 4', b'"turnsUsed": 5'))
+        elif case == "r7_run_exists":
+            (Path(m.EVIDENCE) / "i90-p5-turns-r7-20261115T000000Z").mkdir()
+        elif case == "other_turns_r6_run":
+            (Path(m.EVIDENCE) / "i90-p5-turns-r6-20261115T000000Z").mkdir()
+        elif case == "unit_name_instead":
+            # the decision names the unit / log name (one second earlier) instead of the evidence run
+            value = json.loads(path.read_text())
+            value["turns"]["run"] = "i90-p5-turns-r6-20261114T172502Z"
+            data = json.dumps(value).encode()
+            path.write_bytes(data)
+            monkeypatch.setattr(m, "CONTINUE_R7_SHA", hashlib.sha256(data).hexdigest())
+    with pytest.raises(m.Stop) as stopped:
+        m.round_accepted("-r7")
+    assert stopped.value.code == 3
+
+
+def test_turns_r7_runs_s5_and_s6_only(m, monkeypatch, tmp_path):
+    ran = []
+
+    def fake(step):
+        def run(ev, conversation, runner, verdicts, *rest):
+            name = rest[0] if rest else step
+            ran.append(name)
+            verdicts[name] = True
+        return run
+
+    for name in ("s1", "s2", "s3", "s5", "s6"):
+        monkeypatch.setattr(m, "step_" + name, fake(name.upper()))
+    monkeypatch.setattr(m, "step_s4", fake("S4"))
+    for name, value in (("create_session", lambda ev: None), ("bound_conversation", lambda sfx: "c" * 36),
+                        ("prepare_private", lambda ev, image: None), ("probe_private", lambda: None),
+                        ("start_runner", lambda *a: {}), ("stop_runner", lambda *a: True)):
+        monkeypatch.setattr(m, name, value)
+    verdicts = {}
+    assert m.measure(str(tmp_path), {"toolImage": "x"}, "turns-r7", verdicts) is None
+    assert ran == ["S5", "S6"]
+
+
+def test_round_caps_and_the_r7_reservation_limit(m, monkeypatch):
+    assert [m.round_cap(a) for a in ("turns", "s0", "turns-r5", "turns-r6", "turns-r7", "enable-r7")] == [8, 8, 8, 8, 6, 6]
+    posts = []
+    monkeypatch.setattr(m, "call", lambda method, path, body=None, session=True:
+                        (200, {"state": "idle", "version": 1}, "") if method == "GET" else posts.append(path))
+    m.durable_json(m.BUDGET, {"cap": 8, "turns": R6_BUDGET + [{"n": 5, "step": "S5", "outcome": "accepted"},
+                                                              {"n": 6, "step": "S6", "outcome": "accepted"}]})
+    m.LIMIT["cap"] = m.round_cap("turns-r7")
+    with pytest.raises(m.Stop) as stopped:
+        m.reserve("S6")
+    assert stopped.value.code == 3 and "this round" in stopped.value.message and len(m.budget_read()) == 6
+    m.LIMIT["cap"] = m.round_cap("turns-r6")
+    assert m.reserve("S6") == 7  # an r6-shaped round could reach 8; r7 cannot
+
+
+def test_main_sets_the_round_cap_before_the_guard(m, monkeypatch):
+    seen = []
+    monkeypatch.setattr(m, "expected", lambda: (_ for _ in ()).throw(m.Stop(3, "stop here")))
+    monkeypatch.setattr(m, "cleanup", lambda action: (None, True, None))
+    monkeypatch.setattr(m, "revoke_session", lambda ev: seen.append(m.LIMIT["cap"]))
+    monkeypatch.setattr(m.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(m.signal, "signal", lambda *a: None)
+    assert m.main(["i90-p5.py", "turns-r7"]) == 3
+    assert m.main(["i90-p5.py", "turns-r6"]) == 3
+    assert seen == [6, 8]
+
+
+def test_r7_guards_and_next_steps(m):
+    assert m.base("enable-r7") == "enable" and m.suffix("turns-r7") == "-r7"
+    assert m.next_step("enable-r7", 0, True) == "the next action: turns-r7"
+    assert "disable-r7 next" in m.next_step("turns-r7", 5, False)
+    assert "disable-r7" in m.next_step("turns-r7", 7, False) and "HELD" in m.next_step("turns-r7", 7, False)
+    assert m.next_step("disable-r7", 0, True) == "P5 complete: report the results"
+    with pytest.raises(m.Stop):
+        m.guard("turns-r7")
+    folder = Path(m.EVIDENCE) / "i90-p5-enable-r7-20261115T000000Z"
+    folder.mkdir()
+    (folder / "exit.json").write_text(json.dumps({"rc": 0, "verdicts": {}}))
+    m.guard("turns-r7")
+    (Path(m.EVIDENCE) / "i90-p5-disable-r7-20261115T010000Z").mkdir()
+    with pytest.raises(m.Stop):
+        m.guard("turns-r7")

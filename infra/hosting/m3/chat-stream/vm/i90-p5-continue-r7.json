@@ -1,0 +1,13 @@
+{
+ "version": "i90-p5-continue-r7-r0",
+ "s0Run": "i90-p5-s0-20261114T155956Z",
+ "conversationSha256": "29480c65ee8cd9ac5d0ff78b9e807b902ca82d63000df73595b977faa4d84fe9",
+ "turns": {"run": "i90-p5-turns-r6-20261114T172503Z", "exitSha256": "725549a61cf15aa35cabd21fd7e9ee5b647d13de20d388c8b1f234301a2b402a", "recorded": {"rc": 5, "stepRc": 5, "verdicts": {}, "stoppedAt": null, "runnerReleased": true, "clientsGone": true, "privateRemoved": true, "sessionRevoked": true}},
+ "disable": {"run": "i90-p5-disable-r6-20261114T172648Z", "exitSha256": "3fe5702b15f014c50f85768a5dd3232c7d6d74567441125584ad030e1e36d60b", "recorded": {"rc": 0, "stepRc": 0, "verdicts": {}, "stoppedAt": null, "runnerReleased": null, "clientsGone": true, "privateRemoved": null, "sessionRevoked": null}},
+ "turnsUsed": 4,
+ "roundTurns": 2,
+ "evidence": {"r7PinsLogSha256": "74f678eb9471569f5307c21fb30b897e3bb59790908dee65baf33065a3866b66", "turnsR6LogSha256": "a84a89ced46de6abda5f28ba1fbfe4c936bbab4bbf4e7cdb62a0ae7855f0df7d", "disableR6LogSha256": "8551ba5bb6f987fbdc8c571e0b4ff8c16dd57da81e0d127e0f714e110e8f94fc", "note": "log hashes are provenance references; the guard checks the guest exit files themselves; the collector's \"null\" marker is written as JSON null here; the evidence run names are one second after the unit / log names"},
+ "acceptedObservations": ["turns-r6 stopped at S4a before its turn (reader hop 2 did not open: no headers); no turn spent; verdicts {} as written", "S4a and S4b: not measured; the hop 2 cause is assessed separately (hop2-look) and is never a pass", "disable-r6 restored both pre-enable templates (equal: True)"],
+ "decision": "continue S5 and S6 only in r7, at most 2 turns (6 of 8 in total); the remaining 2 turns are not used; S0 and S1 stay False; S4a and S4b stay unmeasured",
+ "references": ["messages/back/2026-11-15-pm-issue90-p5-r6-results.md", "messages/back/2026-11-15-review-issue90-p5-r6-results-ack.md", "messages/back/2026-11-15-pm-issue90-hop2-decouple.md", "messages/back/2026-11-15-pm-issue90-r7-pins-result.md", "messages/back/2026-11-15-review-issue90-r7-pins-result-ack.md"]
+}
