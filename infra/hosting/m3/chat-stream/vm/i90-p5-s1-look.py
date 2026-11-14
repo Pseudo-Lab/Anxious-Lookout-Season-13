@@ -76,13 +76,15 @@ def reader(path):
     """Per request in stream order (D scoping: a frame with `request` sets it; a request-less frame belongs to the
     last one). Per request: the agentMessage items in order of first appearance (item.started or snapshot.item kind),
     their summaries (item.completed, else the last snapshot.end item), whether a snapshot is left open."""
-    requests, order, current, end = {}, [], None, None
+    requests, order, current, end, bad = {}, [], None, None, 0
     for line in read(path).splitlines():
         try:
             r = json.loads(line)
         except ValueError:
+            bad += 1  # review r1: corrupted lines are counted; the comparison then ends unknown
             continue
         if not isinstance(r, dict):
+            bad += 1
             continue
         if r.get('kind') == 'end':
             end = r.get('reason') if r.get('reason') in END_REASONS else 'unknown'
@@ -112,6 +114,8 @@ def reader(path):
                                        'textSha256': hexsha(r.get('textSha256')),
                                        'textObserved': r.get('textObserved') is True}
         elif event == 'snapshot.begin':
+            # review r1: a snapshot replaces the request's state - no earlier summary may stand for the new final answer
+            slot['kinds'].clear(); slot['agent'] = []; slot['completed'].clear(); slot['snapshotItems'].clear()
             slot['snapshot'].append(r.get('turnState') if r.get('turnState') in ('running', 'completed') else None)
             slot['open'] = True
         elif event == 'snapshot.end':
@@ -134,8 +138,8 @@ def reader(path):
         listed.append({'request': index, 'events': slot['events'], 'agentMessages': len(slot['agent']),
                        'agentSummaries': summaries, 'snapshotTurnStates': slot['snapshot'],
                        'snapshotOpen': slot['open'], 'turnCompleted': slot['turnCompleted']})
-    out('reader', requests=listed, end=end)
-    return listed
+    out('reader', requests=listed, end=end, unreadableLines=bad)
+    return listed, bad
 
 
 def record(conversation):
@@ -209,7 +213,7 @@ def front(folder):
     out('front', S1Items=items)
 
 
-def compare(listed, agent, fresh):
+def compare(listed, agent, fresh, bad):
     """The selection rule (review): the reader's LAST request must have its turn.completed and no open snapshot; its
     final agentMessage (the last by first appearance) needs a summary with observed text; the record's final assistant
     is the last agentMessage of the fresh S1 turn. Anything missing or ambiguous: unknown with a fixed reason."""
@@ -217,8 +221,12 @@ def compare(listed, agent, fresh):
     why = None
     if not fresh:
         why = 'the record is not exactly S0 + one completed S1 turn'
+    elif bad:
+        why = 'the reader file has unreadable lines'
     elif last is None or not last['turnCompleted']:
         why = 'no completed request on the reader'
+    elif last['turnCompleted'][-1] != 'completed':
+        why = 'the last terminal status of the request is not completed'
     elif last['snapshotOpen']:
         why = 'a snapshot of the request is still open on the reader'
     elif not last['agentSummaries'] or not agent:
@@ -249,7 +257,7 @@ def main():
         if not (isinstance(conversation, str) and re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-'
                                                                r'[0-9a-f]{12}', conversation)):
             raise Refused('the s0 run.json has no conversation UUID')
-        listed = reader(os.path.join(turns, 'client-S1-hop3.jsonl'))
+        listed, bad = reader(os.path.join(turns, 'client-S1-hop3.jsonl'))
         agent, fresh = record(conversation)
         front(turns)
         pins()
@@ -259,7 +267,7 @@ def main():
     except OSError:
         out('refused', reason='an input is missing or unreadable')
         return 3
-    compare(listed, agent, fresh)
+    compare(listed, agent, fresh, bad)
     return 0
 
 

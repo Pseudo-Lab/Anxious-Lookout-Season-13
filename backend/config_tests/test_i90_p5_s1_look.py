@@ -159,3 +159,40 @@ def test_pins_for_r5_hash_the_turns_and_disable_exits_and_list_the_budget(look, 
 
 def sha256_bytes(data):
     return hashlib.sha256(data).hexdigest()
+
+
+# --- review s1-look r1 counterexamples -------------------------------------------------------------------------
+
+@pytest.mark.parametrize("status,reason", [("failed", "the last terminal status of the request is not completed"),
+                                           (None, "the last terminal status of the request is not completed")])
+def test_a_failed_or_null_terminal_status_is_unknown(look, monkeypatch, capsys, status, reason):
+    f = frames()
+    for x in f:
+        if x.get("event") == "turn.completed" and x.get("request") == CUR:
+            x["status"] = status
+    setup(look, monkeypatch, reader_frames=f)
+    look.main()
+    out = lines(capsys)["compare"]
+    assert out["result"] == "unknown" and out["reason"] == reason
+
+
+def test_a_corrupted_line_makes_the_comparison_unknown(look, monkeypatch, capsys):
+    setup(look, monkeypatch)
+    path = look.turns / "client-S1-hop3.jsonl"
+    path.write_text(path.read_text() + "{not json\n")
+    look.main()
+    out = lines(capsys)
+    assert out["reader"]["unreadableLines"] == 1
+    assert out["compare"] == {**out["compare"], "result": "unknown", "reason": "the reader file has unreadable lines"}
+
+
+def test_a_replacement_snapshot_drops_the_earlier_summary(look, monkeypatch, capsys):
+    f = frames()  # a good live summary of the current request ...
+    f[-1:-1] = [{"kind": "frame", "event": "snapshot.begin", "request": CUR, "turnState": "completed"},
+                {"kind": "frame", "event": "snapshot.item", "request": CUR, "item": LIVE, "itemKind": "agentMessage"},
+                {"kind": "frame", "event": "snapshot.end", "request": CUR, "items": {}}]  # ... then one without
+    setup(look, monkeypatch, reader_frames=f)
+    look.main()
+    out = lines(capsys)["compare"]
+    assert out["result"] == "unknown"
+    assert out["reason"] == "the reader has no summary with observed text for its final agentMessage"
