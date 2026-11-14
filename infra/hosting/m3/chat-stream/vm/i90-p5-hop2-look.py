@@ -191,8 +191,11 @@ def all3(values):
 
 
 def sources(rule):
-    """(tags, host): fixed source tags and whether the rule's peers include the host. A peer form this does not
-    interpret (another endpoint selector, CIDR, kube-apiserver, an unknown field) makes `host` unknown, never False."""
+    """(tags, host): fixed source tags and whether the rule's peers include the host. The known peer fields are
+    alternatives (OR): a peer form this does not interpret (another endpoint selector, CIDR, kube-apiserver) is an
+    unknown alternative. Any other rule field (`fromRequires`, `fromNodes`, `icmps`, `authentication`, …) may be an
+    added constraint or another alternative, so it makes the whole rule's `host` unknown, whatever the peers say
+    (review r1: a known host peer must not erase it)."""
     tags, host = [], []
     for peer in rule.get('fromEndpoints') or []:
         peer = peer if isinstance(peer, dict) else {}
@@ -214,7 +217,7 @@ def sources(rule):
         host.append(UNKNOWN)
     if set(rule) - {'fromEndpoints', 'fromEntities', 'fromCIDR', 'fromCIDRSet', 'toPorts'}:
         tags.append('other')
-        host.append(UNKNOWN)
+        return sorted(set(tags)), UNKNOWN
     if not tags:
         tags.append('any-source')  # no peer field: every source, the host included
         host.append(True)

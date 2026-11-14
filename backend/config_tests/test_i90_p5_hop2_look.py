@@ -127,6 +127,14 @@ H8080 = {"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "8080", "prot
     ({"fromNodes": [{}], "toPorts": [{"ports": [{"port": "8080"}]}]}, "unknown"),
     ({"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "http"}]}, {"ports": [{"port": "8080"}]}]}, True),
     ({"fromEntities": ["host"], "toPorts": [{"ports": [{"port": "http"}]}, {"ports": [{"port": "9"}]}]}, "unknown"),
+    # review r1: an uninterpreted rule field is never erased by a known host peer (nor by a known non-host one)
+    ({"fromEntities": ["host"], "fromRequires": [{"matchLabels": {"role": "restricted"}}]}, "unknown"),
+    ({"fromEntities": ["host"], "fromNodes": [{}], "toPorts": [{"ports": [{"port": "8080"}]}]}, "unknown"),
+    ({"fromEntities": ["host"], "icmps": [{"fields": [{"type": 8}]}]}, "unknown"),
+    ({"fromEntities": ["host"], "authentication": {"mode": "required"}}, "unknown"),
+    ({"fromEntities": ["world"], "fromRequires": [{"matchLabels": {"role": "x"}}]}, "unknown"),
+    ({"fromEndpoints": [{"matchLabels": TRAEFIK}], "fromRequires": [{}], "toPorts": [{"ports": [{"port": "8080"}]}]},
+     "unknown"),
 ])
 def test_host_tcp_8080_allow_rule_is_tri_state(h, monkeypatch, capsys, rule, allow):
     cnp = repo_cnp()
@@ -134,6 +142,17 @@ def test_host_tcp_8080_allow_rule_is_tri_state(h, monkeypatch, capsys, rule, all
     out = verdict(h, monkeypatch, capsys, cnps=[cnp])
     assert out["hostTcp8080"]["allowRule"] == allow
     assert out["hostTcp8080"]["allowRule"] is not (not allow)  # never a bare True/False standing for "unknown"
+
+
+def test_a_constrained_rule_stays_unknown_but_an_independent_host_rule_decides(h, monkeypatch, capsys):  # review r1
+    cnp = repo_cnp()
+    cnp["spec"]["ingress"].append({"fromEntities": ["host"], "fromRequires": [{"matchLabels": {"role": "x"}}]})
+    out = verdict(h, monkeypatch, capsys, cnps=[cnp])
+    rule = out["policies"]["items"][0]["rules"][-1]
+    assert rule["from"] == ["entities:host", "other"] and rule["hostSource"] == "unknown" and rule["match"] == "unknown"
+    assert out["hostTcp8080"]["allowRule"] == "unknown"
+    cnp["spec"]["ingress"].append(H8080)
+    assert verdict(h, monkeypatch, capsys, cnps=[cnp])["hostTcp8080"]["allowRule"] is True
 
 
 def test_unknown_selector_with_a_host_rule_is_unknown_not_admitted(h, monkeypatch, capsys):  # review r0
