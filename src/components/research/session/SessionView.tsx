@@ -807,16 +807,45 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
     setStopping({ requestId, phase: "failed", resent });
   };
 
-  // #90 실시간 스트림. 연결된 동안은 대화 상세·Codex 상태 polling을 멈추고, 확정 신호마다 기록을 한 번 다시 불러온다.
+  // #90 확정 신호(turn.completed·sync·끊김 등)의 기록 GET. 스트림이 연결된 동안은 polling이 멈춰 있으므로, 이 GET이 일시
+  // 실패(network·5xx·timeout)하면 성공할 때까지 늘려 가는 간격으로 다시 한다(GET만, POST는 다시 보내지 않는다 — review 1908aaf).
+  // 확정 실패(401·403·404)는 useLoad가 그대로 보이므로 멈춘다. 진행 중에 다시 요청되면 겹치지 않고 끝난 뒤 한 번 더 한다.
+  const refreshing = useRef<{ again: boolean } | null>(null);
+  const refreshRecord = async () => {
+    if (refreshing.current) {
+      refreshing.current.again = true;
+      return;
+    }
+    const run = { again: false };
+    refreshing.current = run;
+    try {
+      for (let attempt = 0; alive.current; ) {
+        run.again = false;
+        const r = await reloadResult();
+        // null: 더 나중의 조회에 밀렸다(그 결과를 알 수 없으므로 일시 실패처럼 다시 확인한다).
+        if (r === null || (!r.ok && isUncertain(r.failure))) {
+          await new Promise((resolve) => setTimeout(resolve, Math.min(CONFIRM_RETRY_MS * 2 ** attempt, CONFIRM_RETRY_MAX_MS)));
+          attempt++;
+          continue;
+        }
+        if (!run.again) break;
+        attempt = 0;
+      }
+    } finally {
+      refreshing.current = null;
+    }
+  };
+
+  // #90 실시간 스트림. 연결된 동안은 대화 상세·Codex 상태 polling을 멈추고, 확정 신호마다 기록을 다시 불러온다.
   const stream = useChatStream(id, chat.open && visible, {
-    onRefresh: () => void reload(),
+    onRefresh: () => void refreshRecord(),
     onRunner: (raw) => {
       const status = readCodexStatus(raw);
       if (status) pushStatus(status);
     },
     // 기록은 실행 중인데 스트림이 진행 중인 턴이 없다고 하면(연결 전에 끝남) 기록으로 확인한다.
     onIdle: () => {
-      if (running && send === null) void reload();
+      if (running && send === null) void refreshRecord();
     },
     onTurnRunning: (requestId) => {
       if (stopping?.phase === "awaitStart" && stopping.requestId === requestId && !stopping.resent) void requestStop(requestId, true);

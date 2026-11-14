@@ -969,6 +969,37 @@ await step("N25", async () => {
   check("N25. no status polling while streaming", (await statusReads()) === r0, String((await statusReads()) - r0));
   check("N25. no stop button after completion", (await chat.getByRole("button", { name: "중지" }).count()) === 0);
 
+  // review(1908aaf): 완료 확정 GET이 일시 실패(503)해도 스트림 연결 중 GET만 다시 해 완료 기록으로 복구하고 입력 잠금을 푼다.
+  {
+    const gets = [];
+    let failNext = false;
+    await page.route("**/api/research/sessions/*", async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      if (failNext) {
+        failNext = false;
+        gets.push(503);
+        return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "unavailable", message: "Unavailable" } }) });
+      }
+      gets.push(200);
+      return route.continue();
+    });
+    const posts0 = (await mockCalls()).filter((c) => c.method === "POST" && /\/messages$/.test(c.path)).length;
+    await input.fill("완료 조회 실패 질문");
+    await input.press("Enter");
+    await appears(chat.locator("li[data-role=assistant]", { hasText: "모의 응답" }).last(), 5000);
+    await page.waitForTimeout(800);
+    gets.length = 0;
+    failNext = true; // 다음 GET = 완료 확정 GET
+    check("N25. completion GET 503 -> retried, input unlocked", await appears(input.and(chat.locator(":enabled")), 15000), JSON.stringify(gets));
+    check("N25. completion GET failed once then recovered", gets[0] === 503 && gets.includes(200), JSON.stringify(gets));
+    check("N25. recovered record shows the answer", await appears(chat.getByText("모의 응답: 완료 조회 실패 질문")));
+    check(
+      "N25. message not resent",
+      (await mockCalls()).filter((c) => c.method === "POST" && /\/messages$/.test(c.path)).length === posts0 + 1
+    );
+    await page.unroute("**/api/research/sessions/*");
+  }
+
   // 중지: 부분 답변은 표시 전용, 대화는 idle(실패 아님)
   const i0 = (await counts()).interrupts;
   await input.fill("중지할 질문");
