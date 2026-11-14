@@ -292,10 +292,16 @@ rollback needs them. Nothing prunes images in #90.
 - Why a start: `stream-prefixes.json` is written only on the runner's remember paths (install / remember_secrets
   at entry, after the journal write). Before a start on the r4 image the control volume has no prefix file and
   journal_lengths v2 can only report `prefixFile: absent`, every long literal legacy.
-- D1 / D2 are not reused as they are: D1 is once-guarded with its own evidence, and both take the stage C images from
-  `i90-expected.json`. R-D is `i90r-d1.py` / `i90r-d2.py` derived from them the same way (names, the R-C expected
-  file, the R-C generation), written after R-C's output; journal_lengths.py v2 r1 (sha256 `fd1d9f7f…`, approved
-  dd04d84) is installed for it. Its result (structural covered / legacy, snapshots count) is bounded as review set:
+- r17 (after R-C2 result rc 0, 2026-11-14): **R-D1** is `vm/i90r-d1.py`, i90-d1.py with listed changes only
+  (header; `i90r-expected.json` at its sha; GENERATION / REVISION 33 / 132 from the R-C2 run's final fence; SOURCE
+  bb3aa97; evidence and guard `i90r-d1-<UTC>`; SQL tag `i90rd1`; "stage C" texts → "stage R"; generation 34). D1
+  itself is not reused: its once-guard is `i90-d1-*` (already ran) and it takes the stage C images. The lock
+  `i90-d.lock` stays shared. `config_tests/test_i90_vm.py` checks every changed line; `test_i90_d1.py`'s fake VM
+  now reads the module's constants and runs the pass path, the once-guard and a failed start against i90r-d1.py.
+- **R-D2** reuses the approved `vm/i90-d2.py` (sha256 `fb056c4f…`, dd04d84) unchanged: it takes only `toolImage`
+  from `i90-expected.json` (still on the guest at its sha, and the same id in `i90r-expected.json`), checks
+  …5805 idle with no Pod and the plan's control PVC / PV, is read only and has no once-guard. Installed with it:
+  journal_lengths.py v2 r1 (sha256 `fd1d9f7f…`, approved dd04d84); the earlier guest copies are kept as `.rN`. Its result (structural covered / legacy, snapshots count) is bounded as review set:
   `macVerified: false`, `snapshots` only the observed row count; the final coverage answer is the runtime `legacyL`
   of a streaming turn (P5 S1). The P5 plan is set after this result (PM).
 

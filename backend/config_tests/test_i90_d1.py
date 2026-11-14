@@ -12,24 +12,24 @@ VM = ROOT / "infra" / "hosting" / "m3" / "chat-stream" / "vm"
 pytestmark = pytest.mark.skipif(not VM.exists(), reason="infra/ not mounted")
 
 
-def load():
-    spec = importlib.util.spec_from_file_location("i90_d1", VM / "i90-d1.py")
+def load(name="i90-d1"):
+    spec = importlib.util.spec_from_file_location(name.replace("-", "_"), VM / (name + ".py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-def expected_doc():
-    return json.loads((VM / "i90-expected.json").read_text())
+def expected_doc(module=None):
+    return json.loads((VM / (Path(module.EXPECTED_FILE).name if module else "i90-expected.json")).read_text())
 
 
 class FakeVM:
-    """The …5805 registry moves idle_stopped gen 29 → (POST) gen 30 with a Pod → (DELETE) idle_stopped gen 30."""
+    """The …5805 registry moves idle_stopped GENERATION → (POST) GENERATION + 1 with a Pod → (DELETE) idle_stopped."""
 
     def __init__(self, module, doc, **faults):
         self.m, self.doc, self.faults = module, doc, faults
         self.clock = 1_800_000_000.0
-        self.registry = {"phase": "idle_stopped", "gen": 29, "rev": 116, "pod": None, "active": 0,
+        self.registry = {"phase": "idle_stopped", "gen": module.GENERATION, "rev": module.REVISION, "pod": None, "active": 0,
                          "ambiguous": False, "state": module.STATE}
         self.pods, self.sessions, self.stops, self.requests = [], {}, [], []
         self.status_reads = 0
@@ -69,7 +69,7 @@ class FakeVM:
             "containers": containers, "initContainers": init}}}, "status": {"readyReplicas": 1}}
 
     def sql(self, text):
-        tag = re.search(r"/\*i90d1:(\w+)\*/", text).group(1)
+        tag = re.search(r"/\*i90r?d1:(\w+)\*/", text).group(1)  # i90-d1 / i90r-d1
         if tag == "registry":
             return 0, json.dumps(self.registry)
         if tag == "binding":
@@ -129,7 +129,7 @@ class FakeVM:
         if path == self.m.BASE + "/codex/runner" and method == "POST":
             if self.faults.get("interrupt_at_entry"):
                 raise self.m.Interrupted()
-            self.registry.update(gen=30, phase="ready", pod="pod-uid-30")
+            self.registry.update(gen=self.m.GENERATION + 1, phase="ready", pod="pod-uid-30")
             if self.faults.get("malformed_pod"):  # an answer the start check cannot parse (KeyError, not a Stop)
                 self.pods = [{"status": {}}]
                 return 202, {"available": False, "reason": "provisioning"}, "application/json"
@@ -144,7 +144,7 @@ class FakeVM:
         if path == self.m.BASE + "/codex/runner" and method == "DELETE":
             self.registry.update(phase="idle_stopped", pod=None)
             self.pods = []
-            self.stops = [{"gen": 30, "receipt": 1, "clean": True, "completed": True, "requested": self.clock,
+            self.stops = [{"gen": self.m.GENERATION + 1, "receipt": 1, "clean": True, "completed": True, "requested": self.clock,
                            "completedAt": self.clock + 3}]
             return 200, {"terminationRequested": True}, "application/json"
         return 500, None, ""
@@ -152,9 +152,9 @@ class FakeVM:
 
 @pytest.fixture
 def vm(tmp_path, monkeypatch):
-    def make(**faults):
-        module = load()
-        doc = expected_doc()
+    def make(script="i90-d1", **faults):
+        module = load(script)
+        doc = expected_doc(module)
         fake = FakeVM(module, doc, **faults)
         # plans whose digests are the recorded ones: the fake hands the digest function the owner's recorded digest
         fake.plans = {owner: {"owner": owner} for owner in doc["others"]}
@@ -321,3 +321,39 @@ def test_an_out_txt_failure_after_the_revoke_is_rc9(vm, monkeypatch):
     monkeypatch.setattr(module.os, "fsync", failing_fsync)
     assert module.main(["i90-d1.py", "run"]) == 9
     assert json.loads((run_dir(evidence) / "exit.json").read_text())["rc"] == 9
+
+
+# --- stage R-D1 (i90r-d1.py: i90-d1.py on the R-C2 baseline; derivation checked in test_i90_vm.py) ----------------
+
+def test_stage_r_d1_runs_on_the_r4_facts_once(vm):
+    module, fake, evidence = vm(script="i90r-d1")
+    assert module.EXPECTED_FILE.endswith("/i90r-expected.json") and module.SOURCE.startswith("bb3aa97")
+    assert module.main(["i90r-d1.py", "run"]) == 0
+    folder = run_dir(evidence)
+    assert folder.name.startswith("i90r-d1-")
+    done = json.loads((folder / "exit.json").read_text())
+    assert done == {**done, "rc": 0, "stepRc": 0, "sessionRevoked": True, "finalInvariants": True}
+    out = (folder / "out.txt").read_text()
+    assert "verdict runner Pod on the stage R runner image: True" in out
+    assert fake.stops[0]["gen"] == module.GENERATION + 1 and fake.pods == []
+    assert module.main(["i90r-d1.py", "run"]) == 3  # one run only
+
+
+def test_stage_r_d1_ignores_the_stage_d1_evidence_but_not_its_own(vm):
+    module, fake, evidence = vm(script="i90r-d1")
+    (evidence / "i90-d1-20261114T060000Z").mkdir()  # the stage D1 run's evidence: not this script's guard
+    assert module.main(["i90r-d1.py", "check"]) == 0
+    (evidence / "i90r-d1-20261115T000000Z").mkdir()
+    assert module.main(["i90r-d1.py", "run"]) == 3 and fake.sessions == {}
+
+
+def test_stage_r_d1_start_failure_still_stops(vm):
+    module, fake, evidence = vm(script="i90r-d1", never_ready=True)
+    assert module.main(["i90r-d1.py", "run"]) == 5
+    assert ("DELETE", module.BASE + "/codex/runner") in fake.requests and not any(fake.sessions.values())
+
+
+def test_stage_r_d1_expected_pin_is_the_committed_r_expected_file():
+    import hashlib
+    module = load("i90r-d1")
+    assert module.EXPECTED_SHA == hashlib.sha256((VM / "i90r-expected.json").read_bytes()).hexdigest()

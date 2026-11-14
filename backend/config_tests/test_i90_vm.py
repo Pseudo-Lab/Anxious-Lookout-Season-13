@@ -787,3 +787,32 @@ def test_stage_r_import_refuses_while_a_pin_is_the_placeholder():
 def test_install_accepts_the_stage_r_files(tmp_path, name):
     code, out, d = install_run(tmp_path, name, b"x = 4\n")
     assert code == 0 and (d / name).read_bytes() == b"x = 4\n"
+
+
+# --- stage R-D1: i90r-d1.py is i90-d1.py with the listed changes only -----------------------------------------------
+
+def test_stage_r_d1_is_stage_d1_with_the_listed_changes_only():
+    old = (VM / "i90-d1.py").read_text().splitlines()
+    new = (VM / "i90r-d1.py").read_text().splitlines()
+    marker = new.index("The stage D1 header follows unchanged but for those texts.")
+    assert new[0].startswith('"""#90 stage R-D1') and new[marker + 1] == ""
+    module, stage_c = load("i90r-d1"), load("i90-d1")
+    expected = []
+    for line in old:
+        line = (line.replace("i90-expected.json", "i90r-expected.json").replace("i90-d1", "i90r-d1")
+                .replace("/*i90d1:", "/*i90rd1:").replace("stage C", "stage R").replace("generation 30 ", "generation %d "
+                                                                                       % (module.GENERATION + 1)))
+        if line.startswith(("GENERATION, REVISION = ", "SOURCE = ", "EXPECTED_SHA = ")):
+            line = line.split(" = ")[0] + " = <pin>"
+        expected.append(line)
+    expected[0] = expected[0][3:]
+    got = [line.split(" = ")[0] + " = <pin>" if line.startswith(("GENERATION, REVISION = ", "SOURCE = ", "EXPECTED_SHA = "))
+           else line for line in new[marker + 2:]]
+    assert got == expected
+    assert (module.GENERATION, module.REVISION) > (stage_c.GENERATION, stage_c.REVISION)
+    assert module.SOURCE != stage_c.SOURCE and module.LOCK == stage_c.LOCK
+
+
+def test_install_accepts_the_stage_r_d1_script(tmp_path):
+    code, out, d = install_run(tmp_path, "i90r-d1.py", b"print('rd1')\n")
+    assert code == 0 and (d / "i90r-d1.py").read_bytes() == b"print('rd1')\n"

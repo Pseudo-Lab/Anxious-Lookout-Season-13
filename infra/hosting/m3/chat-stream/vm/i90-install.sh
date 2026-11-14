@@ -12,7 +12,7 @@ set -u
 D=/root/issue90
 WANT='regular file|0|0|600|1'  # stat %F|%u|%g|%a|%h of an installed file (new, or already the reviewed one)
 case "${1:-}" in
-  i90-switch.py|i90-expected.json|i90-d1.py|i90-d2.py|journal_lengths.py|i90-d3.py|p4_client.py|i90r-switch.py|i90r-expected.json|i90rb-switch.py|i90rb-expected.json) ;;
+  i90-switch.py|i90-expected.json|i90-d1.py|i90-d2.py|journal_lengths.py|i90-d3.py|p4_client.py|i90r-switch.py|i90r-expected.json|i90rb-switch.py|i90rb-expected.json|i90r-d1.py) ;;
   *) echo 'usage: i90-install.sh <a name listed in its case> <sha256> < file; nothing changed'; exit 2 ;;
 esac
 [ $# = 2 ] || { echo 'usage: the reviewed sha256 is required; nothing changed'; exit 2; }
