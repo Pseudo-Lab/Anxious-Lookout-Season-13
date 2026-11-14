@@ -452,4 +452,8 @@ async def relay_body(relay, row, finished):
     except Exception:
         relay.stats["reason"] = relay.stats.get("reason") or "closed"
     finally:
+        if relay.stats.get("reason") is None:
+            # Closed from outside (GeneratorExit / cancellation): the API's shutdown event, else the browser left
+            # (#90 D3-d: the summary's reason was null for a plain client close).
+            relay.stats["reason"] = "shutdown" if relay.stopping() else "client_closed"
         finished()
