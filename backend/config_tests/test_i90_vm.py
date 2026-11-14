@@ -615,3 +615,8 @@ def test_install_refuses_a_symlink_or_directory_at_the_name(tmp_path):
 def test_install_refuses_a_parent_that_is_not_0700(tmp_path):
     code, out, d = install_run(tmp_path, "i90-expected.json", b"x\n", prepare=lambda d: d.chmod(0o755))
     assert code == 3 and "is not root:root 700" in out and not (d / "i90-expected.json").exists()
+
+
+def test_install_accepts_the_stage_d1_script(tmp_path):
+    code, out, d = install_run(tmp_path, "i90-d1.py", b"print('d1')\n")
+    assert code == 0 and (d / "i90-d1.py").read_bytes() == b"print('d1')\n"

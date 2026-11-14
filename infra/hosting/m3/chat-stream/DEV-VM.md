@@ -104,6 +104,17 @@ re-run. Then `precheck <expected sha256>` (read only), and `run` only after its 
 - The browser session follows `infra/k3s/DEV-VM.md` (token file in the guest, `session_digest` computed in the API image); the stage D block creates and removes it.
 - **Sending a message is a Codex turn**: it is in P5 (S0), not here.
 
+**Stage D1 (r6)**: `vm/i90-d1.py` does the list above (`check` read only; `run` once as a systemd unit, installed
+with `i90-install.sh`). Its order, rc table and evidence (`/root/issue90/evidence/i90-d1-<UTC>/`) are in its
+docstring; the stage C facts (images, the five other owners) come from `i90-expected.json` at its reviewed hash.
+- The runner entry is generation 30 of …5805 on the stage C runner image; ready = `/codex/status` `available: true`,
+  `reason: null` at the read +65 s after the container start (reads at +5/+35/+65 s). It is then stopped with
+  `DELETE /codex/runner` (the stop is sent also when the start check fails) and must be released by one completed
+  stop with drain receipt 1.
+- "The same items as before": no GET was recorded under the old API before stage C, so D1 checks the shape and
+  records each of the three newest conversations' item count and items digest. Those are the baseline P4/P5
+  compare against; an old-vs-new comparison is not claimed.
+
 **Rollback**: `i90-switch.py`'s reverse path. The runner binding goes back to its P0 `plan.image` (report/apply, `idle_stopped`), and the api containers go back to their P0 images (the same image-only change). Nothing in the DB schema changes in #90, so no data step.
 
 ## P3 — L measurement (read only, no turn)

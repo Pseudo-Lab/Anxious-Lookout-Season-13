@@ -1,5 +1,5 @@
 # #90 stage C install (chat-stream/DEV-VM.md P2; guest, as root, sent as the argument of `sh -c`; never installed itself):
-# stdin = one reviewed stage C file, $1 = its guest name (i90-switch.py or i90-expected.json), $2 = its reviewed sha256
+# stdin = one reviewed stage C/D file, $1 = its guest name (i90-switch.py, i90-expected.json, i90-d1.py), $2 = its sha256
 # (given in review's approval; the expected file is reviewed after the survey, so no hash is pinned here). The file is
 # written new as /root/issue90/<name>, root:root 0600. An existing regular file of that name is kept as <name>.rN (the
 # first free N in 0-9, never overwritten) before the new one moves in; anything else at that name refuses.
@@ -12,8 +12,8 @@ set -u
 D=/root/issue90
 WANT='regular file|0|0|600|1'  # stat %F|%u|%g|%a|%h of an installed file (new, or already the reviewed one)
 case "${1:-}" in
-  i90-switch.py|i90-expected.json) ;;
-  *) echo 'usage: i90-install.sh i90-switch.py|i90-expected.json <sha256> < file; nothing changed'; exit 2 ;;
+  i90-switch.py|i90-expected.json|i90-d1.py) ;;
+  *) echo 'usage: i90-install.sh i90-switch.py|i90-expected.json|i90-d1.py <sha256> < file; nothing changed'; exit 2 ;;
 esac
 [ $# = 2 ] || { echo 'usage: the reviewed sha256 is required; nothing changed'; exit 2; }
 N=$1
