@@ -127,7 +127,12 @@ class FakeVM:
             return 200, {"id": ident, "title": "t", "state": "idle", "version": 1, "createdAt": "x", "updatedAt": "y",
                          "context": None, "items": [{"id": "i1"}], "error": None}, "application/json"
         if path == self.m.BASE + "/codex/runner" and method == "POST":
+            if self.faults.get("interrupt_at_entry"):
+                raise self.m.Interrupted()
             self.registry.update(gen=30, phase="ready", pod="pod-uid-30")
+            if self.faults.get("malformed_pod"):  # an answer the start check cannot parse (KeyError, not a Stop)
+                self.pods = [{"status": {}}]
+                return 202, {"available": False, "reason": "provisioning"}, "application/json"
             started = self.m.time.strftime("%Y-%m-%dT%H:%M:%SZ", self.m.time.gmtime(self.clock))
             self.pods = [{"metadata": {"name": self.m.POD_NAME, "uid": "pod-uid-30"},
                           "spec": {"containers": [{"name": "runner", "image": self.doc["newImage"]}]},
@@ -242,3 +247,48 @@ def test_expected_pin_is_the_committed_expected_file():
     import hashlib
     module = load()
     assert module.EXPECTED_SHA == hashlib.sha256((VM / "i90-expected.json").read_bytes()).hexdigest()
+
+
+# Review 518c088 majors: cleanup boundaries -------------------------------------------------------------------------
+
+def test_an_unexpected_start_exception_still_sends_the_stop(vm):
+    module, fake, evidence = vm(malformed_pod=True)
+    assert module.main(["i90-d1.py", "run"]) == 5
+    assert ("DELETE", module.BASE + "/codex/runner") in fake.requests and fake.pods == []
+    done = json.loads((run_dir(evidence) / "exit.json").read_text())
+    assert done["rc"] == 5 and done["sessionRevoked"] is True
+    assert "unexpected KeyError in the start check; the stop is still sent" in (run_dir(evidence) / "out.txt").read_text()
+
+
+def test_an_evidence_write_failure_never_skips_the_revoke(vm, monkeypatch):
+    module, fake, evidence = vm()
+    real_fsync = module.os.fsync
+    def failing_fsync(fd):
+        if any(fake.sessions.values()):  # from the session insert on, every evidence fsync fails
+            raise OSError("disk")
+        return real_fsync(fd)
+    monkeypatch.setattr(module.os, "fsync", failing_fsync)
+    code = module.main(["i90-d1.py", "run"])  # returns: never raises out of main
+    assert code != 0 and fake.sessions and not any(fake.sessions.values())
+    assert not [p for m, p in fake.requests if p.endswith("/codex/runner")]  # failed before the entry
+
+
+def test_a_second_interrupt_at_the_entry_revokes_but_sends_no_stop(vm):
+    module, fake, evidence = vm(interrupt_at_entry=True)
+    assert module.main(["i90-d1.py", "run"]) == 130
+    assert ("DELETE", module.BASE + "/codex/runner") not in fake.requests
+    assert fake.sessions and not any(fake.sessions.values())
+    assert json.loads((run_dir(evidence) / "exit.json").read_text())["sessionRevoked"] is True
+
+
+def test_evidence_failure_after_a_full_pass_is_rc9(vm, monkeypatch):
+    module, fake, evidence = vm()
+    real_fsync = module.os.fsync
+    state = {"deleted": False}
+    def failing_fsync(fd):
+        if ("DELETE", module.BASE + "/codex/runner") in fake.requests and not state["deleted"]:
+            state["deleted"] = True
+            raise OSError("disk")
+        return real_fsync(fd)
+    monkeypatch.setattr(module.os, "fsync", failing_fsync)
+    assert module.main(["i90-d1.py", "run"]) == 9

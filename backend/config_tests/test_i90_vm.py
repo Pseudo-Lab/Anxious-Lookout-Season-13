@@ -620,3 +620,9 @@ def test_install_refuses_a_parent_that_is_not_0700(tmp_path):
 def test_install_accepts_the_stage_d1_script(tmp_path):
     code, out, d = install_run(tmp_path, "i90-d1.py", b"print('d1')\n")
     assert code == 0 and (d / "i90-d1.py").read_bytes() == b"print('d1')\n"
+
+
+@pytest.mark.parametrize("name", ["i90-d2.py", "journal_lengths.py"])
+def test_install_accepts_the_stage_d2_files(tmp_path, name):
+    code, out, d = install_run(tmp_path, name, b"x = 1\n")
+    assert code == 0 and (d / name).read_bytes() == b"x = 1\n"

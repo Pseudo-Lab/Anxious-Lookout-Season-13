@@ -111,6 +111,9 @@ docstring; the stage C facts (images, the five other owners) come from `i90-expe
   `reason: null` at the read +65 s after the container start (reads at +5/+35/+65 s). It is then stopped with
   `DELETE /codex/runner` (the stop is sent also when the start check fails) and must be released by one completed
   stop with drain receipt 1.
+- Cleanup (r7, review 518c088): after the entry, any exception the process can handle in the start check still sends
+  the stop (rc 5); only a second interrupt does not (rc 130, the runner left to its idle stop). The session revoke
+  runs in a `finally` and never raises; an evidence write failure is remembered (rc 9 when every step passed).
 - "The same items as before": no GET was recorded under the old API before stage C, so D1 checks the shape and
   records each of the three newest conversations' item count and items digest. Those are the baseline P4/P5
   compare against; an old-vs-new comparison is not claimed.
@@ -129,6 +132,16 @@ The stage D block does this; the steps it takes:
 - **Exit codes**: 2 = refused input (missing, symlink, non-regular file, hot `-journal`/`-wal`), 3 = database error. Report the rc, do not retry.
 - **Read only**: lstat checks before any open, and `mode=ro&immutable=1`. Tests: `config_tests/test_journal_lengths.py` (unchanged files, refusals).
 - If L is large (hundreds of chars or more), the prefix optimization is decided as a separate design inside #90 (PM decision 2026-11-14).
+
+**Stage D2 (r7)**: `vm/i90-d2.py measure` (read only, after D1; writes nothing on the guest) does steps 1–2 for
+…5805 and adds what the review minor asked: the plan's `control` `{name, uid, volume}` must match PVC uid, PVC
+Bound to that PV, and the PV's claimRef (namespace, name, uid); …5805 idle_stopped with no Pod and no runner Pod.
+The container is the guest Docker tool image `i90-expected.json` names (`toolImage`), `--network none --read-only
+--cap-drop ALL --security-opt no-new-privileges --security-opt label=disable --user 10001:10001`, the PV path read
+only at `/control`. `journal_lengths.py` (installed root 0600, its sha256 pinned) is not mounted: the exact hashed
+bytes go to `python3 -I -B - /control` on stdin. `label=disable` instead of a `:z` relabel, which would write the
+volume's SELinux labels. rc in its docstring (0 measured, 2 input refused, 3 refused before, 4 database error, 80
+container not proved gone).
 
 ## P4 — runner and API shutdown with a real runner (no turn)
 

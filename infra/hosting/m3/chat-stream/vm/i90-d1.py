@@ -20,9 +20,14 @@ an flock on evidence/i90-d.lock; one run (a second run is refused, any rerun is 
 and CSRF value are never printed or written; only the first 16 hex characters of the token hash are.
 
 rc: 0 every check passed; 3 refused before any change; 4 a regression check failed before the entry (the runner
-was not started); 5 the runner start was not proved (the stop still runs); 6 stop/release not proved; 7 session not
-created; 8 every step passed but the final invariants failed or could not be checked; 70 every step passed but the
-session revoke is not proved; 130 interrupted twice. exit.json holds rc, stepRc, sessionRevoked, finalInvariants.
+was not started); 5 the runner start was not proved, by a failed check or any other exception after the entry (the
+stop still runs); 6 stop/release not proved; 7 session not created; 8 every step passed but the final invariants
+failed or could not be checked; 9 every step passed but an evidence write failed (out.txt / run.json); 70 every step
+passed but the session revoke is not proved; 130 interrupted twice (after the entry: no stop is sent, the runner is
+left to its idle stop). exit.json holds rc, stepRc, sessionRevoked, finalInvariants.
+
+Cleanup (review 518c088): the session revoke runs in a `finally` once a session hash exists and never raises; an
+evidence write failure (say / record) is remembered, never raised into a cleanup step.
 """
 import calendar
 import fcntl
@@ -86,10 +91,13 @@ def say(text):
         print(line, flush=True)
     except Exception:
         pass
-    if OUT['stream'] is not None:
-        OUT['stream'].write(line + '\n')
-        OUT['stream'].flush()
-        os.fsync(OUT['stream'].fileno())
+    if OUT['stream'] is not None and not OUT.get('failed'):
+        try:  # an evidence write failure never stops a cleanup step (review 518c088 major); it is reported in rc
+            OUT['stream'].write(line + '\n')
+            OUT['stream'].flush()
+            os.fsync(OUT['stream'].fileno())
+        except Exception:
+            OUT['failed'] = True
 
 
 def now_utc():
@@ -312,17 +320,25 @@ def create_session(ev):
 
 
 def revoke_session(ev):
-    if not SESSION.get('hash') or SESSION.get('revoked'):
-        return SESSION.get('revoked') if SESSION.get('hash') else None
+    """Never raises: called from main's finally once a session hash exists (also after a failed insert, whose
+    result is unknown). The evidence record and the report line are best effort; the DELETE and its check are not
+    skipped by their failure (review 518c088 major)."""
+    if not SESSION.get('hash'):
+        return None
+    if SESSION.get('revoked'):
+        return True
     try:
         sql('revoke', "WITH d AS (DELETE FROM auth.sessions WHERE token_hash='%s' AND account_id='%s' RETURNING 1) "
             "SELECT json_build_object('deleted',count(*)) FROM d;" % (SESSION['hash'], OWNER), 70, write=True)
         left = sql('session', "SELECT json_build_object('n',count(*)) FROM auth.sessions WHERE token_hash='%s';"
                    % SESSION['hash'], 70)
         SESSION['revoked'] = left == [{'n': 0}]
-    except Stop:
+    except Exception:
         SESSION['revoked'] = False
-    record(ev, session='revoked' if SESSION['revoked'] else 'revoke not proved (expires by itself)')
+    try:
+        record(ev, session='revoked' if SESSION['revoked'] else 'revoke not proved (expires by itself)')
+    except Exception:
+        OUT['failed'] = True
     say('session %s: %s' % (SESSION['hash'][:16], 'revoked' if SESSION['revoked'] else 'REVOKE NOT PROVED'))
     return SESSION['revoked']
 
@@ -481,7 +497,7 @@ def final_check(doc):
             and not runner_pods(8) and others_unchanged(doc, 8) and all(deployments.values()) \
             and binding_image(8) == doc['newImage'] \
             and pending(8) == {'sessions': 0, 'stops': 0, 'admissions': 0, 'outbox': 0, 'running': 0}
-    except Stop:
+    except Exception:
         ok = False
     say('final invariants (…5805 idle_stopped gen %d, no Pod, others and Deployments as after C, binding unchanged, '
         'nothing pending, no live session): %s' % (GENERATION + 1, ok))
@@ -521,48 +537,61 @@ def main(argv):
         return 0
     for each in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(each, on_signal)
-    ev, code, verdicts, final, step = None, 0, {}, None, 0
+    ev, code, verdicts, final, step, doc, phase = None, 0, {}, None, 0, None, 'before'
+    revoked = None
     try:
-        doc = expected()
-        lock = take_lock()  # noqa: F841 (held until exit)
-        guard()
-        precheck(doc)
-        ev = os.path.join(EVIDENCE, 'i90-d1-' + time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()))
-        os.mkdir(ev, 0o700)
-        fd = os.open(os.path.join(ev, 'out.txt'), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        OUT['stream'] = os.fdopen(fd, 'w')
-        record(ev, action='run', started=now_utc(), expectedSha256=EXPECTED_SHA)
-        say('evidence: %s' % ev)
-        create_session(ev)
-        regression(ev, verdicts)
-        # From the entry on, a failed start check still sends the stop (a second interrupt does not: the runner is
-        # then left to its idle stop, CODEX_USER_RUNNER_IDLE_SECONDS; report it).
         try:
-            start_runner(ev, doc, verdicts)
+            doc = expected()
+            lock = take_lock()  # noqa: F841 (held until exit)
+            guard()
+            precheck(doc)
+            ev = os.path.join(EVIDENCE, 'i90-d1-' + time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()))
+            os.mkdir(ev, 0o700)
+            fd = os.open(os.path.join(ev, 'out.txt'), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            OUT['stream'] = os.fdopen(fd, 'w')
+            record(ev, action='run', started=now_utc(), expectedSha256=EXPECTED_SHA)
+            say('evidence: %s' % ev)
+            phase = 'session'
+            create_session(ev)
+            regression(ev, verdicts)
+            # From the entry on, every start failure the process can handle (a Stop or any other exception) still
+            # sends the stop (review 518c088 major). Only a second interrupt does not: the runner is then left to its
+            # idle stop (CODEX_USER_RUNNER_IDLE_SECONDS) and the result is 130; report it.
+            phase = 'entry'
+            try:
+                start_runner(ev, doc, verdicts)
+            except Stop as stop:
+                step = stop.code
+                say('STOPPED (%d): %s; the stop is still sent' % (stop.code, stop.message))
+            except Exception as error:
+                step = 5
+                say('STOPPED (5): unexpected %s in the start check; the stop is still sent' % type(error).__name__)
+            stop_runner(ev, verdicts)
+            if step:
+                raise Stop(step, '')
         except Stop as stop:
-            step = stop.code
-            say('STOPPED (%d): %s; the stop is still sent' % (stop.code, stop.message))
-        stop_runner(ev, verdicts)
-        if step:
-            raise Stop(step, '')
-    except Stop as stop:
-        code = stop.code
-        if stop.message:
-            say('STOPPED (%d): %s' % (stop.code, stop.message))
-    except Interrupted:
-        code = 130
-        say('STOPPED (130): interrupted twice')
-    except Exception as error:
-        code = 6 if SESSION.get('created') else 3
-        say('STOPPED (%d): unexpected %s' % (code, type(error).__name__))
+            code = stop.code
+            if stop.message:
+                say('STOPPED (%d): %s' % (stop.code, stop.message))
+        except Interrupted:
+            code = 130
+            say('STOPPED (130): interrupted twice%s' % ('; the runner is left to its idle stop' if phase == 'entry'
+                                                        else ''))
+        except Exception as error:
+            code = {'before': 3, 'session': 4, 'entry': 6}[phase]
+            say('STOPPED (%d): unexpected %s' % (code, type(error).__name__))
+    finally:
+        # Independent of every report and evidence write above (review 518c088 major); never raises.
+        revoked = revoke_session(ev)
     step_rc = code
-    revoked = revoke_session(ev) if ev else None
     if ev and code in (0, 4, 5, 6):
         final = final_check(doc)
     if code == 0 and final is not True:
         code = 8
     if code == 0 and revoked is False:
         code = 70
+    if code == 0 and OUT.get('failed'):
+        code = 9
     for name, value in verdicts.items():
         say('verdict %s: %s' % (name, value))
     if ev:
