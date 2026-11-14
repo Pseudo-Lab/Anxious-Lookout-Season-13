@@ -37,7 +37,7 @@ OWNER = '00000000-0000-4000-8000-000000005805'
 EXPECTED_FILE = '/root/issue90/i90-expected.json'
 EXPECTED_SHA = '2476bdb2535e7733a58494fbac63057a02d8724b6b9f599b94fbfb07efa31b9f'  # i90-expected.json, from sha256sum
 SCRIPT = '/root/issue90/journal_lengths.py'
-JOURNAL_LENGTHS_SHA = '0750d3a711c4278168d42265e222c6d2b216b87c8919bc8ab2238791f2a117f8'  # journal_lengths.py, from sha256sum
+JOURNAL_LENGTHS_SHA = '118737fd767a0ad441f8412957d2a90272f228d3125360ab2d375a96a2ac1128'  # journal_lengths.py, from sha256sum
 K3S, DOCKER = '/usr/local/bin/k3s', '/usr/bin/docker'
 RUNNER_NS = 'codex-runner'
 
@@ -205,7 +205,8 @@ def measure(image, script, path):
         result = json.loads(out.splitlines()[-1])
     except (ValueError, IndexError):
         return 4
-    if rc == 0 and result.get('ok') is True and set(result) == {'ok', 'literals', 'L', 'holdbackChars', 'lengths'}:
+    if rc == 0 and result.get('ok') is True and {'ok', 'literals', 'L', 'holdbackChars', 'lengths'} <= set(result):
+        # v2 adds snapshots, prefixFile and the structural covered / legacy split (journal_lengths.py docstring)
         return 0
     return {2: 2, 3: 4}.get(rc, 4)
 

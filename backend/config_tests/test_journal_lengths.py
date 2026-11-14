@@ -45,8 +45,11 @@ def test_lengths_only_and_nothing_written(control):
     code, out = run(control)
     assert code == 0
     value = json.loads(out)
-    assert value == {"ok": True, "literals": 4, "L": 48, "holdbackChars": 47,
-                     "lengths": {"20": 1, "43": 2, "48": 1}}
+    assert {k: value[k] for k in ("ok", "literals", "L", "holdbackChars", "lengths")} == {
+        "ok": True, "literals": 4, "L": 48, "holdbackChars": 47, "lengths": {"20": 1, "43": 2, "48": 1}}  # v1 fields
+    assert value["snapshots"] == 0 and value["prefixFile"] == "absent"
+    assert value["structural"] == {"macVerified": False, "covered": {}, "legacy": {"20": 1, "43": 2, "48": 1},
+                                   "LLegacy": 48}
     assert SECRET not in out and hashlib.sha256(SECRET.encode()).hexdigest() not in out and "123" not in out
     after = {path.name: (path.stat().st_mtime_ns, path.read_bytes()) for path in control.iterdir()}
     assert after == before  # no sidecar, no change
@@ -72,3 +75,61 @@ def test_refusals(control, tmp_path, case, reason):
         target = tmp_path / "absent"
     code, out = run(target)
     assert code == 2 and json.loads(out) == {"ok": False, "reason": reason}
+
+
+# --- v2 (design r4): structural covered / legacy and the snapshots count -------------------------------------------
+
+def prefix_file(directory, literals, raw=None):
+    path = directory / "stream-prefixes.json"
+    if raw is not None:
+        path.write_text(raw)
+        return path
+    entries = [[1, "p" * 64, len(value), hashlib.sha256(value.encode()).hexdigest()] for value in literals]
+    path.write_text(json.dumps({"version": 1, "owner": "o", "trialId": "t", "prefixLength": 16, "entries": entries,
+                                "mac": "0" * 64}))
+    return path
+
+
+@pytest.mark.skipif(not SCRIPT.exists(), reason="infra/ not mounted (the unit command mounts backend/ only)")
+def test_structural_coverage_and_snapshots(control):
+    token = "eyJ" + "t" * 1673  # 1676 chars, like the dev VM's L
+    ledger(control, [token, "a" * 43, "b" * 43, "short-account-id"])
+    connection = sqlite3.connect(control / "service-access.sqlite3")
+    connection.execute("INSERT INTO snapshots VALUES(?,?)", ("s1", "f" * 64))
+    connection.commit()
+    connection.close()
+    prefix_file(control, [token, "a" * 43])
+    before = {path.name: (path.stat().st_mtime_ns, path.read_bytes()) for path in control.iterdir()}
+    code, out = run(control)
+    value = json.loads(out)
+    assert code == 0 and value["snapshots"] == 1 and value["prefixFile"] == "present"
+    assert value["structural"] == {"macVerified": False, "covered": {"1676": 1, "43": 1}, "legacy": {"43": 1},
+                                   "LLegacy": 43}
+    assert value["L"] == 1676  # the v1 L is unchanged: every literal
+    assert token not in out and hashlib.sha256(token.encode()).hexdigest() not in out and "p" * 64 not in out
+    after = {path.name: (path.stat().st_mtime_ns, path.read_bytes()) for path in control.iterdir()}
+    assert after == before
+
+
+@pytest.mark.skipif(not SCRIPT.exists(), reason="infra/ not mounted (the unit command mounts backend/ only)")
+@pytest.mark.parametrize("case,state", [("malformed", "malformed"), ("not-json", "malformed"), ("symlink", "unreadable"),
+                                        ("fifo", "unreadable"), ("directory", "unreadable")])
+def test_a_bad_prefix_file_counts_everything_legacy(control, tmp_path, case, state):
+    token = "eyJ" + "u" * 100
+    ledger(control, [token])
+    path = control / "stream-prefixes.json"
+    if case == "malformed":
+        prefix_file(control, [], raw=json.dumps({"entries": [[1, "p", "103", "x"]]}))
+    elif case == "not-json":
+        prefix_file(control, [], raw="{")
+    elif case == "symlink":
+        real = prefix_file(tmp_path, [token])
+        os.symlink(real, path)
+    elif case == "fifo":
+        os.mkfifo(path)  # lstat refuses first: never opened, no blocking read
+    elif case == "directory":
+        path.mkdir()
+    code, out = run(control)
+    value = json.loads(out)
+    assert code == 0 and value["prefixFile"] == state
+    assert value["structural"]["covered"] == {} and value["structural"]["LLegacy"] == len(token)
