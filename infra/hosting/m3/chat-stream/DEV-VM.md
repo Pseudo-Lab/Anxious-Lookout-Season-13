@@ -217,6 +217,12 @@ table).
   - r14 (D3-L recount, 2026-11-14): with the r4 parser the D3-d P4-0 window holds exactly the 4 summary lines (reason
     null, as the deployed image writes them). Each step's window is [since, until + 1 s) by the second; the script
     now waits 1.1 s before each step so two steps never share a second.
+  - r15 (D3-d2 `p4-rerun` on r4: P4-0/P4-1 True, P4-3 False from the r4 shared second, review-attributed): a
+    one-time `p4-tail` runs P4-3 and P4-4 only, after exactly one `p4-rerun` that ended rc 0, P4-0/P4-1 True, stopped
+    at P4-3 with its cleanup proved; its precheck needs restartedAt = the recorded value P4-3 left, and stage C plus the
+    flag once flag-on's baseline is restored. It prints `P4 combined` (P4-0/1 of p4-rerun + P4-3/4 of p4-tail).
+    `p4-2` now refuses without a P4 pass from the evidence (one P4 action all True, or that pair). `flag-off` CASes
+    the newest restartedAt of p4 / p4-rerun / p4-tail.
   - The client containers run with `--security-opt label=disable` (as D2); before any runner start a probe container
     with the same image, user and mounts must read both private files (else rc 5, nothing changed).
 

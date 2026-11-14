@@ -103,7 +103,8 @@ class Guest:
                 old = self.api_pods[0]
                 old["metadata"]["deletionTimestamp"] = "x"
                 self.old_gone_at = self.clock + 3
-                self.api_pods.append({"metadata": {"name": "api-2", "uid": "api-pod-2"},
+                fresh = self.restarts + 1  # a new Pod name and uid at every restart
+                self.api_pods.append({"metadata": {"name": "api-%d" % fresh, "uid": "api-pod-%d" % fresh},
                                       "spec": {"terminationGracePeriodSeconds": 30}})
                 return 0, ""
             if rest[:2] == ["get", "pods"]:
@@ -485,13 +486,16 @@ def test_a_leftover_client_container_is_rc80(guest):
 
 
 def test_p4_2_idle_stop(guest):
-    m, g, evidence, doc = guest(idle=True)
+    m, g, evidence, doc = guest()
     assert m.main(["i90-d3.py", "flag-on"]) == 0
+    assert m.main(["i90-d3.py", "p4"]) == 0  # p4-2 needs a P4 pass first
+    g.faults["idle"] = True
+    before = len(g.requests)
     assert m.main(["i90-d3.py", "p4-2"]) == 0
     out = out_of(evidence, "p4-2")
     assert "verdict P4-2: True" in out and "flag-off is the next step" in out
     # only the three ready reads: nothing the script does during the idle wait could extend the idle clock
-    assert sum(1 for c, p in g.requests if c == "GET" and p.endswith("/codex/status")) == 3
+    assert sum(1 for c, p in g.requests[before:] if c == "GET" and p.endswith("/codex/status")) == 3
 
 
 def test_p4_refuses_without_the_flag(guest):
@@ -784,3 +788,84 @@ def test_consecutive_step_windows_never_share_a_second(guest):
     assert len(windows) >= 3
     for (_, previous_until), (next_since, _) in zip(windows, windows[1:]):
         assert m.instant(next_since) >= m.instant(previous_until) + 1
+
+
+# --- p4-tail (r6): P4-3 and P4-4 only, after the r4 p4-rerun stopped at P4-3 (2026-11-14) --------------------------
+
+def rerun_stopped_at_p43(m, g, monkeypatch):
+    """flag-on, a p4 False at P4-0, then a p4-rerun whose P4-3 is False (the shared-second outcome)."""
+    g.faults["no_cap"] = True
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    assert m.main(["i90-d3.py", "p4"]) == 0
+    g.faults["no_cap"] = False
+    real = m.p4_3
+    def false_p43(ev, conversation, verdicts):
+        real(ev, conversation, verdicts)
+        verdicts["P4-3"] = False
+    monkeypatch.setattr(m, "p4_3", false_p43)
+    assert m.main(["i90-d3.py", "p4-rerun"]) == 0
+    monkeypatch.setattr(m, "p4_3", real)
+
+
+def test_p4_tail_runs_p4_3_and_p4_4_only_then_flag_off_restores(guest, monkeypatch):
+    m, g, evidence, doc = guest()
+    assert m.main(["i90-d3.py", "p4-tail"]) == 3  # nothing before
+    rerun_stopped_at_p43(m, g, monkeypatch)
+    out = out_of(evidence, "p4-rerun")
+    assert "stopped at: P4-3" in out and "verdict P4-4: unknown" in out
+    starts, restarts = g.clients_started, g.restarts
+    assert m.main(["i90-d3.py", "p4-tail"]) == 0
+    out = out_of(evidence, "p4-tail")
+    assert "--- P4-0" not in out and "--- P4-1" not in out and "--- P4-3" in out and "--- P4-4" in out
+    assert "verdict P4-3: True" in out and "verdict P4-4: True" in out and "verdict overall pass: True" in out
+    assert "verdict P4-0" not in out and g.restarts == restarts + 1 and g.clients_started == starts + 2
+    assert m.main(["i90-d3.py", "p4-tail"]) == 3  # once
+    assert m.main(["i90-d3.py", "flag-off"]) == 0 and m.template_sha(g.api) == doc["apiTemplateSha256"]
+
+
+def test_p4_tail_refused_after_a_rerun_that_did_not_stop_at_p4_3(guest, monkeypatch):
+    m, g, evidence, doc = guest(no_cap=True)
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    assert m.main(["i90-d3.py", "p4"]) == 0
+    assert m.main(["i90-d3.py", "p4-rerun"]) == 0  # still no cap: stops at P4-0 again
+    assert "stopped at: P4-0" in out_of(evidence, "p4-rerun")
+    assert m.main(["i90-d3.py", "p4-tail"]) == 3
+
+
+def test_p4_tail_refused_when_restarted_at_is_not_the_recorded_value(guest, monkeypatch):
+    m, g, evidence, doc = guest()
+    rerun_stopped_at_p43(m, g, monkeypatch)
+    g.api["spec"]["template"]["metadata"]["annotations"][m.RESTARTED] = "another-writer"
+    before = len(g.patches)
+    assert m.main(["i90-d3.py", "p4-tail"]) == 3 and len(g.patches) == before and g.restarts == 1
+
+
+def test_p4_2_needs_a_combined_p4_pass(guest, monkeypatch):
+    m, g, evidence, doc = guest(idle=True)
+    rerun_stopped_at_p43(m, g, monkeypatch)
+    assert m.main(["i90-d3.py", "p4-2"]) == 3  # P4-3 False, P4-4 not run: no P4 pass yet
+    g.faults["idle"] = False
+    assert m.main(["i90-d3.py", "p4-tail"]) == 0
+    assert "P4 combined: P4-0 True and P4-1 True (p4-rerun), P4-3 True and P4-4 True (this p4-tail)" in \
+        out_of(evidence, "p4-tail")
+    g.faults["idle"] = True
+    assert m.main(["i90-d3.py", "p4-2"]) == 0
+
+
+def test_p4_tail_refused_after_a_rerun_whose_cleanup_failed(guest, monkeypatch):
+    m, g, evidence, doc = guest()
+    g.faults["no_cap"] = True
+    assert m.main(["i90-d3.py", "flag-on"]) == 0
+    assert m.main(["i90-d3.py", "p4"]) == 0
+    g.faults["no_cap"] = False
+    real = m.p4_3
+    def false_p43(ev, conversation, verdicts):
+        real(ev, conversation, verdicts)
+        verdicts["P4-3"] = False
+    monkeypatch.setattr(m, "p4_3", false_p43)
+    g.faults["revoke_fails"] = True
+    assert m.main(["i90-d3.py", "p4-rerun"]) == 70
+    g.faults["revoke_fails"] = False
+    monkeypatch.setattr(m, "p4_3", real)
+    g.sessions.clear()
+    assert m.main(["i90-d3.py", "p4-tail"]) == 3

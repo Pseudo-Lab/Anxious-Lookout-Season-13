@@ -6,6 +6,7 @@ Run as root on the guest, each action other than `check` once, as a systemd unit
     systemd-run … python3 -I -B /root/issue90/i90-d3.py flag-on   # api env RESEARCH_STREAM_ENABLE=true, rollout
     systemd-run … python3 -I -B /root/issue90/i90-d3.py p4        # P4-0, P4-1, P4-3, P4-4
     systemd-run … python3 -I -B /root/issue90/i90-d3.py p4-rerun  # once, only after one p4 that ended rc 0 without a pass
+    systemd-run … python3 -I -B /root/issue90/i90-d3.py p4-tail   # once: P4-3, P4-4 after a p4-rerun stopped at P4-3
     systemd-run … python3 -I -B /root/issue90/i90-d3.py p4-2      # idle stop (CODEX_USER_RUNNER_IDLE_SECONDS)
     systemd-run … python3 -I -B /root/issue90/i90-d3.py flag-off  # env entry and P4-3's restartedAt removed
 
@@ -81,8 +82,9 @@ READS = (5, 35, 65)          # runner ready reads after the container start (D1)
 RUNNER_GRACE = 20            # the runner Pod's stop grace (DEV-VM P4)
 IDLE_SECONDS = 1800          # CODEX_USER_RUNNER_IDLE_SECONDS on this VM (PM 2026-11-14); checked in the api env
 SUMMARY_WAIT = 30
-ACTIONS = ('check', 'flag-on', 'p4', 'p4-rerun', 'p4-2', 'flag-off')
+ACTIONS = ('check', 'flag-on', 'p4', 'p4-rerun', 'p4-tail', 'p4-2', 'flag-off')
 P4_ACTIONS = ('p4', 'p4-rerun')  # p4-rerun: once, after a p4 whose overall verdict was not a pass (PM decision)
+RESTARTING = P4_ACTIONS + ('p4-tail',)  # actions whose P4-3 records restartedAtAfter (p4-tail: P4-3 and P4-4 only)
 SESSION, OUT, STOPPING, CLIENTS, FOLLOWERS = {}, {'stream': None}, {'requested': False}, [], []
 
 
@@ -413,7 +415,7 @@ def flag_change(ev, doc, direction):
         baseline = recorded('flag-on', 'restartedAtBefore')
         if baseline is None:
             raise Stop(3, 'no flag-on run recorded the restartedAt baseline; nothing sent')
-        after_p43 = recorded_latest(P4_ACTIONS, 'restartedAtAfter')
+        after_p43 = recorded_latest(RESTARTING, 'restartedAtAfter')
         current = baseline if after_p43 is None else after_p43
         say('flag-off: restartedAt baseline %s, expected now %s' % (
             'absent' if baseline is ABSENT else 'a value', 'absent' if current is ABSENT else
@@ -1108,6 +1110,27 @@ def precheck(doc, action):
         raise Stop(3, '%s needs the flag on (run flag-on first)' % action)
     if action in P4_ACTIONS and not flagless:
         raise Stop(3, 'p4 needs the api template = stage C plus the flag only')
+    if action == 'p4-tail':
+        # The template is stage C plus the flag, with restartedAt as the newest P4-3 left it (p4-rerun's restart):
+        # that value must be the recorded one, and restoring flag-on's baseline must give the stage C hash.
+        baseline, left = recorded('flag-on', 'restartedAtBefore'), recorded_latest(RESTARTING, 'restartedAtAfter')
+        current = restarted_of(d)
+        restored = json.loads(json.dumps(d))
+        meta = restored['spec']['template'].setdefault('metadata', {})
+        annotations = meta.setdefault('annotations', {})
+        if baseline is None:
+            raise Stop(3, 'p4-tail: no flag-on run recorded the restartedAt baseline')
+        if baseline is ABSENT:
+            annotations.pop(RESTARTED, None)
+            if not annotations:
+                meta.pop('annotations')
+        else:
+            annotations[RESTARTED] = baseline
+        same = left is not None and left is not ABSENT and current == left
+        say('p4-tail: restartedAt is the value P4-3 left %s; template = stage C plus the flag once it is restored %s'
+            % (same, template_sha(restored, without_flag=True) == doc['apiTemplateSha256']))
+        if not same or template_sha(restored, without_flag=True) != doc['apiTemplateSha256']:
+            raise Stop(3, 'p4-tail needs the api template = stage C plus the flag, restartedAt as P4-3 left it')
 
 
 def flag_line(action, code):
@@ -1144,6 +1167,55 @@ def guard(action):
         if not (done and done.get('rc') == 0
                 and any(verdicts.get(name) is not True for name in ('P4-0', 'P4-1', 'P4-3', 'P4-4'))):
             raise Stop(3, 'p4-rerun needs exactly one earlier p4 that ended rc 0 without a pass')
+    if action == 'p4-tail':
+        # Once, only after exactly one p4-rerun that ended rc 0 with P4-0 and P4-1 True, P4-3 False, P4-4 not run and
+        # stopped at P4-3 (the r4 shared-second outcome of 2026-11-14; PM decision): only P4-3 and P4-4 run.
+        earlier = runs_of('p4-rerun')
+        try:
+            done = json.load(open(os.path.join(EVIDENCE, earlier[0], 'exit.json'))) if len(earlier) == 1 else None
+        except Exception:
+            done = None
+        verdicts = (done or {}).get('verdicts') or {}
+        if not (done and done.get('rc') == 0 and done.get('stoppedAt') == 'P4-3'
+                and verdicts.get('P4-0') is True and verdicts.get('P4-1') is True
+                and verdicts.get('P4-3') is False and 'P4-4' not in verdicts
+                and done.get('sessionRevoked') is True and done.get('privateRemoved') is True
+                and done.get('clientsGone') is True and done.get('runnerReleased') in (None, True)):
+            raise Stop(3, 'p4-tail needs exactly one p4-rerun that ended rc 0, P4-0/P4-1 True, stopped at P4-3, its '
+                          'cleanup proved')
+    if action == 'p4-2':
+        combined = combined_p4()
+        if combined is not True:
+            raise Stop(3, 'p4-2 needs a P4 pass from the evidence (%s)' % combined)
+
+
+def exit_of(name):
+    try:
+        return json.load(open(os.path.join(EVIDENCE, name, 'exit.json')))
+    except Exception:
+        return None
+
+
+def combined_p4():
+    """True, or why not: one P4 action whose four verdicts are all True, or (review/PM 2026-11-14) the one p4-rerun
+    that stopped at P4-3 with P4-0/P4-1 True combined with the one p4-tail whose P4-3/P4-4 are True. Every exit.json
+    involved must be rc 0."""
+    for action in P4_ACTIONS:
+        for name in runs_of(action):
+            done = exit_of(name) or {}
+            if done.get('rc') == 0 and all((done.get('verdicts') or {}).get(item) is True
+                                           for item in ('P4-0', 'P4-1', 'P4-3', 'P4-4')):
+                return True
+    rerun, tail = runs_of('p4-rerun'), runs_of('p4-tail')
+    if len(rerun) != 1 or len(tail) != 1:
+        return 'no single P4 action passed and no p4-rerun + p4-tail pair'
+    first, second = exit_of(rerun[0]) or {}, exit_of(tail[0]) or {}
+    a, b = first.get('verdicts') or {}, second.get('verdicts') or {}
+    if first.get('rc') == 0 and second.get('rc') == 0 and a.get('P4-0') is True and a.get('P4-1') is True \
+            and b.get('P4-3') is True and b.get('P4-4') is True:
+        return True
+    return 'p4-rerun P4-0 %s P4-1 %s, p4-tail P4-3 %s P4-4 %s' % (a.get('P4-0'), a.get('P4-1'), b.get('P4-3'),
+                                                                   b.get('P4-4'))
 
 
 def take_lock():
@@ -1171,6 +1243,9 @@ def measure(ev, doc, action, verdicts):
         steps = (('P4-0', lambda: p4_0(ev, conversation, verdicts)),
                  ('P4-1', lambda: p4_runner_stop(ev, conversation, verdicts, 'p4-1', 'read')),
                  ('P4-3', lambda: p4_3(ev, conversation, verdicts)),
+                 ('P4-4', lambda: p4_runner_stop(ev, conversation, verdicts, 'p4-4', 'no-read')))
+    elif action == 'p4-tail':
+        steps = (('P4-3', lambda: p4_3(ev, conversation, verdicts)),
                  ('P4-4', lambda: p4_runner_stop(ev, conversation, verdicts, 'p4-4', 'no-read')))
     else:
         steps = (('P4-2', lambda: p4_2(ev, conversation, verdicts)),)
@@ -1201,7 +1276,7 @@ def cleanup(action):
     except BaseException:
         gone = False
     try:  # p4 / p4-2: any container of this script (clients, the probe) left counts, whatever stopped the action
-        if action in P4_ACTIONS + ('p4-2',):
+        if action in RESTARTING + ('p4-2',):
             rc, out = run([DOCKER, 'ps', '-a', '--filter', 'name=^issue90-i90-d3-', '--format', '{{.Names}}'], 30)
             gone = gone and rc == 0 and not out
     except BaseException:
@@ -1234,6 +1309,9 @@ def main(argv):
             return stop.code
         say('result rc=0 (read-only)')
         return 0
+    # One action per process on the VM; reset the module state anyway (a caller running several in one process).
+    SESSION.clear(); ENTERED.clear(); PRIVATE.clear(); del CLIENTS[:]; del FOLLOWERS[:]
+    OUT.clear(); OUT['stream'] = None; STOPPING['requested'] = False
     for each in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(each, on_signal)
     ev, code, verdicts, revoked, lock, stopped_at = None, 0, {}, None, None, None
@@ -1276,7 +1354,8 @@ def main(argv):
     say('cleanup: runner released %s; client containers gone %s; private files removed %s; session revoked %s'
         % ({None: 'n/a'}.get(runner, runner), gone, {None: 'n/a'}.get(private, private),
            {None: 'n/a'}.get(revoked, revoked)))
-    items = ('P4-0', 'P4-1', 'P4-3', 'P4-4') if action in P4_ACTIONS else ('P4-2',) if action == 'p4-2' else ()
+    items = (('P4-0', 'P4-1', 'P4-3', 'P4-4') if action in P4_ACTIONS else ('P4-3', 'P4-4') if action == 'p4-tail'
+             else ('P4-2',) if action == 'p4-2' else ())
     for name in items:  # a step that did not run is `unknown`, never a pass (review/PM D3 major)
         say('verdict %s: %s' % (name, {True: 'True', False: 'False'}.get(verdicts.get(name), 'unknown')))
     failing = [name for name in items if verdicts.get(name) is not True]
@@ -1285,6 +1364,10 @@ def main(argv):
             say('stopped at: %s' % stopped_at)
         if failing:
             say('verdicts False or unknown: %s' % ', '.join(failing))
+    if action == 'p4-tail':  # the retained P4-0/P4-1 of the p4-rerun, combined explicitly (review 2026-11-14)
+        rerun = (exit_of(runs_of('p4-rerun')[0]) or {}).get('verdicts') or {} if len(runs_of('p4-rerun')) == 1 else {}
+        say('P4 combined: P4-0 %s and P4-1 %s (p4-rerun), P4-3 %s and P4-4 %s (this p4-tail)' % (
+            rerun.get('P4-0'), rerun.get('P4-1'), verdicts.get('P4-3'), verdicts.get('P4-4')))
     say(flag_line(action, code))
     # The last writes (out.txt's result line, then exit.json) can fail too: the rule is applied again after them, in
     # the same function, and a changed code is reported last (PM 2026-11-14: one rule for every exit path).
