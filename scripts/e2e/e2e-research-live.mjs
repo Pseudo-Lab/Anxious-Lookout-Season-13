@@ -422,6 +422,19 @@ const publicSessionUrl = U(`/research/session/?id=${publicSessionId}`);
   );
 }
 
+// #94 review: 대화창은 로그인 확인·기억한 대화 복원 뒤에 목록 또는 대화 화면을 그린다. 한 번만 보고 넘어가면 복원보다 앞서
+// '대화 목록' 버튼을 놓친다. 목록 폼이나 '대화 목록' 버튼 중 하나가 보일 때까지 기다리며 필요하면 목록으로 간다.
+// 끝내 목록에 못 가면 패널 상태를 오류에 남긴다.
+async function toChatList(panel, p) {
+  const form = panel.getByLabel("새 대화 제목");
+  const back = panel.getByRole("button", { name: "← 대화 목록" });
+  for (let i = 0; i < 150; i++) {
+    if (await form.isVisible().catch(() => false)) return;
+    if (await back.isVisible().catch(() => false)) await back.click({ timeout: 2000 }).catch(() => {});
+    await p.waitForTimeout(200);
+  }
+  throw new Error(`chat list not reached: ${(await panel.innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 240)}`);
+}
 // L9. 세션: 실제 Codex 미연결 상태 표시, 전송 실패 시 입력 보존
 // #44: 내 연구에 대화 탭이 없다. Codex 안내·새 대화 폼은 공통 대화창에 있다.
 await page.goto(U("/research/"));
@@ -436,11 +449,7 @@ await page.waitForTimeout(800);
 check("L9. no model name shown", (await chatPanel.getByText(/모델:|서버에서 고정/).count()) === 0);
 check("L9. no 'Codex' wording in the chat panel", !(await chatPanel.innerText()).includes("Codex"));
 // 대화창은 직전(L8b)에 연 공개 글 대화를 기억해 그 대화 화면으로 다시 열릴 수 있다. 새 대화 폼은 목록에 있으므로 목록으로 간다.
-{
-  const back = chatPanel.getByRole("button", { name: "← 대화 목록" });
-  if (await back.isVisible().catch(() => false)) await back.click();
-}
-await chatPanel.getByLabel("새 대화 제목").waitFor();
+await toChatList(chatPanel, page);
 check("L9. list view: no 'Codex' wording", !(await chatPanel.innerText()).includes("Codex"));
 await chatPanel.getByLabel("새 대화 제목").fill("실물 세션");
 await chatPanel.getByRole("button", { name: "새 대화" }).click();

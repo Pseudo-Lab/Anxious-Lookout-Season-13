@@ -108,11 +108,23 @@ async function closePanel() {
   if (await chat.isVisible()) await chat.getByRole("button", { name: "대화창 닫기" }).click();
   await chat.waitFor({ state: "hidden" });
 }
+// #94 review: 대화창은 로그인 확인·기억한 대화 복원 뒤에 목록 또는 대화 화면을 그린다. 한 번만 보고 넘어가면 복원보다 앞서
+// '대화 목록' 버튼을 놓친다. 목록 폼이나 '대화 목록' 버튼 중 하나가 보일 때까지 기다리며 필요하면 목록으로 간다.
+// 끝내 목록에 못 가면 패널 상태를 오류에 남긴다.
+async function toChatList(panel, p) {
+  const form = panel.getByLabel("새 대화 제목");
+  const back = panel.getByRole("button", { name: "← 대화 목록" });
+  for (let i = 0; i < 150; i++) {
+    if (await form.isVisible().catch(() => false)) return;
+    if (await back.isVisible().catch(() => false)) await back.click({ timeout: 2000 }).catch(() => {});
+    await p.waitForTimeout(200);
+  }
+  throw new Error(`chat list not reached: ${(await panel.innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 240)}`);
+}
 // 대화 목록의 새 대화 만들기를 CSRF 거절로 실패시켜 이 탭이 me를 다시 조회하게 한다(새로고침 없음).
 async function refreshMeInTab() {
   await openPanel();
-  const back = chat.getByRole("button", { name: "← 대화 목록" });
-  if (await back.isVisible().catch(() => false)) await back.click();
+  await toChatList(chat, page);
   await chat.getByLabel("새 대화 제목").fill("me 갱신 유도");
   // 이 생성 요청 하나만 CSRF 거절로 돌려준다(서버 전체를 거절 모드로 두면 뒤따르는 준비 요청까지 거절된다).
   await page.route("**/api/research/sessions", (route) =>

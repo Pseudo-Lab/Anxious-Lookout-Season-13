@@ -142,6 +142,19 @@ const directFixtureDocs = async (p = api) =>
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 const userMsgs = (m, text) => m.locator("li[data-role=user]", { hasText: text });
 
+// #94 review: 대화창은 로그인 확인·기억한 대화 복원 뒤에 목록 또는 대화 화면을 그린다. 한 번만 보고 넘어가면 복원보다 앞서
+// '대화 목록' 버튼을 놓친다. 목록 폼이나 '대화 목록' 버튼 중 하나가 보일 때까지 기다리며 필요하면 목록으로 간다.
+// 끝내 목록에 못 가면 패널 상태를 오류에 남긴다.
+async function toChatList(panel, p) {
+  const form = panel.getByLabel("새 대화 제목");
+  const back = panel.getByRole("button", { name: "← 대화 목록" });
+  for (let i = 0; i < 150; i++) {
+    if (await form.isVisible().catch(() => false)) return;
+    if (await back.isVisible().catch(() => false)) await back.click({ timeout: 2000 }).catch(() => {});
+    await p.waitForTimeout(200);
+  }
+  throw new Error(`chat list not reached: ${(await panel.innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 240)}`);
+}
 // #44: 내 연구에 대화 탭이 없다. 대화 목록·Codex 안내·새 대화 폼은 공통 대화창의 목록 화면에 있다.
 async function chatList(p) {
   const c = chatOf(p);
@@ -152,9 +165,7 @@ async function chatList(p) {
     await p.waitForTimeout(200);
   }
   await c.getByRole("heading", { name: "대화", exact: true }).waitFor();
-  const back = c.getByRole("button", { name: "← 대화 목록" });
-  if (await back.isVisible()) await back.click();
-  await c.getByLabel("새 대화 제목").waitFor();
+  await toChatList(c, p);
   return c;
 }
 // 새 대화는 페이지 이동 없이 대화창에 열린다. 그 뒤 질문할 페이지(기본: 문서 작업 공간)로 옮긴다. 반환값은 기존 대화 링크.
