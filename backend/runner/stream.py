@@ -112,7 +112,12 @@ class Sanitizer:
                 journal = self.auth.journal
                 count, _ = journal.generation()
                 current = [value for value in list(self.auth.secrets) if isinstance(value, str)]
-                return (id(journal), count, hold_policy(journal, getattr(self.auth, "control", None), current))
+                # #94 (8): the credential installed last, for the observation split only (the holdback uses `current`)
+                latest = getattr(self.auth, "latest_secrets", None)
+                # an empty set (nothing installed yet) is no information: the split then counts `current` as current,
+                # an over-report of "current" (never of "retired", which would favour the §6 B case)
+                latest = [value for value in list(latest or ()) if isinstance(value, str)] or None
+                return (id(journal), count, hold_policy(journal, getattr(self.auth, "control", None), current, latest))
             except RuntimeError:
                 continue
             except Exception:

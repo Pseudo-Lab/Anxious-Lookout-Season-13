@@ -15,6 +15,12 @@ OLD, NEW = JWT_HEAD + 'o' * 1600, JWT_HEAD + 'n' * 1639  # an earlier and the cu
 EMAIL = 'someone.long.address@example.invalid'
 
 
+@pytest.fixture(autouse=True)
+def fresh_observations(monkeypatch):
+    """The dedup state is per process; each test starts from none."""
+    monkeypatch.setattr(stream_prefix, '_observed', {})
+
+
 @pytest.fixture
 def lines(caplog):
     caplog.set_level(logging.INFO, logger='uvicorn.error')
@@ -102,9 +108,107 @@ def test_no_control_is_logged_and_the_logger_never_raises(lines):
     assert stream_prefix.remember(None, None, [NEW]) is False
     assert lines()[-1] == {'result': 'no_control', 'literals': 0, 'covered': None, 'currentCovered': None,
                            'entries': None, 'limit': stream_prefix.LIMIT}
-    stream_prefix.observe('odd', object(), None, None)  # not serializable: swallowed
+    stream_prefix.observe('control', 'odd', object(), None, None)  # not serializable: swallowed
 
 
 def test_a_turn_summary_starts_with_the_split_at_zero():
     stats = Turn('session', 'request').stats
     assert (stats['legacyL'], stats['legacyCurrentL'], stats['legacyRetiredL']) == (0, 0, 0)
+
+
+# --- review r1 majors (2026-11-15) ---------------------------------------------------------------------------------
+
+class FakeAuth:
+    """What Sanitizer.generation reads: `secrets` (cumulative), `latest_secrets`, `journal`, `control`. Its refresh is
+    a no-op: the file state is set by the test. (A real auth's refresh remembers the whole cumulative `secrets`, so in
+    one process a rotated-out token is normally covered too; the state below - the new token covered, the old one not
+    - arises when the old token's write failed or it was recorded before r4.)"""
+
+    def __init__(self, journal, control, secrets, latest):
+        self.journal, self.control, self.secrets, self.latest_secrets = journal, control, set(secrets), latest
+
+    def refresh_projection_secrets(self):
+        pass
+
+
+def test_a_rotated_out_token_is_retired_not_current_through_the_real_path(tmp_path):
+    """review r1 major 1: `secrets` keeps a token rotated out in this process; the split must name it retired."""
+    from runner.auth import PersonalAuth
+    from runner.stream import Sanitizer
+    auth = object.__new__(PersonalAuth)
+    auth.secrets, auth.latest_secrets = set(), set()
+    auth.grant = lambda: {'providerAccountId': 'acct-000000000000000000000'}
+
+    def cache(token):
+        return {'tokens': dict(id_token=token, access_token=token, refresh_token=token,
+                               account_id='acct-000000000000000000000')}
+    auth.validate_cache(cache(OLD))
+    auth.validate_cache(cache(NEW))
+    assert OLD in auth.secrets and auth.latest_secrets == {NEW, 'acct-000000000000000000000'}
+    journal = journal_with(sorted(auth.secrets))
+    control = control_dir(tmp_path)
+    stream_prefix.remember(control, journal, sorted(auth.latest_secrets))  # only the new credential is covered
+    hold = policy(journal, control, sorted(auth.secrets), sorted(auth.latest_secrets))
+    assert (hold.legacy, hold.legacy_current, hold.legacy_retired) == (len(OLD), 0, len(OLD))
+    _, _, through = Sanitizer(FakeAuth(journal, control, auth.secrets, auth.latest_secrets)).generation()
+    assert (through.legacy, through.legacy_current, through.legacy_retired) == (len(OLD), 0, len(OLD))
+
+
+@pytest.mark.parametrize('latest', [None, [], set()])
+def test_no_or_empty_latest_counts_current_as_current_never_as_retired(tmp_path, latest):
+    journal = journal_with([OLD, NEW])
+    control = control_dir(tmp_path)
+    hold = policy(journal, control, [OLD, NEW], latest)
+    assert hold.legacy_current == len(NEW) and hold.legacy == len(NEW)
+    from runner.stream import Sanitizer
+    _, _, through = Sanitizer(FakeAuth(journal, control, [OLD, NEW], latest)).generation()
+    assert through.legacy_current == max(len(OLD), len(NEW))  # the split errs to "current" (no §6 B case)
+    assert through.legacy_retired == 0
+
+
+def test_the_holdback_does_not_depend_on_latest(tmp_path):
+    journal = journal_with([OLD, NEW])
+    control = control_dir(tmp_path)
+    stream_prefix.remember(control, journal, [NEW])
+    one, two = policy(journal, control, [OLD, NEW]), policy(journal, control, [OLD, NEW], [NEW])
+    assert one == two and all(one.start('x' * n) == two.start('x' * n) for n in (0, 100, 1700, 4000))
+
+
+def test_the_same_state_100_times_logs_one_line_and_reads_once_per_call(tmp_path, lines, monkeypatch):
+    """review r1 major 2 / PM: lines and reads do not grow with deltas or sanitize calls."""
+    journal = journal_with([NEW])
+    control = control_dir(tmp_path)
+    reads = []
+    real = stream_prefix._read
+    monkeypatch.setattr(stream_prefix, '_read', lambda path: reads.append(1) or real(path))
+    for _ in range(100):
+        stream_prefix.remember(control, journal, [NEW])
+    assert [line['result'] for line in lines()] == ['written', 'unchanged']  # the first write, then one steady state
+    assert len(reads) == 100  # the existing per-call verification only; no read-back added (was 200 in r1)
+
+
+def test_a_failure_its_repeats_and_its_recovery(tmp_path, lines, monkeypatch):
+    journal = journal_with([NEW])
+    control = control_dir(tmp_path)
+    broken = lambda path, payload: (_ for _ in ()).throw(OSError(28, 'full'))
+    real = stream_prefix._write
+    monkeypatch.setattr(stream_prefix, '_write', broken)
+    for _ in range(50):
+        stream_prefix.remember(control, journal, [NEW])
+    monkeypatch.setattr(stream_prefix, '_write', real)
+    for _ in range(50):
+        stream_prefix.remember(control, journal, [NEW])
+    assert [(line['result'], line['currentCovered']) for line in lines()] == [
+        ('failed', False), ('written', True), ('unchanged', True)]
+
+
+def test_the_dedup_state_is_bounded(tmp_path, lines, monkeypatch):
+    monkeypatch.setattr(stream_prefix, 'OBSERVED_LIMIT', 3)
+    journal = journal_with([NEW])
+    for i in range(5):
+        (tmp_path / str(i)).mkdir()
+    folders = [control_dir(tmp_path / str(i)) for i in range(5)]
+    for folder in folders:
+        stream_prefix.remember(folder, journal, [NEW])
+    assert len(stream_prefix._observed) <= 3
+    assert len(lines()) == 5  # each directory's first state is logged once
