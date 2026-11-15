@@ -267,8 +267,9 @@ await step("T1", async () => {
   await toPhase("unreachable");
   check("T1 [real]. unreachable → 환경 연결 확인 중", await appears(A.chat.getByText("환경 연결 확인 중")));
   const text = (await A.chat.innerText()).replace(/\s+/g, " ");
-  check("T1 [real]. unreachable copy: checking connection/preparation, no recovery claim",
-    text.includes("환경 연결과 준비 결과를 확인하고 있습니다") && !/잠시|켜지면|새 환경|복구/.test(text), text.slice(0, 160));
+  // #94: 상태 패널(본문 설명)은 관리자만 본다. 편집자는 입력창 위 안내의 상태 이름(위 검사)만 보며, 회복 약속 문구가 없어야 한다.
+  check("T1 [real]. unreachable copy: no recovery claim (editor sees the composer notice only)",
+    text.includes("환경 연결 확인 중") && !/잠시|켜지면|새 환경|복구/.test(text), text.slice(0, 160));
   check("T1 [real]. unreachable: no action button, send locked", (await actionBtnOf(A).count()) === 0 && (await sendBtnOf(A).isDisabled()));
   await shot(A, "unreachable");
 
@@ -448,7 +449,7 @@ await step("U1", async () => {
   const panel = (await D.chat.innerText()).replace(/\s+/g, " ");
   check("U1 [real]. whole panel (status + composer) makes no recovery/turn-on claim", !/잠시|켜지면|새 환경|복구/.test(panel), panel.slice(0, 200));
   check("U1 [real]. UI 확인 중 copy, no action button, send locked, draft kept",
-    (await appears(D.chat.getByText("환경 연결과 준비 결과를 확인하고 있습니다"))) && (await actionBtnOf(D).count()) === 0 &&
+    (await appears(D.chat.getByText("환경 연결 확인 중"))) && (await actionBtnOf(D).count()) === 0 && // #94: 편집자는 입력창 위 안내의 상태 이름만 본다
       (await sendBtnOf(D).isDisabled()) && (await D.chat.getByLabel("메시지").inputValue()) === "D 초안");
   await shot(D, "reserved");
   const n0 = D.net.responses.length;

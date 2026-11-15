@@ -161,9 +161,20 @@ async function chatList(p) {
 async function newSession(p, title, at = DOCS) {
   await p.goto(U("/research/"));
   const m = await chatList(p);
+  const before = (await chatUi(p))?.sessionId ?? null;
   await m.getByLabel("새 대화 제목").fill(title);
   await m.getByRole("button", { name: "새 대화" }).click();
-  await chatOf(p).getByRole("heading", { name: title }).waitFor();
+  // #94: 대화 화면은 제목을 표시하지 않는다. 새로 만든 대화로 바뀌었는지는 기억된 sessionId와 입력창으로 확인한다.
+  await p.waitForFunction(
+    (prev) => {
+      const k = Object.keys(sessionStorage).find((key) => key.endsWith(":chat-ui"));
+      const id = k ? JSON.parse(sessionStorage.getItem(k)).sessionId : null;
+      return !!id && id !== prev;
+    },
+    before,
+    { timeout: 15000 }
+  );
+  await chatOf(p).getByLabel("메시지").waitFor();
   const url = U(`/research/session/?id=${(await chatUi(p)).sessionId}`);
   await p.goto(at);
   await chatOf(p).getByLabel("메시지").waitFor();
@@ -408,8 +419,9 @@ async function dropFirstSend(p) {
   await chat.getByRole("button", { name: "다시 보내기" }).waitFor();
   await appears(answers().nth(3));
   await settled(chat);
-  await header.getByRole("link", { name: "상태" }).first().click();
-  await page.waitForURL(/\/status\/$/);
+  // #94: 상태 메뉴는 관리자만 보인다(이 시험 계정은 편집자). 다른 페이지로 옮기는 용도이므로 글 목록으로 간다.
+  await header.getByRole("link", { name: "글 목록" }).first().click();
+  await page.waitForURL(/\/posts\/$/);
   check("I4. retry notice names original page", await appears(chat.getByText("처음 보낸 화면(내 문서) 기준으로 처리됩니다", { exact: false })));
   await chat.getByRole("button", { name: "다시 보내기" }).click();
   await chat.getByRole("button", { name: "보내기", exact: true }).waitFor();
@@ -816,7 +828,9 @@ console.log(`INFO dropped message POST timings: ${JSON.stringify(postTimings)}`)
   // 대화 목록 클릭은 페이지를 옮기지 않고 대화창에 연다
   await B.page.goto(U("/research/"));
   await (await chatList(B.page)).getByRole("link", { name: "B 세션" }).click();
-  await bm.getByRole("heading", { name: "B 세션" }).waitFor();
+  // #94: 대화 화면은 제목을 표시하지 않는다. 대화 화면으로 열렸는지는 '대화 목록' 버튼과 입력창으로 확인한다.
+  await bm.getByRole("button", { name: "← 대화 목록" }).waitFor();
+  await bm.getByLabel("메시지").waitFor();
   check("O11. list click opens conversation in panel (no navigation)", new URL(B.page.url()).pathname.endsWith("/research/"));
   const bSessionUrl = U(`/research/session/?id=${(await chatUi(B.page)).sessionId}`);
   await B.page.goto(DOCS);
