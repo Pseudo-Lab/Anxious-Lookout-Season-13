@@ -22,13 +22,13 @@ function StartConversation({ doc }: { doc: PublicSnapshot }) {
   const allowed = canUseResearch(user);
   return (
     <section className="space-y-3 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-stone-200/60">
-      <h2 className="font-semibold text-stone-900">이 문서로 Codex와 대화하기</h2>
+      <h2 className="font-semibold text-stone-900">이 문서로 대화하기</h2>
       <p className="text-xs text-stone-500">
         대화는 내 개인 기록으로 저장되며 문서 작성자를 포함한 다른 사람은 볼 수 없습니다. 이 페이지에서 질문하면 이 공개 글과 직접 참고자료를 읽고 답합니다. 대화는 모든 페이지의 대화창에서 이어집니다.
       </p>
       {status === "authenticated" && user && !allowed ? (
         <p className="text-sm text-stone-900">
-          이 글에 대한 Codex 질문은 관리자가 승인한 편집자·관리자만 이용할 수 있습니다. 글과 참고 자료는 누구나 읽을 수 있습니다.
+          이 글에 대한 질문은 관리자가 승인한 편집자·관리자만 이용할 수 있습니다. 글과 참고 자료는 누구나 읽을 수 있습니다.
         </p>
       ) : status === "authenticated" && user ? (
         // 개인 입력(복구된 제목 포함)은 계정에 묶는다. 계정이 바뀌면 폼을 새로 그려 이전 계정 입력을 버린다.

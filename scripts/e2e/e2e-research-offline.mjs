@@ -146,12 +146,12 @@ const userMsgs = (m, text) => m.locator("li[data-role=user]", { hasText: text })
 async function chatList(p) {
   const c = chatOf(p);
   // 새로고침·이동 뒤 대화창은 기억한 열림 상태로 다시 그려진다: 정착할 때까지 보고 나서 연다
-  const button = p.getByRole("button", { name: "Codex 대화창 열기" });
+  const button = p.getByRole("button", { name: "대화창 열기" });
   for (let i = 0; i < 50 && !(await c.isVisible()); i++) {
     if (await button.isVisible()) await button.click({ timeout: 2000 }).catch(() => {});
     await p.waitForTimeout(200);
   }
-  await c.getByRole("heading", { name: "Codex 대화" }).waitFor();
+  await c.getByRole("heading", { name: "대화", exact: true }).waitFor();
   const back = c.getByRole("button", { name: "← 대화 목록" });
   if (await back.isVisible()) await back.click();
   await c.getByLabel("새 대화 제목").waitFor();
@@ -185,38 +185,37 @@ async function settled(m) {
   await m.getByLabel("메시지").and(m.locator(":enabled")).waitFor({ timeout: 30000 });
 }
 
-// O1. 상태: fixture 연결을 실제 모델처럼 표시하지 않는다
+// O1. 상태(#94): 연결 상태 패널은 관리자만 보며, 편집자(이 시험 계정)에게는 보이지 않는다. 모델명은 누구에게도 표시하지 않는다.
 await page.goto(U("/research/"));
 {
   const c = await chatList(page);
-  check("O1. codex status shown as fixture (not real)", await appears(c.getByText("테스트용 모의 Codex")));
-  check("O1. server-fixed model shown display-only", await appears(c.getByText("모델: gpt-6.1-sol (서버에서 고정)")));
+  await page.waitForTimeout(800);
+  check("O1. editor: no connection status panel", (await c.getByText(/테스트용 모의 응답|연결되어 있습니다/).count()) === 0);
+  check("O1. no model name shown", (await c.getByText(/모델:|서버에서 고정/).count()) === 0);
 }
 
 // O2. 일반 메시지: 실제 adapter → 실제 storage tool callback → 전체 도구 입력·출력과 원본
 const s1 = await newSession(page, "오프라인 세션 1");
 const docs0 = await fixtureDocs();
 await send(chat, "자료를 정리해줘");
-check("O2. running shown", await appears(chat.getByText("Codex가 응답하는 중입니다."), 10000));
+check("O2. running shown", await appears(chat.getByText("응답하는 중입니다."), 10000));
 check("O2. offline answer shown", await appears(chat.getByText("Offline fixture answer")));
 await settled(chat);
 const toolBtn = chat.getByRole("button", { name: /research_document_save/ });
 check("O2. tool call listed", await appears(toolBtn));
 await toolBtn.first().click();
 check("O2. full tool input shown inert", await appears(chat.locator("pre", { hasText: "Complete fixture tool input" })));
-await chat.getByRole("button", { name: "저장된 원본 기록 보기" }).first().click();
-check("O2. stored raw item shown", await appears(chat.locator("pre", { hasText: "research_document_save" })));
+check("O2. no raw record entry (#94)", (await chat.getByRole("button", { name: /원본 기록/ }).count()) === 0);
 check("O2. tool left one new-document proposal via real API", (await fixtureDocs()) === docs0 + 1, `${docs0} -> ${await fixtureDocs()}`);
 check("O2. D1: no document created directly", (await directFixtureDocs()) === 0, String(await directFixtureDocs()));
-check("O2. chat links the new-document proposal", await appears(chat.getByText("Codex가 새 문서를 제안했습니다", { exact: false })));
+check("O2. chat links the new-document proposal", await appears(chat.getByText("새 문서 제안이 만들어졌습니다", { exact: false })));
 
 // O3. 미기록 실패 입력: failed + platform 표시, 후속 명시 입력 성공 후에도 보존
 await send(chat, "/fixture/unrecorded");
 const unrec = userMsgs(chat, "/fixture/unrecorded");
 check("O3. unrecorded input labeled 미기록", await appears(unrec.getByText("미기록 입력")));
 check("O3. failed state shown", await appears(chat.getByText("마지막 요청이 실패했습니다")));
-await unrec.getByRole("button", { name: "보존된 입력 기록" }).click();
-check("O3. raw is platformInput, not Codex original", await appears(unrec.locator("pre", { hasText: "platformInput" })) && (await unrec.getByText("Codex 원본 아님").count()) === 1);
+check("O3. no raw record entry for the preserved input (#94)", (await unrec.getByRole("button", { name: /입력 기록|원본 기록/ }).count()) === 0);
 await send(chat, "후속 질문");
 check("O3. explicit follow-up succeeds", await appears(userMsgs(chat, "후속 질문")) && (await appears(chat.getByText("Offline fixture answer").nth(1))));
 await settled(chat);
@@ -224,7 +223,7 @@ check("O3. failed input still preserved", (await userMsgs(chat, "/fixture/unreco
 
 // O4. 명확 거절: 202 후 failed/codex_rejected, 새 명시 입력 가능
 await send(chat, "/fixture/reject");
-check("O4. codex_rejected shown", await appears(chat.getByText("Codex가 이 요청을 받지 않았습니다")));
+check("O4. codex_rejected shown", await appears(chat.getByText("이 요청은 처리되지 않았습니다")));
 await send(chat, "거절 뒤 질문");
 check("O4. new explicit message after rejection succeeds", await appears(chat.getByText("Offline fixture answer").nth(2)));
 await settled(chat);
@@ -296,10 +295,10 @@ async function dropFirstSend(p) {
   const bm = chatOf(B.page);
   await openAt(page, s1);
   await send(chat, "/fixture/hold");
-  await chat.getByText("Codex가 응답하는 중입니다.").waitFor();
+  await chat.getByText("응답하는 중입니다.").waitFor();
   await send(m2, "hold 중 다른 세션");
   await send(bm, "B 질문");
-  check("O7. same-account other session busy -> rejected", await appears(m2.getByText("Codex가 이 요청을 받지 않았습니다")));
+  check("O7. same-account other session busy -> rejected", await appears(m2.getByText("이 요청은 처리되지 않았습니다")));
   check("O7. account B independent during A hold", await appears(bm.getByText("Offline fixture answer")));
   check("O7. held turn completes", await appears(chat.getByText("Offline fixture answer").nth(5), 30000));
   await settled(chat);
@@ -359,7 +358,7 @@ async function dropFirstSend(p) {
   await settled(chat);
   check("I1. general: body page {kind:general}", JSON.stringify(bodies.at(-1)?.body.page) === '{"kind":"general"}', JSON.stringify(bodies.at(-1)?.body));
   check("I1. general: accepted page badge from server", await appears(userMsgs(chat, "일반 페이지 질문").getByText("보낸 화면: 일반")));
-  check("I1. general: owner tool completed", await appears(lastTool().getByText("completed")));
+  check("I1. general: owner tool completed", await appears(lastTool().getByText("완료")));
   check("I1. general: exactly one document written", (await fixtureDocs()) === docs + 1, `${docs} -> ${await fixtureDocs()}`);
   docs = await fixtureDocs();
 
@@ -372,19 +371,19 @@ async function dropFirstSend(p) {
   await settled(chat);
   check("I2. workspace: body page", JSON.stringify(bodies.at(-1)?.body.page) === '{"kind":"document_workspace"}', JSON.stringify(bodies.at(-1)?.body.page));
   check("I2. workspace: page badge", await appears(userMsgs(chat, "문서 목록 질문").getByText("보낸 화면: 내 문서")));
-  check("I2. workspace: tool completed", await appears(lastTool().getByText("completed")));
+  check("I2. workspace: tool completed", await appears(lastTool().getByText("완료")));
   check("I2. workspace: exactly one document written", (await fixtureDocs()) === docs + 1, `${docs} -> ${await fixtureDocs()}`);
   check("I2. earlier general turn kept in same conversation", (await userMsgs(chat, "일반 페이지 질문").count()) === 1);
   docs = await fixtureDocs();
 
   // I3. 실행 중 페이지 이동: 접수된 요청의 화면 문맥(문서 작업 공간)은 바뀌지 않는다
   await send(chat, "/fixture/hold");
-  await chat.getByText("Codex가 응답하는 중입니다.").waitFor();
+  await chat.getByText("응답하는 중입니다.").waitFor();
   await header.getByRole("link", { name: "홈" }).first().click();
   await page.waitForURL(U("/"));
   check("I3. held answer arrives after navigation", await appears(answers().nth(2), 30000));
   await settled(chat);
-  check("I3. navigation during run: tool still completed", await appears(lastTool().getByText("completed")));
+  check("I3. navigation during run: tool still completed", await appears(lastTool().getByText("완료")));
   check("I3. navigation during run: document written once", (await fixtureDocs()) === docs + 1, `${docs} -> ${await fixtureDocs()}`);
   check("I3. sent page stays 내 문서", await appears(userMsgs(chat, "/fixture/hold").getByText("보낸 화면: 내 문서")));
   check("I3. next hint follows current page", await appears(chat.getByText("보고 있는 화면: 일반")));
@@ -459,7 +458,7 @@ async function dropFirstSend(p) {
       bodies.at(-1)?.body.page?.kind === "public_document" && bodies.at(-1)?.body.page?.resourceId === pubDoc.body.id,
       JSON.stringify(bodies.at(-1)?.body.page)
     );
-    check("I6. public: page context tool completed", await appears(lastTool("research_page_context").getByText("completed")));
+    check("I6. public: page context tool completed", await appears(lastTool("research_page_context").getByText("완료")));
     check("I6. public: badge carries server title", await appears(userMsgs(chat, "/fixture/page-context").first().getByText(/보낸 범위: 이 공개 글 · 범위 공개 글/)));
     // #14: 공개 글은 유일한 도구 경계. 소유자 저장 호출은 실제 callback이 거부하고 문서는 생기지 않는다.
     docs = await fixtureDocs();
@@ -675,7 +674,7 @@ async function dropFirstSend(p) {
   const beforeProp = (await api.get(`/research/posts/${postId}`)).body;
   await send(chat, "/fixture/post-propose 다듬어줘");
   await settled(chat);
-  check("IP9. chat: post proposal link", await appears(chat.getByText("Codex가 글 수정 제안을 만들었습니다", { exact: false })));
+  check("IP9. chat: post proposal link", await appears(chat.getByText("글 수정 제안이 만들어졌습니다", { exact: false })));
   check("IP9. real API: post unchanged before acceptance", (await api.get(`/research/posts/${postId}`)).body.latestVersion.number === beforeProp.latestVersion.number);
   await chat.locator("li", { hasText: "research_post_propose" }).last().getByRole("link", { name: "제안 검토" }).click();
   const propBox = main.locator("#proposals");
@@ -730,7 +729,7 @@ async function dropFirstSend(p) {
   // 작성 중인 새 글 초안에 대한 Codex 제안(fixture가 research_post_draft_get으로 최신 revision을 읽음) → 수락하면 새 글, 초안 닫힘
   await send(chat, "/fixture/post-propose 이어서 써줘");
   await settled(chat);
-  check("IP10. chat: new post proposal", await appears(chat.getByText("Codex가 새 글을 제안했습니다", { exact: false })));
+  check("IP10. chat: new post proposal", await appears(chat.getByText("새 글 제안이 만들어졌습니다", { exact: false })));
   const props10 = (await api.get("/research/post-proposals?limit=100")).body?.items ?? [];
   check("IP10. real API: proposal bound to the open draft", props10.some((x) => x.postId === null && x.baseDraftId === ctxDraft && x.status === "pending"), JSON.stringify(props10.map((x) => x.baseDraftId)));
   await chat.locator("li", { hasText: "research_post_propose" }).last().getByRole("link", { name: "제안 검토" }).click();

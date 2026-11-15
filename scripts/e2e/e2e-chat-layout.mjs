@@ -75,7 +75,7 @@ async function createSession(title) {
 async function openPanel() {
   await page.waitForLoadState("networkidle");
   await page.waitForTimeout(300);
-  if (!(await chat.isVisible())) await page.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  if (!(await chat.isVisible())) await page.getByRole("button", { name: "대화창 열기" }).click();
   await chat.getByLabel("메시지").waitFor();
 }
 const panelWidth = async () => Math.round((await chat.boundingBox()).width);
@@ -278,10 +278,11 @@ if (resizable) {
     check("C5. setup width 576", (await panelWidth()) === 576);
     await chat.getByRole("button", { name: "대화창 닫기" }).click();
     check("C5. padding removed while closed", await page.evaluate(() => getComputedStyle(document.body).paddingRight === "0px"));
-    await page.getByRole("button", { name: "Codex 대화창 열기" }).click();
+    await page.getByRole("button", { name: "대화창 열기" }).click();
     check("C5. width kept after close/reopen", (await panelWidth()) === 576);
-    await page.evaluate(() => document.querySelector('header a[href$="/status/"]')?.click());
-    await page.waitForURL(/\/status\//);
+    // #94: 상태 메뉴는 관리자만 보이므로 클라이언트 이동은 공개 문서 메뉴로 한다.
+    await page.evaluate(() => document.querySelector('header a[href$="/public/"]')?.click());
+    await page.waitForURL(/\/public\//);
     check("C5. width kept after client navigation", (await panelWidth()) === 576 && (await page.evaluate(() => getComputedStyle(document.body).paddingRight)) === "576px");
     await page.reload();
     await openPanel();
@@ -467,7 +468,7 @@ if (resizable) {
     const before = await panelWidth();
     const saved = await storedWidth(acc);
     const closeBtn = chat.getByRole("button", { name: "대화창 닫기" });
-    const openBtn = page.getByRole("button", { name: "Codex 대화창 열기" });
+    const openBtn = page.getByRole("button", { name: "대화창 열기" });
     async function dragStart() {
       const b = await sep.boundingBox();
       const cx = b.x + b.width / 2;

@@ -14,7 +14,7 @@ const BASE = process.env.BASE_PATH ?? "";
 const SHOTS = process.env.SHOTS_DIR ?? "/tmp";
 const U = (p) => `${ORIGIN}${BASE}${p}`;
 
-await fetch(`${ORIGIN}/__mock/set?me=normal&health=normal&nextLogin=approved&access=approved&codex=fixture`);
+await fetch(`${ORIGIN}/__mock/set?me=normal&health=normal&nextLogin=admin&access=approved&codex=fixture`); // #94: 서비스 상태 화면은 관리자만 본다
 
 const results = [];
 function check(name, ok, detail = "") {
@@ -535,9 +535,9 @@ for (const scheme of ["light", "dark"]) {
   await editorScreens(page, scheme, send, csrf);
   // 대화창
   await page.goto(U("/research/"), { waitUntil: "domcontentloaded" });
-  await page.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  await page.getByRole("button", { name: "대화창 열기" }).click();
   const panel = page.locator("#chat-panel");
-  if (!(await ready(page, "chat", scheme, [panel, panel.getByRole("heading", { name: "Codex 대화" }), panel.getByRole("button", { name: "새 대화" })]))) {
+  if (!(await ready(page, "chat", scheme, [panel, panel.getByRole("heading", { name: "대화", exact: true }), panel.getByRole("button", { name: "새 대화" })]))) {
     await ctx.close();
     continue;
   }

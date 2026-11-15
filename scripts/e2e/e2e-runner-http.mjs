@@ -386,7 +386,7 @@ await step("E3", async () => {
 // ---------- E4. 세션 소실 401: 기존 인증 처리, 반복 POST 없음 [real] ----------
 await step("E4", async () => {
   await B.page.goto(U("/research/"));
-  if (!(await B.chat.isVisible())) await B.page.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  if (!(await B.chat.isVisible())) await B.page.getByRole("button", { name: "대화창 열기" }).click();
   await appears(B.chat.getByText("환경 활성화 중"));
   const p0 = B.net.posts.length;
   await B.context.clearCookies();
@@ -482,7 +482,7 @@ await step("P1", async () => {
   await host(`phase ${userE.accountId} not_prepared`); // 새 계정에 registry가 없음을 확인만 한다
   const g = await apiClient(E.page).get("/research/codex/status");
   check("P1 [real]. GET not_prepared (no registry row)", g.status === 200 && statusShape(g.body) && g.body.reason === "not_prepared" && !("retryAfterSeconds" in g.body), JSON.stringify(g.body));
-  if (!(await E.chat.isVisible())) await E.page.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  if (!(await E.chat.isVisible())) await E.page.getByRole("button", { name: "대화창 열기" }).click();
   check("P1 [real]. UI 대화 준비 button", await appears(E.chat.getByRole("button", { name: "대화 준비" })));
   const n0 = E.net.responses.length;
   await E.chat.getByRole("button", { name: "대화 준비" }).first().click();
@@ -502,7 +502,7 @@ await step("F0", async () => {
   const meA = await meOf(A.page);
   check("F0 [real]. off: me codexRunner present false, research still allowed", meA.codexRunner === false && meA.isApproved && meA.role === "editor");
   check("F0 [real]. off: no preparation POST", A.net.posts.length === p0, String(A.net.posts.length - p0));
-  check("F0 [real]. off: conversation still opens", (await A.chat.getByRole("heading", { name: "준비 통합 대화" }).count()) === 1);
+  check("F0 [real]. off: conversation still opens", (await A.chat.getByLabel("메시지").count()) === 1); // #94: 대화 제목은 표시하지 않는다
   const text = (await A.chat.innerText()).replace(/\s+/g, " ");
   check("F0 [real]. off: no runner state copy", !/환경 활성화 중|환경 연결 확인 중|사용 대기 중|환경이 쉬는 중|환경 정리 중|확인이 필요합니다/.test(text), text.slice(0, 160));
   const g = await apiA.get("/research/codex/status");

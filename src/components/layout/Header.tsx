@@ -4,7 +4,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { API_ENABLED, SITE_NAME } from "@/lib/constants";
 import LoginButton from "@/components/auth/LoginButton";
-import { canUseResearch } from "@/lib/auth/api";
+import { canUseResearch, isAdmin } from "@/lib/auth/api";
 import { useAuth } from "@/hooks/useAuth";
 
 export default function Header() {
@@ -38,7 +38,8 @@ export default function Header() {
     { href: "/research/", label: "내 연구", show: status === "authenticated" && canUseResearch(user) },
     { href: "/write/", label: "글 쓰기", show: user?.isApproved === true },
     { href: "/admin/", label: "관리", show: user?.role === "admin" && user.isApproved },
-    { href: "/status/", label: "상태", show: true },
+    // #94: 서비스 상태는 관리자에게만 보인다(정적 배포에는 관리자 로그인이 없으므로 메뉴도 없다).
+    { href: "/status/", label: "상태", show: status === "authenticated" && isAdmin(user) },
   ].filter((l) => l.show);
 
   return (

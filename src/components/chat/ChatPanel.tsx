@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuth } from "@/hooks/useAuth";
-import { canUseResearch } from "@/lib/auth/api";
+import { canUseResearch, isAdmin } from "@/lib/auth/api";
 import AuthGate from "@/components/research/AuthGate";
 import CodexStatusBanner from "@/components/research/CodexStatusBanner";
 import { SessionList } from "@/components/research/ItemLists";
@@ -19,28 +19,23 @@ function pageTitle(): string {
 function PanelContent() {
   const { user } = useAuth();
   const chat = useChat();
+  const admin = isAdmin(user);
 
   // 메뉴·안내용 판단이며 실제 허용 여부는 각 API가 다시 판단한다.
   if (!canUseResearch(user)) {
     return (
       <Notice tone="info">
-        Codex 질문은 관리자가 승인한 편집자·관리자만 이용할 수 있습니다. 승인 상태가 바뀌었다면 다시 로그인해 주세요.
+        대화 기능은 관리자가 승인한 편집자·관리자만 이용할 수 있습니다. 승인 상태가 바뀌었다면 다시 로그인해 주세요.
       </Notice>
     );
   }
 
   if (chat.sessionId) {
     // 대화 본문은 위에서 아래로 이어지고 입력창은 대화창 아래에 붙는다(SessionView의 Composer).
+    // '대화 목록' 버튼은 SessionView 상단 줄에 붙어 있다(#94: 스크롤해도 보인다).
     return (
       <div className="flex min-h-full flex-col">
-        <button
-          type="button"
-          onClick={() => chat.openSession(null)}
-          className="-ml-2 min-h-11 self-start rounded-md px-2 text-xs text-stone-500 hover:bg-stone-100 hover:text-stone-800 md:min-h-8"
-        >
-          ← 대화 목록
-        </button>
-        <SessionView key={chat.sessionId} id={chat.sessionId} onArchived={chat.leaveSession} />
+        <SessionView key={chat.sessionId} id={chat.sessionId} onArchived={chat.leaveSession} onBack={() => chat.openSession(null)} />
       </div>
     );
   }
@@ -51,7 +46,8 @@ function PanelContent() {
         compact
         action={
           <div className="space-y-3">
-            <CodexStatusBanner poll={chat.open} />
+            {/* #94: 연결·실행 환경 상태는 admin에게만 보인다 */}
+            {admin && <CodexStatusBanner poll={chat.open} />}
             <NewSessionForm defaultTitle={pageTitle()} />
           </div>
         }

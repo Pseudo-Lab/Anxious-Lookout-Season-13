@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { SITE_DESCRIPTION } from "@/lib/constants";
+import AdminOnly from "@/components/layout/AdminOnly";
 
 export default function Hero() {
   return (
@@ -29,12 +30,15 @@ export default function Hero() {
           >
             글 둘러보기
           </Link>
-          <Link
-            href="/status/"
-            className="rounded-lg border border-white/50 bg-white/50 px-5 py-2.5 text-sm font-medium text-slate-700 backdrop-blur-sm transition-colors hover:bg-white/80"
-          >
-            서비스 상태
-          </Link>
+          {/* #94: 서비스 상태는 관리자에게만 */}
+          <AdminOnly>
+            <Link
+              href="/status/"
+              className="rounded-lg border border-white/50 bg-white/50 px-5 py-2.5 text-sm font-medium text-slate-700 backdrop-blur-sm transition-colors hover:bg-white/80"
+            >
+              서비스 상태
+            </Link>
+          </AdminOnly>
         </div>
       </div>
 

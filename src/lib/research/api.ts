@@ -833,7 +833,7 @@ export function researchErrorMessage(failure: FetchFailure): string | null {
     case "unauthenticated":
       return "로그인이 필요합니다. 다시 로그인해 주세요.";
     case "forbidden":
-      return "이 기능을 이용할 권한이 없습니다. 개인 자료·문서와 Codex 질문은 관리자가 승인한 편집자·관리자만 이용할 수 있습니다.";
+      return "이 기능을 이용할 권한이 없습니다. 개인 자료·문서와 대화 기능은 관리자가 승인한 편집자·관리자만 이용할 수 있습니다.";
     case "csrf_invalid":
     case "origin_not_allowed":
       return "요청을 확인하지 못했습니다. 페이지를 새로고침한 뒤 다시 시도해 주세요.";
@@ -850,26 +850,26 @@ export function researchErrorMessage(failure: FetchFailure): string | null {
     case "policy_pending":
       return "이용 정책이 확정되기 전이라 아직 사용할 수 없습니다.";
     case "codex_unavailable":
-      return "Codex에 연결할 수 없어 대화를 진행할 수 없습니다. 이전 기록은 보존됩니다.";
+      return "지금은 연결할 수 없어 대화를 진행할 수 없습니다. 이전 기록은 보존됩니다.";
     case "codex_rejected":
-      return "Codex가 이 요청을 받지 않았습니다. 입력은 대화에 보존되어 있으며 새 메시지로 다시 보낼 수 있습니다.";
+      return "이 요청은 처리되지 않았습니다. 입력은 대화에 보존되어 있으며 새 메시지로 다시 보낼 수 있습니다.";
     case "codex_not_enabled_for_account":
-      return "이 계정에는 아직 Codex가 열려 있지 않습니다. 입력과 이전 대화는 그대로 있습니다.";
+      return "이 계정에는 아직 대화 기능이 열려 있지 않습니다. 입력과 이전 대화는 그대로 있습니다.";
     // 아래 codex_* 문구는 선접수 거절(503)과 접수 뒤 실행 실패(failed) 모두에 쓰인다.
     case "codex_auth_expired":
-      return "서버의 Codex 인증이 만료되어 요청을 처리하지 못했습니다. 운영자가 다시 연결하면 이 대화에서 이어서 질문할 수 있습니다. 입력과 이전 대화는 그대로 있습니다.";
+      return "서버 인증이 만료되어 요청을 처리하지 못했습니다. 운영자가 다시 연결하면 이 대화에서 이어서 질문할 수 있습니다. 입력과 이전 대화는 그대로 있습니다.";
     case "codex_auth_revoked":
-      return "서버의 Codex 인증이 더 이상 유효하지 않아 요청을 처리하지 못했습니다. 운영자가 다시 연결해야 합니다. 입력과 이전 대화는 그대로 있습니다.";
+      return "서버 인증이 더 이상 유효하지 않아 요청을 처리하지 못했습니다. 운영자가 다시 연결해야 합니다. 입력과 이전 대화는 그대로 있습니다.";
     case "codex_model_unavailable":
       return "고정된 모델을 사용할 수 없어 요청을 처리하지 못했습니다. 다른 모델로 자동 전환하지 않습니다. 입력과 이전 대화는 그대로 있습니다.";
     case "codex_policy_refused":
       return "정책에 따라 이 요청이 거부되었습니다. 입력과 이전 대화는 그대로 있습니다.";
     case "codex_budget_exhausted":
-      return "Codex 사용 한도에 도달해 요청을 처리하지 못했습니다. 입력과 이전 대화는 그대로 있습니다.";
+      return "사용 한도에 도달해 요청을 처리하지 못했습니다. 입력과 이전 대화는 그대로 있습니다.";
     case "codex_rate_limited":
-      return "Codex 제공자의 사용 한도에 걸려 요청을 처리하지 못했습니다. 자동으로 다시 보내지 않습니다. 입력과 이전 대화는 그대로 있습니다.";
+      return "제공자의 사용 한도에 걸려 요청을 처리하지 못했습니다. 자동으로 다시 보내지 않습니다. 입력과 이전 대화는 그대로 있습니다.";
     case "codex_failed":
-      return "Codex 요청이 실패했습니다. 자동으로 다시 실행하거나 다른 모델로 바꾸지 않습니다. 이전 대화는 그대로 있습니다.";
+      return "요청이 실패했습니다. 자동으로 다시 실행하거나 다른 모델로 바꾸지 않습니다. 이전 대화는 그대로 있습니다.";
     // #10 실행 환경 상태로 접수 전에 거절된 질문(초안은 남는다). 자동으로 다시 보내지 않는다.
     case "codex_runner_not_prepared":
       return "대화 환경이 아직 준비되지 않아 보내지 않았습니다. ‘대화 준비’를 누른 뒤 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";

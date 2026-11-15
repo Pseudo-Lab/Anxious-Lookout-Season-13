@@ -162,7 +162,7 @@ export default function AdminPage() {
     <div className="mx-auto max-w-3xl">
       <h1 className="mb-2 text-2xl font-bold text-stone-900">관리</h1>
       <p className="mb-6 text-sm text-stone-500">
-        승인된 편집자는 개인 자료·문서와 Codex 질문을 이용할 수 있습니다. 변경은 사유와 함께 감사 기록에 남고, 대상 사용자는 다시
+        승인된 편집자는 개인 자료·문서와 대화 기능을 이용할 수 있습니다. 변경은 사유와 함께 감사 기록에 남고, 대상 사용자는 다시
         로그인해야 합니다.
       </p>
       <AuthGate>
