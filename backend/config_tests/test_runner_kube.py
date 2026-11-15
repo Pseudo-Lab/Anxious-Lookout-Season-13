@@ -420,3 +420,47 @@ def test_other_stream_env_differences_still_refused(plan, server, monkeypatch, c
     with pytest.raises(Refused):
         port.lookup(plan.identity)
     port.close()
+
+
+# --- #95 B1: the retired-literal switch is a third stream flag -----------------------------------------------------
+
+def test_the_retired_switch_adds_only_its_key(plan, monkeypatch):
+    for name in ('CODEX_RUNNER_STREAM_TEXT', 'CODEX_RUNNER_STREAM_TRACE', 'CODEX_RUNNER_STREAM_RETIRED'):
+        monkeypatch.delenv(name, raising=False)
+    base = plan.manifest('isolated')
+    monkeypatch.setenv('CODEX_RUNNER_STREAM_RETIRED', 'true')
+    rendered = plan.manifest('isolated')
+    env = rendered['spec']['containers'][0]['env']
+    assert [e for e in env if e['name'] == 'STREAM_RETIRED'] == [{'name': 'STREAM_RETIRED', 'value': 'true'}]
+    rendered['spec']['containers'][0]['env'] = [e for e in env if e['name'] != 'STREAM_RETIRED']
+    assert rendered == base
+
+
+@pytest.mark.parametrize('created', [{}, {'CODEX_RUNNER_STREAM_RETIRED': 'true'},
+                                     {'CODEX_RUNNER_STREAM_TEXT': 'true', 'CODEX_RUNNER_STREAM_RETIRED': 'true'},
+                                     {'CODEX_RUNNER_STREAM_TEXT': 'true', 'CODEX_RUNNER_STREAM_TRACE': 'true',
+                                      'CODEX_RUNNER_STREAM_RETIRED': 'true'}])
+def test_a_pod_from_any_flag_state_stays_usable_with_the_retired_flag(plan, server, monkeypatch, created):
+    for name in ('CODEX_RUNNER_STREAM_TEXT', 'CODEX_RUNNER_STREAM_TRACE', 'CODEX_RUNNER_STREAM_RETIRED'):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in created.items():
+        monkeypatch.setenv(name, value)
+    port = kube_port(plan, server)
+    made = port.create_once(plan.identity)
+    for name in created:
+        monkeypatch.delenv(name)
+    assert port.lookup(plan.identity) == made
+    port.close()
+
+
+def test_a_false_retired_key_in_a_pod_is_still_refused(plan, server, monkeypatch):
+    monkeypatch.delenv('CODEX_RUNNER_STREAM_RETIRED', raising=False)
+    port = kube_port(plan, server)
+    port.create_once(plan.identity)
+    env = server.pod['spec']['containers'][0]['env']
+    plain = [e for e in env if 'value' in e]
+    refs = [e for e in env if 'value' not in e]
+    server.pod['spec']['containers'][0]['env'] = plain + [{'name': 'STREAM_RETIRED', 'value': 'false'}] + refs
+    with pytest.raises(Refused):
+        port.lookup(plan.identity)
+    port.close()

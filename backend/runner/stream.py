@@ -17,6 +17,7 @@ import time
 from collections import deque
 
 from .stream_prefix import HoldPolicy, policy as hold_policy
+from . import stream_retired
 
 MARKER = "[redacted]"
 
@@ -118,7 +119,13 @@ class Sanitizer:
                 # an empty set (nothing installed yet) is no information: the split then counts `current` as current,
                 # an over-report of "current" (never of "retired", which would favour the §6 B case)
                 latest = [value for value in list(latest or ()) if isinstance(value, str)] or None
-                return (id(journal), count, hold_policy(journal, getattr(self.auth, "control", None), current, latest))
+                control = getattr(self.auth, "control", None)
+                retired = None
+                if getattr(self.auth, "service", False) and stream_retired.enabled():
+                    # #95 B1: rows proven retired and expired leave the holdback only (service mode, switch on);
+                    # the protected set is computed again inside the policy, so this is a candidate list.
+                    retired = stream_retired.excluded(control, journal, frozenset())
+                return (id(journal), count, hold_policy(journal, control, current, latest, retired))
             except RuntimeError:
                 continue
             except Exception:
@@ -240,7 +247,8 @@ class Turn:
         self.started_at = time.monotonic()
         self.stats = {"deltaIn": {}, "eventsOut": 0, "eventBytes": 0, "flushes": 0, "compactions": 0,
                       "firstDeltaMs": None, "firstEventMs": None, "holdbackPeakChars": 0, "legacyL": 0, "legacyCurrentL": 0,
-                      "legacyRetiredL": 0, "cutDelayPeakChars": 0,
+                      "legacyRetiredL": 0, "retiredState": "off", "retiredExcludedProven": 0, "retiredExcludedAssumed": 0,
+                      "cutDelayPeakChars": 0,
                       "bufferPeakBytes": 0, "outputDroppedBytes": 0, "subscribersPeak": 0, "staleFlushes": 0}
         self.samples = deque(maxlen=SAMPLE_RING)
         self.peaks = {"rssKb": 0, "messagesQueue": 0, "flushLagMs": 0}
@@ -689,6 +697,10 @@ class Hub:
             # #94 (8): the split of legacyL - a current-credential literal without a fingerprint, or only earlier ones
             turn.stats["legacyCurrentL"] = max(turn.stats["legacyCurrentL"], getattr(before[2], "legacy_current", 0))
             turn.stats["legacyRetiredL"] = max(turn.stats["legacyRetiredL"], getattr(before[2], "legacy_retired", 0))
+            # #95 B1: the retired-literal record state of the plan and how many rows it took out of the holdback
+            turn.stats["retiredState"] = getattr(before[2], "retired_state", "off")
+            turn.stats["retiredExcludedProven"] = max(turn.stats["retiredExcludedProven"],
+                                                      getattr(before[2], "retired_excluded", 0))
             turn.stats["cutDelayPeakChars"] = max([turn.stats["cutDelayPeakChars"]] + delays)
             if before != after:
                 # A literal was observed meanwhile: nothing of this pass is published (text, output or summary).

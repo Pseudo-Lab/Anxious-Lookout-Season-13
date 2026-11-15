@@ -30,7 +30,8 @@ LABEL = 'anxious.io/'
 GRACE_SECONDS = 20
 # #90 P5-0: process env of the components that render and verify runner Pods (runner-controller, API) -> runner Pod
 # env. Default false: no key is added and the Pod is rendered exactly as before. Only the exact value "true" is passed.
-STREAM_FLAGS = (("CODEX_RUNNER_STREAM_TEXT", "RUNNER_STREAM_TEXT"), ("CODEX_RUNNER_STREAM_TRACE", "STREAM_TRACE"))
+STREAM_FLAGS = (("CODEX_RUNNER_STREAM_TEXT", "RUNNER_STREAM_TEXT"), ("CODEX_RUNNER_STREAM_TRACE", "STREAM_TRACE"),
+                ("CODEX_RUNNER_STREAM_RETIRED", "STREAM_RETIRED"))  # #95 B1: the retired-literal kill switch (default off)
 
 
 def stream_env():
@@ -299,8 +300,10 @@ class KubePods:
         # A pre-#62 Pod differs from the current render only in the callback env value. #90: a Pod rendered while
         # a stream flag had another value differs only by the exact "true" stream keys; it stays usable when the flag
         # changes (the next Pod takes the new value). Every other difference is still refused.
-        variants = [{key: 'true' for key in combination} for combination in
-                    ((), ('RUNNER_STREAM_TEXT',), ('STREAM_TRACE',), ('RUNNER_STREAM_TEXT', 'STREAM_TRACE'))]
+        # #95: every subset of the STREAM_FLAGS targets (the retired-literal switch included), not a hand list.
+        targets = [target for _, target in STREAM_FLAGS]
+        variants = [{key: 'true' for key, bit in zip(targets, range(len(targets))) if mask >> bit & 1}
+                    for mask in range(1 << len(targets))]
         accepted = [expected] + [plan.manifest(self.namespace, stream=variant)['spec'] for variant in variants]
         if plan.callback == LEGACY_CALLBACK_URL:
             accepted += [plan.manifest(self.namespace, legacy_callback=True, stream=variant)['spec'] for variant in variants]

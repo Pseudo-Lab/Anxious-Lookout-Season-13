@@ -132,9 +132,9 @@ def test_preflight_refuses_a_stream_mismatch(values, baseline, maps, where):
 
 
 @pytest.mark.parametrize('stream, line', [
-    (None, {'stream': {'enable': False, 'text': False, 'trace': False}, 'streamInput': False}),
+    (None, {'stream': {'enable': False, 'retired': False, 'text': False, 'trace': False}, 'streamInput': False}),
     ({'enable': True, 'text': True, 'trace': False},
-     {'stream': {'enable': True, 'text': True, 'trace': False}, 'streamInput': True}),
+     {'stream': {'enable': True, 'retired': False, 'text': True, 'trace': False}, 'streamInput': True}),
 ])
 def test_cli_prints_the_stream_flags(values, baseline, maps, tmp_path, stream, line):
     v = dict(values) if stream is None else dict(values, stream=stream)
@@ -148,3 +148,34 @@ def test_cli_prints_the_stream_flags(values, baseline, maps, tmp_path, stream, l
     assert done.returncode == 0
     lines = [json.loads(x) for x in done.stdout.splitlines() if x.startswith('{')]
     assert line in lines and done.stdout.rstrip().endswith('no deployment or service changes')
+
+
+# --- #95 B1: the optional retired-literal switch -------------------------------------------------------------------
+
+def test_the_retired_switch_reaches_both_deployments(values, baseline, maps):
+    flags = {'enable': True, 'text': True, 'trace': False, 'retired': True}
+    _, api, controller = rendered(dict(values, stream=flags), baseline, maps)
+    assert api == {'RESEARCH_STREAM_ENABLE': 'true', 'CODEX_RUNNER_STREAM_TEXT': 'true',
+                   'CODEX_RUNNER_STREAM_RETIRED': 'true'}
+    assert controller == {'CODEX_RUNNER_STREAM_TEXT': 'true', 'CODEX_RUNNER_STREAM_RETIRED': 'true'}
+
+
+def test_an_input_without_retired_still_renders_as_before(values, baseline, maps):
+    old = dict(values, stream={'enable': True, 'text': True, 'trace': False})
+    new = dict(values, stream={'enable': True, 'text': True, 'trace': False, 'retired': False})
+    assert rollout.render(old, baseline, TEMPLATES, maps) == rollout.render(new, baseline, TEMPLATES, maps)
+
+
+def test_an_inherited_retired_key_is_dropped(values, baseline, maps):
+    base = deepcopy(baseline)
+    base['spec']['template']['spec']['containers'][0]['env'].append(
+        {'name': 'CODEX_RUNNER_STREAM_RETIRED', 'value': 'true'})
+    _, api, controller = rendered(values, base, maps)
+    assert api == {} and controller == {}
+
+
+@pytest.mark.parametrize('retired', ['true', 1, None])
+def test_a_non_boolean_retired_refuses(values, baseline, maps, retired):
+    with pytest.raises(ValueError):
+        rollout.render(dict(values, stream={'enable': True, 'text': True, 'trace': False, 'retired': retired}),
+                       baseline, TEMPLATES, maps)

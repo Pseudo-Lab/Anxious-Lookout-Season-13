@@ -19,6 +19,7 @@ from .access import AccessAuth, claims
 from .auth import read_private
 from .binding import canonical_uuid
 from . import stream_prefix
+from . import stream_retired
 from .projection import ProjectionJournal, BASE, MASK, rolling, merge_spans, redact
 from .service_store import ServiceStore, LEDGER, LEGACY, refuse, private_file
 
@@ -230,6 +231,11 @@ class ServiceAccessAuth(AccessAuth):
             self.journal = journal
             # #90 r4: prefix fingerprints after the committed journal rows; never raises (failure = legacy).
             stream_prefix.remember(self.control, journal, literals)
+            # #95 B1: the kinds of this install's literals and its provider times, for the retired-literal holdback
+            # (STREAM_RETIRED only; never raises; a missing record never excludes anything).
+            stream_retired.observe_install(self.control, journal, envelope['accessToken'],
+                                           [item for item in literals if item != envelope['accessToken']],
+                                           value.get('iat'), value['exp'])
 
     def attach(self, codex_home):
         with self.mutex:
