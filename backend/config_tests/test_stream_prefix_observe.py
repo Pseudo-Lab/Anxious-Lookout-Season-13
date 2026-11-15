@@ -40,10 +40,10 @@ def test_a_written_install_logs_the_current_literals_covered(tmp_path, lines, ca
     journal = journal_with([NEW, EMAIL])
     control = control_dir(tmp_path)
     assert stream_prefix.remember(control, journal, [NEW, EMAIL, 'acct']) is True
-    assert lines() == [{'result': 'written', 'literals': 2, 'covered': 2, 'currentCovered': True, 'entries': 2,
+    assert lines() == [{'result': 'written', 'literals': 2, 'covered': 2, 'allCovered': True, 'entries': 2,
                         'limit': stream_prefix.LIMIT}]
     assert stream_prefix.remember(control, journal, [NEW, EMAIL]) is False
-    assert lines()[-1]['result'] == 'unchanged' and lines()[-1]['currentCovered'] is True
+    assert lines()[-1]['result'] == 'unchanged' and lines()[-1]['allCovered'] is True
     no_plaintext(caplog, journal, NEW, EMAIL)
 
 
@@ -55,7 +55,7 @@ def test_review_counterexample_a_failed_write_after_an_old_cover_is_visible(tmp_
     journal.observe([NEW])  # the new credential reaches the journal ...
     monkeypatch.setattr(stream_prefix, '_write', lambda path, payload: (_ for _ in ()).throw(OSError(28, 'full')))
     assert stream_prefix.remember(control, journal, [NEW]) is False  # ... but its fingerprint write fails
-    assert lines()[-1] == {'result': 'failed', 'literals': 1, 'covered': 0, 'currentCovered': False, 'entries': 1,
+    assert lines()[-1] == {'result': 'failed', 'literals': 1, 'covered': 0, 'allCovered': False, 'entries': 1,
                            'limit': stream_prefix.LIMIT}
     hold = policy(journal, control, [NEW])
     assert hold.covered and hold.legacy == len(NEW)  # the aggregate view: present, covered >= 1, legacy L
@@ -70,7 +70,7 @@ def test_a_full_file_is_visible_and_the_current_literal_counts_as_current(tmp_pa
     stream_prefix.remember(control, journal, [OLD])
     journal.observe([NEW])
     assert stream_prefix.remember(control, journal, [NEW]) is False
-    assert lines()[-1] == {'result': 'full', 'literals': 1, 'covered': 0, 'currentCovered': False, 'entries': 1,
+    assert lines()[-1] == {'result': 'full', 'literals': 1, 'covered': 0, 'allCovered': False, 'entries': 1,
                            'limit': 1}
     hold = policy(journal, control, [NEW])
     assert (hold.legacy_current, hold.legacy_retired) == (len(NEW), 0)
@@ -81,7 +81,7 @@ def test_case_b_only_a_retired_literal_is_legacy(tmp_path, lines):
     control = control_dir(tmp_path)
     journal.observe([NEW])
     stream_prefix.remember(control, journal, [NEW])
-    assert lines()[-1]['currentCovered'] is True
+    assert lines()[-1]['allCovered'] is True
     hold = policy(journal, control, [NEW])
     assert hold.legacy == len(OLD) and (hold.legacy_current, hold.legacy_retired) == (0, len(OLD))
 
@@ -106,7 +106,7 @@ def test_the_split_does_not_change_the_holdback(tmp_path):
 
 def test_no_control_is_logged_and_the_logger_never_raises(lines):
     assert stream_prefix.remember(None, None, [NEW]) is False
-    assert lines()[-1] == {'result': 'no_control', 'literals': 0, 'covered': None, 'currentCovered': None,
+    assert lines()[-1] == {'result': 'no_control', 'literals': 0, 'covered': None, 'allCovered': None,
                            'entries': None, 'limit': stream_prefix.LIMIT}
     stream_prefix.observe('control', 'odd', object(), None, None)  # not serializable: swallowed
 
@@ -198,7 +198,7 @@ def test_a_failure_its_repeats_and_its_recovery(tmp_path, lines, monkeypatch):
     monkeypatch.setattr(stream_prefix, '_write', real)
     for _ in range(50):
         stream_prefix.remember(control, journal, [NEW])
-    assert [(line['result'], line['currentCovered']) for line in lines()] == [
+    assert [(line['result'], line['allCovered']) for line in lines()] == [
         ('failed', False), ('written', True), ('unchanged', True)]
 
 
@@ -212,3 +212,19 @@ def test_the_dedup_state_is_bounded(tmp_path, lines, monkeypatch):
         stream_prefix.remember(folder, journal, [NEW])
     assert len(stream_prefix._observed) <= 3
     assert len(lines()) == 5  # each directory's first state is logged once
+
+
+def test_review_r2_a_full_aggregate_with_a_covered_latest_is_retired_only(tmp_path, lines, monkeypatch):
+    """review r2 major: the prefix line covers the caller's (cumulative) set; the latest credential's state is the
+    summary split. Capacity 1, only the new token stored, journal old + new, next call with old + new: the line says
+    full / allCovered false, and the split says current 0, retired len(OLD) - the post-rollout check reads (b) here,
+    not (a)."""
+    journal = journal_with([OLD, NEW])
+    control = control_dir(tmp_path)
+    monkeypatch.setattr(stream_prefix, 'LIMIT', 1)
+    stream_prefix.remember(control, journal, [NEW])
+    stream_prefix.remember(control, journal, [OLD, NEW])
+    assert (lines()[-1]['result'], lines()[-1]['allCovered']) == ('full', False)
+    hold = policy(journal, control, [OLD, NEW], [NEW])
+    assert (hold.legacy_current, hold.legacy_retired) == (0, len(OLD))
+    assert 'currentCovered' not in lines()[-1]

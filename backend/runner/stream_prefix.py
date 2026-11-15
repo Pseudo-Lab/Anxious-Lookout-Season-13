@@ -146,7 +146,10 @@ def remember(control, journal, literals):
 
     #94 (8): the outcome is observable (`observe`, the `runner_stream_prefix` line): the result from a fixed list and
     how many long literals of this call are covered by the file this call wrote or found valid. Counts only; never a
-    value, digest or path. review r1: `remember` also runs on the stream's hot path (every refresh / sanitize), so the
+    value, digest or path. review r2: the literals of a call are what the caller passes - in the personal / access
+    modes the cumulative `secrets` (credentials rotated out in this process included), in the service mode the
+    installed credential - so this line is the coverage of that set, **not** of the latest credential; the latest
+    credential's state is the summary split (`policy`, `legacy_current`). review r1: `remember` also runs on the stream's hot path (every refresh / sanitize), so the
     counts come from the sets already in hand (no extra read) and a line is logged only when the observed state of
     this control directory changes - a Pod whose credential and file stay the same logs a constant number of lines,
     whatever the number of deltas or sanitize calls (PM)."""
@@ -197,9 +200,10 @@ OBSERVED_LIMIT = 64
 def observe(control, status, literals, covered, entries):
     """#94 (8): the `runner_stream_prefix` log line, only when the state of `control` differs from the last one logged
     for it (a change of result, of the covered count or of the file's entry count; a failure and its recovery are both
-    logged). `literals`: long literals of this call; `covered`: how many of them the file covers (None: unknown);
-    `currentCovered`: all of them (true / false / null); `entries`: the file's entry count (None: no valid file);
-    `limit`: LIMIT. Called under _write_lock. Never raises."""
+    logged). `literals`: long literals of this call (the caller's set, possibly cumulative); `covered`: how many of them
+    the file covers (None: unknown); `allCovered`: all of them (true / false / null) - review r2: an aggregate, never
+    by itself a verdict on the latest credential; `entries`: the file's entry count (None: no valid file); `limit`:
+    LIMIT. Called under _write_lock. Never raises."""
     try:
         state = (status if status in RESULTS else "other", literals, covered, entries)
         key = str(control)
@@ -210,7 +214,7 @@ def observe(control, status, literals, covered, entries):
         _observed[key] = state
         logging.getLogger("uvicorn.error").info("runner_stream_prefix %s", json.dumps({
             "result": state[0], "literals": literals, "covered": covered,
-            "currentCovered": None if covered is None or literals is None else covered == literals,
+            "allCovered": None if covered is None or literals is None else covered == literals,
             "entries": entries, "limit": LIMIT}, sort_keys=True))
     except Exception:
         pass
