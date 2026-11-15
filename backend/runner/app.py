@@ -77,25 +77,54 @@ class Drain(BaseModel):
         return value
 
 
-IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{0,47}")
-EXCEPTION_NAME = re.compile(r"[A-Z][A-Za-z0-9]{0,47}")
+# #94 (2) review r0: fixed lists, not a shape rule - an identifier-shaped string can still be a secret. TOOL_NAMES is
+# app/research_tools.py TOOLS plus the shell authorization (config_tests/test_runner_tool_reply_log.py keeps them equal).
+TOOL_NAMES = frozenset({
+    "research_archive", "research_document_save", "research_document_update", "research_get", "research_list",
+    "research_material_save", "research_material_update", "research_page_context", "research_post_draft_get",
+    "research_post_propose", "research_relation_save", "research_relation_update", "research_relations",
+    "research_version_get", "research_versions", "runner_shell_authorize"})
+REPLY_CODES = frozenset({
+    # runner/app.py _reply_tool
+    "native_turn_mismatch", "tool_not_allowed", "not_ready",
+    # the api's /api/internal/research/tools and its dispatch (ResearchError codes)
+    "not_found", "forbidden", "unauthenticated", "validation_error", "conflict", "payload_too_large",
+    "storage_quota_exceeded", "idempotency_conflict", "content_limit_exceeded", "post_contract_upgrade_required",
+    # CodexFailure reasons (app/codex_policy.py REASONS) from the permission check
+    "not_configured", "not_enabled_for_account", "auth_expired", "auth_revoked", "model_unavailable",
+    "policy_refused", "budget_exhausted", "provider_rate_limited", "unavailable"})
+STAGES = frozenset({"unknown", "turn_mismatch", "binding", "permission", "scope", "callback", "callback_body",
+                    "callback_done"})
+
+
+def failure_kind(error):
+    """A fixed category for an exception in the tool reply (never its class name or text)."""
+    if isinstance(error, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(error, httpx.TransportError):
+        return "transport"
+    if isinstance(error, ValueError):  # json.JSONDecodeError included
+        return "invalid_json"
+    return "other"
 
 
 def log_tool_reply(message, turn, outcome, elapsed):
-    """#94 (2): one line per dynamic tool reply, so a failed tool shown on screen can be traced to its cause. Only
-    identifier-shaped names and codes, the HTTP status, the stage reached and a duration - never the arguments, the
-    result, the token or a message text. Never raises."""
+    """#94 (2): one line per dynamic tool reply, so a failed tool shown on screen can be traced to its cause. The tool
+    and code only from fixed lists (else "other"), the exception as a fixed category, the HTTP status, the stage reached
+    and a duration - never the arguments, the result, the token or a message text. Never raises."""
     try:
         params = message.get("params") if isinstance(message, dict) else None
         tool = params.get("tool") if isinstance(params, dict) else None
         code = outcome.get("code")
-        exception = outcome.get("exception")
+        kind = outcome.get("exception")
+        stage = outcome.get("stage")
         line = {"requestId": str(turn["request"]) if turn and turn.get("request") else None,
-                "tool": tool if isinstance(tool, str) and IDENTIFIER.fullmatch(tool) else "other",
-                "stage": outcome.get("stage"), "success": outcome.get("success") is True,
+                "tool": tool if isinstance(tool, str) and tool in TOOL_NAMES else "other",
+                "stage": stage if isinstance(stage, str) and stage in STAGES else "other",
+                "success": outcome.get("success") is True,
                 "status": outcome["status"] if type(outcome.get("status")) is int else None,
-                "code": None if code is None else code if isinstance(code, str) and IDENTIFIER.fullmatch(code) else "other",
-                "exception": None if exception is None else exception if EXCEPTION_NAME.fullmatch(exception) else "other",
+                "code": None if code is None else code if isinstance(code, str) and code in REPLY_CODES else "other",
+                "exception": None if kind is None else kind if kind in {"timeout", "transport", "invalid_json"} else "other",
                 "ms": round(elapsed, 3)}
         logging.getLogger("uvicorn.error").info("runner_tool_reply %s", json.dumps(line, sort_keys=True))
     except Exception:
@@ -926,7 +955,7 @@ class Native:
                 self.blocked_reason = rejected.reason
                 success, result = False, {"error": {"code": str(rejected), "message": "Storage tool permission is unavailable"}}
             except Exception as error:
-                outcome["exception"] = type(error).__name__
+                outcome["exception"] = failure_kind(error)
                 success, result = False, {"error": {"code": "not_ready", "message": "Storage tool did not confirm success"}}
         outcome["success"] = success
         error = result.get("error") if isinstance(result, dict) else None

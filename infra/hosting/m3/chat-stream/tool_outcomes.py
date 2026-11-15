@@ -6,21 +6,31 @@ without an access log, so nothing records what the tool callback returned. The C
 tool call (`response_item/function_call`, the dynamic tool name) and its output (`function_call_output`): the runner's
 reply text is the api's JSON body or the runner's own `{"error": {"code": ...}}` (runner/app.py `_reply_tool`).
 
-Input: the owner's Codex sessions directory (mounted read only), and a UTC window. Every `rollout-*.jsonl` file below it
-(at most 3 levels: YYYY/MM/DD) is read through lstat + O_NOFOLLOW | O_NONBLOCK + fstat (regular files only, 64 MiB cap);
-only lines whose `timestamp` falls in the window count. Nothing is written.
+Input: the owner's Codex sessions directory (mounted read only), a UTC window (< 6 h) and, optionally, the
+conversation's native thread id (`--thread <uuid>`: only `rollout-*-<uuid>.jsonl` files count). Every matching
+`rollout-*.jsonl` file below the directory (at most 3 levels: YYYY/MM/DD) is read through lstat + O_NOFOLLOW |
+O_NONBLOCK + fstat (regular files only, 64 MiB cap); only lines whose `timestamp` falls in the window count. Nothing
+is written.
+
+r1 (review r0 majors): anything not read is counted, never skipped silently - `errors.directories` (a directory that
+could not be listed), `errors.files` (a rollout file that could not be read: permission, size, type change),
+`errors.lines` (a line that is not a JSON object), `errors.untimed` (an object line without a valid timestamp: it
+could belong to the window). `complete` is true only when all four are 0. **An incomplete look decides nothing.**
+A JSON body with `detail` (FastAPI's 4xx shape) is `error:detail`, not `ok-json`.
 
 Output: one JSON line:
-- `files`: rollout files scanned / with lines in the window (counts only; no name);
+- `complete`, `errors` (above), `files`: rollout files scanned / with lines in the window (counts only; no name);
+- `turnsInWindow`: `event_msg/task_started` + `event_msg/turn_started` lines in the window (a call is tied to one turn
+  only when this is 1);
 - `eventKinds`: counts per fixed kind (+ `other`);
 - `calls`: for each research tool `function_call` in the window (name from the fixed TOOLS list, else `other`), paired
   with its `function_call_output` by call id: `output` = `error:<code>` (code from the fixed ERRORS list, else
-  `error:other`), `ok-json` (a JSON object without an `error` key), `text` (not JSON), `missing` (no output in the
-  window), and `success` when the output payload carries one (true / false / absent);
+  `error:other`), `error:detail`, `ok-json` (a JSON object with neither `error` nor `detail`), `text` (not JSON),
+  `missing` (no output in the window), and `success` when the output payload carries one (true / false / absent);
 - `exec`: code-mode `exec` / `exec_command` custom tool calls and outputs in the window, and per fixed error code the
   number of exec outputs whose text contains it (a substring count: a hint, not a call outcome).
-Exit codes: 0 measured, 2 refused input.
-Usage: python -I tool_outcomes.py /sessions --since 2026-11-15T11:50:00Z --until 2026-11-15T12:10:00Z
+Exit codes: 0 measured (complete or not: read `complete`), 2 refused input.
+Usage: python -I tool_outcomes.py /sessions --since 2026-11-15T11:50:00Z --until 2026-11-15T12:10:00Z [--thread <uuid>]
 """
 import json
 import os
@@ -46,7 +56,9 @@ KINDS = ('session_meta', 'turn_context', 'compacted', 'event_msg/task_started', 
          'event_msg/mcp_tool_call_end', 'response_item/message', 'response_item/reasoning',
          'response_item/custom_tool_call', 'response_item/custom_tool_call_output', 'response_item/function_call',
          'response_item/function_call_output')
+STARTS = ('event_msg/task_started', 'event_msg/turn_started')
 ROLLOUT = re.compile(r'rollout-[A-Za-z0-9T:._-]{1,200}\.jsonl')
+UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 
 
 def refuse(reason):
@@ -86,25 +98,28 @@ def read(path):
         os.close(descriptor)
 
 
-def rollouts(root):
-    """Paths of rollout-*.jsonl files at most 3 directory levels below root, never following a link."""
+def rollouts(root, thread, errors):
+    """Paths of rollout-*.jsonl files (of `thread` when given) at most 3 directory levels below root, never following
+    a link. A directory that cannot be listed counts in errors['directories']."""
     found, stack = [], [(root, 0)]
     while stack:
         directory, depth = stack.pop()
         try:
             names = sorted(os.listdir(directory))
         except OSError:
+            errors['directories'] += 1
             continue
         for name in names:
             path = os.path.join(directory, name)
             try:
                 info = os.lstat(path)
             except OSError:
+                errors['files'] += 1
                 continue
             if stat.S_ISDIR(info.st_mode) and depth < 3:
                 stack.append((path, depth + 1))
-            elif stat.S_ISREG(info.st_mode) and ROLLOUT.fullmatch(name):
-                found.append(path)
+            elif ROLLOUT.fullmatch(name) and (thread is None or name.endswith('-%s.jsonl' % thread)):
+                found.append(path)  # a non-regular rollout name is refused by read() and counted there
     return sorted(found)
 
 
@@ -121,8 +136,6 @@ def texts(output):
 
 def classify(output):
     found = texts(output)
-    if not found:
-        return 'text'
     for text in found:
         try:
             value = json.loads(text)
@@ -133,8 +146,11 @@ def classify(output):
             if isinstance(error, dict):
                 code = error.get('code')
                 return 'error:' + (code if code in ERRORS else 'other')
-            if 'error' not in value:
-                return 'ok-json'
+            if 'error' in value:
+                return 'error:other'
+            if 'detail' in value:
+                return 'error:detail'
+            return 'ok-json'
     return 'text'
 
 
@@ -146,27 +162,36 @@ def success_of(payload):
     return 'absent'
 
 
-def measure(root, since, until):
-    kinds, calls, outputs, scanned, used = {}, {}, {}, 0, 0
+def measure(root, since, until, thread=None):
+    errors = {'directories': 0, 'files': 0, 'lines': 0, 'untimed': 0}
+    kinds, calls, outputs, scanned, used, turns = {}, {}, {}, 0, 0, 0
     order = []
     execs = {'calls': 0, 'outputs': 0, 'errorTextHints': {}}
     exec_ids = set()
-    for path in rollouts(root):
+    for path in rollouts(root, thread, errors):
         try:
             data = read(path)
         except OSError:
+            errors['files'] += 1
             continue
         scanned += 1
         hit = False
         for raw in data.splitlines():
+            if not raw.strip():
+                continue
             try:
                 line = json.loads(raw)
             except ValueError:
+                errors['lines'] += 1
                 continue
             if not isinstance(line, dict):
+                errors['lines'] += 1
                 continue
             stamp = utc(line.get('timestamp'))
-            if stamp is None or not since <= stamp <= until:
+            if stamp is None:
+                errors['untimed'] += 1
+                continue
+            if not since <= stamp <= until:
                 continue
             hit = True
             kind, payload = line.get('type'), line.get('payload')
@@ -175,6 +200,7 @@ def measure(root, since, until):
             name = kind if kind in ('session_meta', 'turn_context', 'compacted') else '%s/%s' % (kind, sub)
             name = name if name in KINDS else 'other'
             kinds[name] = kinds.get(name, 0) + 1
+            turns += name in STARTS
             call = payload.get('call_id')
             call = call if isinstance(call, str) and 0 < len(call) <= 200 else None
             if name == 'response_item/function_call' and call:
@@ -203,13 +229,20 @@ def measure(root, since, until):
     for call in order:
         output, success = outputs.get(call, ('missing', 'absent'))
         listed.append({'tool': calls[call], 'output': output, 'success': success})
-    return {'ok': True, 'files': {'scanned': scanned, 'inWindow': used}, 'eventKinds': kinds,
-            'calls': listed, 'unpairedOutputs': sum(1 for call in outputs if call not in calls),
-            'exec': execs}
+    return {'ok': True, 'complete': not any(errors.values()), 'errors': errors,
+            'files': {'scanned': scanned, 'inWindow': used}, 'thread': thread is not None,
+            'turnsInWindow': turns, 'eventKinds': kinds, 'calls': listed,
+            'unpairedOutputs': sum(1 for call in outputs if call not in calls), 'exec': execs}
 
 
 if __name__ == '__main__':
     args = sys.argv[1:]
+    thread = None
+    if len(args) == 7 and args[5] == '--thread':
+        thread = args[6]
+        if not UUID.fullmatch(thread):
+            refuse('thread')
+        args = args[:5]
     if len(args) != 5 or args[1] != '--since' or args[3] != '--until':
         refuse('usage')
     since, until = utc(args[2]), utc(args[4])
@@ -221,4 +254,4 @@ if __name__ == '__main__':
         refuse('directory_missing')
     if not stat.S_ISDIR(info.st_mode):
         refuse('directory_not_a_directory')
-    print(json.dumps(measure(args[0], since, until), sort_keys=True))
+    print(json.dumps(measure(args[0], since, until, thread), sort_keys=True))

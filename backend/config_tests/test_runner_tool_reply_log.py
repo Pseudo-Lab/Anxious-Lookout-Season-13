@@ -93,13 +93,17 @@ def test_an_api_error_logs_its_status_and_code(native, turn, lines, monkeypatch,
     assert native.sent[0]['result']['success'] is False
 
 
-def test_a_callback_transport_error_logs_its_class_only(native, turn, lines, monkeypatch, caplog):
-    callback(monkeypatch, raises=httpx.ConnectTimeout(SECRET))
+@pytest.mark.parametrize('error, kind', [(httpx.ConnectTimeout(SECRET), 'timeout'),
+                                         (httpx.ReadTimeout(SECRET), 'timeout'),
+                                         (httpx.ConnectError(SECRET), 'transport'),
+                                         (RuntimeError(SECRET), 'other')])
+def test_a_callback_error_logs_a_fixed_category_only(native, turn, lines, monkeypatch, caplog, error, kind):
+    callback(monkeypatch, raises=error)
     native.reply_tool(call(), turn)
     line, = lines()
     assert (line['stage'], line['success'], line['status'], line['code'], line['exception']) == (
-        'callback', False, None, 'not_ready', 'ConnectTimeout')
-    assert SECRET not in caplog.text
+        'callback', False, None, 'not_ready', kind)
+    assert SECRET not in caplog.text and type(error).__name__ not in caplog.text
 
 
 def test_a_non_json_body_is_seen_as_the_body_stage(native, turn, lines, monkeypatch):
@@ -119,7 +123,7 @@ def test_a_non_json_body_is_seen_as_the_body_stage(native, turn, lines, monkeypa
     native.reply_tool(call(), turn)
     line, = lines()
     assert (line['stage'], line['status'], line['code'], line['exception']) == (
-        'callback_body', 502, 'not_ready', 'JSONDecodeError')
+        'callback_body', 502, 'not_ready', 'invalid_json')
 
 
 def test_a_turn_mismatch_and_a_scope_refusal(native, turn, lines, monkeypatch):
@@ -131,14 +135,36 @@ def test_a_turn_mismatch_and_a_scope_refusal(native, turn, lines, monkeypatch):
     assert (second['stage'], second['code'], second['status']) == ('scope', 'tool_not_allowed', None)
 
 
-def test_odd_names_and_codes_are_bucketed(native, turn, lines, monkeypatch, caplog):
-    callback(monkeypatch, 400, {'error': {'code': 'Has Spaces ' + SECRET, 'message': 'x'}})
-    native.reply_tool(call(tool='Research List ' + SECRET), turn)
+@pytest.mark.parametrize('tool, code', [
+    ('Research List ' + SECRET, 'Has Spaces ' + SECRET),
+    # review r0 major: identifier-shaped secrets (lowercase, digits, underscore) are not let through either
+    ('private_credential_abc123', 'private_credential_abc123'),
+    ('research_list_x', 'not_found_x'),
+    ('sk_live_0123456789abcdef', 'token_9f8e7d6c5b4a'),
+])
+def test_names_and_codes_outside_the_fixed_lists_are_other(native, turn, lines, monkeypatch, caplog, tool, code):
+    callback(monkeypatch, 400, {'error': {'code': code, 'message': 'x'}})
+    native.reply_tool(call(tool=tool), turn)
     line, = lines()
     assert line['tool'] == 'other' and line['code'] == 'other'
-    assert SECRET not in caplog.text
+    assert tool not in caplog.text and code not in caplog.text
+
+
+def test_scope_refused_names_are_other_too(native, turn, lines, monkeypatch, caplog):
+    monkeypatch.setattr(runner_app, 'tool_allowed', lambda scope, name, arguments: False)
+    native.reply_tool(call(tool='private_credential_abc123'), turn)
+    line, = lines()
+    assert (line['tool'], line['stage'], line['code']) == ('other', 'scope', 'tool_not_allowed')
+    assert 'private_credential_abc123' not in caplog.text
+
+
+def test_the_fixed_lists_match_their_sources():
+    from app.codex_policy import REASONS
+    from app.research_tools import TOOLS
+    assert runner_app.TOOL_NAMES == set(TOOLS) | {'runner_shell_authorize'}
+    assert REASONS <= runner_app.REPLY_CODES
 
 
 def test_the_logger_never_raises():
     log_tool_reply(None, None, {}, 1.0)
-    log_tool_reply({'params': 'odd'}, {'request': None}, {'status': 'x', 'code': 5, 'exception': 7}, 2.0)
+    log_tool_reply({'params': 'odd'}, {'request': None}, {'status': 'x', 'code': 5, 'exception': 7, 'stage': []}, 2.0)

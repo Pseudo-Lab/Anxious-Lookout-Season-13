@@ -19,6 +19,7 @@ The caller keeps r3's left-only rule (a detected span crossing the cut pulls it 
 import hashlib
 import hmac
 import json
+import logging
 import os
 import stat
 import threading
@@ -32,6 +33,7 @@ FILE = "stream-prefixes.json"
 LIMIT = 4096
 VERSION = 1
 FIELDS = {"version", "owner", "trialId", "prefixLength", "entries", "mac"}
+RESULTS = {"written", "unchanged", "full", "failed", "no_control"}  # #94 (8) runner_stream_prefix results
 _write_lock = threading.Lock()
 
 
@@ -140,8 +142,14 @@ def _write(path, payload):
 def remember(control, journal, literals):
     """Add the fingerprints of `literals` (plaintext in memory) after the journal write. Never raises; True when the
     file was written. Content already present is a no-op (no rewrite, no generation change, design r4.1). A file that
-    is missing or invalid is rewritten with the current literals only (the others stay legacy)."""
+    is missing or invalid is rewritten with the current literals only (the others stay legacy).
+
+    #94 (8): the outcome is no longer silent. Every call logs one `runner_stream_prefix` line (`observe`): the result
+    from a fixed list and whether the long literals of this call - the credential being installed, i.e. the current
+    one - are covered by the file as read back. Counts only; never a value, digest or path."""
+    status, new = "failed", set()
     if control is None or journal is None:
+        observe("no_control", 0, None, None)
         return False
     with _write_lock:
         try:
@@ -150,28 +158,56 @@ def remember(control, journal, literals):
             current, _ = load(control, journal)
             known = set(current or ())
             if current is not None and new <= known:
+                status = "unchanged"
                 return False
             room = max(LIMIT - len(known), 0)
             merged = known | set(sorted(new - known)[:room])  # over the limit: the rest stay legacy
             if current is not None and merged == known:
                 # A valid file that would not change (full: the new literals stay legacy) is never rewritten, so the
                 # plan's generation stays stable and the stream progresses on the legacy holdback (review 732e278).
+                status = "full"
                 return False
             payload = {"version": VERSION, "owner": journal.owner, "trialId": journal.trial, "prefixLength": P,
                        "entries": sorted([list(item) for item in merged])}
             payload["mac"] = file_mac(journal.key, payload)
             _write(Path(control) / FILE, payload)
+            status = "written"
             return True
         except Exception:
+            status = "failed"
             return False
+        finally:
+            try:
+                after, _ = load(control, journal)
+                covered = len(new & set(after)) if after is not None else 0
+                observe(status, len(new), covered, len(after) if after is not None else None)
+            except Exception:
+                observe(status, len(new), None, None)
+
+
+def observe(status, literals, covered, entries):
+    """#94 (8): the `runner_stream_prefix` log line. `literals`: long literals of this install; `covered`: how many of
+    them the file covers after the call (None: unknown); `currentCovered`: all of them (true / false / null); `entries`:
+    the file's entry count (None: no valid file), `limit`: LIMIT. Never raises."""
+    try:
+        logging.getLogger("uvicorn.error").info("runner_stream_prefix %s", json.dumps({
+            "result": status if status in RESULTS else "other", "literals": literals, "covered": covered,
+            "currentCovered": None if covered is None else covered == literals, "entries": entries, "limit": LIMIT},
+            sort_keys=True))
+    except Exception:
+        pass
 
 
 class HoldPolicy:
     """The cut start for one plan (see the module docstring). `none()` = no recorded literal: nothing is held."""
 
-    def __init__(self, short=0, covered=False, legacy=0, groups=None, filters=None, key=None, state=None):
+    def __init__(self, short=0, covered=False, legacy=0, groups=None, filters=None, key=None, state=None,
+                 legacy_current=0, legacy_retired=0):
         self.short, self.covered, self.legacy = short, covered, legacy
         self.groups, self.filters, self.key, self.state = groups or {}, filters or {}, key, state
+        # #94 (8): where `legacy` comes from (observation only; `legacy` = max of the two). current: a long literal
+        # of the credential in memory has no fingerprint; retired: only a journal row of an earlier credential has none.
+        self.legacy_current, self.legacy_retired = legacy_current, legacy_retired
 
     @classmethod
     def none(cls):
@@ -221,15 +257,22 @@ def policy(journal, control, current=()):
     covered_entries = {item for item in (entries or ()) if (item[2], item[3]) in rows}
     covered_rows = {(item[2], item[3]) for item in covered_entries}
     legacy = max((length for length, _ in rows - covered_rows), default=0)
+    current_rows, legacy_current = set(), 0
     for value in current:
         if not isinstance(value, str) or not value:
             continue
         if len(value) <= P:
             short = max(short, len(value))
-        elif (len(value), journal.digest(value)) not in covered_rows:
-            legacy = max(legacy, len(value))
+        else:
+            row = (len(value), journal.digest(value))
+            current_rows.add(row)
+            if row not in covered_rows:
+                legacy = max(legacy, len(value))
+                legacy_current = max(legacy_current, len(value))
+    legacy_retired = max((length for length, _ in rows - covered_rows - current_rows), default=0)
     groups, filters = {}, {}
     for prefix_filter, digest, length, _ in covered_entries:
         groups[digest] = max(groups.get(digest, 0), length)
         filters.setdefault(prefix_filter, set()).add(digest)
-    return HoldPolicy(short, bool(covered_entries), legacy, groups, filters, journal.key, state)
+    return HoldPolicy(short, bool(covered_entries), legacy, groups, filters, journal.key, state,
+                      legacy_current, legacy_retired)

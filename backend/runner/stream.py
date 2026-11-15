@@ -233,7 +233,8 @@ class Turn:
         self.raw_bytes = 0
         self.started_at = time.monotonic()
         self.stats = {"deltaIn": {}, "eventsOut": 0, "eventBytes": 0, "flushes": 0, "compactions": 0,
-                      "firstDeltaMs": None, "firstEventMs": None, "holdbackPeakChars": 0, "legacyL": 0, "cutDelayPeakChars": 0,
+                      "firstDeltaMs": None, "firstEventMs": None, "holdbackPeakChars": 0, "legacyL": 0, "legacyCurrentL": 0,
+                      "legacyRetiredL": 0, "cutDelayPeakChars": 0,
                       "bufferPeakBytes": 0, "outputDroppedBytes": 0, "subscribersPeak": 0, "staleFlushes": 0}
         self.samples = deque(maxlen=SAMPLE_RING)
         self.peaks = {"rssKb": 0, "messagesQueue": 0, "flushLagMs": 0}
@@ -676,6 +677,9 @@ class Hub:
             return
         with self.lock:
             turn.stats["legacyL"] = max(turn.stats["legacyL"], before[2].legacy)  # r4: L_legacy (verified)
+            # #94 (8): the split of legacyL - a current-credential literal without a fingerprint, or only earlier ones
+            turn.stats["legacyCurrentL"] = max(turn.stats["legacyCurrentL"], getattr(before[2], "legacy_current", 0))
+            turn.stats["legacyRetiredL"] = max(turn.stats["legacyRetiredL"], getattr(before[2], "legacy_retired", 0))
             turn.stats["cutDelayPeakChars"] = max([turn.stats["cutDelayPeakChars"]] + delays)
             if before != after:
                 # A literal was observed meanwhile: nothing of this pass is published (text, output or summary).
