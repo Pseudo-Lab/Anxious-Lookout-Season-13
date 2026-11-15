@@ -25,6 +25,7 @@
     "nativeSizeGiB": {"$ref": "#/$defs/size"}, "controlSizeGiB": {"$ref": "#/$defs/size"},
     "stream": {"type": "object", "additionalProperties": false, "required": ["enable", "text", "trace"],
                "description": "#94 (9) optional #90 stream flags; absent = all off. enable: api RESEARCH_STREAM_ENABLE; text: CODEX_RUNNER_STREAM_TEXT (api, runner-controller); trace: CODEX_RUNNER_STREAM_TRACE (api, runner-controller) and api STREAM_TRACE. The renderer owns these keys: inherited values are dropped.",
-               "properties": {"enable": {"type": "boolean"}, "text": {"type": "boolean"}, "trace": {"type": "boolean"}}}
+               "properties": {"enable": {"type": "boolean"}, "text": {"type": "boolean"}, "trace": {"type": "boolean"},
+                              "retired": {"type": "boolean", "description": "#95 B1 optional: CODEX_RUNNER_STREAM_RETIRED (api, runner-controller) -> runner Pod STREAM_RETIRED, the retired-literal holdback switch; absent = false"}}}
   }
 }

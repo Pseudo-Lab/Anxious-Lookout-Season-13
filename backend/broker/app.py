@@ -31,6 +31,13 @@ def envelope(identity, credentials, force=False):
             'accessToken': token, 'expiresAt': expiry}
 
 
+def attested_envelope(identity, credentials, received_at):
+    token, account, expiry, attested = credentials.attest(received_at)
+    return {'version': 2, 'ownerId': str(identity.owner), 'stateId': str(identity.state_id),
+            'snapshotId': str(snapshot_id(identity, token)), 'accountId': account,
+            'accessToken': token, 'expiresAt': expiry, 'refreshedForRequest': attested is True}
+
+
 def create_app(verifier=None, credentials=None):
     if verifier is None:
         verifier = Verifier(Kube(), namespace=os.getenv('BROKER_RUNNER_NAMESPACE', 'codex-runner'))
@@ -67,12 +74,14 @@ def create_app(verifier=None, credentials=None):
         if not header.startswith('Bearer '):
             return refused(401, 'unauthenticated')
         try:
-            if type(body) is not dict or not set(body) <= {'ownerId', 'stateId', 'refresh'} or not {'ownerId', 'stateId'} <= set(body):
+            if (type(body) is not dict or not set(body) <= {'ownerId', 'stateId', 'refresh', 'attest'}
+                    or not {'ownerId', 'stateId'} <= set(body)):
                 raise ValueError()
             owner, state = canonical(body['ownerId']), canonical(body['stateId'])
             force = body.get('refresh', False)
-            if type(force) is not bool:
-                raise ValueError()
+            attest = body.get('attest', False)
+            if type(force) is not bool or type(attest) is not bool or (attest and not force):
+                raise ValueError()  # #95: `attest` only with `refresh: true`
         except (ValueError, TypeError):
             return refused(400, 'invalid_request')
         try:
@@ -82,7 +91,12 @@ def create_app(verifier=None, credentials=None):
         except Exception:
             return refused(403, 'refused')
         try:
-            value = envelope(identity, credentials, force)
+            if attest:
+                # #95 route 1: an operator's anchor request (runner.stream_anchor). Only this opt-in request carries
+                # `refreshedForRequest`; every other envelope is unchanged (runners check the exact field set).
+                value = attested_envelope(identity, credentials, credentials.clock())
+            else:
+                value = envelope(identity, credentials, force)
         except CodexFailure as failure:
             code = failure.reason if failure.reason in {'not_configured', 'auth_expired'} else 'unavailable'
             return refused(503, code)

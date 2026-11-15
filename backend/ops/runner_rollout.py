@@ -21,7 +21,9 @@ KEYS = {'version', 'runtimeImage', 'runnerImage', 'provisionerImageId', 'postIma
 # nor leave the two disagreeing. Only "true" keys are written: with every flag off the render is as before #94.
 OPTIONAL = {'stream'}
 STREAM = {'enable', 'text', 'trace'}
-API_STREAM_KEYS = ('RESEARCH_STREAM_ENABLE', 'CODEX_RUNNER_STREAM_TEXT', 'CODEX_RUNNER_STREAM_TRACE', 'STREAM_TRACE')
+STREAM_OPTIONAL = {'retired'}  # #95 B1: the retired-literal switch; absent = false (inputs written before #95 still render)
+API_STREAM_KEYS = ('RESEARCH_STREAM_ENABLE', 'CODEX_RUNNER_STREAM_TEXT', 'CODEX_RUNNER_STREAM_TRACE', 'STREAM_TRACE',
+                   'CODEX_RUNNER_STREAM_RETIRED')
 IMAGE = r'[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}'
 
 
@@ -51,8 +53,8 @@ def checked(v):
     # #68: new owners get the native shell runner; a shell-executor opt-in is refused, not ignored.
     require(type(v) is dict and KEYS <= set(v) <= KEYS | OPTIONAL and type(v['version']) is int and v['version'] == 1)
     if 'stream' in v:
-        require(type(v['stream']) is dict and set(v['stream']) == STREAM
-                and all(type(v['stream'][key]) is bool for key in STREAM))
+        require(type(v['stream']) is dict and STREAM <= set(v['stream']) <= STREAM | STREAM_OPTIONAL
+                and all(type(value) is bool for value in v['stream'].values()))
     sc = v['postImagesStorageClass']
     require(type(sc) is str and len(sc) <= 253 and all(
         re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in sc.split('.')))
@@ -99,8 +101,9 @@ def stream_env(v, role):
     """#94 (9): the stream env of the api or the runner-controller ({} when `stream` is absent or all false).
     api: RESEARCH_STREAM_ENABLE (its /events), STREAM_TRACE (its relay trace) and the two runner keys (it renders and
     verifies runner Pods too, app/runner_kube.py STREAM_FLAGS). runner-controller: the two runner keys."""
-    flags = v.get('stream') or {key: False for key in STREAM}
-    pairs = [('CODEX_RUNNER_STREAM_TEXT', 'text'), ('CODEX_RUNNER_STREAM_TRACE', 'trace')]
+    flags = {key: False for key in STREAM | STREAM_OPTIONAL} | (v.get('stream') or {})
+    pairs = [('CODEX_RUNNER_STREAM_TEXT', 'text'), ('CODEX_RUNNER_STREAM_TRACE', 'trace'),
+             ('CODEX_RUNNER_STREAM_RETIRED', 'retired')]  # #95 B1: both render and verify runner Pods
     if role == 'api':
         pairs = [('RESEARCH_STREAM_ENABLE', 'enable')] + pairs + [('STREAM_TRACE', 'trace')]
     else:
@@ -449,7 +452,7 @@ def main():
                 target.chmod(0o700 if name.endswith('.sh') else 0o600)
             preflight({name: (args.output/name).read_text() for name in files}, values)
         # #94 (9): what this render does to streaming, before anyone applies it (absent input = all off).
-        stream = {key: bool((values.get('stream') or {}).get(key)) for key in sorted(STREAM)}
+        stream = {key: bool((values.get('stream') or {}).get(key)) for key in sorted(STREAM | STREAM_OPTIONAL)}
         print(json.dumps({'stream': stream, 'streamInput': 'stream' in values}, sort_keys=True), flush=True)
     except Exception:
         p.exit(1, 'Rollout render refused; values and credentials are not printed\n')
