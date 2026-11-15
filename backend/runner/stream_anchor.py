@@ -24,7 +24,8 @@ import sys
 from pathlib import Path
 
 RESULTS = {"anchored", "already", "pending", "refused"}
-REASONS = {None, "configuration", "no_record", "record_write_failed", "request_failed", "not_attested", "no_iat",
+REASONS = {None, "configuration", "no_record", "record_write_failed", "request_failed", "not_attested", "no_iat", "off",
+           "lock_failed",
            "epoch_changed", "already_anchored", "claims_refused"}
 
 

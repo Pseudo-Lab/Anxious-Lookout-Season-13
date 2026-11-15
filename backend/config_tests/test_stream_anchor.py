@@ -190,6 +190,7 @@ def install(auth, envelope, value):
 def owner(tmp_path, monkeypatch):
     monkeypatch.setattr(stream_retired, '_observed', {})
     monkeypatch.setattr(stream_retired, '_cache', {})
+    monkeypatch.setattr(stream_retired, '_poisoned', set())
     monkeypatch.setattr(stream_prefix, '_write', lambda path, payload: (_ for _ in ()).throw(OSError(28, 'full')))
     auth, home, envelope = setup(tmp_path)
     monkeypatch.setenv('STREAM_RETIRED', 'false')
@@ -286,21 +287,43 @@ def test_no_record_or_an_existing_anchor_requests_nothing(owner, capsys):
     assert run(environ, gone, capsys) == (3, {'result': 'refused', 'reason': 'no_record'}) and gone.calls == []
 
 
-def test_a_sidecar_recreated_during_the_request_never_receives_the_anchor(owner, capsys):
+def test_a_sidecar_lost_during_the_request_turns_the_owner_off(owner, capsys):
+    """review r0: a lost record after observation began is a permanent off (no new T0), so no anchor can land."""
     auth, envelope, old, current, environ = owner
 
-    def recreate():
+    def lose():
         (auth.control / stream_retired.FILE).unlink()
-        install(auth, envelope, token(NOW + 5 * HOUR, NOW + 6 * HOUR))  # a new T0 with a new epoch
-    broker = FakeBroker(answer(NOW + 3 * HOUR), during=recreate)
+        install(auth, envelope, token(NOW + 5 * HOUR, NOW + 6 * HOUR))
+    broker = FakeBroker(answer(NOW + 3 * HOUR), during=lose)
+    assert run(environ, broker, capsys) == (4, {'result': 'pending', 'reason': 'off'})
+    assert stream_retired.load(auth.control, auth.journal)[0] is None
+    assert stream_retired.excluded(auth.control, auth.journal, frozenset())[1] == 'off'
+
+
+def test_an_epoch_change_during_the_request_never_receives_the_anchor(owner, capsys):
+    auth, envelope, old, current, environ = owner
+
+    def new_epoch():
+        payload, _ = stream_retired.load(auth.control, auth.journal)
+        stream_retired._write(auth.control, auth.journal, dict(payload, epoch='f' * 32))
+    broker = FakeBroker(answer(NOW + 3 * HOUR), during=new_epoch)
     assert run(environ, broker, capsys) == (4, {'result': 'pending', 'reason': 'epoch_changed'})
-    payload, _ = stream_retired.load(auth.control, auth.journal)
-    assert payload['anchor'] is None
+    assert stream_retired.load(auth.control, auth.journal)[0]['anchor'] is None
+
+
+def test_a_lock_failure_is_a_fixed_answer_and_no_request(owner, capsys):
+    auth, envelope, old, current, environ = owner
+    lock = auth.control / stream_retired.LOCK
+    lock.unlink(missing_ok=True)
+    lock.symlink_to(auth.control / 'elsewhere')
+    broker = FakeBroker(answer(NOW + 3 * HOUR))
+    assert run(environ, broker, capsys) == (3, {'result': 'refused', 'reason': 'lock_failed'}) and broker.calls == []
 
 
 def test_a_changed_email_makes_t0_not_assumable_and_nothing_is_released(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(stream_retired, '_observed', {})
     monkeypatch.setattr(stream_retired, '_cache', {})
+    monkeypatch.setattr(stream_retired, '_poisoned', set())
     auth, home, envelope = setup(tmp_path)
     monkeypatch.setenv('STREAM_RETIRED', 'false')
     install(auth, envelope, token(NOW, NOW + 2 * HOUR, email='first-address@example.invalid'))

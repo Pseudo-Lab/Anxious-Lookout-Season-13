@@ -10,7 +10,14 @@ to the journal's owner / trialId, private file, size caps; missing / damaged / f
   N == R over DISTINCT snapshot fingerprints, no `migration` row), an `anchor` written by the operator's
   runner.stream_anchor from a broker-attested token (route 1, design r4.2), and `maxIat > anchor.iat +
   ATTEST_TOLERANCE + G`. Until then they are `pending`. The runner never requests an anchor by itself.
-- `epoch`: a new id whenever the sidecar is (re)created; an anchor is recorded only for the epoch it was reserved in.
+- `epoch`: a new id when the sidecar is created; an anchor is recorded only for the epoch it was reserved in.
+- **Permanent off (review r0):** two journal marker literals, durable with the journal and outside the sidecar.
+  `#95-retired-seen` is written before the first sidecar; `#95-retired-off!` whenever anything goes wrong - a
+  failed observation (lock, read, write), a lost or damaged sidecar after SEEN, a T0 or record overflow, a lifetime over
+  A1's bound, or an **incomplete history**: the distinct snapshot fingerprints must equal those at T0 plus the token
+  records after T0, so a missed install (and the identifiers it carried) is caught even after a restart without the
+  marker. Once off, nothing is ever excluded for that journal; there is no reset (the evidence that made it off is
+  gone or untrusted).
 - `records`: per install, each long literal's kind - the envelope's access token `token` with its own `exp`, the
   account and e-mail `identifier`. A row with any `identifier` record is never excluded; a row with no record is never
   excluded.
@@ -43,14 +50,21 @@ MARGIN = 600                 # seconds after a token's exp before it may leave t
 G = 11 * 86400               # A1 (user, #95): past service tokens lived <= 10 days; G = 11 days
 LIFETIME_LIMIT = G - 86400   # an installed token living longer than this disables the owner (fail-closed)
 ATTEST_TOLERANCE = 300      # broker/credentials.py ATTEST_TOLERANCE: the anchor may predate the request by this
-FIELDS = {"version", "owner", "trialId", "epoch", "t0Rows", "t0Assumable", "records", "maxIat", "iatAnomaly",
-          "disabled", "lifetimeHoursMax", "lifetimeCount", "anchor", "anchorAttempts", "mac"}
+FIELDS = {"version", "owner", "trialId", "epoch", "t0Rows", "t0Snapshots", "t0Assumable", "records", "maxIat",
+          "iatAnomaly", "disabled", "lifetimeHoursMax", "lifetimeCount", "anchor", "anchorAttempts", "mac"}
 KINDS = {"token", "identifier"}
 STATES = {"off", "unproven", "pending", "proven", "assumed"}
+REASONS = {None, "marked", "record_lost", "overflow", "marker_write_failed", "incomplete", "lifetime",
+           "observe_failed"}
 LOCK = "stream-retired.lock"
+# review r0 (#95): journal marker literals (16 chars: short literals, at most a 15-char short holdback like any
+# covered literal). SEEN: observation began for this journal. OFF: never exclude again for this journal.
+MARKER_SEEN = "#95-retired-seen"
+MARKER_OFF = "#95-retired-off!"
 _lock = threading.Lock()
 _observed = {}
 _cache = {}
+_poisoned = set()   # control dirs this process turned off (also when the OFF marker could not be written)
 
 
 def enabled():
@@ -95,6 +109,7 @@ def _valid(payload, journal):
             and _int_or_none(payload["maxIat"]) and type(payload["iatAnomaly"]) is bool
             and payload["disabled"] in (None, "lifetime")
             and _int_or_none(payload["lifetimeHoursMax"]) and type(payload["lifetimeCount"]) is int
+            and type(payload["t0Snapshots"]) is int
             and isinstance(payload["epoch"], str) and len(payload["epoch"]) == 32 and _hex32(payload["epoch"])
             and type(payload["t0Assumable"]) is bool
             and (payload["anchor"] is None or (isinstance(payload["anchor"], dict) and set(payload["anchor"]) == {"iat"}
@@ -185,28 +200,86 @@ def assumable(journal, rows, current):
         return False
 
 
+def _markers(journal):
+    """(seen, off, distinct snapshot fingerprints) from the store, one transaction. The two markers are journal
+    literals (review r0, #95): durable with the journal itself, MAC'd per row, outside the sidecar - so losing,
+    damaging or recreating the sidecar can neither forget that observation started nor clear a permanent off."""
+    rows = {}
+    with journal.auth.store.transaction() as db:
+        for marker in (MARKER_SEEN, MARKER_OFF):
+            rows[marker] = db.execute("SELECT 1 FROM literals WHERE length=? AND digest=?",
+                                      (len(marker), journal.digest(marker))).fetchone() is not None
+        distinct = db.execute("SELECT COUNT(DISTINCT fingerprint) FROM snapshots").fetchone()[0]
+    return rows[MARKER_SEEN], rows[MARKER_OFF], distinct
+
+
+def _mark(journal, marker):
+    """Write a marker literal into the journal (the normal row path: MAC'd, schema unchanged). Returns success."""
+    try:
+        with journal.auth.store.transaction() as db:
+            journal.remember(db, [marker])
+        return True
+    except Exception:
+        return False
+
+
+def _poison(control, journal, reason):
+    """Permanent off for this journal: the durable marker, the process-level flag (if the marker cannot be written,
+    this process still excludes nothing; after a restart the completeness check catches what was missed), a log."""
+    _poisoned.add(str(control))
+    _mark(journal, MARKER_OFF)
+    _log(control, "off", None, {"reason": reason})
+
+
+def _complete(payload, distinct):
+    """Every snapshot taken after T0 has its install recorded: distinct fingerprints now == those at T0 + the token
+    records not among the T0 rows. A missed observation (failed write, lock, crash) leaves a token - and its install's
+    identifiers - unrecorded, which this detects for good (review r0 blocker)."""
+    t0 = {(item[0], item[1]) for item in payload["t0Rows"]}
+    tokens = {(item[0], item[1]) for item in payload["records"] if item[2] == "token"} - t0
+    return type(distinct) is int and distinct == payload["t0Snapshots"] + len(tokens)
+
+
 def observe_install(control, journal, token, identifiers, iat, exp):
     """After a service install's journal commit: record the kinds of this install's long literals, the provider time
-    and the lifetime. Never raises; on any failure nothing new becomes excludable (a missing record never excludes)."""
+    and the lifetime. Never raises into the install. Any failure here (lock, read, write, a lost or damaged sidecar
+    after observation began, an incomplete history, an overflow, a lifetime over A1's bound) turns the owner off for
+    good: nothing is ever excluded again for this journal (review r0)."""
     if not enabled() or control is None or journal is None:
         return
-    with _lock, file_lock(control):
-        try:
+    try:
+        with _lock, file_lock(control):
+            seen, off, distinct = _markers(journal)
+            if off:
+                _poisoned.add(str(control))
+                _log(control, "off", None, {"reason": "marked"})
+                return
             payload, _ = load(control, journal)
             if payload is None:
-                # First observation (T0), or a missing / damaged / foreign file: every long row now present becomes
-                # a T0 row - conservative (this install's token included; it can never be proven). A new epoch
-                # invalidates any anchor run against the previous file (runner.stream_anchor checks it).
+                if seen:
+                    # observation began earlier and its record is gone or damaged: the history is incomplete
+                    _poison(control, journal, "record_lost")
+                    return
+                # First observation (T0): every long row now present is a T0 row - conservative (this install's
+                # token included; it can never be proven). The seen marker goes first, so a sidecar write failing
+                # after it reads as a loss next time.
                 _, rows = journal.stream_rows(P)
                 current = {(len(value), journal.digest(value)) for value in [token, *identifiers]
                            if isinstance(value, str) and len(value) > P}
-                payload = {"version": VERSION, "owner": journal.owner, "trialId": journal.trial,
-                           "epoch": uuid.uuid4().hex, "t0Rows": sorted([list(row) for row in rows])[:LIMIT],
-                           "t0Assumable": assumable(journal, rows, current), "records": [], "maxIat": None,
-                           "iatAnomaly": False, "disabled": None, "lifetimeHoursMax": None, "lifetimeCount": 0,
-                           "anchor": None, "anchorAttempts": 0}
                 if len(rows) > LIMIT:
-                    payload["iatAnomaly"] = True  # over the cap: never exclude for this directory
+                    _mark(journal, MARKER_SEEN)
+                    _poison(control, journal, "overflow")
+                    return
+                if not _mark(journal, MARKER_SEEN):
+                    _poisoned.add(str(control))
+                    _log(control, "off", None, {"reason": "marker_write_failed"})
+                    return
+                _, _, distinct = _markers(journal)
+                payload = {"version": VERSION, "owner": journal.owner, "trialId": journal.trial,
+                           "epoch": uuid.uuid4().hex, "t0Rows": sorted([list(row) for row in rows]),
+                           "t0Snapshots": distinct, "t0Assumable": assumable(journal, rows, current), "records": [],
+                           "maxIat": None, "iatAnomaly": False, "disabled": None, "lifetimeHoursMax": None,
+                           "lifetimeCount": 0, "anchor": None, "anchorAttempts": 0}
             records = {(item[0], item[1], item[2], item[3]) for item in payload["records"]}
             fresh = set()
             if isinstance(token, str) and P < len(token) <= 65536 and type(exp) is int:
@@ -215,6 +288,13 @@ def observe_install(control, journal, token, identifiers, iat, exp):
                 if isinstance(value, str) and P < len(value) <= 65536:
                     fresh.add((len(value), journal.digest(value), "identifier", None))
             records |= fresh
+            if len(records) > LIMIT:
+                _poison(control, journal, "overflow")
+                return
+            payload["records"] = sorted([list(item) for item in records], key=str)
+            if not _complete(payload, distinct):
+                _poison(control, journal, "incomplete")
+                return
             valid_time = type(iat) is int and type(exp) is int and iat <= exp
             if valid_time:
                 lifetime = exp - iat
@@ -228,17 +308,17 @@ def observe_install(control, journal, token, identifiers, iat, exp):
                     payload["iatAnomaly"] = True
                 elif payload["maxIat"] is None or iat > payload["maxIat"]:
                     payload["maxIat"] = iat
-                    payload["iatAnomaly"] = len(records) > LIMIT
+                    payload["iatAnomaly"] = False
             else:
                 payload["iatAnomaly"] = True
-            if len(records) > LIMIT:
-                payload["iatAnomaly"] = True  # over the cap: never exclude, keep what is known
-            payload["records"] = sorted([list(item) for item in records], key=str)[:LIMIT]
             _write(control, journal, payload)
+            if payload["disabled"]:
+                _poison(control, journal, payload["disabled"])  # A1 disproven for this owner: off for good
+                return
             state, _, _, counts = _evaluate(payload, set())
             _log(control, state, payload, counts)
-        except Exception:
-            _log(control, "unproven", None, None)
+    except Exception:
+        _poison(control, journal, "observe_failed")
 
 
 def _evaluate(payload, protected):
@@ -273,16 +353,35 @@ def _evaluate(payload, protected):
 
 def excluded(control, journal, protected):
     """(rows excludable, state, file state, the assumed part of the rows) for the holdback - service mode with the
-    switch on only. A stat per call; the file is read again only when its (inode, mtime, size) changes."""
+    switch on only. review r0: nothing is excluded when this process turned the owner off, when the journal carries
+    the OFF marker, when observation began (SEEN marker) and the record is missing, damaged, not private or foreign,
+    or when the history is incomplete against the store's snapshots right now. The file's private attributes are
+    checked on every call (not only when its content changes) and are part of the cache key."""
+    from .stream_prefix import _private
+
+    def nothing(state, file_state):
+        return frozenset(), state, file_state, frozenset()
     if not enabled() or control is None or journal is None:
-        return frozenset(), "off", ("off",), frozenset()
+        return nothing("off", ("off",))
+    if str(control) in _poisoned:
+        return nothing("off", ("poisoned",))
+    try:
+        seen, off, distinct = _markers(journal)
+    except Exception:
+        return nothing("unproven", ("markers",))
+    if off:
+        return nothing("off", ("marked",))
+    lost = "off" if seen else "unproven"
     try:
         info = os.lstat(Path(control) / FILE)
-        key = (str(control), info.st_ino, info.st_mtime_ns, info.st_size, journal.owner, journal.trial)
     except FileNotFoundError:
-        return frozenset(), "unproven", ("absent",), frozenset()
+        return nothing(lost, ("absent",))
     except Exception:
-        return frozenset(), "unproven", ("unreadable",), frozenset()
+        return nothing(lost, ("unreadable",))
+    if not _private(info):
+        return nothing(lost, ("not_private",))
+    key = (str(control), info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size, info.st_mode,
+           info.st_uid, info.st_nlink, journal.owner, journal.trial)
     cached = _cache.get(str(control))
     if cached is None or cached[0] != key:
         payload, state = load(control, journal)
@@ -291,8 +390,12 @@ def excluded(control, journal, protected):
         _cache[str(control)] = (key, payload, state)
         cached = _cache[str(control)]
     _, payload, file_state = cached
+    if payload is None:
+        return nothing(lost, file_state)
+    if not _complete(payload, distinct):
+        return nothing("off", ("incomplete",))
     status, proven, assumed, _ = _evaluate(payload, protected)
-    return proven | assumed, status, file_state, assumed
+    return proven | assumed, status, (file_state, distinct), assumed
 
 
 def _log(control, state, payload, counts):
@@ -308,7 +411,8 @@ def _log(control, state, payload, counts):
                 "assumed": (counts or {}).get("assumed"),
                 "t0Assumable": None if payload is None else payload["t0Assumable"],
                 "anchor": None if payload is None else payload["anchor"] is not None,
-                "anchorAttempts": None if payload is None else payload["anchorAttempts"]}
+                "anchorAttempts": None if payload is None else payload["anchorAttempts"],
+                "reason": (counts or {}).get("reason") if (counts or {}).get("reason") in REASONS else "other"}
         key = str(control)
         if _observed.get(key) == line:
             return
@@ -323,41 +427,57 @@ def _log(control, state, payload, counts):
 # --- route 1: the operator's anchor (runner.stream_anchor; design r4.2) --------------------------------------------
 
 def reserve_anchor(control, journal):
-    """Before the anchor request: a valid sidecar with no anchor yet -> anchorAttempts += 1 written durably, returns the
-    epoch to bind the answer to; otherwise (missing, damaged, foreign, already anchored, write failed) returns a fixed
-    reason and nothing is requested. The count is a record of operator runs, not a cap: the runner never requests."""
-    with _lock, file_lock(control):
-        payload, _ = load(control, journal)
-        if payload is None:
-            return None, "no_record"
-        if payload["anchor"] is not None:
-            return None, "already_anchored"
-        payload["anchorAttempts"] += 1
-        try:
-            _write(control, journal, payload)
-        except Exception:
-            return None, "record_write_failed"
-        return payload["epoch"], None
+    """Before the anchor request: a valid, complete sidecar with no anchor, for an owner not turned off ->
+    anchorAttempts += 1 written durably, returns the epoch to bind the answer to; otherwise returns a fixed reason and
+    nothing is requested. Never raises (review r0: a lock failure is a reason, not an exception). The count is a record
+    of operator runs, not a cap: the runner never requests."""
+    try:
+        with _lock, file_lock(control):
+            seen, off, distinct = _markers(journal)
+            if off or str(control) in _poisoned:
+                return None, "off"
+            payload, _ = load(control, journal)
+            if payload is None:
+                return None, "no_record"
+            if not _complete(payload, distinct) or payload["disabled"]:
+                return None, "off"
+            if payload["anchor"] is not None:
+                return None, "already_anchored"
+            payload["anchorAttempts"] += 1
+            try:
+                _write(control, journal, payload)
+            except Exception:
+                return None, "record_write_failed"
+            return payload["epoch"], None
+    except Exception:
+        return None, "lock_failed"
 
 
 def record_anchor(control, journal, epoch, iat):
     """After an attested answer: write `anchor = {iat}` only if the sidecar is still the same epoch with no anchor (a
-    sidecar recreated meanwhile - new T0 - never receives an anchor from the previous one). Returns a fixed result."""
+    sidecar recreated meanwhile - new T0 - never receives an anchor from the previous one) and the owner is not off.
+    Returns a fixed result; never raises."""
     if type(iat) is not int:
         return "no_iat"
-    with _lock, file_lock(control):
-        payload, _ = load(control, journal)
-        if payload is None:
-            return "no_record"
-        if payload["epoch"] != epoch:
-            return "epoch_changed"
-        if payload["anchor"] is not None:
-            return "already_anchored"
-        payload["anchor"] = {"iat": iat}
-        try:
-            _write(control, journal, payload)
-        except Exception:
-            return "record_write_failed"
-        state, _, _, counts = _evaluate(payload, set())
-        _log(control, state, payload, counts)
-        return "anchored"
+    try:
+        with _lock, file_lock(control):
+            _, off, _ = _markers(journal)
+            if off or str(control) in _poisoned:
+                return "off"
+            payload, _ = load(control, journal)
+            if payload is None:
+                return "no_record"
+            if payload["epoch"] != epoch:
+                return "epoch_changed"
+            if payload["anchor"] is not None:
+                return "already_anchored"
+            payload["anchor"] = {"iat": iat}
+            try:
+                _write(control, journal, payload)
+            except Exception:
+                return "record_write_failed"
+            state, _, _, counts = _evaluate(payload, set())
+            _log(control, state, payload, counts)
+            return "anchored"
+    except Exception:
+        return "lock_failed"

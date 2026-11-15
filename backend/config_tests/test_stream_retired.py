@@ -39,6 +39,7 @@ def service(tmp_path, monkeypatch):
     monkeypatch.setenv('STREAM_RETIRED', 'true')
     monkeypatch.setattr(stream_retired, '_observed', {})
     monkeypatch.setattr(stream_retired, '_cache', {})
+    monkeypatch.setattr(stream_retired, '_poisoned', set())
     # the prefix write fails: the tokens stay uncovered, so the retired rows really hold the stream (production #93)
     monkeypatch.setattr(stream_prefix, '_write', lambda path, payload: (_ for _ in ()).throw(OSError(28, 'full')))
     auth, home, envelope = setup(tmp_path)
@@ -157,9 +158,11 @@ def test_the_local_clock_is_never_used(service, monkeypatch):
     before = stream_retired.excluded(auth.control, auth.journal, frozenset())[0]
     monkeypatch.setattr(time, 'time', lambda: NOW + 365 * 86400)   # forward a year
     monkeypatch.setattr(stream_retired, '_cache', {})
+    monkeypatch.setattr(stream_retired, '_poisoned', set())
     assert stream_retired.excluded(auth.control, auth.journal, frozenset())[0] == before
     monkeypatch.setattr(time, 'time', lambda: 0)                      # and back
     monkeypatch.setattr(stream_retired, '_cache', {})
+    monkeypatch.setattr(stream_retired, '_poisoned', set())
     assert stream_retired.excluded(auth.control, auth.journal, frozenset())[0] == before
 
 
@@ -185,7 +188,8 @@ def test_a_damaged_or_foreign_record_excludes_nothing(service, damage, tmp_path)
         path.write_text('{')
     stream_retired._cache.clear()
     hold_ = hold(auth)
-    assert hold_.retired_state == 'unproven' and hold_.retired_excluded == 0
+    # review r0: once observation began, a damaged, foreign, linked or shared record is permanently off
+    assert hold_.retired_state == 'off' and hold_.retired_excluded == 0
 
 
 def test_a_failed_record_write_never_creates_an_exclusion(service, monkeypatch):
@@ -222,7 +226,7 @@ def test_logs_hold_states_and_counts_only_and_repeat_nothing(service, caplog):
              if r.getMessage().startswith('runner_stream_retired ')]
     assert lines and set(lines[-1]) == {'state', 't0Rows', 'records', 'proven', 'iatAnomaly', 'disabled',
                                         'lifetimeHoursMax', 'lifetimeCount', 'assumed', 't0Assumable', 'anchor',
-                                        'anchorAttempts'}
+                                        'anchorAttempts', 'reason'}
     assert lines[-1]['lifetimeHoursMax'] == 2 and lines[-1]['lifetimeCount'] == 3
     assert (lines[-1]['assumed'], lines[-1]['anchor'], lines[-1]['anchorAttempts']) == (0, False, 0)
     for value in values:
@@ -231,3 +235,93 @@ def test_logs_hold_states_and_counts_only_and_repeat_nothing(service, caplog):
     for _ in range(20):
         hold(auth)
     assert len([r for r in caplog.records if r.getMessage().startswith('runner_stream_retired ')]) == count
+
+
+# --- review r0 (2026-11-16) counterexamples ----------------------------------------------------------------------------
+
+def test_a_failed_observation_ends_an_existing_exclusion(service, monkeypatch):
+    auth, envelope = service
+    chain(auth, envelope)
+    assert hold(auth).retired_excluded == 1
+    monkeypatch.setattr(stream_retired, '_write', lambda *a: (_ for _ in ()).throw(OSError(28, 'full')))
+    install(auth, envelope, token(None, NOW + 10 * HOUR))
+    hold_ = hold(auth)
+    assert hold_.retired_state == 'off' and hold_.retired_excluded == 0
+
+
+def test_a_failed_identifier_observation_is_never_lost_by_a_later_success(service, monkeypatch):
+    """Even when the OFF marker cannot be written and the process restarts: the history count catches it."""
+    auth, envelope = service
+    first, second, third = chain(auth, envelope)
+    real_write, real_mark = stream_retired._write, stream_retired._mark
+    monkeypatch.setattr(stream_retired, '_write', lambda *a: (_ for _ in ()).throw(OSError(28, 'full')))
+    monkeypatch.setattr(stream_retired, '_mark', lambda journal, marker: False)
+    install(auth, envelope, token(NOW + 20 * HOUR, NOW + 21 * HOUR, email=second))  # second used as an identifier
+    monkeypatch.setattr(stream_retired, '_write', real_write)
+    monkeypatch.setattr(stream_retired, '_mark', real_mark)
+    stream_retired._poisoned.clear()  # a restart: the process flag is gone
+    stream_retired._cache.clear()
+    assert hold(auth).retired_state == 'off'  # incomplete against the snapshots even before the next install
+    install(auth, envelope, token(NOW + 30 * HOUR, NOW + 31 * HOUR))
+    row = (len(second), auth.journal.digest(second))
+    assert row not in stream_retired.excluded(auth.control, auth.journal, frozenset())[0]
+    assert hold(auth).retired_state == 'off' and hold(auth).retired_excluded == 0
+
+
+@pytest.mark.parametrize('change', ['chmod', 'hardlink'])
+def test_a_file_safety_change_after_caching_ends_the_exclusion(service, tmp_path, change):
+    auth, envelope = service
+    chain(auth, envelope)
+    assert hold(auth).retired_excluded == 1  # cached now
+    path = auth.control / stream_retired.FILE
+    if change == 'chmod':
+        os.chmod(path, 0o644)
+    else:
+        os.link(path, auth.control / 'second-link')
+    hold_ = hold(auth)
+    assert hold_.retired_state == 'off' and hold_.retired_excluded == 0
+
+
+def test_a_lock_failure_never_breaks_the_install_and_turns_the_owner_off(service):
+    auth, envelope = service
+    chain(auth, envelope)
+    lock = auth.control / stream_retired.LOCK
+    lock.unlink(missing_ok=True)
+    lock.symlink_to(auth.control / 'elsewhere')
+    install(auth, envelope, token(NOW + 20 * HOUR, NOW + 21 * HOUR))  # does not raise
+    assert auth.snapshot is not None
+    hold_ = hold(auth)
+    assert hold_.retired_state == 'off' and hold_.retired_excluded == 0
+
+
+def test_a_t0_overflow_is_off_for_good(tmp_path, monkeypatch):
+    monkeypatch.setattr(stream_retired, '_observed', {})
+    monkeypatch.setattr(stream_retired, '_cache', {})
+    monkeypatch.setattr(stream_retired, '_poisoned', set())
+    monkeypatch.setattr(stream_prefix, '_write', lambda path, payload: (_ for _ in ()).throw(OSError(28, 'full')))
+    monkeypatch.setattr(stream_retired, 'LIMIT', 4)
+    auth, home, envelope = setup(tmp_path)
+    monkeypatch.setenv('STREAM_RETIRED', 'false')
+    for i in range(6):
+        install(auth, envelope, token(NOW + i * HOUR, NOW + (i + 2) * HOUR))
+    monkeypatch.setenv('STREAM_RETIRED', 'true')
+    for i in range(6, 10):
+        install(auth, envelope, token(NOW + i * (HOUR + 700), NOW + (i + 1) * (HOUR + 700)))
+    hold_ = hold(auth)
+    assert hold_.retired_state == 'off' and hold_.retired_excluded == 0
+
+
+def test_a_lifetime_off_survives_the_loss_of_the_record(service):
+    auth, envelope = service
+    chain(auth, envelope)
+    long = stream_retired.LIFETIME_LIMIT + HOUR
+    install(auth, envelope, token(NOW + 10 * HOUR, NOW + 10 * HOUR + long))
+    assert hold(auth).retired_state == 'off'
+    (auth.control / stream_retired.FILE).unlink()
+    stream_retired._poisoned.clear()  # a restart
+    stream_retired._cache.clear()
+    base = NOW + 10 * HOUR + long
+    for step in range(3):
+        install(auth, envelope, token(base + step * (HOUR + 700), base + (step + 1) * (HOUR + 700)))
+    hold_ = hold(auth)
+    assert hold_.retired_state == 'off' and hold_.retired_excluded == 0
