@@ -77,6 +77,31 @@ class Drain(BaseModel):
         return value
 
 
+IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{0,47}")
+EXCEPTION_NAME = re.compile(r"[A-Z][A-Za-z0-9]{0,47}")
+
+
+def log_tool_reply(message, turn, outcome, elapsed):
+    """#94 (2): one line per dynamic tool reply, so a failed tool shown on screen can be traced to its cause. Only
+    identifier-shaped names and codes, the HTTP status, the stage reached and a duration - never the arguments, the
+    result, the token or a message text. Never raises."""
+    try:
+        params = message.get("params") if isinstance(message, dict) else None
+        tool = params.get("tool") if isinstance(params, dict) else None
+        code = outcome.get("code")
+        exception = outcome.get("exception")
+        line = {"requestId": str(turn["request"]) if turn and turn.get("request") else None,
+                "tool": tool if isinstance(tool, str) and IDENTIFIER.fullmatch(tool) else "other",
+                "stage": outcome.get("stage"), "success": outcome.get("success") is True,
+                "status": outcome["status"] if type(outcome.get("status")) is int else None,
+                "code": None if code is None else code if isinstance(code, str) and IDENTIFIER.fullmatch(code) else "other",
+                "exception": None if exception is None else exception if EXCEPTION_NAME.fullmatch(exception) else "other",
+                "ms": round(elapsed, 3)}
+        logging.getLogger("uvicorn.error").info("runner_tool_reply %s", json.dumps(line, sort_keys=True))
+    except Exception:
+        pass
+
+
 def bind_owner(root, owner):
     if root.is_symlink():
         raise RuntimeError("Runner state must be a private volume")
@@ -857,40 +882,55 @@ class Native:
 
     def reply_tool(self, message, turn):
         started = time.monotonic()
+        outcome = {"stage": "unknown"}
         try:
-            return self._reply_tool(message, turn)
+            return self._reply_tool(message, turn, outcome)
         finally:
+            elapsed = (time.monotonic() - started) * 1000
             if turn and "timing" in turn:
                 turn["timing"]["toolCalls"] += 1
-                turn["timing"]["toolMs"] += (time.monotonic() - started) * 1000
+                turn["timing"]["toolMs"] += elapsed
+            log_tool_reply(message, turn, outcome, elapsed)
 
-    def _reply_tool(self, message, turn):
+    def _reply_tool(self, message, turn, outcome):
         params = message.get("params", {})
         failure = None
         valid = (not self.blocked_reason and turn and turn.get("turnId") and params.get("threadId") == turn["thread"]
                  and params.get("turnId") == turn["turnId"] and isinstance(params.get("callId"), str)
                  and params["callId"] and (turn["thread"], turn["turnId"]) not in self.completed)
         if not valid:
+            outcome["stage"] = "turn_mismatch"
             success, result = False, {"error": {"code": "native_turn_mismatch", "message": "Storage tool is outside the active native turn"}}
         else:
             try:
+                outcome["stage"] = "binding"
                 self.check_binding()
                 if self.auth:
+                    outcome["stage"] = "permission"
                     self.auth.permitted_tool(params["arguments"])
                 if not tool_allowed(turn.get("scope"), params.get("tool"), params.get("arguments")):
+                    outcome["stage"] = "scope"
                     success, result = False, {"error": {"code": "tool_not_allowed", "message": "Tool is unavailable in this request's research mode"}}
                 else:
+                    outcome["stage"] = "callback"
                     with httpx.Client(timeout=15, trust_env=False, follow_redirects=False) as client:
                         reply = client.post(self.callback_url, headers={"Authorization": "Bearer " + turn["token"]},
                                             json={"sessionId": turn["session"], "requestId": turn["request"],
                                                   "name": params["tool"], "arguments": params["arguments"]})
+                    outcome["status"] = reply.status_code
+                    outcome["stage"] = "callback_body"
                     success, result = reply.is_success, reply.json()
+                    outcome["stage"] = "callback_done"
             except CodexFailure as rejected:
                 failure = rejected
                 self.blocked_reason = rejected.reason
                 success, result = False, {"error": {"code": str(rejected), "message": "Storage tool permission is unavailable"}}
-            except Exception:
+            except Exception as error:
+                outcome["exception"] = type(error).__name__
                 success, result = False, {"error": {"code": "not_ready", "message": "Storage tool did not confirm success"}}
+        outcome["success"] = success
+        error = result.get("error") if isinstance(result, dict) else None
+        outcome["code"] = error.get("code") if isinstance(error, dict) else None
         if self.auth:
             result = self.auth.sanitize(result)
         self.send({"id": message["id"], "result": {"success": success, "contentItems": [{"type": "inputText", "text": json.dumps(result, ensure_ascii=True)}]}})
