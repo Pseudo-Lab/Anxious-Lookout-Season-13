@@ -276,12 +276,15 @@ check("J. post detail shows like/comment 준비 중", await appears(page.getByTe
 }
 
 // K. 로그아웃과 me 조회 경쟁: 로그아웃 이후 늦게 도착한 authenticated 응답이 로그인 UI를 되살리면 안 된다.
+// me 재조회는 상태 화면의 "다시 확인"으로 일으킨다. #94부터 상태 화면은 관리자만 보므로 승인된 관리자로 로그인한다
+// (승인 계정 메뉴 "글 쓰기"는 관리자에게도 보이므로 아래 "되살아나지 않음" 단언은 그대로 유효하다).
 async function loginApproved() {
-  await setMock("me=normal&nextLogin=approved&logout=normal");
+  await setMock("me=normal&nextLogin=admin&logout=normal");
   await page.goto(U("/"));
   await header.getByRole("link", { name: "GitHub 로그인" }).first().click();
   await header.getByText("mock-user").first().waitFor();
   await page.goto(U("/status/"));
+  await page.getByRole("button", { name: "다시 확인", exact: true }).waitFor();
   await page.waitForFunction(() => !document.body.innerText.includes("확인 중..."), null, { timeout: 10000 });
 }
 async function assertStaysLoggedOut(label) {
@@ -290,6 +293,7 @@ async function assertStaysLoggedOut(label) {
   check(`${label}: login link remains`, await header.getByRole("link", { name: "GitHub 로그인" }).first().isVisible());
   check(`${label}: user name not restored`, (await header.getByText("mock-user").count()) === 0);
   check(`${label}: approved menu not restored`, (await header.getByRole("link", { name: "글 쓰기" }).count()) === 0);
+  check(`${label}: admin menus not restored`, (await header.getByRole("link", { name: "관리" }).count()) === 0 && (await header.getByRole("link", { name: "상태" }).count()) === 0);
   const real = await context.request.get(`${ORIGIN}${BASE}/api/auth/me`);
   check(`${label}: backend me is 401`, real.status() === 401, `status ${real.status()}`);
 }
