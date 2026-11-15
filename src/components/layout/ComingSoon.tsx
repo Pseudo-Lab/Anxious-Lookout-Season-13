@@ -1,4 +1,5 @@
 import Link from "next/link";
+import AdminOnly from "@/components/layout/AdminOnly";
 
 interface ComingSoonProps {
   title: string;
@@ -22,9 +23,12 @@ export default function ComingSoon({ title, description }: ComingSoonProps) {
         <Link href="/" className="text-indigo-600 hover:text-indigo-800">
           홈으로
         </Link>
-        <Link href="/status/" className="text-stone-500 hover:text-stone-700">
-          서비스 상태
-        </Link>
+        {/* #94: 서비스 상태는 관리자에게만 */}
+        <AdminOnly>
+          <Link href="/status/" className="text-stone-500 hover:text-stone-700">
+            서비스 상태
+          </Link>
+        </AdminOnly>
       </div>
     </section>
   );

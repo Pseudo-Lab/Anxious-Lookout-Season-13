@@ -22,6 +22,9 @@
     "allowlist": {"oneOf": [{"type": "null"}, {"type": "array", "minItems": 1, "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/uuid"}}]},
     "maxPods": {"type": "integer", "minimum": 1, "maximum": 100},
     "idleSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
-    "nativeSizeGiB": {"$ref": "#/$defs/size"}, "controlSizeGiB": {"$ref": "#/$defs/size"}
+    "nativeSizeGiB": {"$ref": "#/$defs/size"}, "controlSizeGiB": {"$ref": "#/$defs/size"},
+    "stream": {"type": "object", "additionalProperties": false, "required": ["enable", "text", "trace"],
+               "description": "#94 (9) optional #90 stream flags; absent = all off. enable: api RESEARCH_STREAM_ENABLE; text: CODEX_RUNNER_STREAM_TEXT (api, runner-controller); trace: CODEX_RUNNER_STREAM_TRACE (api, runner-controller) and api STREAM_TRACE. The renderer owns these keys: inherited values are dropped.",
+               "properties": {"enable": {"type": "boolean"}, "text": {"type": "boolean"}, "trace": {"type": "boolean"}}}
   }
 }

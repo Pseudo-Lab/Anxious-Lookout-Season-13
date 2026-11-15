@@ -59,11 +59,11 @@ await page.waitForLoadState("networkidle");
 check("login page shows no-API notice", await appears(page.getByText("API 서버가 없어 로그인을 제공하지 않습니다")));
 check("login page has no GitHub login link", (await page.getByRole("link", { name: /GitHub로 계속하기/ }).count()) === 0);
 
+// #94: 서비스 상태는 관리자만 본다. 정적 배포에는 로그인이 없으므로 메뉴가 없고, 주소로 들어오면 안내만 보인다.
+check("header has no status link (admin only)", (await header.getByRole("link", { name: "상태" }).count()) === 0);
 await page.goto(U("/status/"));
-await page.waitForFunction(() => !document.body.innerText.includes("확인 중..."), null, { timeout: 10000 });
-const st = await page.locator("main").innerText();
-check("status shows no-API for API rows", st.includes("이 배포(정적 사이트)에는 API 서버가 없습니다."));
-check("status shows login not provided", st.includes("이 배포에서는 로그인을 제공하지 않습니다."));
+check("status page shows admin-only notice", await appears(page.getByText("서비스 상태는 관리자만 볼 수 있습니다.")));
+check("status page shows no API details", !(await page.locator("main").innerText()).includes("API 상태"));
 
 // M3 개인/공개 화면: API 없는 배포 안내만 표시하고 조회하지 않는다.
 for (const p of ["/research/", "/research/material/?id=x", "/research/session/?id=x"]) {

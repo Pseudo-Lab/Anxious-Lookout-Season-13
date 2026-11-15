@@ -105,15 +105,38 @@ check("B. session cookie HttpOnly, Path=<base>/api", sidCookie?.httpOnly && sidC
 const ls = await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }));
 check("B. no token in local/sessionStorage", ls === "{}", ls);
 
-// C. 상태 화면
+// C. 상태 화면(#94: 관리자만). 일반(승인 대기) 계정에는 메뉴·홈 버튼이 없고, 주소로 들어오면 안내만 보인다.
+check("C. non-admin: no 상태 nav", (await header.getByRole("link", { name: "상태" }).count()) === 0);
+check("C. non-admin: no 서비스 상태 button on home", (await page.locator("main").getByRole("link", { name: "서비스 상태" }).count()) === 0);
 await page.goto(U("/status/"));
-await page.getByText("API 상태").waitFor();
-await page.waitForFunction(() => !document.body.innerText.includes("확인 중..."), null, { timeout: 10000 });
-const statusText = await page.locator("main").innerText();
-check("C. status shows web sha", statusText.includes(EXPECT_SHA), "");
-check("C. status shows API 정상", statusText.includes("정상 (요청을 받을 준비가 되었습니다)"));
-check("C. status shows API version", statusText.includes("b".repeat(40)));
-check("C. status shows account pending", statusText.includes("mock-user") && statusText.includes("승인 대기"));
+check("C. non-admin: status page shows admin-only notice", await appears(page.getByText("서비스 상태는 관리자만 볼 수 있습니다.")));
+check("C. non-admin: no status details", !(await page.locator("main").innerText()).includes("API 상태"));
+// 관리자(별도 브라우저)는 메뉴와 상세를 본다.
+async function adminStatusPage() {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  const h = p.locator("header").first();
+  await setMock("nextLogin=admin");
+  await p.goto(U("/"));
+  await h.getByRole("link", { name: "GitHub 로그인" }).first().click();
+  await h.getByText("mock-user").first().waitFor();
+  await setMock("nextLogin=pending");
+  return { ctx, p, h };
+}
+{
+  const a = await adminStatusPage();
+  check("C. admin: 상태 nav shown", await appears(a.h.getByRole("link", { name: "상태" })));
+  check("C. admin: 서비스 상태 button on home", await appears(a.p.locator("main").getByRole("link", { name: "서비스 상태" })));
+  await a.p.goto(U("/status/"));
+  await a.p.getByText("API 상태").waitFor();
+  await a.p.waitForFunction(() => !document.body.innerText.includes("확인 중..."), null, { timeout: 10000 });
+  const statusText = await a.p.locator("main").innerText();
+  check("C. status shows web sha", statusText.includes(EXPECT_SHA), "");
+  check("C. status shows API 정상", statusText.includes("정상 (요청을 받을 준비가 되었습니다)"));
+  check("C. status shows API version", statusText.includes("b".repeat(40)));
+  check("C. status shows account (admin)", statusText.includes("mock-user") && statusText.includes("관리자"));
+  await a.ctx.close();
+}
 
 // D. 로그아웃 실패(403) -> 로그인 유지 + 오류 표시
 await setMock("logout=403");
@@ -174,20 +197,26 @@ for (const m of ["503", "html502"]) {
   check(`H. me ${m} -> header shows 확인 실패`, await errBtn.isVisible());
   check(`H. me ${m} -> no login link shown`, (await header.getByRole("link", { name: "GitHub 로그인" }).count()) === 0);
 }
+// #94: 로그인 상태를 확인하지 못하면 관리자인지 알 수 없으므로 상태 화면은 안내만 보인다.
 await page.goto(U("/status/"));
-await page.waitForFunction(() => !document.body.innerText.includes("확인 중..."), null, { timeout: 10000 });
-check("H. status account row shows 확인 실패", (await page.locator("main").innerText()).includes("로그인 상태를 확인하지 못했습니다"));
+check("H. me error: status page stays admin-only", await appears(page.getByText("서비스 상태는 관리자만 볼 수 있습니다.")));
 await setMock("me=normal");
 await header.getByRole("button", { name: /로그인 상태 확인 실패/ }).first().click();
 await header.getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
 check("H. retry after recovery -> unauthenticated", true);
 
-// I. health 503
-await setMock("health=503");
-await page.goto(U("/status/"));
-await page.waitForFunction(() => !document.body.innerText.includes("확인 중..."), null, { timeout: 10000 });
-check("I. health 503 -> 준비되지 않음", (await page.locator("main").innerText()).includes("준비되지 않음 (not_ready)"));
-await setMock("health=normal");
+// I. health 503(관리자 화면)
+{
+  const prevLogin = "pending";
+  const a = await adminStatusPage();
+  await setMock("health=503");
+  await a.p.goto(U("/status/"));
+  await a.p.getByText("API 상태").waitFor();
+  await a.p.waitForFunction(() => !document.body.innerText.includes("확인 중..."), null, { timeout: 10000 });
+  check("I. health 503 -> 준비되지 않음", (await a.p.locator("main").innerText()).includes("준비되지 않음 (not_ready)"));
+  await setMock(`health=normal&nextLogin=${prevLogin}`);
+  await a.ctx.close();
+}
 
 // J. 글 상세: 좋아요·댓글 준비 중
 await page.goto(U("/posts/welcome-to-observatory/"));
@@ -247,12 +276,15 @@ check("J. post detail shows like/comment 준비 중", await appears(page.getByTe
 }
 
 // K. 로그아웃과 me 조회 경쟁: 로그아웃 이후 늦게 도착한 authenticated 응답이 로그인 UI를 되살리면 안 된다.
+// me 재조회는 상태 화면의 "다시 확인"으로 일으킨다. #94부터 상태 화면은 관리자만 보므로 승인된 관리자로 로그인한다
+// (승인 계정 메뉴 "글 쓰기"는 관리자에게도 보이므로 아래 "되살아나지 않음" 단언은 그대로 유효하다).
 async function loginApproved() {
-  await setMock("me=normal&nextLogin=approved&logout=normal");
+  await setMock("me=normal&nextLogin=admin&logout=normal");
   await page.goto(U("/"));
   await header.getByRole("link", { name: "GitHub 로그인" }).first().click();
   await header.getByText("mock-user").first().waitFor();
   await page.goto(U("/status/"));
+  await page.getByRole("button", { name: "다시 확인", exact: true }).waitFor();
   await page.waitForFunction(() => !document.body.innerText.includes("확인 중..."), null, { timeout: 10000 });
 }
 async function assertStaysLoggedOut(label) {
@@ -261,6 +293,7 @@ async function assertStaysLoggedOut(label) {
   check(`${label}: login link remains`, await header.getByRole("link", { name: "GitHub 로그인" }).first().isVisible());
   check(`${label}: user name not restored`, (await header.getByText("mock-user").count()) === 0);
   check(`${label}: approved menu not restored`, (await header.getByRole("link", { name: "글 쓰기" }).count()) === 0);
+  check(`${label}: admin menus not restored`, (await header.getByRole("link", { name: "관리" }).count()) === 0 && (await header.getByRole("link", { name: "상태" }).count()) === 0);
   const real = await context.request.get(`${ORIGIN}${BASE}/api/auth/me`);
   check(`${label}: backend me is 401`, real.status() === 401, `status ${real.status()}`);
 }

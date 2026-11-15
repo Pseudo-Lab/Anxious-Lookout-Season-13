@@ -142,28 +142,50 @@ const directFixtureDocs = async (p = api) =>
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 const userMsgs = (m, text) => m.locator("li[data-role=user]", { hasText: text });
 
+// #94 review: 대화창은 로그인 확인·기억한 대화 복원 뒤에 목록 또는 대화 화면을 그린다. 한 번만 보고 넘어가면 복원보다 앞서
+// '대화 목록' 버튼을 놓친다. 목록 폼이나 '대화 목록' 버튼 중 하나가 보일 때까지 기다리며 필요하면 목록으로 간다.
+// 끝내 목록에 못 가면 패널 상태를 오류에 남긴다.
+async function toChatList(panel, p) {
+  const form = panel.getByLabel("새 대화 제목");
+  const back = panel.getByRole("button", { name: "← 대화 목록" });
+  for (let i = 0; i < 150; i++) {
+    if (await form.isVisible().catch(() => false)) return;
+    if (await back.isVisible().catch(() => false)) await back.click({ timeout: 2000 }).catch(() => {});
+    await p.waitForTimeout(200);
+  }
+  throw new Error(`chat list not reached: ${(await panel.innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 240)}`);
+}
 // #44: 내 연구에 대화 탭이 없다. 대화 목록·Codex 안내·새 대화 폼은 공통 대화창의 목록 화면에 있다.
 async function chatList(p) {
   const c = chatOf(p);
   // 새로고침·이동 뒤 대화창은 기억한 열림 상태로 다시 그려진다: 정착할 때까지 보고 나서 연다
-  const button = p.getByRole("button", { name: "Codex 대화창 열기" });
+  const button = p.getByRole("button", { name: "대화창 열기" });
   for (let i = 0; i < 50 && !(await c.isVisible()); i++) {
     if (await button.isVisible()) await button.click({ timeout: 2000 }).catch(() => {});
     await p.waitForTimeout(200);
   }
-  await c.getByRole("heading", { name: "Codex 대화" }).waitFor();
-  const back = c.getByRole("button", { name: "← 대화 목록" });
-  if (await back.isVisible()) await back.click();
-  await c.getByLabel("새 대화 제목").waitFor();
+  await c.getByRole("heading", { name: "대화", exact: true }).waitFor();
+  await toChatList(c, p);
   return c;
 }
 // 새 대화는 페이지 이동 없이 대화창에 열린다. 그 뒤 질문할 페이지(기본: 문서 작업 공간)로 옮긴다. 반환값은 기존 대화 링크.
 async function newSession(p, title, at = DOCS) {
   await p.goto(U("/research/"));
   const m = await chatList(p);
+  const before = (await chatUi(p))?.sessionId ?? null;
   await m.getByLabel("새 대화 제목").fill(title);
   await m.getByRole("button", { name: "새 대화" }).click();
-  await chatOf(p).getByRole("heading", { name: title }).waitFor();
+  // #94: 대화 화면은 제목을 표시하지 않는다. 새로 만든 대화로 바뀌었는지는 기억된 sessionId와 입력창으로 확인한다.
+  await p.waitForFunction(
+    (prev) => {
+      const k = Object.keys(sessionStorage).find((key) => key.endsWith(":chat-ui"));
+      const id = k ? JSON.parse(sessionStorage.getItem(k)).sessionId : null;
+      return !!id && id !== prev;
+    },
+    before,
+    { timeout: 15000 }
+  );
+  await chatOf(p).getByLabel("메시지").waitFor();
   const url = U(`/research/session/?id=${(await chatUi(p)).sessionId}`);
   await p.goto(at);
   await chatOf(p).getByLabel("메시지").waitFor();
@@ -185,38 +207,37 @@ async function settled(m) {
   await m.getByLabel("메시지").and(m.locator(":enabled")).waitFor({ timeout: 30000 });
 }
 
-// O1. 상태: fixture 연결을 실제 모델처럼 표시하지 않는다
+// O1. 상태(#94): 연결 상태 패널은 관리자만 보며, 편집자(이 시험 계정)에게는 보이지 않는다. 모델명은 누구에게도 표시하지 않는다.
 await page.goto(U("/research/"));
 {
   const c = await chatList(page);
-  check("O1. codex status shown as fixture (not real)", await appears(c.getByText("테스트용 모의 Codex")));
-  check("O1. server-fixed model shown display-only", await appears(c.getByText("모델: gpt-6.1-sol (서버에서 고정)")));
+  await page.waitForTimeout(800);
+  check("O1. editor: no connection status panel", (await c.getByText(/테스트용 모의 응답|연결되어 있습니다/).count()) === 0);
+  check("O1. no model name shown", (await c.getByText(/모델:|서버에서 고정/).count()) === 0);
 }
 
 // O2. 일반 메시지: 실제 adapter → 실제 storage tool callback → 전체 도구 입력·출력과 원본
 const s1 = await newSession(page, "오프라인 세션 1");
 const docs0 = await fixtureDocs();
 await send(chat, "자료를 정리해줘");
-check("O2. running shown", await appears(chat.getByText("Codex가 응답하는 중입니다."), 10000));
+check("O2. running shown", await appears(chat.getByText("응답하는 중입니다."), 10000));
 check("O2. offline answer shown", await appears(chat.getByText("Offline fixture answer")));
 await settled(chat);
 const toolBtn = chat.getByRole("button", { name: /research_document_save/ });
 check("O2. tool call listed", await appears(toolBtn));
 await toolBtn.first().click();
 check("O2. full tool input shown inert", await appears(chat.locator("pre", { hasText: "Complete fixture tool input" })));
-await chat.getByRole("button", { name: "저장된 원본 기록 보기" }).first().click();
-check("O2. stored raw item shown", await appears(chat.locator("pre", { hasText: "research_document_save" })));
+check("O2. no raw record entry (#94)", (await chat.getByRole("button", { name: /원본 기록/ }).count()) === 0);
 check("O2. tool left one new-document proposal via real API", (await fixtureDocs()) === docs0 + 1, `${docs0} -> ${await fixtureDocs()}`);
 check("O2. D1: no document created directly", (await directFixtureDocs()) === 0, String(await directFixtureDocs()));
-check("O2. chat links the new-document proposal", await appears(chat.getByText("Codex가 새 문서를 제안했습니다", { exact: false })));
+check("O2. chat links the new-document proposal", await appears(chat.getByText("새 문서 제안이 만들어졌습니다", { exact: false })));
 
 // O3. 미기록 실패 입력: failed + platform 표시, 후속 명시 입력 성공 후에도 보존
 await send(chat, "/fixture/unrecorded");
 const unrec = userMsgs(chat, "/fixture/unrecorded");
 check("O3. unrecorded input labeled 미기록", await appears(unrec.getByText("미기록 입력")));
 check("O3. failed state shown", await appears(chat.getByText("마지막 요청이 실패했습니다")));
-await unrec.getByRole("button", { name: "보존된 입력 기록" }).click();
-check("O3. raw is platformInput, not Codex original", await appears(unrec.locator("pre", { hasText: "platformInput" })) && (await unrec.getByText("Codex 원본 아님").count()) === 1);
+check("O3. no raw record entry for the preserved input (#94)", (await unrec.getByRole("button", { name: /입력 기록|원본 기록/ }).count()) === 0);
 await send(chat, "후속 질문");
 check("O3. explicit follow-up succeeds", await appears(userMsgs(chat, "후속 질문")) && (await appears(chat.getByText("Offline fixture answer").nth(1))));
 await settled(chat);
@@ -224,7 +245,7 @@ check("O3. failed input still preserved", (await userMsgs(chat, "/fixture/unreco
 
 // O4. 명확 거절: 202 후 failed/codex_rejected, 새 명시 입력 가능
 await send(chat, "/fixture/reject");
-check("O4. codex_rejected shown", await appears(chat.getByText("Codex가 이 요청을 받지 않았습니다")));
+check("O4. codex_rejected shown", await appears(chat.getByText("이 요청은 처리되지 않았습니다")));
 await send(chat, "거절 뒤 질문");
 check("O4. new explicit message after rejection succeeds", await appears(chat.getByText("Offline fixture answer").nth(2)));
 await settled(chat);
@@ -296,10 +317,10 @@ async function dropFirstSend(p) {
   const bm = chatOf(B.page);
   await openAt(page, s1);
   await send(chat, "/fixture/hold");
-  await chat.getByText("Codex가 응답하는 중입니다.").waitFor();
+  await chat.getByText("응답하는 중입니다.").waitFor();
   await send(m2, "hold 중 다른 세션");
   await send(bm, "B 질문");
-  check("O7. same-account other session busy -> rejected", await appears(m2.getByText("Codex가 이 요청을 받지 않았습니다")));
+  check("O7. same-account other session busy -> rejected", await appears(m2.getByText("이 요청은 처리되지 않았습니다")));
   check("O7. account B independent during A hold", await appears(bm.getByText("Offline fixture answer")));
   check("O7. held turn completes", await appears(chat.getByText("Offline fixture answer").nth(5), 30000));
   await settled(chat);
@@ -359,7 +380,7 @@ async function dropFirstSend(p) {
   await settled(chat);
   check("I1. general: body page {kind:general}", JSON.stringify(bodies.at(-1)?.body.page) === '{"kind":"general"}', JSON.stringify(bodies.at(-1)?.body));
   check("I1. general: accepted page badge from server", await appears(userMsgs(chat, "일반 페이지 질문").getByText("보낸 화면: 일반")));
-  check("I1. general: owner tool completed", await appears(lastTool().getByText("completed")));
+  check("I1. general: owner tool completed", await appears(lastTool().getByText("완료")));
   check("I1. general: exactly one document written", (await fixtureDocs()) === docs + 1, `${docs} -> ${await fixtureDocs()}`);
   docs = await fixtureDocs();
 
@@ -372,19 +393,19 @@ async function dropFirstSend(p) {
   await settled(chat);
   check("I2. workspace: body page", JSON.stringify(bodies.at(-1)?.body.page) === '{"kind":"document_workspace"}', JSON.stringify(bodies.at(-1)?.body.page));
   check("I2. workspace: page badge", await appears(userMsgs(chat, "문서 목록 질문").getByText("보낸 화면: 내 문서")));
-  check("I2. workspace: tool completed", await appears(lastTool().getByText("completed")));
+  check("I2. workspace: tool completed", await appears(lastTool().getByText("완료")));
   check("I2. workspace: exactly one document written", (await fixtureDocs()) === docs + 1, `${docs} -> ${await fixtureDocs()}`);
   check("I2. earlier general turn kept in same conversation", (await userMsgs(chat, "일반 페이지 질문").count()) === 1);
   docs = await fixtureDocs();
 
   // I3. 실행 중 페이지 이동: 접수된 요청의 화면 문맥(문서 작업 공간)은 바뀌지 않는다
   await send(chat, "/fixture/hold");
-  await chat.getByText("Codex가 응답하는 중입니다.").waitFor();
+  await chat.getByText("응답하는 중입니다.").waitFor();
   await header.getByRole("link", { name: "홈" }).first().click();
   await page.waitForURL(U("/"));
   check("I3. held answer arrives after navigation", await appears(answers().nth(2), 30000));
   await settled(chat);
-  check("I3. navigation during run: tool still completed", await appears(lastTool().getByText("completed")));
+  check("I3. navigation during run: tool still completed", await appears(lastTool().getByText("완료")));
   check("I3. navigation during run: document written once", (await fixtureDocs()) === docs + 1, `${docs} -> ${await fixtureDocs()}`);
   check("I3. sent page stays 내 문서", await appears(userMsgs(chat, "/fixture/hold").getByText("보낸 화면: 내 문서")));
   check("I3. next hint follows current page", await appears(chat.getByText("보고 있는 화면: 일반")));
@@ -409,8 +430,9 @@ async function dropFirstSend(p) {
   await chat.getByRole("button", { name: "다시 보내기" }).waitFor();
   await appears(answers().nth(3));
   await settled(chat);
-  await header.getByRole("link", { name: "상태" }).first().click();
-  await page.waitForURL(/\/status\/$/);
+  // #94: 상태 메뉴는 관리자만 보인다(이 시험 계정은 편집자). 다른 페이지로 옮기는 용도이므로 글 목록으로 간다.
+  await header.getByRole("link", { name: "글 목록" }).first().click();
+  await page.waitForURL(/\/posts\/$/);
   check("I4. retry notice names original page", await appears(chat.getByText("처음 보낸 화면(내 문서) 기준으로 처리됩니다", { exact: false })));
   await chat.getByRole("button", { name: "다시 보내기" }).click();
   await chat.getByRole("button", { name: "보내기", exact: true }).waitFor();
@@ -459,7 +481,7 @@ async function dropFirstSend(p) {
       bodies.at(-1)?.body.page?.kind === "public_document" && bodies.at(-1)?.body.page?.resourceId === pubDoc.body.id,
       JSON.stringify(bodies.at(-1)?.body.page)
     );
-    check("I6. public: page context tool completed", await appears(lastTool("research_page_context").getByText("completed")));
+    check("I6. public: page context tool completed", await appears(lastTool("research_page_context").getByText("완료")));
     check("I6. public: badge carries server title", await appears(userMsgs(chat, "/fixture/page-context").first().getByText(/보낸 범위: 이 공개 글 · 범위 공개 글/)));
     // #14: 공개 글은 유일한 도구 경계. 소유자 저장 호출은 실제 callback이 거부하고 문서는 생기지 않는다.
     docs = await fixtureDocs();
@@ -561,8 +583,8 @@ async function dropFirstSend(p) {
   check("IP2. W1: no slug input", (await main.getByLabel(/주소\(slug\)/).count()) === 0);
   await main.getByLabel("태그", { exact: true }).fill("오프라인");
   await main.getByLabel("태그", { exact: true }).press("Enter");
-  await main.getByRole("button", { name: "요약 추가(선택)" }).click();
-  await main.getByLabel("요약").fill("실 API 글 요약");
+  // #44: 글 편집기에는 요약 입력이 없다(e2e-write WP3와 같은 현재 계약).
+  check("IP2. #44: no summary input", (await main.getByRole("button", { name: "요약 추가(선택)" }).count()) === 0 && (await main.getByLabel("요약").count()) === 0);
   await main.getByRole("button", { name: "문서 연결" }).click();
   await main.getByLabel("연결할 문서 찾기").fill("글 바탕");
   await main.getByRole("button", { name: "글 바탕 문서 연결" }).click();
@@ -641,15 +663,19 @@ async function dropFirstSend(p) {
   // 수정 → v2 → 현재 공개본 대비 diff → 재발행 → 발행 취소
   await main.getByRole("button", { name: "내용 수정" }).click();
   await writeBody(["# 오프라인 본문", "두 번째 버전 문장"]);
-  // 이미지(D2): 원본 바이트 업로드 → 본문에 삽입 → 표지 지정. 서버가 형식 검사·재인코딩한다.
-  const imageBox = main.getByRole("region", { name: "이미지" });
-  await imageBox.getByLabel("이미지 파일").setInputFiles({ name: "offline.png", mimeType: "image/png", buffer: PNG });
-  check("IP4. image uploaded via real API", await appears(imageBox.getByText("올렸습니다", { exact: false })), (await imageBox.innerText()).slice(0, 200));
+  // 이미지(#44): 본문 도구 막대의 '이미지 올리기'(파일 선택 → 원본 바이트 업로드 → 커서 위치에 이미지 블록). 표지 지정 UI는 없다.
+  // 서버가 형식 검사·재인코딩한다.
+  {
+    const button = main.getByRole("toolbar", { name: "서식", exact: true }).getByRole("button", { name: "이미지 올리기" });
+    const [chooser] = await Promise.all([page.waitForEvent("filechooser", { timeout: 10000 }), button.click()]);
+    await chooser.setFiles({ name: "offline.png", mimeType: "image/png", buffer: PNG });
+  }
+  check("IP4. image uploaded via real API (toolbar)", await appears(bodyBox().locator("figure[data-type=post-image]"), 20000));
+  check("IP4. #44: no image panel or cover control", (await main.getByRole("region", { name: "이미지" }).count()) === 0 && (await main.getByRole("button", { name: "표지로" }).count()) === 0);
   const uploaded = (await api.get("/research/post-images")).body?.items?.[0];
   check("IP4. image url is canonical own path", !!uploaded && uploaded.url === `/api/media/post-images/${uploaded.id}` && uploaded.mimeType === "image/png", JSON.stringify(uploaded));
   await bodyBox().locator("figure[data-type=post-image] img").first().waitFor({ timeout: 20000 }).catch(() => {});
   check("IP4. #32: image block inserted by imageId", (await bodyBox().locator("figure[data-type=post-image] img").first().getAttribute("src").catch(() => null)) === uploaded?.url);
-  await imageBox.getByRole("button", { name: "표지로" }).first().click();
   await main.getByText("초안 자동 저장됨").first().waitFor({ timeout: 20000 });
   await main.getByRole("button", { name: "새 버전으로 저장" }).click();
   await main.getByRole("button", { name: "내용 수정" }).waitFor({ timeout: 20000 });
@@ -662,7 +688,7 @@ async function dropFirstSend(p) {
   check("IP4. anonymous sees v2", await appears(anon.getByText("두 번째 버전 문장")));
   await anon.locator("article .prose img").first().waitFor({ timeout: 20000 }).catch(() => {});
   const pubImgs = await anon.locator("article img").evaluateAll((els) => els.map((e) => [e.getAttribute("src"), e.complete && e.naturalWidth > 0]));
-  check("IP4. anonymous: cover + body image load from real API", pubImgs.length === 2 && pubImgs.every(([src, loaded]) => src === uploaded?.url && loaded), JSON.stringify(pubImgs));
+  check("IP4. anonymous: body image loads from real API (no cover, #44)", pubImgs.length === 1 && pubImgs.every(([src, loaded]) => src === uploaded?.url && loaded), JSON.stringify(pubImgs));
   const media = await anon.request.get(U(uploaded?.url ?? "/x"));
   check(
     "IP4. published image public with nosniff + revalidate",
@@ -675,7 +701,7 @@ async function dropFirstSend(p) {
   const beforeProp = (await api.get(`/research/posts/${postId}`)).body;
   await send(chat, "/fixture/post-propose 다듬어줘");
   await settled(chat);
-  check("IP9. chat: post proposal link", await appears(chat.getByText("Codex가 글 수정 제안을 만들었습니다", { exact: false })));
+  check("IP9. chat: post proposal link", await appears(chat.getByText("글 수정 제안이 만들어졌습니다", { exact: false })));
   check("IP9. real API: post unchanged before acceptance", (await api.get(`/research/posts/${postId}`)).body.latestVersion.number === beforeProp.latestVersion.number);
   await chat.locator("li", { hasText: "research_post_propose" }).last().getByRole("link", { name: "제안 검토" }).click();
   const propBox = main.locator("#proposals");
@@ -730,7 +756,7 @@ async function dropFirstSend(p) {
   // 작성 중인 새 글 초안에 대한 Codex 제안(fixture가 research_post_draft_get으로 최신 revision을 읽음) → 수락하면 새 글, 초안 닫힘
   await send(chat, "/fixture/post-propose 이어서 써줘");
   await settled(chat);
-  check("IP10. chat: new post proposal", await appears(chat.getByText("Codex가 새 글을 제안했습니다", { exact: false })));
+  check("IP10. chat: new post proposal", await appears(chat.getByText("새 글 제안이 만들어졌습니다", { exact: false })));
   const props10 = (await api.get("/research/post-proposals?limit=100")).body?.items ?? [];
   check("IP10. real API: proposal bound to the open draft", props10.some((x) => x.postId === null && x.baseDraftId === ctxDraft && x.status === "pending"), JSON.stringify(props10.map((x) => x.baseDraftId)));
   await chat.locator("li", { hasText: "research_post_propose" }).last().getByRole("link", { name: "제안 검토" }).click();
@@ -817,7 +843,9 @@ console.log(`INFO dropped message POST timings: ${JSON.stringify(postTimings)}`)
   // 대화 목록 클릭은 페이지를 옮기지 않고 대화창에 연다
   await B.page.goto(U("/research/"));
   await (await chatList(B.page)).getByRole("link", { name: "B 세션" }).click();
-  await bm.getByRole("heading", { name: "B 세션" }).waitFor();
+  // #94: 대화 화면은 제목을 표시하지 않는다. 대화 화면으로 열렸는지는 '대화 목록' 버튼과 입력창으로 확인한다.
+  await bm.getByRole("button", { name: "← 대화 목록" }).waitFor();
+  await bm.getByLabel("메시지").waitFor();
   check("O11. list click opens conversation in panel (no navigation)", new URL(B.page.url()).pathname.endsWith("/research/"));
   const bSessionUrl = U(`/research/session/?id=${(await chatUi(B.page)).sessionId}`);
   await B.page.goto(DOCS);

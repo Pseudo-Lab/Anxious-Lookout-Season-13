@@ -74,7 +74,8 @@ function apiClient(page) {
   };
 }
 
-await setMock("me=normal&health=normal&logout=normal&nextLogin=approved&access=pending&publish=allowed&codex=unavailable");
+// #94: 연결 상태 패널·상태 메뉴는 관리자만 본다. 이 시험은 그 화면을 함께 보므로 관리자로 로그인한다(편집자 화면은 runner N27).
+await setMock("me=normal&health=normal&logout=normal&nextLogin=admin&access=pending&publish=allowed&codex=unavailable");
 const { context, page } = await newPage();
 const main = page.locator("main");
 const api = apiClient(page);
@@ -423,12 +424,12 @@ const publishButton = () => main.getByRole("button", { name: /글과 참고 자�
 const chat = page.locator("#chat-panel");
 // 새로고침 뒤 대화창은 기억한 열림 상태로 다시 그려진다: 대화창이나 여는 버튼 중 하나가 정착할 때까지 보고 나서 연다
 async function openChatPanel() {
-  const button = page.getByRole("button", { name: "Codex 대화창 열기" });
+  const button = page.getByRole("button", { name: "대화창 열기" });
   for (let i = 0; i < 50 && !(await chat.isVisible()); i++) {
     if (await button.isVisible()) await button.click({ timeout: 2000 }).catch(() => {});
     await page.waitForTimeout(200);
   }
-  await chat.getByRole("heading", { name: "Codex 대화" }).waitFor();
+  await chat.getByRole("heading", { name: "대화", exact: true }).waitFor();
 }
 await page.goto(U("/research/"));
 check("R9. #44: research page has no conversation tab", (await main.getByRole("navigation", { name: "내 연구 구분" }).getByRole("link", { name: "대화" }).count()) === 0 && !(await main.innerText()).includes("나눈 대화"));
@@ -440,8 +441,8 @@ check("R9. codex unavailable banner", await appears(chat.getByText("새 대화�
 await setMock("codex=auth_expired");
 await page.reload();
 await openChatPanel();
-check("R9a. auth_expired reason explained (operator reconnect)", await appears(chat.getByText("서버의 Codex 인증이 만료되어 재연결이 필요합니다")));
-check("R9a. fixed model shown, no auto switch", await appears(chat.getByText("모델: gpt-6.1-sol (서버에서 고정)")) && (await appears(chat.getByText("다른 모델로 자동 전환하지 않습니다"))));
+check("R9a. auth_expired reason explained (operator reconnect)", await appears(chat.getByText("서버 인증이 만료되어 재연결이 필요합니다")));
+check("R9a. no model name shown (#94), no auto switch", (await chat.getByText(/모델:|서버에서 고정/).count()) === 0 && (await appears(chat.getByText("다른 모델로 자동 전환하지 않습니다"))));
 check("R9a. no login/API-key input offered", (await chat.getByLabel(/API|키|ChatGPT/).count()) === 0);
 await setMock("codex=unavailable");
 await page.reload();
@@ -450,7 +451,7 @@ await chat.getByLabel("새 대화 제목").fill("세션 1");
 await chat.getByRole("button", { name: "새 대화" }).click();
 // 새 대화는 페이지를 옮기지 않고 공통 대화창에서 열린다. 기존 대화 링크는 그 대화를 대화창에 여는 호환 진입점이다.
 await chat.getByLabel("메시지").waitFor();
-check("R9. new session opens in chat panel without navigation", page.url() === U("/") && (await chat.getByRole("heading", { name: "세션 1" }).count()) === 1, page.url());
+check("R9. new session opens in chat panel without navigation", page.url() === U("/") && (await chat.getByRole("button", { name: "← 대화 목록" }).count()) === 1, page.url()); // #94: 대화 제목은 표시하지 않는다
 const chatUi = () =>
   page.evaluate(() => {
     const k = Object.keys(sessionStorage).find((key) => key.endsWith(":chat-ui"));
@@ -474,31 +475,29 @@ const sessionUrl = U(`/research/session/?id=${(await chatUi()).sessionId}`);
 }
 await setMock("codex=fixture");
 await chat.getByRole("button", { name: "상태 다시 확인" }).click();
-check("R9. recheck unlocks without reload", await appears(chat.getByText("테스트용 모의 Codex")));
+check("R9. recheck unlocks without reload", await appears(chat.getByText("테스트용 모의 응답")));
 check("R9. input still there after unlock", (await chat.getByLabel("메시지").inputValue()) === "질문 하나");
 await chat.getByRole("button", { name: "보내기" }).click();
-check("R9. running state shown", await appears(chat.getByText("Codex가 응답하는 중입니다.")));
+check("R9. running state shown", await appears(chat.getByText("응답하는 중입니다.")));
 await page.reload(); // 진행 중 재접속
 check("R9. reply after reconnect (polling)", await appears(chat.getByText("모의 응답:"), 15000));
 // 홈은 general: #14부터 소유자 도구 전부라 모의 모델의 research_list 호출이 실행된다(거부는 R22 공개 글).
 check("R9. user message shows sent page hint (general)", await appears(chat.locator("li[data-role=user]", { hasText: "질문 하나" }).getByText("보낸 화면: 일반")));
-check("R9. owner tool call completed on general page", await appears(chat.locator("li", { hasText: "research_list" }).last().getByText("completed")));
+check("R9. owner tool call completed on general page", await appears(chat.locator("li", { hasText: "research_list" }).last().getByText("완료")));
 await chat.getByRole("button", { name: /research_list/ }).first().click();
 check("R9. tool input shown inert", await appears(chat.locator("pre", { hasText: '"query": "질문 하나"' })));
-await chat.getByRole("button", { name: "저장된 원본 기록 보기" }).click();
-check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: '"kind": "function_call"' })));
+check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /원본 기록/ }).count()) === 0);
 
 // R9b. runner 명확 거절: 202 후 failed/codex_rejected, 입력은 '미기록 입력'으로 보존(모델 이력·성공으로 표시 안 함)
 {
   await setMock("codex=reject");
   await chat.getByLabel("메시지").fill("거절 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
-  check("R9b. failed codex_rejected shown", await appears(chat.getByText("Codex가 이 요청을 받지 않았습니다")));
+  check("R9b. failed codex_rejected shown", await appears(chat.getByText("이 요청은 처리되지 않았습니다")));
   const rejected = chat.locator("li[data-role=user]", { hasText: "거절 질문" });
   check("R9b. platform input labeled 미기록", await appears(rejected.getByText("미기록 입력")));
-  check("R9b. not presented as Codex record", await appears(rejected.getByText("Codex 대화 기록에 반영되지 않은 입력입니다")));
-  await rejected.getByRole("button", { name: "보존된 입력 기록" }).click();
-  check("R9b. raw shows platformInput, not Codex original", await appears(rejected.locator("pre", { hasText: '"type": "platformInput"' })) && (await rejected.getByText("Codex 원본 아님").count()) === 1);
+  check("R9b. not presented as Codex record", await appears(rejected.getByText("대화 기록에 반영되지 않은 입력입니다")));
+  check("R9b. no raw record entry for the preserved input (#94)", (await rejected.getByRole("button", { name: /입력 기록|원본 기록/ }).count()) === 0);
   await setMock("codex=fixture");
   await chat.getByLabel("메시지").fill("거절 후 새 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
@@ -510,8 +509,8 @@ check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: 
 {
   // 화면을 연 뒤에 접수 불가가 된 경우(열어 둔 화면에서 만료 등): 서버 선접수 거절 → 안내·입력 유지 → 상태 재확인으로 잠금
   for (const [mode, text] of [
-    ["auth_expired", "서버의 Codex 인증이 만료되어"],
-    ["not_enabled_for_account", "이 계정에는 아직 Codex가 열려 있지 않습니다"],
+    ["auth_expired", "서버 인증이 만료되어"],
+    ["not_enabled_for_account", "이 계정에는 아직 대화 기능이 열려 있지 않습니다"],
     ["model_unavailable", "고정된 모델을 사용할 수 없어"],
     ["budget_exhausted", "사용 한도에 도달해"],
     ["rate_limited", "제공자의 사용 한도에 걸려"],
@@ -519,7 +518,7 @@ check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: 
     await setMock("codex=fixture");
     await page.reload();
     await chat.getByLabel("메시지").waitFor();
-    await chat.getByText("테스트용 모의 Codex").waitFor();
+    await chat.getByText("테스트용 모의 응답").waitFor();
     await setMock(`codex=${mode}`);
     await chat.getByLabel("메시지").fill(`${mode} 질문`);
     await chat.getByRole("button", { name: "보내기" }).click();
@@ -531,7 +530,7 @@ check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: 
     );
     check(`R9g. ${mode}: status rechecked -> send locked`, await appears(chat.getByText("보내기가 잠겨 있습니다")));
   }
-  check("R9g. rate limit reason shown in status", await appears(chat.getByText("Codex 제공자의 사용 한도에 걸려 지금은 사용할 수 없습니다")));
+  check("R9g. rate limit reason shown in status", await appears(chat.getByText("제공자의 사용 한도에 걸려 지금은 사용할 수 없습니다")));
   // 계약에 없는 codex_* 503은 결과 불명: 같은 key·본문 보관, "다시 보내기" 제공, 새로고침 뒤 입력 복구(리뷰 F7-1)
   {
     await setMock("codex=unknown_code");
@@ -591,8 +590,8 @@ check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: 
 //      provider 원문 비노출, 입력은 기록 여부대로 표시, 자동 재실행 없음, 상태 재확인으로 잠금, 운영자 재공급 뒤 같은 대화에서 이어짐
 {
   for (const [mode, text, recorded] of [
-    ["midturn_expired", "서버의 Codex 인증이 만료되어", false],
-    ["midturn_revoked", "서버의 Codex 인증이 더 이상 유효하지 않아", true],
+    ["midturn_expired", "서버 인증이 만료되어", false],
+    ["midturn_revoked", "서버 인증이 더 이상 유효하지 않아", true],
   ]) {
     await setMock("codex=fixture");
     await page.reload();
@@ -620,7 +619,7 @@ check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: 
     // 운영자 재공급(같은 계정) 뒤: 상태 재확인 → 같은 대화에 새 메시지
     await setMock("codex=fixture");
     await chat.getByRole("button", { name: "상태 다시 확인" }).click();
-    await chat.getByText("테스트용 모의 Codex").waitFor();
+    await chat.getByText("테스트용 모의 응답").waitFor();
     await chat.getByLabel("메시지").fill(`${mode} 재개 질문`);
     await chat.getByRole("button", { name: "보내기" }).click();
     check(`R9h. ${mode}: same conversation continues after resupply`, await appears(chat.getByText(`모의 응답: ${mode} 재개 질문`), 15000));
@@ -642,11 +641,11 @@ check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: 
   check("R9w. remaining admissions refreshed after turn", await appears(chat.getByText("남은 요청 횟수: 1")));
   await chat.getByLabel("메시지").fill("창 끝난 뒤 질문");
   check("R9w. window end -> locked without reload", await appears(chat.getByText("보내기가 잠겨 있습니다"), 15000));
-  check("R9w. expired reason shown", await appears(chat.getByText("서버의 Codex 인증이 만료되어 재연결이 필요합니다")));
+  check("R9w. expired reason shown", await appears(chat.getByText("서버 인증이 만료되어 재연결이 필요합니다")));
   check("R9w. input kept after window end", (await chat.getByLabel("메시지").inputValue()) === "창 끝난 뒤 질문");
   await setMock("codex=fixture&window=&remaining=");
   await chat.getByRole("button", { name: "상태 다시 확인" }).click();
-  await chat.getByText("테스트용 모의 Codex").waitFor();
+  await chat.getByText("테스트용 모의 응답").waitFor();
   await chat.getByLabel("메시지").fill("");
 }
 
@@ -717,7 +716,7 @@ check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: 
     return route.continue();
   });
   await chat.getByLabel("메시지").fill("조회 실패 질문");
-  check("R9y. failed expiry recheck shown, last status kept", await appears(chat.getByText("Codex 상태를 다시 확인하지 못했습니다"), 20000));
+  check("R9y. failed expiry recheck shown, last status kept", await appears(chat.getByText("연결 상태를 다시 확인하지 못했습니다"), 20000));
   check("R9y. not locked from a failed read alone", !(await chat.getByRole("button", { name: "보내기" }).isDisabled()));
   await page.waitForTimeout(8000);
   failing = false;
@@ -727,7 +726,7 @@ check("R9. stored raw item shown", await appears(chat.locator("pre", { hasText: 
   await page.unroute("**/api/research/codex/status");
   await setMock("codex=fixture&window=&remaining=");
   await chat.getByRole("button", { name: "상태 다시 확인" }).click();
-  await chat.getByText("테스트용 모의 Codex").waitFor();
+  await chat.getByText("테스트용 모의 응답").waitFor();
   await chat.getByLabel("메시지").fill("");
 }
 
@@ -846,7 +845,7 @@ async function confirmSingleTurn(label, text) {
 //      실제 모델·도구·서버 권한 검증이 아니다(서버 거부는 back 검사와 실제 시험에서 따로 확인).
 {
   await setMock("codex=fixture&window=&remaining=");
-  const dock = page.getByRole("button", { name: "Codex 대화창 열기" });
+  const dock = page.getByRole("button", { name: "대화창 열기" });
   const header = page.locator("header");
   for (const path of ["/", "/posts/", "/status/", "/public/", "/research/?tab=materials"]) {
     await page.goto(U(path));
@@ -855,13 +854,13 @@ async function confirmSingleTurn(label, text) {
     check(`R22. dock button on ${path} (>=44px)`, !!box && box.width >= 44 && box.height >= 44, JSON.stringify(box));
   }
   await dock.click();
-  await chat.getByRole("heading", { name: "Codex 대화" }).waitFor();
+  await chat.getByRole("heading", { name: "대화", exact: true }).waitFor();
   check("R22. open moves focus into panel", await page.evaluate(() => document.activeElement?.id === "chat-panel-title"));
   check("R22. desktop panel is non-modal", (await chat.getAttribute("role")) === "complementary" && (await chat.getAttribute("aria-modal")) === null);
   check("R22. desktop page padded so panel does not cover content", await page.evaluate(() => getComputedStyle(document.body).paddingRight === "416px"));
   await page.keyboard.press("Escape");
   await dock.waitFor();
-  check("R22. Esc closes and returns focus to button", await page.evaluate(() => document.activeElement?.getAttribute("aria-label") === "Codex 대화창 열기"));
+  check("R22. Esc closes and returns focus to button", await page.evaluate(() => document.activeElement?.getAttribute("aria-label") === "대화창 열기"));
   check("R22. padding removed after close", await page.evaluate(() => getComputedStyle(document.body).paddingRight === "0px"));
 
   // 대화 선택·입력 → 닫기 → 클라이언트 이동 → 다시 열기 / 새로고침
@@ -885,23 +884,31 @@ async function confirmSingleTurn(label, text) {
     return route.continue();
   });
   const lastTool = () => chat.locator("li", { hasText: "research_list" }).last();
+  // #94: 범위 설명은 입력창 위 본문에서 없앴고, 입력창 옆 범위 이름(다음 질문 범위)의 도움말(title)로만 남는다.
+  // 그 설명이 도움말에 있고 본문에는 없는지 함께 본다.
+  const scopeHelp = async (text) => {
+    const inTitle = await appears(chat.locator(`form p[title*="${text}"]`));
+    const inBody = await chat.getByText(text, { exact: false }).count();
+    return inTitle && inBody === 0;
+  };
 
   // general 페이지: #14부터 소유자 도구 전부(화면은 참고일 뿐)
   check("R22. general page hint shown", await appears(chat.getByText("보고 있는 화면: 일반")));
-  check("R22. owner wording: no per-page tool limits", await appears(chat.getByText("연결 관계와 보관도 처리합니다", { exact: false })));
-  check("R22. web search saving wording", await appears(chat.getByText("출처 주소와 수집 시각을 붙여 자료로 저장합니다", { exact: false })));
+  check("R22. owner wording: no per-page tool limits (scope help, not body)", await scopeHelp("연결 관계와 보관도 처리합니다"));
+  check("R22. web search saving wording (scope help, not body)", await scopeHelp("출처 주소와 수집 시각을 붙여 자료로 저장합니다"));
   // #68 native shell: 실행기의 한 번에 하나·시간 상한 문구는 없어지고, 파일을 직접 고칠 수 있다고 적는다.
   check(
     "R22. shell wording: files edited directly, no executor limits (#68)",
-    (await appears(chat.getByText("파일을 만들거나 고쳐 계산·정리할 수 있습니다", { exact: false }))) && !/30\s*초|시간 상한 안에서/.test(await chat.innerText())
+    // #94: 입력창 위 설명 문구는 없앴다. 같은 설명은 입력창 옆 범위 이름의 도움말(title)에 남아 있다.
+    (await chat.locator('[title*="파일을 만들거나 고쳐 계산·정리할 수 있습니다"]').count()) >= 1 && !/30\s*초|시간 상한 안에서/.test(await chat.innerText())
   );
-  check("R22. memory wording: earlier conversation continues", await appears(chat.getByText("이전 대화 내용은 이 대화에 계속 이어집니다.")));
+  check("R22. no hint text under the input (#94)", (await chat.getByText("이전 대화 내용은 이 대화에 계속 이어집니다.").count()) === 0);
   await chat.getByLabel("메시지").fill("일반 페이지 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
   await chat.getByText("모의 응답: 일반 페이지 질문").waitFor({ timeout: 15000 });
   check("R22. general page sends kind general", JSON.stringify(bodies.at(-1)?.page) === '{"kind":"general"}', JSON.stringify(bodies.at(-1)));
   check("R22. general: draft cleared after success", (await chat.getByLabel("메시지").inputValue()) === "");
-  check("R22. general: owner tool completed", await appears(lastTool().getByText("completed")));
+  check("R22. general: owner tool completed", await appears(lastTool().getByText("완료")));
 
   // 자료 목록(작업 공간): research_list 허용
   await page.goto(U("/research/?tab=materials"));
@@ -911,7 +918,7 @@ async function confirmSingleTurn(label, text) {
   await chat.getByRole("button", { name: "보내기" }).click();
   await chat.getByText("모의 응답: 자료 목록 질문").waitFor({ timeout: 15000 });
   check("R22. workspace sends material_workspace", JSON.stringify(bodies.at(-1)?.page) === '{"kind":"material_workspace"}', JSON.stringify(bodies.at(-1)?.page));
-  check("R22. workspace: allowed tool completed", await appears(lastTool().getByText("completed")));
+  check("R22. workspace: allowed tool completed", await appears(lastTool().getByText("완료")));
 
   // 자료 상세: 보낸 뒤 바로 다른 페이지로 이동해도 접수 범위는 그대로
   const materialId = new URL(materialAUrl).searchParams.get("id");
@@ -920,14 +927,14 @@ async function confirmSingleTurn(label, text) {
   check("R22. material page hint shown", await appears(chat.getByText("보고 있는 화면: 이 자료")));
   await chat.getByLabel("메시지").fill("자료 페이지 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
-  await chat.getByText("Codex가 응답하는 중입니다.").waitFor();
+  await chat.getByText("응답하는 중입니다.").waitFor();
   await header.getByRole("link", { name: "홈" }).first().click();
   await page.waitForURL(U("/"));
   await chat.getByText("모의 응답: 자료 페이지 질문").waitFor({ timeout: 15000 });
   check("R22. material page sends material + id", bodies.at(-1)?.page?.kind === "material" && bodies.at(-1)?.page?.resourceId === materialId, JSON.stringify(bodies.at(-1)?.page));
   check("R22. navigation during run: sent page stays material", await appears(chat.locator("li[data-role=user]", { hasText: "자료 페이지 질문" }).getByText(/보낸 화면: 이 자료/)));
   check("R22. next hint follows current page", await appears(chat.getByText("보고 있는 화면: 일반")));
-  check("R22. material page: list tool not limited by page", await appears(lastTool().getByText("completed")));
+  check("R22. material page: list tool not limited by page", await appears(lastTool().getByText("완료")));
 
   // 공개 글: 유일한 도구 경계. 소유자 도구 호출은 서버가 거부한다.
   const pub22 = await api.send("POST", "/research/documents", { title: "범위 공개 글", content: "공개 본문" });
@@ -941,7 +948,7 @@ async function confirmSingleTurn(label, text) {
   await page.goto(U(`/public/document/?id=${pub22.body.id}`));
   await chat.getByLabel("메시지").waitFor();
   check("R22. public document scope shown", await appears(chat.getByText("다음 질문 범위: 이 공개 글")));
-  check("R22. public wording: read only, no web search or shell", await appears(chat.getByText("웹 검색·명령 실행이나 저장·수정은 하지 않습니다", { exact: false })));
+  check("R22. public wording: read only, no web search or shell (scope help, not body)", await scopeHelp("웹 검색·명령 실행이나 저장·수정은 하지 않습니다"));
   await chat.getByLabel("메시지").fill("공개 글 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
   await chat.getByText("모의 응답: 공개 글 질문").waitFor({ timeout: 15000 });
@@ -1112,7 +1119,7 @@ async function confirmSingleTurn(label, text) {
   // 비로그인: 버튼은 보이고 대화는 로그인 안내
   const anon = await newPage();
   await anon.page.goto(U("/posts/"));
-  const anonDock = anon.page.getByRole("button", { name: "Codex 대화창 열기" });
+  const anonDock = anon.page.getByRole("button", { name: "대화창 열기" });
   check("R22. dock shown to logged-out visitors", await appears(anonDock));
   await anonDock.click();
   check(
@@ -1354,14 +1361,14 @@ let docEUrl;
   if (pubList.items?.length) {
     await c.page.goto(U(`/public/document/?id=${pubList.items[0].documentId}`));
     check("R20. commenter can read public document", await appears(cm.getByRole("heading").first()));
-    check("R20. commenter sees question restriction, no form", (await appears(cm.getByText("Codex 질문은 관리자가 승인한 편집자·관리자만"))) && (await cm.getByLabel("새 대화 제목").count()) === 0);
+    check("R20. commenter sees question restriction, no form", (await appears(cm.getByText("관리자가 승인한 편집자·관리자만"))) && (await cm.getByLabel("새 대화 제목").count()) === 0);
   } else {
     check("R20. public fixture available", false, "no public document");
   }
-  await c.page.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  await c.page.getByRole("button", { name: "대화창 열기" }).click();
   check(
     "R20. commenter chat panel shows restriction, no composer",
-    (await appears(c.page.locator("#chat-panel").getByText("Codex 질문은 관리자가 승인한 편집자·관리자만"))) && (await c.page.locator("#chat-panel textarea").count()) === 0
+    (await appears(c.page.locator("#chat-panel").getByText("관리자가 승인한 편집자·관리자만"))) && (await c.page.locator("#chat-panel textarea").count()) === 0
   );
   await c.context.close();
   await setMock("nextLogin=approved");
@@ -1541,7 +1548,7 @@ let docEUrl;
     return route.continue();
   });
   // #44: 새 대화 폼은 대화창에만 있다. 생성 응답을 붙잡아 둔 채 대화창을 닫는다(아래 흐름은 닫힌 대화창에서 시작한다)
-  await rp.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  await rp.getByRole("button", { name: "대화창 열기" }).click();
   await rc.getByLabel("새 대화 제목").fill("지연 생성 대화");
   await rc.getByRole("button", { name: "새 대화" }).click();
   await rc.getByRole("button", { name: "대화창 닫기" }).click();
@@ -1550,14 +1557,14 @@ let docEUrl;
   await tab.waitForURL(U("/"));
   await tab.close();
   // 이 탭에서 이전 계정 CSRF로 보낸 요청이 403 → me 재조회로 새 계정이 된다(새로고침 없이).
-  await rp.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  await rp.getByRole("button", { name: "대화창 열기" }).click();
   await rc.getByLabel("새 대화 제목").fill("전환 유도");
   await rc.getByRole("button", { name: "새 대화" }).click();
   // 새 계정의 대화창 상태는 닫힘에서 시작하므로, 전환이 화면에 반영되면 대화창이 내려간다.
   await rc.waitFor({ state: "hidden", timeout: 10000 });
   const after = (await rapi.get("/auth/me")).user.accountId;
   check("R23b. setup: same tab switched to another account", !!after && after !== before);
-  await rp.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  await rp.getByRole("button", { name: "대화창 열기" }).click();
   await rc.getByLabel("새 대화 제목").waitFor();
   releaseCreate();
   await rp.waitForTimeout(1000);
@@ -1566,7 +1573,7 @@ let docEUrl;
   check("R23b. setup: previous account create completed (201)", createdStatus === 201, String(createdStatus));
   check(
     "R23b. late create of previous account does not select it in new account's panel",
-    (ui === null || ui.sessionId === null) && (await rc.getByText("항목을 찾을 수 없습니다").count()) === 0 && (await rc.getByRole("heading", { name: "지연 생성 대화" }).count()) === 0,
+    (ui === null || ui.sessionId === null) && (await rc.getByText("항목을 찾을 수 없습니다").count()) === 0 && (await rc.getByRole("button", { name: "← 대화 목록" }).count()) === 0, // #94: 열린 대화 화면 없음(제목은 표시하지 않는다)
     JSON.stringify(ui)
   );
 
@@ -1576,8 +1583,8 @@ let docEUrl;
   // 저장된 열림 상태는 로그인 확인 뒤에 반영되므로 화면이 자리 잡은 뒤에 연다.
   await rp.waitForLoadState("networkidle");
   await rp.waitForTimeout(500);
-  if (!(await rc.isVisible())) await rp.getByRole("button", { name: "Codex 대화창 열기" }).click();
-  await rc.getByRole("heading", { name: "Codex 대화" }).waitFor();
+  if (!(await rc.isVisible())) await rp.getByRole("button", { name: "대화창 열기" }).click();
+  await rc.getByRole("heading", { name: "대화", exact: true }).waitFor();
   const inside = () => rp.evaluate(() => !!document.activeElement?.closest("#chat-panel"));
   let escaped = 0;
   for (let i = 0; i < 25; i++) {
@@ -1594,8 +1601,8 @@ let docEUrl;
   check("R23c. Tab from outside returns focus into panel", await inside());
   await rp.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : undefined));
   await rp.keyboard.press("Escape");
-  check("R23c. Escape closes with focus outside panel", await appears(rp.getByRole("button", { name: "Codex 대화창 열기" })));
-  check("R23c. focus returns to dock button", await rp.evaluate(() => document.activeElement?.getAttribute("aria-label") === "Codex 대화창 열기"));
+  check("R23c. Escape closes with focus outside panel", await appears(rp.getByRole("button", { name: "대화창 열기" })));
+  check("R23c. focus returns to dock button", await rp.evaluate(() => document.activeElement?.getAttribute("aria-label") === "대화창 열기"));
   await r.context.close();
 }
 
@@ -1721,7 +1728,7 @@ let docEUrl;
   // Codex 제안: 대화에서 만들어도 문서는 바뀌지 않는다 → 대화의 '제안 검토' 링크 → diff → 수락
   const sess = await api.send("POST", "/research/sessions", { title: "편집 대화" });
   check("W2. setup: session", sess.status === 201, String(sess.status));
-  await page.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  await page.getByRole("button", { name: "대화창 열기" }).click();
   await chat.getByRole("link", { name: /편집 대화/ }).click();
   await chat.getByLabel("메시지").fill("/fixture/propose 문장 하나 더해줘");
   await chat.getByRole("button", { name: "보내기" }).click();
@@ -1731,7 +1738,7 @@ let docEUrl;
   await chat.getByRole("link", { name: "제안 검토" }).click();
   const proposalsBox = main.locator("#proposals");
   check("W2. proposal: diff vs current document", await appears(proposalsBox.locator('[data-diff="add"]', { hasText: "Codex가 덧붙인 문장" })));
-  check("W2. proposal: link opens that proposal", (await proposalsBox.getByRole("button", { name: /Codex 제안/ }).first().getAttribute("aria-expanded")) === "true");
+  check("W2. proposal: link opens that proposal", (await proposalsBox.getByRole("button", { name: /대화 제안/ }).first().getAttribute("aria-expanded")) === "true");
   await proposalsBox.getByRole("button", { name: "제안 수락" }).click();
   await proposalsBox.getByRole("button", { name: "수락 확인" }).click();
   check("W2. proposal: accepted becomes new version", await appears(main.locator(".prose").getByText("Codex가 덧붙인 문장")));

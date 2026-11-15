@@ -152,7 +152,7 @@ export function ProposalReview({
         <p className="text-xs text-stone-900">
           {baseDraft
             ? `작성 중인 새 글 초안(${formatDateTime(baseDraft.updatedAt)} 자동 저장)에서 이 제안으로 바뀌는 내용입니다. 수락하면 이 제안으로 새 글이 만들어지고 그 초안은 닫힙니다(초안 내용은 기록으로 보존).`
-            : "Codex가 새 글로 제안한 내용입니다. 수락하면 이 내용으로 새 글과 첫 버전이 만들어지고 공개 주소가 자동으로 정해집니다(발행은 따로 합니다)."}
+            : "대화에서 새 글로 제안된 내용입니다. 수락하면 이 내용으로 새 글과 첫 버전이 만들어지고 공개 주소가 자동으로 정해집니다(발행은 따로 합니다)."}
         </p>
       )}
       {pending && baseClosed && (
@@ -281,7 +281,7 @@ export default function PostProposalPanel({
         className="flex w-full items-center justify-between gap-3 px-4 py-2 text-left text-sm hover:bg-stone-50"
       >
         <span className="min-w-0 break-words">
-          <span className="mr-2 text-xs font-medium text-indigo-700">Codex 제안</span>
+          <span className="mr-2 text-xs font-medium text-indigo-700">대화 제안</span>
           <span className="text-stone-900">{p.title}</span>
         </span>
         <span className="shrink-0 text-xs text-stone-500">
@@ -306,9 +306,9 @@ export default function PostProposalPanel({
 
   return (
     <section id="proposals" ref={section} className="scroll-mt-4">
-      <h2 className="mb-1 text-lg font-semibold text-stone-900">Codex 제안</h2>
+      <h2 className="mb-1 text-lg font-semibold text-stone-900">대화 제안</h2>
       <p className="mb-3 text-xs text-stone-500">
-        대화에서 Codex가 이 글을 고치면 제안으로 남습니다. 수락하기 전에는 글이 바뀌지 않으며, 비교한 뒤 수락하면 새 버전이 됩니다(발행은 따로).
+        대화에서 이 글을 고치면 제안으로 남습니다. 수락하기 전에는 글이 바뀌지 않으며, 비교한 뒤 수락하면 새 버전이 됩니다(발행은 따로).
       </p>
       {list.failure && <ErrorNotice failure={list.failure} prefix="제안 목록을 불러오지 못했습니다." describe={postErrorMessage} />}
       {pending.length > 0 ? <ul className="space-y-2">{pending.map(row)}</ul> : !list.failure && <p className="text-sm text-stone-500">검토할 제안이 없습니다.</p>}
@@ -341,8 +341,8 @@ export function NewPostProposals({ baseDraftId, reload = "" }: { baseDraftId?: s
   }, [searching, loading, loadMore]);
   if (!items.length && !list.failure) return null;
   return (
-    <section aria-label="Codex 새 글 제안" className="space-y-2 rounded-lg bg-indigo-50/50 p-3 ring-1 ring-indigo-200">
-      <h2 className="text-sm font-semibold text-indigo-900">{baseDraftId ? "이 초안에 대한 Codex 제안" : "Codex가 제안한 새 글"}</h2>
+    <section aria-label="대화 새 글 제안" className="space-y-2 rounded-lg bg-indigo-50/50 p-3 ring-1 ring-indigo-200">
+      <h2 className="text-sm font-semibold text-indigo-900">{baseDraftId ? "이 초안에 대한 대화 제안" : "대화에서 제안된 새 글"}</h2>
       {list.failure && <ErrorNotice failure={list.failure} prefix="제안 목록을 불러오지 못했습니다." describe={postErrorMessage} />}
       <ul className="space-y-1 text-sm">
         {items.map((p) => (

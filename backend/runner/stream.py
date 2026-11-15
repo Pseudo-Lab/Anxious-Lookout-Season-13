@@ -112,7 +112,12 @@ class Sanitizer:
                 journal = self.auth.journal
                 count, _ = journal.generation()
                 current = [value for value in list(self.auth.secrets) if isinstance(value, str)]
-                return (id(journal), count, hold_policy(journal, getattr(self.auth, "control", None), current))
+                # #94 (8): the credential installed last, for the observation split only (the holdback uses `current`)
+                latest = getattr(self.auth, "latest_secrets", None)
+                # an empty set (nothing installed yet) is no information: the split then counts `current` as current,
+                # an over-report of "current" (never of "retired", which would favour the §6 B case)
+                latest = [value for value in list(latest or ()) if isinstance(value, str)] or None
+                return (id(journal), count, hold_policy(journal, getattr(self.auth, "control", None), current, latest))
             except RuntimeError:
                 continue
             except Exception:
@@ -233,7 +238,8 @@ class Turn:
         self.raw_bytes = 0
         self.started_at = time.monotonic()
         self.stats = {"deltaIn": {}, "eventsOut": 0, "eventBytes": 0, "flushes": 0, "compactions": 0,
-                      "firstDeltaMs": None, "firstEventMs": None, "holdbackPeakChars": 0, "legacyL": 0, "cutDelayPeakChars": 0,
+                      "firstDeltaMs": None, "firstEventMs": None, "holdbackPeakChars": 0, "legacyL": 0, "legacyCurrentL": 0,
+                      "legacyRetiredL": 0, "cutDelayPeakChars": 0,
                       "bufferPeakBytes": 0, "outputDroppedBytes": 0, "subscribersPeak": 0, "staleFlushes": 0}
         self.samples = deque(maxlen=SAMPLE_RING)
         self.peaks = {"rssKb": 0, "messagesQueue": 0, "flushLagMs": 0}
@@ -676,6 +682,9 @@ class Hub:
             return
         with self.lock:
             turn.stats["legacyL"] = max(turn.stats["legacyL"], before[2].legacy)  # r4: L_legacy (verified)
+            # #94 (8): the split of legacyL - a current-credential literal without a fingerprint, or only earlier ones
+            turn.stats["legacyCurrentL"] = max(turn.stats["legacyCurrentL"], getattr(before[2], "legacy_current", 0))
+            turn.stats["legacyRetiredL"] = max(turn.stats["legacyRetiredL"], getattr(before[2], "legacy_retired", 0))
             turn.stats["cutDelayPeakChars"] = max([turn.stats["cutDelayPeakChars"]] + delays)
             if before != after:
                 # A literal was observed meanwhile: nothing of this pass is published (text, output or summary).

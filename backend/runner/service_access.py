@@ -226,6 +226,7 @@ class ServiceAccessAuth(AccessAuth):
             if isinstance(plan, str):
                 self.snapshot['chatgptPlanType'] = plan
             self.secrets = literals  # Historical plaintext need not stay in memory.
+            self.latest_secrets = literals  # #94 (8): the installed credential (here equal to `secrets`)
             self.journal = journal
             # #90 r4: prefix fingerprints after the committed journal rows; never raises (failure = legacy).
             stream_prefix.remember(self.control, journal, literals)

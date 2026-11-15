@@ -58,6 +58,7 @@ class AccessAuth:
         self.owner, self.state_id = canonical_uuid(owner), canonical_uuid(state_id)
         self.snapshot = None
         self.secrets, self.journal, self.lease = set(), None, None
+        self.latest_secrets = set()  # #94 (8): the literals of the credential installed last (observation split)
 
     def state(self):
         value = read_private(self.control/'access-ledger.json')
@@ -107,9 +108,11 @@ class AccessAuth:
         self.snapshot = {'accessToken': envelope['accessToken'], 'chatgptAccountId': account}
         if isinstance(value.get('https://api.openai.com/auth', {}).get('chatgpt_plan_type'), str):
             self.snapshot['chatgptPlanType'] = value['https://api.openai.com/auth']['chatgpt_plan_type']
-        self.secrets.update((envelope['accessToken'], account))
+        latest = {envelope['accessToken'], account}
         if isinstance(value.get('email'), str) and value['email']:
-            self.secrets.add(value['email'])
+            latest.add(value['email'])
+        self.secrets.update(latest)
+        self.latest_secrets = latest  # #94 (8): observation split only; `secrets` stays cumulative
         self.remember_secrets()
 
     def attach(self, codex_home):
@@ -196,6 +199,7 @@ class AccessAuth:
     def close(self, clean=False):
         self.snapshot = None
         self.secrets.clear()
+        self.latest_secrets = set()
         if self.lease:
             self.lease.close()
             self.lease = None

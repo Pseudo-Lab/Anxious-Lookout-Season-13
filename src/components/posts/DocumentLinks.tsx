@@ -95,7 +95,7 @@ export default function DocumentLinks({
         )}
       </div>
       <p className="text-xs text-stone-500">
-        발행하면 연결 문서의 제목이 글에 함께 공개되고, 공개된 문서만 링크됩니다. 문서 본문은 공개되지 않습니다. Codex도 연결 문서를 읽고 제안할 수 있습니다.
+        발행하면 연결 문서의 제목이 글에 함께 공개되고, 공개된 문서만 링크됩니다. 문서 본문은 공개되지 않습니다. 대화에서도 연결 문서를 읽고 제안할 수 있습니다.
       </p>
       {adding && !readOnly && <Search linked={ids} onAdd={(id) => onChange(ids.includes(id) ? ids : [...ids, id])} />}
       {ids.length > 0 && (

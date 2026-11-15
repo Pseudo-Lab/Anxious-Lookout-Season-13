@@ -258,7 +258,7 @@ export default function ChatDock() {
           ref={buttonRef}
           type="button"
           onClick={() => chat.setOpen(true)}
-          aria-label="Codex 대화창 열기"
+          aria-label="대화창 열기"
           aria-expanded={false}
           aria-controls={PANEL_ID}
           className="fixed bottom-5 right-5 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-indigo-600 text-white shadow-lg ring-4 ring-white/70 hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700"
@@ -326,7 +326,7 @@ export default function ChatDock() {
           )}
           <div className="flex shrink-0 items-center gap-1 border-b border-stone-100 py-1 pl-4 pr-2">
             <h2 id="chat-panel-title" ref={headingRef} tabIndex={-1} className="flex-1 text-sm font-semibold text-stone-900 outline-none">
-              Codex 대화
+              대화
             </h2>
             {!isMobile && canWiden && (
               <button
@@ -354,7 +354,7 @@ export default function ChatDock() {
           {/* 세로로만 스크롤한다. 넓은 표·코드는 각자 안에서 가로로 스크롤한다.
               브라우저 scroll anchoring은 끈다(#89): 스크롤 위치는 useStickToBottom이 정한다. 켜 두면 화면 위쪽이 잘린 도구 항목을
               펼칠 때 브라우저가 그 아래 답변을 기준점으로 잡아 펼친 높이만큼 아래로 스크롤해, 읽던 위치(누른 머리글)가 위로 밀린다. */}
-          <div data-chat-scroll className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 [overflow-anchor:none]">
+          <div data-chat-scroll className="relative min-h-0 flex-1 scroll-pt-12 overflow-y-auto overflow-x-hidden overscroll-contain px-4 [overflow-anchor:none]">
             {/* 계정이 바뀌면 이전 계정의 조회 결과·입력·늦은 응답을 버리고 새로 그린다. */}
             <ChatPanel key={accountKey} />
           </div>

@@ -119,6 +119,11 @@ export function canUseResearch(user: AuthUser | null | undefined): boolean {
   return !!user && user.isApproved && (user.role === "editor" || user.role === "admin");
 }
 
+/** 승인된 관리자. 운영 상태(서비스 상태 페이지·대화 연결 상태)는 관리자에게만 보인다(#94). 표시용이며 판단은 서버가 한다. */
+export function isAdmin(user: AuthUser | null | undefined): boolean {
+  return !!user && user.isApproved && user.role === "admin";
+}
+
 export const ROLE_LABELS: Record<UserRole, string> = {
   admin: "관리자",
   editor: "편집자",

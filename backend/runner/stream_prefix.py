@@ -19,6 +19,7 @@ The caller keeps r3's left-only rule (a detected span crossing the cut pulls it 
 import hashlib
 import hmac
 import json
+import logging
 import os
 import stat
 import threading
@@ -32,6 +33,7 @@ FILE = "stream-prefixes.json"
 LIMIT = 4096
 VERSION = 1
 FIELDS = {"version", "owner", "trialId", "prefixLength", "entries", "mac"}
+RESULTS = {"written", "unchanged", "full", "failed", "no_control"}  # #94 (8) runner_stream_prefix results
 _write_lock = threading.Lock()
 
 
@@ -140,38 +142,94 @@ def _write(path, payload):
 def remember(control, journal, literals):
     """Add the fingerprints of `literals` (plaintext in memory) after the journal write. Never raises; True when the
     file was written. Content already present is a no-op (no rewrite, no generation change, design r4.1). A file that
-    is missing or invalid is rewritten with the current literals only (the others stay legacy)."""
+    is missing or invalid is rewritten with the current literals only (the others stay legacy).
+
+    #94 (8): the outcome is observable (`observe`, the `runner_stream_prefix` line): the result from a fixed list and
+    how many long literals of this call are covered by the file this call wrote or found valid. Counts only; never a
+    value, digest or path. review r2: the literals of a call are what the caller passes - in the personal / access
+    modes the cumulative `secrets` (credentials rotated out in this process included), in the service mode the
+    installed credential - so this line is the coverage of that set, **not** of the latest credential; the latest
+    credential's state is the summary split (`policy`, `legacy_current`). review r1: `remember` also runs on the stream's hot path (every refresh / sanitize), so the
+    counts come from the sets already in hand (no extra read) and a line is logged only when the observed state of
+    this control directory changes - a Pod whose credential and file stay the same logs a constant number of lines,
+    whatever the number of deltas or sanitize calls (PM)."""
     if control is None or journal is None:
+        with _write_lock:
+            observe(control, "no_control", 0, None, None)
         return False
     with _write_lock:
+        new, known, merged, valid = None, set(), None, False
+        status = "failed"
         try:
             new = {entry(journal, value) for value in literals
                    if isinstance(value, str) and P < len(value) <= 65536}
             current, _ = load(control, journal)
-            known = set(current or ())
-            if current is not None and new <= known:
+            valid, known = current is not None, set(current or ())
+            if valid and new <= known:
+                status = "unchanged"
                 return False
             room = max(LIMIT - len(known), 0)
             merged = known | set(sorted(new - known)[:room])  # over the limit: the rest stay legacy
-            if current is not None and merged == known:
+            if valid and merged == known:
                 # A valid file that would not change (full: the new literals stay legacy) is never rewritten, so the
                 # plan's generation stays stable and the stream progresses on the legacy holdback (review 732e278).
+                status = "full"
                 return False
             payload = {"version": VERSION, "owner": journal.owner, "trialId": journal.trial, "prefixLength": P,
                        "entries": sorted([list(item) for item in merged])}
             payload["mac"] = file_mac(journal.key, payload)
             _write(Path(control) / FILE, payload)
+            status = "written"
             return True
         except Exception:
+            status = "failed"
             return False
+        finally:
+            if new is None:
+                observe(control, status, None, None, None)
+            else:
+                held = merged if status == "written" else known if valid else None
+                observe(control, status, len(new), len(new & held) if held is not None else 0,
+                        len(held) if held is not None else None)
+
+
+_observed = {}  # str(control) -> the last logged state (bounded; see observe)
+OBSERVED_LIMIT = 64
+
+
+def observe(control, status, literals, covered, entries):
+    """#94 (8): the `runner_stream_prefix` log line, only when the state of `control` differs from the last one logged
+    for it (a change of result, of the covered count or of the file's entry count; a failure and its recovery are both
+    logged). `literals`: long literals of this call (the caller's set, possibly cumulative); `covered`: how many of them
+    the file covers (None: unknown); `allCovered`: all of them (true / false / null) - review r2: an aggregate, never
+    by itself a verdict on the latest credential; `entries`: the file's entry count (None: no valid file); `limit`:
+    LIMIT. Called under _write_lock. Never raises."""
+    try:
+        state = (status if status in RESULTS else "other", literals, covered, entries)
+        key = str(control)
+        if _observed.get(key) == state:
+            return
+        if key not in _observed and len(_observed) >= OBSERVED_LIMIT:
+            _observed.clear()  # bounded: an evicted directory logs its state once more, never more often
+        _observed[key] = state
+        logging.getLogger("uvicorn.error").info("runner_stream_prefix %s", json.dumps({
+            "result": state[0], "literals": literals, "covered": covered,
+            "allCovered": None if covered is None or literals is None else covered == literals,
+            "entries": entries, "limit": LIMIT}, sort_keys=True))
+    except Exception:
+        pass
 
 
 class HoldPolicy:
     """The cut start for one plan (see the module docstring). `none()` = no recorded literal: nothing is held."""
 
-    def __init__(self, short=0, covered=False, legacy=0, groups=None, filters=None, key=None, state=None):
+    def __init__(self, short=0, covered=False, legacy=0, groups=None, filters=None, key=None, state=None,
+                 legacy_current=0, legacy_retired=0):
         self.short, self.covered, self.legacy = short, covered, legacy
         self.groups, self.filters, self.key, self.state = groups or {}, filters or {}, key, state
+        # #94 (8): where `legacy` comes from (observation only; `legacy` = max of the two). current: a long literal
+        # of the credential in memory has no fingerprint; retired: only a journal row of an earlier credential has none.
+        self.legacy_current, self.legacy_retired = legacy_current, legacy_retired
 
     @classmethod
     def none(cls):
@@ -212,15 +270,23 @@ class HoldPolicy:
         return max(cut, 0)
 
 
-def policy(journal, control, current=()):
+def policy(journal, control, current=(), latest=None):
     """The HoldPolicy of `journal` (verified rows) and the fingerprint file in `control`. Raises when the journal
     cannot be read (the caller stops text); a fingerprint problem only makes literals legacy. `current`: the secrets
-    in memory (refresh writes them to the journal first; any not covered still counts, fail-safe)."""
+    in memory (refresh writes them to the journal first; any not covered still counts, fail-safe).
+
+    #94 (8) observation only: `latest` is the literal set of the credential installed last (the auth's
+    `latest_secrets`); `current` may also hold literals of credentials rotated out in this process (review r1). The
+    split names a long literal of `latest` without a fingerprint `legacy_current` and every other uncovered long literal
+    `legacy_retired`. The holdback (`legacy`, the cut) is computed exactly as before from rows and `current`; with no
+    or an empty `latest`, the split treats all of `current` as the latest credential (an over-report of "current",
+    never of "retired")."""
     short, rows = journal.stream_rows(P)
     entries, state = load(control, journal) if control is not None else (None, ("no-control",))
     covered_entries = {item for item in (entries or ()) if (item[2], item[3]) in rows}
     covered_rows = {(item[2], item[3]) for item in covered_entries}
     legacy = max((length for length, _ in rows - covered_rows), default=0)
+    uncovered = set()
     for value in current:
         if not isinstance(value, str) or not value:
             continue
@@ -228,8 +294,15 @@ def policy(journal, control, current=()):
             short = max(short, len(value))
         elif (len(value), journal.digest(value)) not in covered_rows:
             legacy = max(legacy, len(value))
+            uncovered.add((len(value), journal.digest(value)))
+    split = latest if latest else current  # none or empty: no information, count `current` as current (see above)
+    latest_rows = {(len(value), journal.digest(value)) for value in split
+                   if isinstance(value, str) and len(value) > P}
+    legacy_current = max((length for length, _ in latest_rows - covered_rows), default=0)
+    legacy_retired = max((row[0] for row in (rows - covered_rows) | uncovered if row not in latest_rows), default=0)
     groups, filters = {}, {}
     for prefix_filter, digest, length, _ in covered_entries:
         groups[digest] = max(groups.get(digest, 0), length)
         filters.setdefault(prefix_filter, set()).add(digest)
-    return HoldPolicy(short, bool(covered_entries), legacy, groups, filters, journal.key, state)
+    return HoldPolicy(short, bool(covered_entries), legacy, groups, filters, journal.key, state,
+                      legacy_current, legacy_retired)

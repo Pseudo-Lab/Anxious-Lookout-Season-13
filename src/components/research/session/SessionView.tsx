@@ -1,13 +1,11 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from "react";
-import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import type { FetchFailure } from "@/lib/api/client";
 import {
   archiveSession,
   getSession,
-  getSessionItemRaw,
   interruptSession,
   readCodexStatus,
   researchErrorMessage,
@@ -26,6 +24,7 @@ import {
 import { storeGeneration } from "@/lib/research/pendingStore";
 import { clearDraft, loadDraft, saveDraft } from "@/lib/research/chatState";
 import { useAuth } from "@/hooks/useAuth";
+import { isAdmin } from "@/lib/auth/api";
 import type { NoticeItem, PageDescriptor, SessionDetail, SessionItem, SessionSummary, ToolCallItem, UnknownItem } from "@/lib/research/types";
 import { describePage, kindText, pageUnresolved, sameDescriptor, scopeLabel, useRegisteredPage } from "@/lib/research/pageContext";
 import { own } from "@/lib/research/own";
@@ -46,7 +45,7 @@ import {
   shellOutputLabel,
   shellView,
 } from "@/lib/research/shell";
-import { formatDateTime, toDisplayText } from "@/lib/research/format";
+import { toDisplayText } from "@/lib/research/format";
 import {
   EMPTY_CONTINUITY,
   awaitingReply,
@@ -63,6 +62,7 @@ import {
   CodexStatusView,
   RunnerActionButton,
   codexBlocked,
+  codexBlockedReason,
   runnerState,
   useCodexStatus,
 } from "@/components/research/CodexStatusBanner";
@@ -73,7 +73,6 @@ import type { CodexStatus } from "@/lib/research/types";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
 import SafeMarkdown, { StreamingMarkdown } from "@/components/research/SafeMarkdown";
-import { SESSION_STATE_LABELS } from "@/components/research/ItemLists";
 
 const POLL_MS = 2000;
 // 접수된 전송을 확인하는 대화 조회가 일시 실패했을 때의 재조회 간격(늘려 가며 최대값까지).
@@ -94,19 +93,17 @@ function Inert({ value }: { value: unknown }) {
   );
 }
 
-function RawItem({ sessionId, itemId, label = "저장된 원본 전체" }: { sessionId: string; itemId: string; label?: string }) {
-  const { result } = useLoad(`raw:${sessionId}:${itemId}`, () => getSessionItemRaw(sessionId, itemId));
-  if (!result) return <p className="text-xs text-stone-500">원본을 불러오는 중...</p>;
-  if (!result.ok) return <ErrorNotice failure={result.failure} prefix="원본 기록을 불러오지 못했습니다." />;
-  return (
-    <div className="space-y-1">
-      <p className="text-xs font-medium text-stone-900">{label}</p>
-      <Inert value={result.data.raw} />
-    </div>
-  );
-}
-
-const TOOL_STATUS_LABELS: Record<string, string> = { rejected: "거부됨", inProgress: "진행 중", approval: "허가 확인 중" };
+// #94: 스트림 도구 항목의 상태 값(completed·failed 등)도 한국어로 보인다(영어 "failed" 그대로 노출되던 문제).
+const TOOL_STATUS_LABELS: Record<string, string> = {
+  rejected: "거부됨",
+  inProgress: "진행 중",
+  approval: "허가 확인 중",
+  completed: "완료",
+  failed: "실패",
+  declined: "거부됨",
+  // 스트림 item 상태 값(runner stream: inProgress | completed | failed | declined | approval | interrupted)
+  interrupted: "중지됨",
+};
 
 // #22 research_document_update는 문서를 바꾸지 않고 제안(Proposal)을 만든다. #28 D1: research_document_save(새 문서)와
 // research_post_propose(글)도 제안이다. 도구 결과는 flat Proposal이며 출력(JSON 또는 text 조각)에서 제안 위치만 읽는다.
@@ -130,14 +127,14 @@ function proposalRef(item: ToolCallItem): { href: string; text: string } | null 
     if (!v || typeof v.id !== "string" || v.status !== "pending") continue;
     const hash = `#proposal-${enc(v.id)}`;
     if (item.name === "research_post_propose") {
-      if (typeof v.postId === "string") return { href: `/write/?id=${enc(v.postId)}${hash}`, text: "Codex가 글 수정 제안을 만들었습니다. 수락하기 전에는 글이 바뀌지 않습니다." };
-      if (v.postId === null) return { href: `/write/new/?proposal=${enc(v.id)}`, text: "Codex가 새 글을 제안했습니다. 수락하기 전에는 글이 만들어지지 않습니다." };
+      if (typeof v.postId === "string") return { href: `/write/?id=${enc(v.postId)}${hash}`, text: "글 수정 제안이 만들어졌습니다. 수락하기 전에는 글이 바뀌지 않습니다." };
+      if (v.postId === null) return { href: `/write/new/?proposal=${enc(v.id)}`, text: "새 글 제안이 만들어졌습니다. 수락하기 전에는 글이 만들어지지 않습니다." };
       continue;
     }
     if (typeof v.documentId === "string")
-      return { href: `/research/document/?id=${enc(v.documentId)}${hash}`, text: "Codex가 문서 수정 제안을 만들었습니다. 수락하기 전에는 문서가 바뀌지 않습니다." };
+      return { href: `/research/document/?id=${enc(v.documentId)}${hash}`, text: "문서 수정 제안이 만들어졌습니다. 수락하기 전에는 문서가 바뀌지 않습니다." };
     if (v.documentId === null && item.name === "research_document_save")
-      return { href: `/research/document/new/?proposal=${enc(v.id)}`, text: "Codex가 새 문서를 제안했습니다. 수락하기 전에는 문서가 만들어지지 않습니다." };
+      return { href: `/research/document/new/?proposal=${enc(v.id)}`, text: "새 문서 제안이 만들어졌습니다. 수락하기 전에는 문서가 만들어지지 않습니다." };
   }
   return null;
 }
@@ -163,13 +160,13 @@ function liveToolItem(item: LiveItem): ToolCallItem {
   if (item.kind === "fileChange") {
     return { id: item.itemId, type: "tool_call", name: PATCH_TOOL, input: { changes: Array.isArray(item.changes) ? item.changes : [] }, output: null, status: item.status };
   }
-  return { id: item.itemId, type: "tool_call", name: item.kind === "mcpToolCall" ? "MCP 도구" : "도구", input: null, output: null, status: item.status };
+  // 스트림은 도구 이름을 주지 않는다. 머리글의 "도구" 표시만 두고 이름 칸은 비운다("도구 도구"로 겹쳐 보이지 않게).
+  return { id: item.itemId, type: "tool_call", name: "", input: null, output: null, status: item.status };
 }
 
-/** live: 스트림으로 받는 중인 항목(#90). 아직 기록이 없어 원본 보기를 두지 않는다. 같은 id의 기록 항목으로 바뀌어도 이어진다. */
-function ToolCall({ sessionId, item, live = false }: { sessionId: string; item: ToolCallItem; live?: boolean }) {
+/** 도구 호출 하나(기록 또는 스트림으로 받는 중인 항목). 같은 id의 기록 항목으로 바뀌어도 이어진다. */
+function ToolCall({ item }: { item: ToolCallItem }) {
   const [open, setOpen] = useState(false);
-  const [raw, setRaw] = useState(false);
   // #23: shell은 명령 실행으로 읽기 쉽게 보인다. 서버 기록은 그대로이며 모르는 값은 일반 도구처럼 표시한다.
   const shell = item.name === SHELL_TOOL ? shellView(item) : null;
   // #68: apply_patch(native 파일 수정)는 "파일 변경"으로 보인다. changes가 배열이 아니면 일반 도구처럼 표시한다.
@@ -287,13 +284,6 @@ function ToolCall({ sessionId, item, live = false }: { sessionId: string; item: 
               </div>
             </>
           )}
-          {live ? null : raw ? (
-            <RawItem sessionId={sessionId} itemId={item.id} />
-          ) : (
-            <button onClick={() => setRaw(true)} className="text-xs font-medium text-indigo-600 hover:text-indigo-800">
-              저장된 원본 기록 보기
-            </button>
-          )}
         </div>
       )}
     </li>
@@ -331,18 +321,15 @@ function ScopeBadge({ page }: { page: { kind: string; title?: string } }) {
  * 같은 컴포넌트라 다시 그려지지 않고 이어진다(#89).
  */
 function Message({
-  sessionId,
   item,
   sending,
   live = false,
 }: {
-  sessionId: string;
   item: Extract<SessionItem, { type: "message" }>;
   sending?: { page?: PageDescriptor };
   // #90 스트림으로 받는 중인 답변(기록 전). 같은 id의 기록 항목으로 바뀌어도 같은 말풍선이다.
   live?: boolean;
 }) {
-  const [raw, setRaw] = useState(false);
   const mine = item.role === "user";
   // 플랫폼이 보존한 입력: Codex 원본 이력에 기록되지 않았으므로 모델이 본 대화나 성공으로 표시하지 않는다.
   const platform = item.source === "platform";
@@ -357,14 +344,17 @@ function Message({
         unrecorded ? "border border-dashed border-amber-400" : ""
       }`}
     >
+      {/* #94: 답변 말풍선에는 작성자 이름을 두지 않는다(내 말풍선은 "나"와 보낸 범위). */}
+      {(mine || unrecorded || item.turnStatus === "interrupted") && (
       <p className="mb-1 flex flex-wrap items-center gap-1.5 text-[13px] font-medium text-stone-500">
-        {mine ? "나" : "Codex"}
+        {mine && "나"}
         {mine && scope && <ScopeBadge page={scope} />}
         {unrecorded && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-800">{NOT_RECORDED_LABEL}</span>}
         {!mine && item.turnStatus === "interrupted" && (
           <span className="rounded-full bg-stone-100 px-2 py-0.5 font-normal text-stone-600">{item.partial ? "중지됨(부분)" : "중지됨"}</span>
         )}
       </p>
+      )}
       {mine ? (
         <p className="whitespace-pre-wrap text-sm text-stone-900 [overflow-wrap:anywhere]">{item.text}</p>
       ) : live ? (
@@ -374,42 +364,23 @@ function Message({
       )}
       {item.displayOnly && (
         <p className="mt-1 text-xs text-stone-500">
-          중지하기 전까지 받은 부분 답변입니다. Codex 대화 기록에는 남지 않아, 이어서 질문해도 Codex는 이 내용을 보지 않습니다.
+          중지하기 전까지 받은 부분 답변입니다. 대화 기록에는 남지 않아, 이어서 질문해도 이 내용은 참고되지 않습니다.
         </p>
       )}
       {item.modelMismatch && <ModelMismatchNote />}
       {unrecorded && (
         <p className="mt-1 text-xs text-amber-800">
-          Codex 대화 기록에 반영되지 않은 입력입니다. 내 대화에는 보존되며, 필요하면 새 메시지로 다시 보내세요.
+          대화 기록에 반영되지 않은 입력입니다. 내 대화에는 보존되며, 필요하면 새 메시지로 다시 보내세요.
         </p>
       )}
-      <div className="mt-1">
-        {sending || live ? (
-          // 서버 항목으로 바뀔 때 높이가 달라지지 않게 같은 자리를 비워 둔다.
-          <span aria-hidden="true" className="invisible text-[13px]">
-            원본 기록
-          </span>
-        ) : raw ? (
-          <RawItem
-            sessionId={sessionId}
-            itemId={item.id}
-            label={platform ? "보존된 입력 기록 (Codex 원본 아님)" : item.displayOnly ? "표시 전용 부분 답변 (Codex 원본 아님)" : undefined}
-          />
-        ) : (
-          <button onClick={() => setRaw(true)} className="text-[13px] text-stone-500 hover:text-stone-700">
-            {unrecorded ? "보존된 입력 기록" : "원본 기록"}
-          </button>
-        )}
-      </div>
     </li>
   );
 }
 
-// 응답을 기다리는 동안의 "생각 중" 표시. 문구는 e2e가 찾는 기존 안내를 그대로 쓴다.
+// 응답을 기다리는 동안의 "생각 중" 표시(#94: 작성자 이름 없이 "응답하는 중입니다").
 function Thinking({ slow, accepted }: { slow: boolean; accepted: boolean }) {
   return (
     <li data-chat-thinking="" className="min-w-0 py-1">
-      <p className="mb-1 text-[13px] font-medium text-stone-500">Codex</p>
       <div className="flex items-center gap-2 text-sm text-stone-500">
         <span aria-hidden="true" className="flex shrink-0 gap-1">
           {[0, 1, 2].map((i) => (
@@ -421,7 +392,7 @@ function Thinking({ slow, accepted }: { slow: boolean; accepted: boolean }) {
           ))}
         </span>
         <span>
-          {slow ? "응답을 기다리거나 실행 결과를 확인 중입니다. 오래 걸려도 자동으로 다시 보내지 않습니다." : "Codex가 응답하는 중입니다."}
+          {slow ? "응답을 기다리거나 실행 결과를 확인 중입니다. 오래 걸려도 자동으로 다시 보내지 않습니다." : "응답하는 중입니다."}
         </span>
       </div>
       {accepted && <p className="mt-1 text-xs text-stone-500">페이지를 닫았다가 다시 열어도 이어서 확인할 수 있습니다.</p>}
@@ -449,29 +420,21 @@ function UnknownRow({ item }: { item: UnknownItem }) {
 // 스크린리더 알림은 상태가 바뀔 때 한 번만, 짧게 한다(대화 목록 자체는 live region이 아니다).
 // 화면에 보이는 안내와 같은 문구를 쓰지 않는다(같은 글자가 두 군데 있으면 화면 낭독이 겹치고 e2e 문구 찾기도 모호해진다).
 function announcement(prev: ChatStatus, next: ChatStatus, prevText: string): string {
-  if (next === "submitted") return "메시지 전송됨, Codex 응답 대기";
-  if (next === "waiting") return prev === "submitted" ? prevText : "Codex 응답 대기 중";
-  if (next === "streaming") return "Codex 답변 수신 중";
-  if (next === "error") return "Codex 응답 실패";
-  if (next === "ready" && (prev === "waiting" || prev === "streaming")) return "Codex 답변 도착";
+  if (next === "submitted") return "메시지 전송됨, 응답 대기";
+  if (next === "waiting") return prev === "submitted" ? prevText : "응답 대기 중";
+  if (next === "streaming") return "답변 수신 중";
+  if (next === "error") return "응답 실패";
+  if (next === "ready" && (prev === "waiting" || prev === "streaming")) return "답변 도착";
   return "";
 }
 
 // 다음 질문과 함께 보낼 화면 문맥. 같은 대화의 이전 내용은 그대로 이어진다. #14부터 소유자 화면은 참고일 뿐 권한을 바꾸지 않고,
-// 공개 글만 읽기 범위로 제한된다. 이름은 입력창 옆(NextScope), 설명은 입력창 바로 위 본문 흐름(ScopeHint)에 둔다.
+// 공개 글만 읽기 범위로 제한된다. 이름은 입력창 옆(NextScope)에 둔다(#94: 입력창 위 설명 문구는 없앴다).
 function NextScope({ page }: { page: PageDescriptor }) {
   const text = kindText(page.kind);
   return (
     <p className="min-w-0 flex-1 truncate text-xs text-stone-500" title={text.can} aria-live="polite">
       <span className="font-medium text-stone-900">{scopeLabel(page.kind, "next")}</span>
-    </p>
-  );
-}
-
-function ScopeHint({ page }: { page: PageDescriptor }) {
-  return (
-    <p className="text-xs leading-relaxed text-stone-500">
-      {kindText(page.kind).can} 이전 대화 내용은 이 대화에 계속 이어집니다.
     </p>
   );
 }
@@ -642,7 +605,6 @@ function Composer({
   return (
     <>
       <div className="mt-auto space-y-2 pt-2">
-        <ScopeHint page={page} />
         {unresolved && !retrying && (
           <Notice tone="info">
             이 공개 글을 확인한 뒤에 질문할 수 있습니다(글을 불러오는 중이거나 찾을 수 없는 글). 입력은 그대로 있으며 자동으로 보내지 않습니다.
@@ -657,8 +619,9 @@ function Composer({
               <RunnerActionButton result={codex} />
             </Notice>
           ) : (
+            // #94: 상태 패널은 admin만 보므로 잠긴 이유를 이 안내에 함께 적는다.
             <Notice tone="warn">
-              지금은 Codex가 요청을 받을 수 없어 보내기가 잠겨 있습니다(위 연결 상태 참고). 입력한 내용과 이전 대화는 그대로 있습니다.{" "}
+              {codexBlockedReason(codex)} 보내기가 잠겨 있습니다. 입력한 내용과 이전 대화는 그대로 있습니다.{" "}
               <button type="button" onClick={onRecheck} className="font-medium underline hover:no-underline">
                 상태 다시 확인
               </button>
@@ -706,7 +669,7 @@ function Composer({
           rows={3}
           disabled={awaiting}
           placeholder={
-            awaiting ? "Codex가 응답하는 중입니다..." : enterSends ? "이어서 질문하기 (Enter 보내기 · Shift+Enter 줄바꿈)" : "이어서 질문하기"
+            awaiting ? "응답하는 중입니다..." : enterSends ? "이어서 질문하기 (Enter 보내기 · Shift+Enter 줄바꿈)" : "이어서 질문하기"
           }
           aria-label="메시지"
           className="block max-h-[40vh] w-full resize-y rounded-lg border border-stone-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100 disabled:bg-stone-50"
@@ -758,8 +721,35 @@ interface StopState {
   token: number;
 }
 
-export default function SessionView({ id, onArchived }: { id: string; onArchived: (id: string) => void }) {
+// #94 대화 화면 상단: '대화 목록' 버튼만 둔다(제목·시간 없음). 스크롤 영역 위에 붙어 있어 긴 대화를 바닥까지 내려도 보이고
+// 누를 수 있다. 메시지는 이 줄 아래로 흐르며 입력창(아래 고정)·'최신으로'(입력창 위)와 겹치지 않는다. 보관은 같은 줄 오른쪽(PM 확인 중).
+function SessionBar({ onBack, archive }: { onBack: () => void; archive?: { onClick: () => void; disabled: boolean } }) {
+  return (
+    <div data-chat-session-bar="" className="sticky top-0 z-20 -mx-4 flex items-center justify-between gap-2 border-b border-stone-100 bg-white px-2">
+      <button
+        type="button"
+        onClick={onBack}
+        className="min-h-11 rounded-md px-2 text-xs text-stone-500 hover:bg-stone-100 hover:text-stone-800 md:min-h-8"
+      >
+        ← 대화 목록
+      </button>
+      {archive && (
+        <button
+          type="button"
+          onClick={archive.onClick}
+          disabled={archive.disabled}
+          className="min-h-11 shrink-0 rounded-md px-2 text-xs text-stone-500 hover:bg-stone-100 hover:text-red-700 disabled:opacity-50 md:min-h-8"
+        >
+          보관
+        </button>
+      )}
+    </div>
+  );
+}
+
+export default function SessionView({ id, onArchived, onBack }: { id: string; onArchived: (id: string) => void; onBack: () => void }) {
   const { user, csrfToken, refresh: refreshAuth } = useAuth();
+  const admin = isAdmin(user);
   const { result, refreshFailure, reload, reloadResult } = useLoad(`session:${id}`, () => getSession(id));
   const { run, busy } = useMutation();
   const [archiveFailure, setArchiveFailure] = useState<FetchFailure | null>(null);
@@ -1030,9 +1020,21 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
   const [announced, setAnnounced] = useState<{ status: ChatStatus; text: string }>({ status, text: "" });
   if (announced.status !== status) setAnnounced({ status, text: announcement(announced.status, status, announced.text) });
 
-  if (!result) return <p className="text-sm text-stone-500">불러오는 중...</p>;
+  if (!result)
+    return (
+      <div className="flex flex-col gap-3">
+        <SessionBar onBack={onBack} />
+        <p className="text-sm text-stone-500">불러오는 중...</p>
+      </div>
+    );
   // 개인 세션 조회 실패. 공개 문서 조회와는 별개다.
-  if (!result.ok) return <ErrorNotice failure={result.failure} prefix="대화를 불러오지 못했습니다." />;
+  if (!result.ok)
+    return (
+      <div className="flex flex-col gap-3">
+        <SessionBar onBack={onBack} />
+        <ErrorNotice failure={result.failure} prefix="대화를 불러오지 못했습니다." />
+      </div>
+    );
   const s = result.data;
 
   async function archive() {
@@ -1047,35 +1049,13 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
       <p className="sr-only" role="status" aria-live="polite">
         {announced.text}
       </p>
-      <header className="flex items-start gap-2">
-        <div className="min-w-0 flex-1 space-y-0.5">
-          <h3 className="break-words text-base font-semibold text-stone-900">{s.title || "(제목 없음)"}</h3>
-          <p className="text-xs text-stone-500">
-            {SESSION_STATE_LABELS[s.state]} · 시작 {formatDateTime(s.createdAt)} · 최근 {formatDateTime(s.updatedAt)}
-          </p>
-          {s.context && (
-            <p className="text-xs text-stone-500">
-              공개 글에서 시작:{" "}
-              <Link href={`/public/document/?id=${encodeURIComponent(s.context.documentId)}`} className="text-indigo-600 hover:text-indigo-800">
-                {s.context.title || "(제목 없음)"}
-              </Link>{" "}
-              — 질문마다 읽을 수 있는 자료는 보낼 때 보고 있는 페이지 기준입니다. 이 글을 다시 읽으며 질문하려면 그 공개 글 페이지에서 보내세요.
-            </p>
-          )}
-        </div>
-        <button
-          onClick={() => void archive()}
-          disabled={busy || awaiting}
-          className="min-h-11 shrink-0 rounded-md px-2 text-xs text-stone-500 hover:bg-stone-100 hover:text-red-700 disabled:opacity-50 md:min-h-8"
-        >
-          보관
-        </button>
-      </header>
+      <SessionBar onBack={onBack} archive={{ onClick: () => void archive(), disabled: busy || awaiting }} />
       {archiveFailure && <ErrorNotice failure={archiveFailure} prefix="보관하지 못했습니다." />}
 
-      <CodexStatusView result={codex.result} />
-      {codex.refreshFailure && (
-        <ErrorNotice failure={codex.refreshFailure} prefix="Codex 상태를 다시 확인하지 못했습니다. 마지막으로 받은 상태를 표시합니다." />
+      {/* #94: 연결·실행 환경 상태 패널은 admin에게만 보인다. 일반 계정은 보내기가 잠길 때 입력창 위 안내로 이유와 할 일을 본다. */}
+      {admin && <CodexStatusView result={codex.result} />}
+      {admin && codex.refreshFailure && (
+        <ErrorNotice failure={codex.refreshFailure} prefix="연결 상태를 다시 확인하지 못했습니다. 마지막으로 받은 상태를 표시합니다." />
       )}
 
       {entries.length === 0 && !awaiting ? (
@@ -1088,14 +1068,13 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
               entry.kind === "local" ? (
                 <Message
                   key={entry.key}
-                  sessionId={s.id}
                   item={{ id: entry.key, type: "message", role: "user", text: entry.text }}
                   sending={{ page: entry.page }}
                 />
               ) : entry.item.type === "message" ? (
-                <Message key={entry.key} sessionId={s.id} item={entry.item} />
+                <Message key={entry.key} item={entry.item} />
               ) : entry.item.type === "tool_call" ? (
-                <ToolCall key={entry.key} sessionId={s.id} item={entry.item} />
+                <ToolCall key={entry.key} item={entry.item} />
               ) : entry.item.type === "notice" ? (
                 <NoticeRow key={entry.key} item={entry.item} />
               ) : (
@@ -1104,9 +1083,9 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
             ),
             ...liveItems.map((item) =>
               item.kind === "agentMessage" ? (
-                <Message key={item.itemId} sessionId={s.id} item={{ id: item.itemId, type: "message", role: "assistant", text: item.text }} live />
+                <Message key={item.itemId} item={{ id: item.itemId, type: "message", role: "assistant", text: item.text }} live />
               ) : (
-                <ToolCall key={item.itemId} sessionId={s.id} item={liveToolItem(item)} live />
+                <ToolCall key={item.itemId} item={liveToolItem(item)} />
               )
             ),
             showLive && liveTurn.stopped ? (
@@ -1128,7 +1107,7 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
           {/* 서버 오류 문구를 그대로 옮기지 않는다(외부 provider 원문·식별자 노출 방지). 아는 코드만 안내하고 나머지는 코드만 표시. */}
           {s.error &&
             (researchErrorMessage({ kind: "http", status: 0, code: s.error.code }) ??
-              `Codex 요청을 처리하지 못했습니다 (${s.error.code}). 다른 모델로 자동 전환하거나 자동으로 다시 실행하지 않습니다.`)}{" "}
+              `요청을 처리하지 못했습니다 (${s.error.code}). 다른 모델로 자동 전환하거나 자동으로 다시 실행하지 않습니다.`)}{" "}
           이전 기록은 보존되어 있으며 새 메시지로 이어서 질문할 수 있습니다. 실패한 요청은 자동으로 다시 실행되지 않습니다.
         </Notice>
       )}

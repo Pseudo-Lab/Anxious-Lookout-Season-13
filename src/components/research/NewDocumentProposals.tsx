@@ -50,7 +50,7 @@ export function NewDocumentProposalReview({ id, onDone }: { id: string; onDone: 
     <div className="space-y-3">
       <p className="text-sm text-stone-900">
         {pending
-          ? "Codex가 대화에서 새 문서로 제안한 내용입니다. 수락하면 이 내용으로 문서와 첫 버전이 만들어지고, 버리면 아무것도 만들어지지 않습니다."
+          ? "대화에서 새 문서로 제안된 내용입니다. 수락하면 이 내용으로 문서와 첫 버전이 만들어지고, 버리면 아무것도 만들어지지 않습니다."
           : p.status === "accepted"
             ? "이미 수락한 제안입니다."
             : "버린 제안입니다(원문은 기록으로 보존)."}
@@ -90,8 +90,8 @@ export function NewDocumentProposals({ reload = "" }: { reload?: string }) {
   }, [searching, loading, loadMore]);
   if (!items.length && !list.failure) return null;
   return (
-    <section aria-label="Codex 새 문서 제안" className="space-y-2 rounded-lg bg-indigo-50/50 p-3 ring-1 ring-indigo-200">
-      <h2 className="text-sm font-semibold text-indigo-900">Codex가 제안한 새 문서</h2>
+    <section aria-label="대화 새 문서 제안" className="space-y-2 rounded-lg bg-indigo-50/50 p-3 ring-1 ring-indigo-200">
+      <h2 className="text-sm font-semibold text-indigo-900">대화에서 제안된 새 문서</h2>
       {list.failure && <ErrorNotice failure={list.failure} prefix="제안 목록을 불러오지 못했습니다." />}
       <ul className="space-y-1 text-sm">
         {items.map((p) => (

@@ -71,6 +71,7 @@ class PersonalAuth:
         self.cache = None
         self.owns_cache = False
         self.secrets = set()
+        self.latest_secrets = set()  # #94 (8): the literals of the credential validated last (observation split)
         self.lease = None
         self.ready = False
         self.journal = None
@@ -115,6 +116,7 @@ class PersonalAuth:
         if tokens.get("account_id") != grant["providerAccountId"] or not all(isinstance(tokens.get(k), str) and tokens[k] for k in ("id_token", "access_token", "refresh_token")):
             raise CodexFailure("policy_refused")
         self.secrets.update(tokens[k] for k in ("id_token", "access_token", "refresh_token", "account_id"))
+        self.latest_secrets = {tokens[k] for k in ("id_token", "access_token", "refresh_token", "account_id")}
         return cache
 
     def attach(self, codex_home):
@@ -233,6 +235,7 @@ class PersonalAuth:
             self.ready = False
             if was_ready:
                 self.secrets.clear()
+                self.latest_secrets = set()
 
     def release(self):
         if self.lease:

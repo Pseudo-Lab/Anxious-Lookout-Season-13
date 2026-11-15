@@ -199,7 +199,7 @@ def test_schema_keys_and_regex_match_values(values):
     import re
     schema = json.loads((TEMPLATES/'values.schema.json').read_text())
     assert set(schema['required']) == rollout.KEYS
-    assert set(schema['properties']) == set(values) == rollout.KEYS
+    assert set(schema["properties"]) == rollout.KEYS | rollout.OPTIONAL and set(values) == rollout.KEYS
     assert 'executor' not in schema['properties']
 
 

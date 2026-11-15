@@ -267,8 +267,9 @@ await step("T1", async () => {
   await toPhase("unreachable");
   check("T1 [real]. unreachable → 환경 연결 확인 중", await appears(A.chat.getByText("환경 연결 확인 중")));
   const text = (await A.chat.innerText()).replace(/\s+/g, " ");
-  check("T1 [real]. unreachable copy: checking connection/preparation, no recovery claim",
-    text.includes("환경 연결과 준비 결과를 확인하고 있습니다") && !/잠시|켜지면|새 환경|복구/.test(text), text.slice(0, 160));
+  // #94: 상태 패널(본문 설명)은 관리자만 본다. 편집자는 입력창 위 안내의 상태 이름(위 검사)만 보며, 회복 약속 문구가 없어야 한다.
+  check("T1 [real]. unreachable copy: no recovery claim (editor sees the composer notice only)",
+    text.includes("환경 연결 확인 중") && !/잠시|켜지면|새 환경|복구/.test(text), text.slice(0, 160));
   check("T1 [real]. unreachable: no action button, send locked", (await actionBtnOf(A).count()) === 0 && (await sendBtnOf(A).isDisabled()));
   await shot(A, "unreachable");
 
@@ -386,7 +387,7 @@ await step("E3", async () => {
 // ---------- E4. 세션 소실 401: 기존 인증 처리, 반복 POST 없음 [real] ----------
 await step("E4", async () => {
   await B.page.goto(U("/research/"));
-  if (!(await B.chat.isVisible())) await B.page.getByRole("button", { name: "Codex 대화창 열기" }).click();
+  if (!(await B.chat.isVisible())) await B.page.getByRole("button", { name: "대화창 열기" }).click();
   await appears(B.chat.getByText("환경 활성화 중"));
   const p0 = B.net.posts.length;
   await B.context.clearCookies();
@@ -448,7 +449,7 @@ await step("U1", async () => {
   const panel = (await D.chat.innerText()).replace(/\s+/g, " ");
   check("U1 [real]. whole panel (status + composer) makes no recovery/turn-on claim", !/잠시|켜지면|새 환경|복구/.test(panel), panel.slice(0, 200));
   check("U1 [real]. UI 확인 중 copy, no action button, send locked, draft kept",
-    (await appears(D.chat.getByText("환경 연결과 준비 결과를 확인하고 있습니다"))) && (await actionBtnOf(D).count()) === 0 &&
+    (await appears(D.chat.getByText("환경 연결 확인 중"))) && (await actionBtnOf(D).count()) === 0 && // #94: 편집자는 입력창 위 안내의 상태 이름만 본다
       (await sendBtnOf(D).isDisabled()) && (await D.chat.getByLabel("메시지").inputValue()) === "D 초안");
   await shot(D, "reserved");
   const n0 = D.net.responses.length;
@@ -482,8 +483,17 @@ await step("P1", async () => {
   await host(`phase ${userE.accountId} not_prepared`); // 새 계정에 registry가 없음을 확인만 한다
   const g = await apiClient(E.page).get("/research/codex/status");
   check("P1 [real]. GET not_prepared (no registry row)", g.status === 200 && statusShape(g.body) && g.body.reason === "not_prepared" && !("retryAfterSeconds" in g.body), JSON.stringify(g.body));
-  if (!(await E.chat.isVisible())) await E.page.getByRole("button", { name: "Codex 대화창 열기" }).click();
-  check("P1 [real]. UI 대화 준비 button", await appears(E.chat.getByRole("button", { name: "대화 준비" })));
+  if (!(await E.chat.isVisible())) await E.page.getByRole("button", { name: "대화창 열기" }).click();
+  // #94: 연결·실행 환경 상태 패널(목록의 준비 버튼 포함)은 관리자만 본다. 편집자는 대화의 입력창 위 안내에서 "대화 준비"를 누른다.
+  // 새 대화를 화면에서 만들어 입력창으로 들어간다(페이지 이동·재로그인 없음 → 새 진입 준비 POST 없음).
+  await E.chat.getByLabel("새 대화 제목").waitFor();
+  await E.chat.getByLabel("새 대화 제목").fill("E 준비 대화");
+  await E.chat.getByRole("button", { name: "새 대화" }).click();
+  await E.chat.getByLabel("메시지").waitFor();
+  await settle(E.page);
+  check("P1 [hybrid]. opening the conversation sends no preparation POST", E.net.posts.length === 1, String(E.net.posts.length));
+  check("P1 [real]. composer notice offers 대화 준비 (editor)", await appears(E.chat.getByRole("button", { name: "대화 준비" })));
+  check("P1 [real]. still no automatic re-request", E.net.posts.length === 1, String(E.net.posts.length));
   const n0 = E.net.responses.length;
   await E.chat.getByRole("button", { name: "대화 준비" }).first().click();
   await waitResponses(E, n0 + 1);
@@ -502,7 +512,7 @@ await step("F0", async () => {
   const meA = await meOf(A.page);
   check("F0 [real]. off: me codexRunner present false, research still allowed", meA.codexRunner === false && meA.isApproved && meA.role === "editor");
   check("F0 [real]. off: no preparation POST", A.net.posts.length === p0, String(A.net.posts.length - p0));
-  check("F0 [real]. off: conversation still opens", (await A.chat.getByRole("heading", { name: "준비 통합 대화" }).count()) === 1);
+  check("F0 [real]. off: conversation still opens", (await A.chat.getByLabel("메시지").count()) === 1); // #94: 대화 제목은 표시하지 않는다
   const text = (await A.chat.innerText()).replace(/\s+/g, " ");
   check("F0 [real]. off: no runner state copy", !/환경 활성화 중|환경 연결 확인 중|사용 대기 중|환경이 쉬는 중|환경 정리 중|확인이 필요합니다/.test(text), text.slice(0, 160));
   const g = await apiA.get("/research/codex/status");

@@ -14,6 +14,16 @@ keys, duplicates, empty allowlists and plaintext credential fields are refused.
 `allowlist: ["<owner UUID>"]` selects canary owners; **null** explicitly expands to
 all approved editors/admins. API and all workers receive the same selection.
 Defaults in `values.example.json`: cap3, idle1800, native5GiB/control1GiB.
+
+**Stream flags (#94, #90).** The optional key `stream: {"enable": bool, "text": bool, "trace": bool}` sets the #90 stream env on **both** the api and the runner-controller Deployments:
+- `enable` → api `RESEARCH_STREAM_ENABLE`;
+- `text` → `CODEX_RUNNER_STREAM_TEXT` on both;
+- `trace` → `CODEX_RUNNER_STREAM_TRACE` on both, plus api `STREAM_TRACE`.
+
+The renderer owns these four keys, so a value inherited from the live api Deployment or its ConfigMap is dropped. **If the key is absent, every flag is off:** an apply without `stream` turns streaming off in production. To keep the #93 state, put `"stream": {"enable": true, "text": true, "trace": false}` in the values file. Only `"true"` keys are written, so with every flag off the render is the same as before #94.
+
+`--check` and a render both print one line, `{"stream": {...}, "streamInput": true|false}`. Read it before any apply.
+
 runner-controller (#61) stop/idle handling still covers existing registry records; the
 allowlist gates new entry after release, not cleanup. Scale its Deployment to 0 to
 suspend it; disabling the API or narrowing the allowlist does not stop cleanup.

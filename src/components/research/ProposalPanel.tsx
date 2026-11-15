@@ -189,7 +189,7 @@ export default function ProposalPanel({
         className="flex w-full items-center justify-between gap-3 px-4 py-2 text-left text-sm hover:bg-stone-50"
       >
         <span className="min-w-0 break-words">
-          <span className="mr-2 text-xs font-medium text-indigo-700">Codex 제안</span>
+          <span className="mr-2 text-xs font-medium text-indigo-700">대화 제안</span>
           <span className="text-stone-900">{p.title}</span>
         </span>
         <span className="shrink-0 text-xs text-stone-500">
@@ -216,9 +216,9 @@ export default function ProposalPanel({
 
   return (
     <section id="proposals" ref={section} className="scroll-mt-4">
-      <h2 className="mb-1 text-lg font-semibold text-stone-900">Codex 제안</h2>
+      <h2 className="mb-1 text-lg font-semibold text-stone-900">대화 제안</h2>
       <p className="mb-3 text-xs text-stone-500">
-        대화에서 Codex가 이 문서를 고치면 제안으로 남습니다. 수락하기 전에는 문서가 바뀌지 않으며, 비교한 뒤 수락하면 새 버전이 됩니다.
+        대화에서 이 문서를 고치면 제안으로 남습니다. 수락하기 전에는 문서가 바뀌지 않으며, 비교한 뒤 수락하면 새 버전이 됩니다.
       </p>
       {list.failure && <ErrorNotice failure={list.failure} prefix="제안 목록을 불러오지 못했습니다." />}
       {pending.length > 0 ? (

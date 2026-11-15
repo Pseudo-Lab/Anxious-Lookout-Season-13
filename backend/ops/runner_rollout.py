@@ -16,6 +16,12 @@ BIN = '/usr/local/lib/anxious-lookout/issue16'
 NS = 'codex-runner'
 KEYS = {'version', 'runtimeImage', 'runnerImage', 'provisionerImageId', 'postImagesStorageClass', 'api', 'hostApi',
         'namespaceUid', 'podCIDR', 'node', 'providerAccountId', 'allowlist', 'maxPods', 'idleSeconds', 'nativeSizeGiB', 'controlSizeGiB'}
+# #94 (9): the #90 stream flags. Optional; absent = every flag off. The renderer owns these keys on both the api and
+# runner-controller Deployments (an inherited value is dropped), so an apply can neither lose a flag on the controller
+# nor leave the two disagreeing. Only "true" keys are written: with every flag off the render is as before #94.
+OPTIONAL = {'stream'}
+STREAM = {'enable', 'text', 'trace'}
+API_STREAM_KEYS = ('RESEARCH_STREAM_ENABLE', 'CODEX_RUNNER_STREAM_TEXT', 'CODEX_RUNNER_STREAM_TRACE', 'STREAM_TRACE')
 IMAGE = r'[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}'
 
 
@@ -43,7 +49,10 @@ def canonical_uuid(value):
 
 def checked(v):
     # #68: new owners get the native shell runner; a shell-executor opt-in is refused, not ignored.
-    require(type(v) is dict and set(v) == KEYS and type(v['version']) is int and v['version'] == 1)
+    require(type(v) is dict and KEYS <= set(v) <= KEYS | OPTIONAL and type(v['version']) is int and v['version'] == 1)
+    if 'stream' in v:
+        require(type(v['stream']) is dict and set(v['stream']) == STREAM
+                and all(type(v['stream'][key]) is bool for key in STREAM))
     sc = v['postImagesStorageClass']
     require(type(sc) is str and len(sc) <= 253 and all(
         re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in sc.split('.')))
@@ -84,6 +93,19 @@ def environment(v):
     if v['allowlist'] is not None:
         env['CODEX_USER_RUNNER_ALLOWLIST'] = ','.join(v['allowlist'])
     return env
+
+
+def stream_env(v, role):
+    """#94 (9): the stream env of the api or the runner-controller ({} when `stream` is absent or all false).
+    api: RESEARCH_STREAM_ENABLE (its /events), STREAM_TRACE (its relay trace) and the two runner keys (it renders and
+    verifies runner Pods too, app/runner_kube.py STREAM_FLAGS). runner-controller: the two runner keys."""
+    flags = v.get('stream') or {key: False for key in STREAM}
+    pairs = [('CODEX_RUNNER_STREAM_TEXT', 'text'), ('CODEX_RUNNER_STREAM_TRACE', 'trace')]
+    if role == 'api':
+        pairs = [('RESEARCH_STREAM_ENABLE', 'enable')] + pairs + [('STREAM_TRACE', 'trace')]
+    else:
+        require(role == 'controller')
+    return {name: 'true' for name, key in pairs if flags[key]}
 
 
 INIT = '''import os
@@ -135,7 +157,8 @@ def deployment(v, baseline, configmaps=()):
     env = environment(v)
     env['POST_IMAGE_ROOT'] = '/var/lib/posts/images/data'
     env['CODEX_USER_RUNNER_POOL_CONFIG_FILE'] = '/run/pool-private/private/pool.json'
-    api['env'] = [e for e in inherited.values() if e['name'] not in retired | set(env)
+    env.update(stream_env(v, 'api'))  # #94 (9): an inherited stream key is dropped below; the input decides
+    api['env'] = [e for e in inherited.values() if e['name'] not in retired | set(env) | set(API_STREAM_KEYS)
                   and not e['name'].startswith('CODEX_PERSONAL_')]
     api['env'] += [{'name': k, 'value': val} for k, val in env.items()]
     api['image'], api['imagePullPolicy'] = v['runtimeImage'], 'Never'
@@ -204,7 +227,7 @@ def controller(v):
     env = {**environment(v), 'RUNNER_NAMESPACE': NS, 'RUNNER_NAMESPACE_UID': v['namespaceUid'],
            'RUNNER_POD_CIDR': v['podCIDR'], 'RUNNER_NODE_NAME': v['node'],
            'CONTROLLER_DATABASE_URL_FILE': '/run/runner-db/controller-url',
-           'OBSERVER_DATABASE_URL_FILE': '/run/runner-db/observer-url'}
+           'OBSERVER_DATABASE_URL_FILE': '/run/runner-db/observer-url', **stream_env(v, 'controller')}
     labels = {'app': 'runner-controller'}
     items.append({'apiVersion': 'apps/v1', 'kind': 'Deployment',
         'metadata': {'name': 'runner-controller', 'namespace': CONTROL_NS, 'labels': labels},
@@ -337,6 +360,14 @@ def preflight(files, v):
     require(root == {'name': 'POST_IMAGE_ROOT', 'value': '/var/lib/posts/images/data'})
     patch = json.loads(files['api-patch.json'])
     require(patch[2] == {'op': 'replace', 'path': '/spec/template/spec', 'value': spec})
+    # #94 (9): exactly the input's stream keys on both Deployments, nothing inherited.
+    require({e['name']: e.get('value') for e in api['env'] if e['name'] in API_STREAM_KEYS} == stream_env(v, 'api'))
+    controllers = [i for i in json.loads(files['resources.json'])['items']
+                   if i['kind'] == 'Deployment' and i['metadata']['name'] == 'runner-controller']
+    require(len(controllers) == 1)
+    container, = controllers[0]['spec']['template']['spec']['containers']
+    require({e['name']: e.get('value') for e in container['env'] if e['name'] in API_STREAM_KEYS}
+            == stream_env(v, 'controller'))
 
 
 def render(v, baseline, templates, configmaps=()):
@@ -417,6 +448,9 @@ def main():
                     stream.write(value)
                 target.chmod(0o700 if name.endswith('.sh') else 0o600)
             preflight({name: (args.output/name).read_text() for name in files}, values)
+        # #94 (9): what this render does to streaming, before anyone applies it (absent input = all off).
+        stream = {key: bool((values.get('stream') or {}).get(key)) for key in sorted(STREAM)}
+        print(json.dumps({'stream': stream, 'streamInput': 'stream' in values}, sort_keys=True), flush=True)
     except Exception:
         p.exit(1, 'Rollout render refused; values and credentials are not printed\n')
     print('PASS offline rollout validation; no deployment or service changes')

@@ -102,13 +102,14 @@ const page = A.page;
 const main = page.locator("main");
 const api = apiClient(page);
 
-// L0. 상태 화면: 실제 M2 health / M3 research health
+// L0. 상태 화면(#94: 관리자만). 비로그인에게는 안내만 보이고, API·연구 health는 API로 직접 확인한다.
 {
   await page.goto(U("/status/"));
-  await page.waitForFunction(() => !document.body.innerText.includes("확인 중..."), null, { timeout: 15000 });
-  const st = await main.innerText();
-  check("L0. status API 정상", st.includes("정상 (요청을 받을 준비가 되었습니다)"));
-  check("L0. status research health 정상", st.includes("정상 (자료·문서 저장소 준비됨)"));
+  check("L0. status page admin-only for anonymous", await appears(page.getByText("서비스 상태는 관리자만 볼 수 있습니다.")));
+  const health = await page.request.get(U("/api/health"));
+  check("L0. API health 200", health.status() === 200, String(health.status()));
+  const rh = await page.request.get(U("/api/research/health"));
+  check("L0. research health 200", rh.status() === 200, String(rh.status()));
 }
 
 // L1. 비로그인
@@ -282,12 +283,15 @@ const chatPanel = page.locator("#chat-panel");
 await page.goto(publicUrl);
 await main.getByLabel("새 대화 제목").waitFor();
 await main.getByRole("button", { name: "새 대화" }).click();
-check("L8b. session context from public document shown", await appears(chatPanel.getByText("공개 글에서 시작:")));
+// #94: 대화 화면에는 시작 맥락 줄을 표시하지 않는다. 맥락이 저장됐는지는 아래에서 API로 확인한다.
+check("L8b. session opened from public document", await appears(chatPanel.getByLabel("메시지")));
+check("L8b. no context line in the chat (#94)", (await chatPanel.getByText("공개 글에서 시작").count()) === 0);
 const publicSessionId = await page.evaluate(() => {
   const k = Object.keys(sessionStorage).find((key) => key.endsWith(":chat-ui"));
   return k ? JSON.parse(sessionStorage.getItem(k)).sessionId : null;
 });
 check("L8b. new public session opened in panel", !!publicSessionId, String(publicSessionId));
+check("L8b. session context from public document stored (API)", !!(await api.get(`/research/sessions/${publicSessionId}`)).body?.context);
 const publicSessionUrl = U(`/research/session/?id=${publicSessionId}`);
 
 // L8c. 공개 중 문서를 보관해도 철회할 수 있다(리뷰 F1): 보관 → 철회 버튼 유지 → 철회 → 익명 404
@@ -418,17 +422,35 @@ const publicSessionUrl = U(`/research/session/?id=${publicSessionId}`);
   );
 }
 
+// #94 review: 대화창은 로그인 확인·기억한 대화 복원 뒤에 목록 또는 대화 화면을 그린다. 한 번만 보고 넘어가면 복원보다 앞서
+// '대화 목록' 버튼을 놓친다. 목록 폼이나 '대화 목록' 버튼 중 하나가 보일 때까지 기다리며 필요하면 목록으로 간다.
+// 끝내 목록에 못 가면 패널 상태를 오류에 남긴다.
+async function toChatList(panel, p) {
+  const form = panel.getByLabel("새 대화 제목");
+  const back = panel.getByRole("button", { name: "← 대화 목록" });
+  for (let i = 0; i < 150; i++) {
+    if (await form.isVisible().catch(() => false)) return;
+    if (await back.isVisible().catch(() => false)) await back.click({ timeout: 2000 }).catch(() => {});
+    await p.waitForTimeout(200);
+  }
+  throw new Error(`chat list not reached: ${(await panel.innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 240)}`);
+}
 // L9. 세션: 실제 Codex 미연결 상태 표시, 전송 실패 시 입력 보존
 // #44: 내 연구에 대화 탭이 없다. Codex 안내·새 대화 폼은 공통 대화창에 있다.
 await page.goto(U("/research/"));
 for (let i = 0; i < 50 && !(await chatPanel.isVisible()); i++) {
-  const button = page.getByRole("button", { name: "Codex 대화창 열기" });
+  const button = page.getByRole("button", { name: "대화창 열기" });
   if (await button.isVisible()) await button.click({ timeout: 2000 }).catch(() => {});
   await page.waitForTimeout(200);
 }
-await chatPanel.getByRole("heading", { name: "Codex 대화" }).waitFor();
-check("L9. codex status not shown as available", await appears(chatPanel.getByText(/새 대화를 진행할 수 없지만|실제 응답은 아직 확인되지 않았습니다/)));
-check("L9. fixed model shown from real status", await appears(chatPanel.getByText("모델: gpt-6.1-sol (서버에서 고정)")));
+await chatPanel.getByRole("heading", { name: "대화", exact: true }).waitFor();
+// #94: 연결 상태 패널은 관리자만 보며 모델명은 누구에게도 표시하지 않는다. 시험 계정 역할과 상관없이 모델명·"Codex" 문구가 없어야 한다.
+await page.waitForTimeout(800);
+check("L9. no model name shown", (await chatPanel.getByText(/모델:|서버에서 고정/).count()) === 0);
+check("L9. no 'Codex' wording in the chat panel", !(await chatPanel.innerText()).includes("Codex"));
+// 대화창은 직전(L8b)에 연 공개 글 대화를 기억해 그 대화 화면으로 다시 열릴 수 있다. 새 대화 폼은 목록에 있으므로 목록으로 간다.
+await toChatList(chatPanel, page);
+check("L9. list view: no 'Codex' wording", !(await chatPanel.innerText()).includes("Codex"));
 await chatPanel.getByLabel("새 대화 제목").fill("실물 세션");
 await chatPanel.getByRole("button", { name: "새 대화" }).click();
 // #9부터 새 대화는 이동 없이 대화창에서 열린다.
@@ -438,7 +460,7 @@ const sid = await page.evaluate(() => {
   return k ? JSON.parse(sessionStorage.getItem(k)).sessionId : null;
 });
 const sessionUrl = U(`/research/session/?id=${sid}`);
-check("L9. session created via real API", await appears(chatPanel.getByRole("heading", { name: "실물 세션" })));
+check("L9. session created via real API", (await appears(chatPanel.getByLabel("메시지"))) && (await api.get(`/research/sessions/${sid}`)).body?.title === "실물 세션");
 await chatPanel.getByLabel("메시지").fill("실물 질문");
 // 실제 status가 접수 불가이면 화면은 보내기를 잠근다. 서버 선접수 거절 자체는 API로 직접 확인한다.
 check("L9. send locked by real status", (await appears(chatPanel.getByText("보내기가 잠겨 있습니다"))) && (await chatPanel.getByRole("button", { name: "보내기" }).isDisabled()));
@@ -452,7 +474,7 @@ check("L9. input preserved", (await chatPanel.getByLabel("메시지").inputValue
 }
 check("L9. no unconfirmed send kept for definitive 503", !(await page.evaluate(() => JSON.stringify(Object.fromEntries(Object.entries(sessionStorage).filter(([k]) => k.includes(":session-send:")))))).includes("실물 질문"));
 await page.reload();
-check("L9. session persists after reload", await appears(chatPanel.getByRole("heading", { name: "실물 세션" })));
+check("L9. session persists after reload", (await appears(chatPanel.getByRole("button", { name: "← 대화 목록" }))) && (await appears(chatPanel.getByLabel("메시지"))));
 
 // LW. #22 실제 API(0005_writing): 서버 초안 자동 저장·새로고침 복구·명시 저장, 다른 곳 저장 뒤 비교해야 저장, 버리기
 {
