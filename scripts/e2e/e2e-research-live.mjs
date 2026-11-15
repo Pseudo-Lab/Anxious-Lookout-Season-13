@@ -435,6 +435,13 @@ await chatPanel.getByRole("heading", { name: "대화", exact: true }).waitFor();
 await page.waitForTimeout(800);
 check("L9. no model name shown", (await chatPanel.getByText(/모델:|서버에서 고정/).count()) === 0);
 check("L9. no 'Codex' wording in the chat panel", !(await chatPanel.innerText()).includes("Codex"));
+// 대화창은 직전(L8b)에 연 공개 글 대화를 기억해 그 대화 화면으로 다시 열릴 수 있다. 새 대화 폼은 목록에 있으므로 목록으로 간다.
+{
+  const back = chatPanel.getByRole("button", { name: "← 대화 목록" });
+  if (await back.isVisible().catch(() => false)) await back.click();
+}
+await chatPanel.getByLabel("새 대화 제목").waitFor();
+check("L9. list view: no 'Codex' wording", !(await chatPanel.innerText()).includes("Codex"));
 await chatPanel.getByLabel("새 대화 제목").fill("실물 세션");
 await chatPanel.getByRole("button", { name: "새 대화" }).click();
 // #9부터 새 대화는 이동 없이 대화창에서 열린다.
