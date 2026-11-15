@@ -230,7 +230,7 @@ class HoldPolicy:
         # #94 (8): where `legacy` comes from (observation only; `legacy` = max of the two). current: a long literal
         # of the credential in memory has no fingerprint; retired: only a journal row of an earlier credential has none.
         self.legacy_current, self.legacy_retired = legacy_current, legacy_retired
-        self.retired_state, self.retired_excluded = "off", 0  # #95 B1 observation (set by policy)
+        self.retired_state, self.retired_excluded, self.retired_excluded_assumed = "off", 0, 0  # #95 B1 (set by policy)
 
     @classmethod
     def none(cls):
@@ -326,5 +326,8 @@ def policy(journal, control, current=(), latest=None, retired=None):
                       state if retired is None else (state, retired_file, retired_state),
                       legacy_current, legacy_retired)
     hold.retired_state = retired_state
-    hold.retired_excluded = len(dropped - covered_rows)  # rows that would have held text without #95
+    assumed_rows = frozenset(retired[3]) if retired is not None and len(retired) > 3 else frozenset()
+    effective = dropped - covered_rows  # rows that would have held text without #95
+    hold.retired_excluded_assumed = len(effective & assumed_rows)
+    hold.retired_excluded = len(effective - assumed_rows)  # proven
     return hold

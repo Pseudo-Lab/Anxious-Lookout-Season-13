@@ -701,6 +701,8 @@ class Hub:
             turn.stats["retiredState"] = getattr(before[2], "retired_state", "off")
             turn.stats["retiredExcludedProven"] = max(turn.stats["retiredExcludedProven"],
                                                       getattr(before[2], "retired_excluded", 0))
+            turn.stats["retiredExcludedAssumed"] = max(turn.stats["retiredExcludedAssumed"],
+                                                       getattr(before[2], "retired_excluded_assumed", 0))
             turn.stats["cutDelayPeakChars"] = max([turn.stats["cutDelayPeakChars"]] + delays)
             if before != after:
                 # A literal was observed meanwhile: nothing of this pass is published (text, output or summary).

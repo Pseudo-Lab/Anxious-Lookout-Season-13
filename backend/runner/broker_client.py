@@ -27,12 +27,16 @@ class BrokerClient:
         self.owner, self.state_id = canonical_uuid(owner), canonical_uuid(state_id)
         self.transport = transport
 
-    def fetch(self, *, refresh=False):
+    def fetch(self, *, refresh=False, attest=False):
+        """`attest` (#95 route 1) is sent only by the operator's runner.stream_anchor, never by BrokerPull or the 401
+        refresher; only then may the envelope carry `refreshedForRequest` (a bool), otherwise the exact field set."""
+        body = {'ownerId': self.owner, 'stateId': self.state_id, 'refresh': refresh}
+        if attest:
+            body['attest'] = True
         try:
             token = self.token_file.read_text().strip()  # Kubelet rotates it; read every call.
             with httpx.Client(timeout=15, trust_env=False, follow_redirects=False, transport=self.transport) as client:
-                response = client.post(self.url, headers={'Authorization': 'Bearer '+token},
-                                       json={'ownerId': self.owner, 'stateId': self.state_id, 'refresh': refresh})
+                response = client.post(self.url, headers={'Authorization': 'Bearer '+token}, json=body)
         except (OSError, httpx.HTTPError):
             raise CodexFailure('unavailable') from None
         if response.status_code == 503 and response.headers.get('content-type', '').startswith('application/json'):
@@ -44,8 +48,10 @@ class BrokerClient:
             envelope = response.json()
         except ValueError:
             raise CodexFailure('unavailable') from None
-        if (type(envelope) is not dict or set(envelope) != FIELDS
-                or envelope['ownerId'] != self.owner or envelope['stateId'] != self.state_id):
+        expected = FIELDS | {'refreshedForRequest'} if attest else FIELDS
+        if (type(envelope) is not dict or set(envelope) != expected
+                or envelope['ownerId'] != self.owner or envelope['stateId'] != self.state_id
+                or (attest and type(envelope['refreshedForRequest']) is not bool)):
             raise CodexFailure('policy_refused')
         return envelope
 

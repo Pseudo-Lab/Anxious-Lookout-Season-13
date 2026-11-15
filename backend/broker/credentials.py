@@ -32,6 +32,22 @@ COMMAND = ['app-server', '--listen', 'stdio://',
            '-c', 'features.plugins=false', '-c', 'features.apps=false', '-c', 'web_search="disabled"']
 
 
+ATTEST_TOLERANCE = 300  # seconds; #95 route 1 condition 4 (the runner adds the same 300 s to its release bound)
+
+
+def iat_of(token):
+    """The integer `iat` claim of a JWT (bool excluded), or None. Decoding only, no signature check (same trust as the
+    rest of the broker's token handling)."""
+    try:
+        import base64
+        body = token.split('.')[1]
+        value = json.loads(base64.urlsafe_b64decode(body + '=' * (-len(body) % 4)))
+        iat = value.get('iat') if isinstance(value, dict) else None
+        return iat if type(iat) is int else None
+    except Exception:
+        return None
+
+
 def loopback_override(value):
     """A mock OAuth endpoint for development checks only: http on a loopback address."""
     parsed = urlsplit(value or '')
@@ -188,6 +204,42 @@ class Credentials:
                 raise CodexFailure('auth_expired')
             self.record(kind, True, before)
             return renewed
+
+    def attest(self, received_at):
+        """#95 route 1 (design r4 / r4.2): one forced refresh for an operator's anchor request, and whether its token
+        may serve as the anchor: (token, accountId, expiresAt, attested). `attested` is true only when all hold -
+          1. a forced refresh RPC really ran for this call (not skipped by the global 60 s cooldown) and succeeded;
+          2. the returned token differs from the token held just before the RPC;
+          3. its `iat` is an integer greater than that previous token's `iat`;
+          4. its `iat` >= `received_at` - ATTEST_TOLERANCE (broker clock: when the request arrived).
+        This is not a proof of issue after the request: a token issued up to ATTEST_TOLERANCE earlier passes, which
+        the runner corrects for (I* + 300 s + G). Residual failure scope (stated): a provider returning an older token
+        together with a broker clock lagging by that token's age. Within the cooldown no refresh runs and the current
+        token is returned unattested; nothing here retries."""
+        with self.lock:
+            current = self.read()
+            if self.forced_at is not None and self.clock() - self.forced_at < 60:
+                if not current:
+                    raise CodexFailure('auth_expired')
+                return (*current, False)
+            server = self.ensure_server()
+            self.forced_at = self.clock()
+            before = self.identity()
+            try:
+                server.rpc('account/read', {'refreshToken': True}, timeout=60)
+                self.server_source = self.source()[1]
+                renewed = self.read()
+            except Exception:
+                self.record('attest', False, before)
+                raise
+            if not renewed or renewed[2] - self.clock() < self.margin or (current and renewed[0] == current[0]):
+                self.record('attest', False, before)
+                raise CodexFailure('auth_expired')
+            self.record('attest', True, before)
+            new_iat, old_iat = iat_of(renewed[0]), iat_of(current[0]) if current else None
+            attested = (current is not None and renewed[0] != current[0] and new_iat is not None
+                        and old_iat is not None and new_iat > old_iat and new_iat >= received_at - ATTEST_TOLERANCE)
+            return (*renewed, attested)
 
     def logged_in(self):
         try:

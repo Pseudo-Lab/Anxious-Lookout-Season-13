@@ -221,8 +221,10 @@ def test_logs_hold_states_and_counts_only_and_repeat_nothing(service, caplog):
     lines = [json.loads(r.getMessage().partition(' ')[2]) for r in caplog.records
              if r.getMessage().startswith('runner_stream_retired ')]
     assert lines and set(lines[-1]) == {'state', 't0Rows', 'records', 'proven', 'iatAnomaly', 'disabled',
-                                        'lifetimeHoursMax', 'lifetimeCount', 'assumed'}
-    assert lines[-1]['lifetimeHoursMax'] == 2 and lines[-1]['lifetimeCount'] == 3 and lines[-1]['assumed'] == 'inactive'
+                                        'lifetimeHoursMax', 'lifetimeCount', 'assumed', 't0Assumable', 'anchor',
+                                        'anchorAttempts'}
+    assert lines[-1]['lifetimeHoursMax'] == 2 and lines[-1]['lifetimeCount'] == 3
+    assert (lines[-1]['assumed'], lines[-1]['anchor'], lines[-1]['anchorAttempts']) == (0, False, 0)
     for value in values:
         assert value[:P] not in caplog.text and auth.journal.digest(value) not in caplog.text
     count = len(lines)
