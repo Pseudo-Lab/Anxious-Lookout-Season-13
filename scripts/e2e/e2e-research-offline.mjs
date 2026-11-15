@@ -583,8 +583,8 @@ async function dropFirstSend(p) {
   check("IP2. W1: no slug input", (await main.getByLabel(/주소\(slug\)/).count()) === 0);
   await main.getByLabel("태그", { exact: true }).fill("오프라인");
   await main.getByLabel("태그", { exact: true }).press("Enter");
-  await main.getByRole("button", { name: "요약 추가(선택)" }).click();
-  await main.getByLabel("요약").fill("실 API 글 요약");
+  // #44: 글 편집기에는 요약 입력이 없다(e2e-write WP3와 같은 현재 계약).
+  check("IP2. #44: no summary input", (await main.getByRole("button", { name: "요약 추가(선택)" }).count()) === 0 && (await main.getByLabel("요약").count()) === 0);
   await main.getByRole("button", { name: "문서 연결" }).click();
   await main.getByLabel("연결할 문서 찾기").fill("글 바탕");
   await main.getByRole("button", { name: "글 바탕 문서 연결" }).click();
@@ -663,15 +663,19 @@ async function dropFirstSend(p) {
   // 수정 → v2 → 현재 공개본 대비 diff → 재발행 → 발행 취소
   await main.getByRole("button", { name: "내용 수정" }).click();
   await writeBody(["# 오프라인 본문", "두 번째 버전 문장"]);
-  // 이미지(D2): 원본 바이트 업로드 → 본문에 삽입 → 표지 지정. 서버가 형식 검사·재인코딩한다.
-  const imageBox = main.getByRole("region", { name: "이미지" });
-  await imageBox.getByLabel("이미지 파일").setInputFiles({ name: "offline.png", mimeType: "image/png", buffer: PNG });
-  check("IP4. image uploaded via real API", await appears(imageBox.getByText("올렸습니다", { exact: false })), (await imageBox.innerText()).slice(0, 200));
+  // 이미지(#44): 본문 도구 막대의 '이미지 올리기'(파일 선택 → 원본 바이트 업로드 → 커서 위치에 이미지 블록). 표지 지정 UI는 없다.
+  // 서버가 형식 검사·재인코딩한다.
+  {
+    const button = main.getByRole("toolbar", { name: "서식", exact: true }).getByRole("button", { name: "이미지 올리기" });
+    const [chooser] = await Promise.all([page.waitForEvent("filechooser", { timeout: 10000 }), button.click()]);
+    await chooser.setFiles({ name: "offline.png", mimeType: "image/png", buffer: PNG });
+  }
+  check("IP4. image uploaded via real API (toolbar)", await appears(bodyBox().locator("figure[data-type=post-image]"), 20000));
+  check("IP4. #44: no image panel or cover control", (await main.getByRole("region", { name: "이미지" }).count()) === 0 && (await main.getByRole("button", { name: "표지로" }).count()) === 0);
   const uploaded = (await api.get("/research/post-images")).body?.items?.[0];
   check("IP4. image url is canonical own path", !!uploaded && uploaded.url === `/api/media/post-images/${uploaded.id}` && uploaded.mimeType === "image/png", JSON.stringify(uploaded));
   await bodyBox().locator("figure[data-type=post-image] img").first().waitFor({ timeout: 20000 }).catch(() => {});
   check("IP4. #32: image block inserted by imageId", (await bodyBox().locator("figure[data-type=post-image] img").first().getAttribute("src").catch(() => null)) === uploaded?.url);
-  await imageBox.getByRole("button", { name: "표지로" }).first().click();
   await main.getByText("초안 자동 저장됨").first().waitFor({ timeout: 20000 });
   await main.getByRole("button", { name: "새 버전으로 저장" }).click();
   await main.getByRole("button", { name: "내용 수정" }).waitFor({ timeout: 20000 });
@@ -684,7 +688,7 @@ async function dropFirstSend(p) {
   check("IP4. anonymous sees v2", await appears(anon.getByText("두 번째 버전 문장")));
   await anon.locator("article .prose img").first().waitFor({ timeout: 20000 }).catch(() => {});
   const pubImgs = await anon.locator("article img").evaluateAll((els) => els.map((e) => [e.getAttribute("src"), e.complete && e.naturalWidth > 0]));
-  check("IP4. anonymous: cover + body image load from real API", pubImgs.length === 2 && pubImgs.every(([src, loaded]) => src === uploaded?.url && loaded), JSON.stringify(pubImgs));
+  check("IP4. anonymous: body image loads from real API (no cover, #44)", pubImgs.length === 1 && pubImgs.every(([src, loaded]) => src === uploaded?.url && loaded), JSON.stringify(pubImgs));
   const media = await anon.request.get(U(uploaded?.url ?? "/x"));
   check(
     "IP4. published image public with nosniff + revalidate",
