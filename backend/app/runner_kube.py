@@ -8,6 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 import base64
 import json
+import os
 import ipaddress
 import re
 import ssl
@@ -27,6 +28,22 @@ LABEL = 'anxious.io/'
 # containers exit 0. 20s covers the app-server stop escalation (EOF, terminate, kill: 5s each);
 # it is not an upper bound of every close path (Native worker join alone allows 20s).
 GRACE_SECONDS = 20
+# #90 P5-0: process env of the components that render and verify runner Pods (runner-controller, API) -> runner Pod
+# env. Default false: no key is added and the Pod is rendered exactly as before. Only the exact value "true" is passed.
+STREAM_FLAGS = (("CODEX_RUNNER_STREAM_TEXT", "RUNNER_STREAM_TEXT"), ("CODEX_RUNNER_STREAM_TRACE", "STREAM_TRACE"))
+
+
+def stream_env():
+    """The runner Pod's #90 stream env for this process: {} by default. Anything but "true"/"false" refuses."""
+    result = {}
+    for source, target in STREAM_FLAGS:
+        value = os.environ.get(source, "false")
+        require(value in {"true", "false"})
+        if value == "true":
+            result[target] = "true"
+    return result
+
+
 # #60: runner pulls operator access with a short-lived token bound to its Pod.
 BROKER_URL = 'http://codex-broker.codex-broker.svc:8080'
 BROKER_AUDIENCE = 'codex-broker'
@@ -92,7 +109,8 @@ class Plan:
             return CALLBACK_URL
         return self.callback
 
-    def manifest(self, namespace, *, legacy_callback=False):
+    def manifest(self, namespace, *, legacy_callback=False, stream=None):
+        """`stream`: the #90 stream env to render ({} for none); None takes this process's (stream_env())."""
         identity = self.identity
         labels = {LABEL+'owner': str(identity.owner), LABEL+'state': str(identity.state_id),
                   LABEL+'generation': str(identity.generation), LABEL+'managed': 'user-runner'}
@@ -103,6 +121,7 @@ class Plan:
                'CODEX_ACCESS_CONTROL_DIR': '/control', 'CODEX_OPERATOR_ACCOUNT_FILE': '/control/operator-account',
                'RESEARCH_TOOL_CALLBACK_URL': self.pod_callback(legacy_callback), 'BROKER_URL': BROKER_URL,
                'BROKER_TOKEN_FILE': '/run/codex-broker/token'}
+        env.update(stream_env() if stream is None else stream)  # #90: nothing by default
         manifest = {'apiVersion': 'v1', 'kind': 'Pod',
                 'metadata': {'name': identity.name, 'namespace': namespace, 'labels': labels},
                 'spec': {'serviceAccountName': self.service_account, 'automountServiceAccountToken': False,
@@ -277,10 +296,14 @@ class KubePods:
                 container.pop('terminationMessagePolicy')
             if container.get('resources') == {}:
                 container.pop('resources')
-        # A pre-#62 Pod differs from the current render only in the callback env value.
-        accepted = [expected]
+        # A pre-#62 Pod differs from the current render only in the callback env value. #90: a Pod rendered while
+        # a stream flag had another value differs only by the exact "true" stream keys; it stays usable when the flag
+        # changes (the next Pod takes the new value). Every other difference is still refused.
+        variants = [{key: 'true' for key in combination} for combination in
+                    ((), ('RUNNER_STREAM_TEXT',), ('STREAM_TRACE',), ('RUNNER_STREAM_TEXT', 'STREAM_TRACE'))]
+        accepted = [expected] + [plan.manifest(self.namespace, stream=variant)['spec'] for variant in variants]
         if plan.callback == LEGACY_CALLBACK_URL:
-            accepted.append(plan.manifest(self.namespace, legacy_callback=True)['spec'])
+            accepted += [plan.manifest(self.namespace, legacy_callback=True, stream=variant)['spec'] for variant in variants]
         require(actual in accepted)
         self._references(plan)
         return Pod(plan.identity, uid)

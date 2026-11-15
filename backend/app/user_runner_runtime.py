@@ -138,6 +138,30 @@ class BoundRunner:
             require(result.get('podUid') == str(state.pod_uid))
             return result
 
+    def interrupt(self, identity, request_id):
+        # #90 Stop: an ordinary POST call, so the same check -> dispatch transaction as every runner write.
+        return self.call('POST', '/sessions/'+str(identity)+'/interrupt', {'requestId': str(request_id)})
+
+    def stream_target(self, identity):
+        """#90: the same Pod checks as a GET call, read inside one registry transaction. Only the address is
+        returned: the API's event stream opens after the transaction (a GET never needed the stop fence), and the
+        runner's hello re-proves owner, state and Pod UID on that connection. call() is unchanged from main."""
+        runtime = self.runtime
+        runtime.namespace()
+        with runtime.engine.begin() as db:
+            Registry(db)._eligible(self.owner)
+            state = runtime.state(db, self.owner)
+            require(state.pod_uid is not None and state.phase in {Phase.READY, Phase.UNREACHABLE})
+            obj = runtime.pods._request('GET', 'pods', runtime.plan.identity.name)
+            pod = runtime.pods._pod(obj, runtime.plan)
+            require(pod.uid == state.pod_uid and obj.get('status', {}).get('phase') == 'Running')
+            address = ipaddress.ip_address(obj['status']['podIP'])
+            require(address in runtime.network and not address.is_loopback and not address.is_link_local)
+            host = '['+str(address)+']' if address.version == 6 else str(address)
+            from .conversations import Runner
+            target = Runner('http://'+host+':8080', runtime.token, self.owner, str(state.state_id)).stream_target(identity)
+            return {**target, 'podUid': str(state.pod_uid)}
+
     def health(self):
         value = self.call('GET', '/health')
         require(value.get('model') == MODEL and type(value.get('available')) is bool

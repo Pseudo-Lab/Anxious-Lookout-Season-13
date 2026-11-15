@@ -1,0 +1,12 @@
+{
+ "version": "i90-p5-continue-r1",
+ "s0Run": "i90-p5-s0-20261114T155956Z",
+ "conversationSha256": "29480c65ee8cd9ac5d0ff78b9e807b902ca82d63000df73595b977faa4d84fe9",
+ "exitSha256": "63dcd81e8867d12b14e281d4dcd9110b49887a774047b6d9416349e268fa4a29",
+ "recorded": {"rc": 0, "stepRc": 0, "verdicts": {"S0": false, "release": true}, "runnerReleased": null, "clientsGone": true, "privateRemoved": null, "sessionRevoked": true},
+ "turnsUsed": 1,
+ "evidence": {"s0LogSha256": "adf38c559c5a321cca745622476e7ceffbf154004ec69ea1a8727cd11dd8e97f", "observationLogSha256": "1dffa2b25ea1daaac71b8fb566eb759dc3fb6d04f885229ad4e56b6e72eae380", "pinsLogSha256": "d0d634f9d9e9cdb1a4ccafa269345e390f5390159c44626ed299ae665c7d7384", "note": "log hashes are provenance references, not proof that guest files are unchanged; the guard checks the guest files themselves"},
+ "acceptedObservations": ["stream flags absent at baseline and in the runner Pod", "one reserved send accepted (202), then the conversation idle", "an assistant message in the retrieved record", "events 404 stream_disabled", "runner release and session revoke reported"],
+ "decision": "continue to enable / turns under plan r3; S0 stays False on record; the original tool-item criterion is unresolved (no tool item displayed in this S0 GET record; one custom-tool-call record and one output record coexist in the selected rollout; invocation unproven)",
+ "references": ["messages/back/2026-11-15-review-issue90-p5-diag-scope-ack.md", "messages/back/2026-11-15-pm-issue90-p5-diag-scope.md", "messages/back/2026-11-15-pm-issue90-p5-plan-r3-decision.md", "messages/back/2026-11-15-review-issue90-p5-diag-r1-approved-plan-r3-notes.md", "messages/back/2026-11-15-review-issue90-p5-diag-result-ack.md", "messages/back/2026-11-15-review-issue90-p5-r3.md"]
+}

@@ -1,0 +1,12 @@
+{
+ "version": "i90-p5-continue-r6-r0",
+ "s0Run": "i90-p5-s0-20261114T155956Z",
+ "conversationSha256": "29480c65ee8cd9ac5d0ff78b9e807b902ca82d63000df73595b977faa4d84fe9",
+ "turns": {"run": "i90-p5-turns-r5-20261114T170503Z", "exitSha256": "3cd18150ce031bc78dcab56c3d9c2874f76b513a2510bcd165df77098b56b303", "recorded": {"rc": 5, "stepRc": 5, "verdicts": {"S2": true, "S3": true}, "stoppedAt": null, "runnerReleased": true, "clientsGone": true, "privateRemoved": true, "sessionRevoked": true}},
+ "disable": {"run": "i90-p5-disable-r5-20261114T170745Z", "exitSha256": "36bd076b47bbdeeba82bde59b7230b36ee6425446650bb5749e7d36662cb2e7f", "recorded": {"rc": 0, "stepRc": 0, "verdicts": {}, "stoppedAt": null, "runnerReleased": null, "clientsGone": true, "privateRemoved": null, "sessionRevoked": null}},
+ "turnsUsed": 4,
+ "evidence": {"r6PinsLogSha256": "598668aaa83c9f4334856dfaee69fc7104c09fd935d753b7e231e9fa53da761e", "turnsR5LogSha256": "ed91c1078d2fccf20d8a87483cc3477e1a6efe4c7fbe600e6a57395659798ca2", "disableR5LogSha256": "cda1ee32f2f75d1aea4879eac92febb466bf389641ca486ae7a3612ebae4b3d1", "note": "log hashes are provenance references; the guard checks the guest exit files themselves; the collector's \"null\" marker is written as JSON null here"},
+ "acceptedObservations": ["S2 True under the text criterion (64 chars equal; V1 observation 0 of 3)", "S3 True (interrupt acknowledged; interrupted terminal; GET interrupted items)", "turns-r5 stopped at S4a before its turn (hop 2: two Services share the selector); verdict release unknown, cleanup proved", "disable-r5 restored both pre-enable templates (equal: True)"],
+ "decision": "continue S4a, S4b, S5, S6 in r6 within the four remaining turns; S0 and S1 stay False; hop 2 is the Service named api, port http 8080",
+ "references": ["messages/back/2026-11-15-pm-issue90-p5-r5b-results.md", "messages/back/2026-11-15-review-issue90-p5-r5b-results-ack.md", "messages/back/2026-11-15-pm-issue90-p5-r6a-result.md", "messages/back/2026-11-15-review-issue90-p5-r6a-result-ack.md"]
+}

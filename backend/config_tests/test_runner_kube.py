@@ -354,3 +354,69 @@ def test_broker_token_is_audience_bound_and_runner_only(plan):
     assert {'name': 'broker-token', 'mountPath': '/run/codex-broker', 'readOnly': True} in runner['volumeMounts']
     env = {entry['name']: entry.get('value') for entry in runner['env']}
     assert (env['BROKER_URL'], env['BROKER_TOKEN_FILE']) == (BROKER_URL, '/run/codex-broker/token')
+
+
+# --- #90 P5-0: optional stream env -------------------------------------------------------------------------------
+
+def stream_keys(manifest):
+    return {e['name']: e.get('value') for e in manifest['spec']['containers'][0]['env']
+            if e['name'] in {'RUNNER_STREAM_TEXT', 'STREAM_TRACE'}}
+
+
+def test_default_render_has_no_stream_env(plan, monkeypatch):
+    monkeypatch.delenv('CODEX_RUNNER_STREAM_TEXT', raising=False)
+    monkeypatch.delenv('CODEX_RUNNER_STREAM_TRACE', raising=False)
+    default = plan.manifest('isolated')
+    assert stream_keys(default) == {}
+    monkeypatch.setenv('CODEX_RUNNER_STREAM_TEXT', 'false')
+    monkeypatch.setenv('CODEX_RUNNER_STREAM_TRACE', 'false')
+    assert plan.manifest('isolated') == default  # explicit false = exactly the pre-#90 render
+
+
+@pytest.mark.parametrize('text,trace,expected', [('true', 'false', {'RUNNER_STREAM_TEXT': 'true'}),
+                                                 ('false', 'true', {'STREAM_TRACE': 'true'}),
+                                                 ('true', 'true', {'RUNNER_STREAM_TEXT': 'true', 'STREAM_TRACE': 'true'})])
+def test_flags_add_only_their_exact_keys(plan, monkeypatch, text, trace, expected):
+    monkeypatch.setenv('CODEX_RUNNER_STREAM_TEXT', text)
+    monkeypatch.setenv('CODEX_RUNNER_STREAM_TRACE', trace)
+    rendered = plan.manifest('isolated')
+    assert stream_keys(rendered) == expected
+    monkeypatch.delenv('CODEX_RUNNER_STREAM_TEXT')
+    monkeypatch.delenv('CODEX_RUNNER_STREAM_TRACE')
+    base = plan.manifest('isolated')
+    rendered['spec']['containers'][0]['env'] = [e for e in rendered['spec']['containers'][0]['env']
+                                                if e['name'] not in {'RUNNER_STREAM_TEXT', 'STREAM_TRACE'}]
+    assert rendered == base  # nothing else changes
+
+
+@pytest.mark.parametrize('value', ['TRUE', '1', 'yes', ''])
+def test_invalid_flag_value_refuses(plan, monkeypatch, value):
+    monkeypatch.setenv('CODEX_RUNNER_STREAM_TEXT', value)
+    with pytest.raises(Refused):
+        plan.manifest('isolated')
+
+
+@pytest.mark.parametrize('created_with,verified_with', [('true', 'false'), ('false', 'true'), ('true', 'true')])
+def test_pod_from_either_flag_state_stays_usable(plan, server, monkeypatch, created_with, verified_with):
+    monkeypatch.setenv('CODEX_RUNNER_STREAM_TEXT', created_with)
+    port = kube_port(plan, server)
+    created = port.create_once(plan.identity)
+    monkeypatch.setenv('CODEX_RUNNER_STREAM_TEXT', verified_with)
+    assert port.lookup(plan.identity) == created
+    port.close()
+
+
+@pytest.mark.parametrize('change', ['false-value', 'other-value', 'other-key', 'trace-false'])
+def test_other_stream_env_differences_still_refused(plan, server, monkeypatch, change):
+    monkeypatch.delenv('CODEX_RUNNER_STREAM_TEXT', raising=False)
+    port = kube_port(plan, server)
+    port.create_once(plan.identity)
+    env = server.pod['spec']['containers'][0]['env']
+    added = {'false-value': ('RUNNER_STREAM_TEXT', 'false'), 'other-value': ('RUNNER_STREAM_TEXT', 'yes'),
+             'other-key': ('RUNNER_STREAM_DEBUG', 'true'), 'trace-false': ('STREAM_TRACE', 'false')}[change]
+    plain = [e for e in env if 'value' in e]
+    refs = [e for e in env if 'value' not in e]
+    server.pod['spec']['containers'][0]['env'] = plain + [{'name': added[0], 'value': added[1]}] + refs
+    with pytest.raises(Refused):
+        port.lookup(plan.identity)
+    port.close()

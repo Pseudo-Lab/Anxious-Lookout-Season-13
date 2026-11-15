@@ -74,6 +74,25 @@ def listener(port):
     return sock
 
 
+def stream_aware_h11():
+    """#90: uvicorn's h11 protocol, except that at server shutdown a connection whose response is an event stream
+    (marked by runner.stream.StoppableStreamingResponse) is aborted rather than closed. close() flushes the write
+    buffer first, so a browser that stopped reading would hold the shutdown until SIGKILL. Every other connection
+    shuts down exactly as before (uvicorn already picks h11 here: httptools is not installed)."""
+    from uvicorn.protocols.http.h11_impl import H11Protocol
+    from runner.stream import STREAM_ABORT_MARK
+
+    class StreamAwareH11(H11Protocol):
+        def shutdown(self):
+            cycle = self.cycle
+            state = cycle.scope.get('state') if cycle is not None else None
+            if cycle is not None and not cycle.response_complete and isinstance(state, dict) and state.get(STREAM_ABORT_MARK):
+                self.transport.abort()
+                return
+            super().shutdown()
+    return StreamAwareH11
+
+
 def main():
     import uvicorn
     from .main import create_app
@@ -81,9 +100,16 @@ def main():
     legacy_public = public_internal()
     settings = Settings.load()
     app = gate(create_app(settings), settings.base_path, legacy_public)
-    config = uvicorn.Config(app, workers=1, access_log=False, proxy_headers=False)
+    config = uvicorn.Config(app, workers=1, access_log=False, proxy_headers=False, http=stream_aware_h11())
     uvicorn.Server(config).run(sockets=[listener(PUBLIC_PORT), listener(INTERNAL_PORT)])
 
 
 if __name__ == '__main__':
     main()
+
+
+def __getattr__(name):
+    # `uvicorn --http app.serve:StreamAwareH11` (the #90 shutdown probe) imports the same class main() uses.
+    if name == 'StreamAwareH11':
+        return stream_aware_h11()
+    raise AttributeError(name)

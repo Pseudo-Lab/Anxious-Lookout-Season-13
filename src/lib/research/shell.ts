@@ -74,6 +74,8 @@ export const SHELL_STATUS_LABELS: Record<string, string> = {
   timed_out: "시간 초과",
   rejected: "거부됨",
   inProgress: "실행 중",
+  // #90 스트림: runner 정책이 실행 허가를 판단하는 중(사용자 승인 UI 아님)
+  approval: "허가 확인 중",
 };
 
 const CODE_TEXT: Record<string, string> = {
@@ -141,6 +143,7 @@ export const PATCH_STATUS_LABELS: Record<string, string> = {
   failed: "실패",
   rejected: "거부됨",
   inProgress: "진행 중",
+  approval: "허가 확인 중",
 };
 
 /** 성공이 아닌 파일 변경의 안내(성공·진행 중이면 null). */

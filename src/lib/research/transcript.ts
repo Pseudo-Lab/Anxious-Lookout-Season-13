@@ -8,9 +8,13 @@ import type { MessageItem, PageDescriptor, SessionItem, SessionState } from "@/l
 
 export type ChatStatus = "ready" | "submitted" | "waiting" | "streaming" | "error";
 
-/** 화면 상태. 전송 요청 중이 가장 앞선다(서버 상태는 아직 이전 값일 수 있다). */
-export function chatStatus(sending: boolean, state: SessionState): ChatStatus {
+/**
+ * 화면 상태. 전송 요청 중이 가장 앞선다(서버 상태는 아직 이전 값일 수 있다).
+ * streaming(#90): 스트림으로 진행 중인 턴의 항목을 받고 있다. 기록(state)이 아직 이전 값이어도 응답 중으로 본다.
+ */
+export function chatStatus(sending: boolean, state: SessionState, streaming = false): ChatStatus {
   if (sending) return "submitted";
+  if (streaming) return "streaming";
   if (state === "running") return "waiting";
   return state === "failed" ? "error" : "ready";
 }

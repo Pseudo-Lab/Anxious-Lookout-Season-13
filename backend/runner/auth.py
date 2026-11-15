@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.codex_policy import CodexFailure
+from . import stream_prefix
 from .projection import PROJECTION_VERSION, ProjectionJournal
 
 
@@ -195,6 +196,8 @@ class PersonalAuth:
             raise CodexFailure("policy_refused")
         if self.journal.observe(self.secrets):
             write_private(self.control / "projection.json", self.journal.payload())
+        # #90 r4: prefix fingerprints after the journal write; never raises (a failure leaves the literal legacy).
+        stream_prefix.remember(self.control, self.journal, self.secrets)
 
     def sanitize(self, value):
         self.refresh_projection_secrets()

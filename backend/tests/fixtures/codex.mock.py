@@ -158,11 +158,26 @@ for line in sys.stdin:
         pending = {"thread": thread, "turn": turn, "items": [{"id": "user-" + turn, "type": "userMessage", "content": params["input"]},
                    {"id": tool_id, "type": "dynamicToolCall", "tool": tool, "arguments": args}]}
         pending['callId'], pending['postStep'] = tool_id, post_step
+        # #90 (unit tests / validate.sh only; D7 and the measurements use real Codex turns):
+        # "/fixture/stream [count] [ms]" answers in `count` agentMessage deltas `ms` apart;
+        # "/fixture/stream-interrupt [count] [ms]" sends them, then waits for turn/interrupt.
+        if prompt.startswith("/fixture/stream"):
+            words = prompt.split()
+            count = int(words[1]) if len(words) > 1 else 20
+            interval = int(words[2]) / 1000 if len(words) > 2 else 0.02
+            assert words[0] in {"/fixture/stream", "/fixture/stream-interrupt"} and 0 < count <= 5000 and 0 <= interval <= 1
+            pending['stream'] = (words[0], count, interval)
         emit({"id": tool_id, "method": "item/tool/call", "params": {"threadId": thread, "turnId": turn,
                     "callId": tool_id, "tool": tool, "arguments": args}})
         emit({"id": identity, "result": {"turn": {"id": turn, "model": "fixture-wrong-model" if prompt == "/fixture/model-response" else params["model"]}}})
     elif method == "turn/interrupt":
         emit({"id": identity, "result": {}})
+        if pending and pending.get("awaitInterrupt") and params.get("turnId") == pending["turn"]:
+            # #90: Codex's partial agentMessage is not recorded here, so the runner's display-only path is exercised.
+            records[pending["thread"]]["turns"].append({"id": pending["turn"], "status": "interrupted", "items": pending["items"]})
+            save()
+            emit({"method": "turn/completed", "params": {"threadId": pending["thread"], "turn": {"id": pending["turn"], "status": "interrupted"}}})
+            pending = None
     elif pending and identity == pending['callId']:
         result = body.get("result", {"success": False, "contentItems": []})
         pending["items"][-1].update(contentItems=result["contentItems"], status="completed" if result["success"] else "failed")
@@ -183,7 +198,22 @@ for line in sys.stdin:
                 'threadId': pending['thread'], 'turnId': pending['turn'], 'callId': pending['callId'],
                 'tool': 'research_post_propose', 'arguments': args}})
             continue
-        pending["items"].append({"id": "answer-" + pending["turn"], "type": "agentMessage", "text": "Offline fixture answer"})
+        answer = "Offline fixture answer"
+        if pending.get("stream"):
+            kind, count, interval = pending["stream"]
+            answer_id = "answer-" + pending["turn"]
+            scope = {"threadId": pending["thread"], "turnId": pending["turn"]}
+            emit({"method": "item/started", "params": {**scope, "item": {"id": answer_id, "type": "agentMessage", "text": ""}}})
+            pieces = ["fixture word %d " % index for index in range(count)]
+            for piece in pieces:
+                emit({"method": "item/agentMessage/delta", "params": {**scope, "itemId": answer_id, "delta": piece}})
+                time.sleep(interval)
+            if kind == "/fixture/stream-interrupt":
+                pending["awaitInterrupt"] = True
+                continue
+            answer = "".join(pieces)
+            emit({"method": "item/completed", "params": {**scope, "item": {"id": answer_id, "type": "agentMessage", "text": answer}}})
+        pending["items"].append({"id": "answer-" + pending["turn"], "type": "agentMessage", "text": answer})
         records[pending["thread"]]["turns"].append({"id": pending["turn"], "items": pending["items"]})
         save()
         emit({"method": "turn/completed", "params": {"threadId": pending["thread"], "turn": {"id": pending["turn"], "status": "completed"}}})

@@ -18,7 +18,8 @@ from app.codex_policy import CodexFailure, REASONS
 from .access import AccessAuth, claims
 from .auth import read_private
 from .binding import canonical_uuid
-from .projection import ProjectionJournal, BASE, MASK, rolling
+from . import stream_prefix
+from .projection import ProjectionJournal, BASE, MASK, rolling, merge_spans, redact
 from .service_store import ServiceStore, LEDGER, LEGACY, refuse, private_file
 
 MODE = 'operator-access-snapshot'
@@ -51,22 +52,26 @@ class ServiceJournal(ProjectionJournal):
             db.execute('INSERT OR IGNORE INTO literals VALUES(?,?,?,?)',
                        (length, str(filter_hash), digest, self.row_mac(length, filter_hash, digest)))
 
-    def text(self, value):
+    def spans(self, value):
         hits = []
         with self.auth.store.transaction() as db:
             metadata = self.auth._state(db)
             refuse(metadata['projectionKey'] == self.key.hex() and metadata['trialId'] == self.trial)
-            # Distinct lengths are bounded by the credential format, not history
-            # size. Query candidates per substring without loading all receipts.
-            for (length,) in db.execute('SELECT DISTINCT length FROM literals'):
+            # Distinct lengths are bounded by the credential format, not history size. The (length, filter) pairs are
+            # read once per call (#90: the stream holdback scans every flush); digests and row MACs are read and
+            # verified only for a filter match, as before.
+            filters = {}
+            for length, filter_hash in db.execute('SELECT length, filter FROM literals'):
+                filters.setdefault(length, set()).add(filter_hash)
+            for length, known in filters.items():
                 if length > len(value):
                     continue
                 factor = pow(BASE, length - 1, 1 << 64)
                 current = rolling(value[:length])
                 for offset in range(len(value) - length + 1):
-                    candidates = db.execute('SELECT digest,mac FROM literals WHERE length=? AND filter=?',
-                                            (length, str(current))).fetchall()
-                    if candidates:
+                    if str(current) in known:
+                        candidates = db.execute('SELECT digest,mac FROM literals WHERE length=? AND filter=?',
+                                                (length, str(current))).fetchall()
                         digest = self.digest(value[offset:offset + length])
                         for expected, mac in candidates:
                             refuse(hmac.compare_digest(self.row_mac(length, current, expected), mac))
@@ -74,19 +79,31 @@ class ServiceJournal(ProjectionJournal):
                                 hits.append((offset, offset + length))
                     if offset + length < len(value):
                         current = ((current - ord(value[offset]) * factor) * BASE + ord(value[offset + length])) & MASK
-        if not hits:
-            return value
-        merged = []
-        for start, end in sorted(hits):
-            if merged and start <= merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
-            else:
-                merged.append((start, end))
-        parts, previous = [], 0
-        for start, end in merged:
-            parts.extend((value[previous:start], '[redacted]'))
-            previous = end
-        return ''.join(parts) + value[previous:]
+        return merge_spans(hits)
+
+    def generation(self):
+        with self.auth.store.transaction() as db:
+            metadata = self.auth._state(db)
+            refuse(metadata['projectionKey'] == self.key.hex() and metadata['trialId'] == self.trial)
+            count, longest = db.execute('SELECT COUNT(*), MAX(length) FROM literals').fetchone()
+        return count, longest or 0
+
+    def stream_rows(self, limit):
+        """(longest length <= limit, {(length, digest)} of the longer literals), every long row's MAC verified (#90 r4
+        holdback classification; a bad row refuses, which stops the stream's text)."""
+        with self.auth.store.transaction() as db:
+            metadata = self.auth._state(db)
+            refuse(metadata['projectionKey'] == self.key.hex() and metadata['trialId'] == self.trial)
+            short = db.execute('SELECT MAX(length) FROM literals WHERE length <= ?', (limit,)).fetchone()[0] or 0
+            rows = set()
+            for length, filter_hash, digest, mac in db.execute(
+                    'SELECT length, filter, digest, mac FROM literals WHERE length > ?', (limit,)):
+                refuse(hmac.compare_digest(self.row_mac(length, int(filter_hash), digest), mac))
+                rows.add((length, digest))
+        return short, rows
+
+    def text(self, value):
+        return redact(value, self.spans(value))
 
 
 class ServiceAccessAuth(AccessAuth):
@@ -210,6 +227,8 @@ class ServiceAccessAuth(AccessAuth):
                 self.snapshot['chatgptPlanType'] = plan
             self.secrets = literals  # Historical plaintext need not stay in memory.
             self.journal = journal
+            # #90 r4: prefix fingerprints after the committed journal rows; never raises (failure = legacy).
+            stream_prefix.remember(self.control, journal, literals)
 
     def attach(self, codex_home):
         with self.mutex:
@@ -287,6 +306,7 @@ class ServiceAccessAuth(AccessAuth):
                 value = self._state(db)
                 refuse(value['projectionKey'] == self.journal.key.hex())
                 self.journal.remember(db, self.secrets)
+            stream_prefix.remember(self.control, self.journal, self.secrets)  # #90 r4: after the commit; never raises
 
     def status(self):
         return {}  # No trial remainingAdmissions/accessExpiresAt fields.

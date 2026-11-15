@@ -67,6 +67,8 @@ interface CodexStatusContextValue {
   refreshFailure: FetchFailure | null;
   /** 상태 조회(읽기 전용). */
   reload: () => Promise<void>;
+  /** #90 대화 스트림의 runner 이벤트(`/codex/status`와 같은 값)를 반영한다. 스트림이 연결된 동안 조회를 대신한다. */
+  push: (status: CodexStatus) => void;
   /** 사용자가 누른 준비 요청(새 key). */
   prepare: () => Promise<void>;
   preparing: boolean;
@@ -81,6 +83,7 @@ const CodexStatusContext = createContext<CodexStatusContextValue>({
   result: null,
   refreshFailure: null,
   reload: noop,
+  push: () => {},
   prepare: noop,
   preparing: false,
   canPrepare: false,
@@ -161,6 +164,16 @@ export function CodexStatusProvider({ children }: { children: ReactNode }) {
     });
     return entry.done;
   }, [apply]);
+
+  // 스트림이 알려 준 상태. 진행 중인 조회 응답보다 새 값이므로 그 응답은 버린다.
+  const push = useCallback(
+    (status: CodexStatus) => {
+      if (!researchRef.current) return;
+      seq.current++;
+      apply(epochRef.current, { ok: true, status: 200, data: status });
+    },
+    [apply]
+  );
 
   // 준비 요청 하나. 응답·실패 모두 시작 세대가 지금 세대일 때만 반영한다. 자동으로 다시 보내지 않는다.
   const sendPrepare = useCallback(
@@ -281,12 +294,13 @@ export function CodexStatusProvider({ children }: { children: ReactNode }) {
       result: current.result,
       refreshFailure: current.refreshFailure,
       reload,
+      push,
       prepare,
       preparing: preparing === epoch,
       canPrepare,
       register,
     }),
-    [current.result, current.refreshFailure, reload, prepare, preparing, epoch, canPrepare, register]
+    [current.result, current.refreshFailure, reload, push, prepare, preparing, epoch, canPrepare, register]
   );
   return <CodexStatusContext.Provider value={value}>{children}</CodexStatusContext.Provider>;
 }

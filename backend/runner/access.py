@@ -18,6 +18,7 @@ from pathlib import Path
 from app.codex_policy import CodexFailure
 from .auth import private_directory, read_private, write_private
 from .binding import canonical_uuid
+from . import stream_prefix
 from .projection import ProjectionJournal
 
 MAX_ENVELOPE = 100_000
@@ -174,6 +175,8 @@ class AccessAuth:
     def remember_secrets(self):
         if self.journal and self.journal.observe(self.secrets):
             write_private(self.control/'access-projection.json', self.journal.payload())
+        if self.journal:  # #90 r4: after the journal write; never raises (a failure leaves the literal legacy)
+            stream_prefix.remember(self.control, self.journal, self.secrets)
 
     def refresh_projection_secrets(self):
         self.remember_secrets()  # Never read a native/host credential file.

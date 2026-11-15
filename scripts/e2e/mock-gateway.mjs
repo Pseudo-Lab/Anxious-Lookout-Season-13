@@ -3,6 +3,7 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import { handleResearch, researchCounts, researchMode, runnerMode, setRunnerAll } from "./mock-research.mjs";
+import { kickAll } from "./mock-stream.mjs";
 
 const BASE = process.env.BASE_PATH ?? "";
 const NEXT = { host: "127.0.0.1", port: Number(process.env.NEXT_PORT ?? 3000) };
@@ -35,6 +36,7 @@ async function api(req, res, path, url) {
     csrf: req.headers["x-csrf-token"] ?? null,
     origin: req.headers.origin ?? null,
     idempotencyKey: req.headers["idempotency-key"] ?? null,
+    at: Date.now(),
   });
   if (path.startsWith("/admin/")) return handleAdmin(req, res, path, url);
   if (path.startsWith("/research/") || path.startsWith("/public/") || path.startsWith("/media/")) {
@@ -195,6 +197,8 @@ http
       if (url.searchParams.has("readyMs")) runnerMode.readyMs = Number(url.searchParams.get("readyMs"));
       if (url.searchParams.has("runnerAll")) setRunnerAll(url.searchParams.get("runnerAll"));
       if (url.searchParams.has("turnMs")) researchMode.turnMs = Number(url.searchParams.get("turnMs"));
+      // #90 streamKick=1: 열린 대화 스트림을 모두 끊는다(중간 끊김 흉내). stream 값 변경 뒤에 적용된다.
+      if (url.searchParams.get("streamKick") === "1") setImmediate(kickAll);
       // demote=<accountId>: 그 계정을 승인 해제된 commenter로 바꾼다(연구 권한 상실 검증용, 기존 session에도 반영)
       if (url.searchParams.get("demote")) {
         const u = users.get(url.searchParams.get("demote"));
@@ -202,7 +206,7 @@ http
       }
       // expire=1: 모든 로그인 session 만료(서버 측 폐기)
       if (url.searchParams.get("expire") === "1") sessions.clear();
-      for (const k of ["access", "publish", "codex", "csrf", "postRevision", "pendingInput"]) if (url.searchParams.has(k)) researchMode[k] = url.searchParams.get(k);
+      for (const k of ["access", "publish", "codex", "csrf", "postRevision", "pendingInput", "stream", "streamIds"]) if (url.searchParams.has(k)) researchMode[k] = url.searchParams.get(k);
       // 시험 창(back 2026-10-11 access-only 계약): window=<초> 뒤 접수 종료, remaining=<횟수>. 빈 값이면 해제.
       if (url.searchParams.has("window")) {
         const sec = url.searchParams.get("window");

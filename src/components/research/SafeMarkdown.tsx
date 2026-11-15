@@ -1,7 +1,9 @@
+import { memo } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import ScrollBox from "@/components/research/ScrollBox";
 import { BASE_PATH } from "@/lib/constants";
+import { streamingBlocks } from "@/lib/research/stream";
 
 // 사용자가 저장한 자료·문서 본문 렌더러.
 // 저장소에 포함된 글(PostContent, MDX)과 달리 본문을 실행 코드로 취급하지 않는다.
@@ -118,6 +120,27 @@ export default function SafeMarkdown({
       >
         {content}
       </Markdown>
+    </div>
+  );
+}
+
+// #90 받는 중인 답변. 블록마다 따로 그려 끝난 블록은 다시 그리지 않고(메모), 바뀌는 마지막 블록만 다시 그린다.
+// 같은 prose 안에 형제로 두어 완료 뒤 SafeMarkdown 전체 렌더와 여백·구조가 같다. 닫히지 않은 코드 블록은 화면용으로 닫는다.
+const Block = memo(function Block({ text }: { text: string }) {
+  return (
+    <Markdown remarkPlugins={[remarkGfm]} skipHtml urlTransform={(url) => url} components={components}>
+      {text}
+    </Markdown>
+  );
+});
+
+export function StreamingMarkdown({ content }: { content: string }) {
+  const blocks = streamingBlocks(content);
+  return (
+    <div className="prose prose-compact max-w-none break-words text-sm text-stone-900">
+      {blocks.map((text, i) => (
+        <Block key={i} text={text} />
+      ))}
     </div>
   );
 }

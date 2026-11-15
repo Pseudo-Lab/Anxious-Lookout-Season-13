@@ -9,6 +9,8 @@
 // - #89 Enter 보내기(N22): Enter 보내기·Shift+Enter 줄바꿈·IME 조합 중 Enter 미전송·연타 한 번 전송
 // - #89 접수 뒤 첫 조회 실패 복구(N23): 보내는 중 유지·조회만 재시도·완료 기록 복구
 // - #89 완료 전환 바닥 추적(N24): 생각 중 → 같은 수의 긴 답변, 직접 펼친 도구 상세는 위치 유지
+// - #90 스트림(N25, 모의): polling 멈춤·실시간 답변·remount 없음·중지·알림/모르는 항목·숨김 닫기/after 재연결·플래그 꺼짐 fallback
+// - #90 턴 단위 교체(N26, 모의): 스트림 id ≠ 기록 id(일부·전부)에서 두 벌·빈 순간 없음, 말풍선 유지, 바닥 유지·읽던 위치 유지
 import { chromium } from "playwright";
 
 const ORIGIN = process.env.ORIGIN ?? "http://127.0.0.1:8080";
@@ -126,7 +128,7 @@ const pendingSends = () =>
   page.evaluate(() => Object.keys(sessionStorage).filter((k) => k.includes(":session-send:")).length);
 
 await setMock(
-  "me=normal&health=normal&logout=normal&nextLogin=approved&reuse=0&as=&access=approved&publish=allowed&codex=fixture&csrf=normal&window=&remaining=&turnMs=2500&pendingInput=0" +
+  "me=normal&health=normal&logout=normal&nextLogin=approved&reuse=0&as=&access=approved&publish=allowed&codex=fixture&csrf=normal&window=&remaining=&turnMs=2500&pendingInput=0&stream=off&streamIds=same" +
     "&codexRunner=true&runner=not_prepared&prepare=ok&readyMs=3000&hint=&runnerAll="
 );
 
@@ -929,6 +931,316 @@ await step("N24", async () => {
   await setMock("turnMs=2500");
 });
 
+// N25. #90 스트림(모의 API, 실제 runner 스트림이 아님): 연결 중 polling 멈춤·답변 조각 실시간 표시·완료 뒤 같은 DOM(remount 없음)·
+// 중지(202 requestId, 부분 답변 표시 전용)·알림/모르는 항목 표시·숨김 30초 닫기와 after 재연결·플래그 꺼짐이면 polling.
+await step("N25", async () => {
+  const counts = () => fetch(`${ORIGIN}/__mock/counts`).then((r) => r.json());
+  const sessionGets = async () => (await mockCalls()).filter((c) => c.method === "GET" && /^\/research\/sessions\/[^/]+$/.test(c.path)).length;
+  const waitFor = async (fn, ms) => {
+    for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) if (await fn()) return true;
+    return false;
+  };
+  const input = chat.getByLabel("메시지");
+  // 입력창 옆 중지 버튼만(도구 행의 "· 중지됨" 상태 문구가 들어간 버튼과 섞이지 않게 — review c6c0105)
+  const stopBtn = () => chat.locator("button[data-chat-stop]");
+  const openSession = async () => {
+    await openPanel();
+    await chat.getByRole("button", { name: "← 대화 목록" }).click().catch(() => {});
+    await chat.getByRole("link", { name: /준비 대화/ }).click();
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 10000 });
+  };
+  await setMock("runnerAll=ready&codex=fixture&turnMs=6000&stream=on");
+  await page.reload();
+  await openSession();
+  check("N25. stream connected", await waitFor(async () => (await counts()).streamOpen >= 1, 5000));
+
+  // 받는 중 표시와 polling 멈춤
+  const g0 = await sessionGets();
+  const r0 = await statusReads();
+  // 이번 질문의 답변만(앞선 N21–N24 답변과 섞이지 않게 — review ecc183f). 스트리밍 중에는 굵게 표시가 덜 닫혀
+  // "모의 응답: **스트림…"처럼 보이므로 질문 고유 낱말로 찾는다.
+  const answer = chat.locator("li[data-role=assistant]", { hasText: "스트림" });
+  check("N25. no earlier answer matches this turn's text", (await answer.count()) === 0);
+  await input.fill("스트림 질문 하나");
+  const t0 = Date.now();
+  await input.press("Enter");
+  check("N25. answer streams before the turn ends", (await appears(answer, 4500)) && Date.now() - t0 < 5500, `${Date.now() - t0}ms`);
+  await answer.evaluate((el) => (window.__ans = el));
+  check("N25. stop button while answering", await stopBtn().isVisible());
+  await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
+  check("N25. same answer element after the record replaces the stream (mock ids match; mismatched ids: N26)", await page.evaluate(() => window.__ans.isConnected));
+  check("N25. one recorded answer", (await chat.locator("li[data-role=assistant]", { hasText: "모의 응답: 스트림 질문 하나" }).count()) === 1);
+  const gets = (await sessionGets()) - g0;
+  check("N25. no 2s session polling while streaming (confirm + completion only)", gets <= 3, String(gets));
+  check("N25. no status polling while streaming", (await statusReads()) === r0, String((await statusReads()) - r0));
+  check("N25. no stop button after completion", (await stopBtn().count()) === 0);
+
+  // review(1908aaf): 완료 확정 GET이 일시 실패(503)해도 스트림 연결 중 GET만 다시 해 완료 기록으로 복구하고 입력 잠금을 푼다.
+  {
+    const gets = [];
+    let failNext = false;
+    await page.route("**/api/research/sessions/*", async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      if (failNext) {
+        failNext = false;
+        gets.push(503);
+        return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "unavailable", message: "Unavailable" } }) });
+      }
+      gets.push(200);
+      return route.continue();
+    });
+    const posts0 = (await mockCalls()).filter((c) => c.method === "POST" && /\/messages$/.test(c.path)).length;
+    await input.fill("완료 조회 실패 질문");
+    await input.press("Enter");
+    await appears(chat.locator("li[data-role=assistant]", { hasText: "완료 조회" }), 5000);
+    await page.waitForTimeout(800);
+    gets.length = 0;
+    failNext = true; // 다음 GET = 완료 확정 GET
+    check("N25. completion GET 503 -> retried, input unlocked", await appears(input.and(chat.locator(":enabled")), 15000), JSON.stringify(gets));
+    check("N25. completion GET failed once then recovered", gets[0] === 503 && gets.includes(200), JSON.stringify(gets));
+    check("N25. recovered record shows the answer", await appears(chat.getByText("모의 응답: 완료 조회 실패 질문")));
+    check(
+      "N25. message not resent",
+      (await mockCalls()).filter((c) => c.method === "POST" && /\/messages$/.test(c.path)).length === posts0 + 1
+    );
+    await page.unroute("**/api/research/sessions/*");
+  }
+
+  // 중지: 부분 답변은 표시 전용, 대화는 idle(실패 아님)
+  const i0 = (await counts()).interrupts;
+  await input.fill("중지할 질문");
+  await input.press("Enter");
+  await appears(chat.locator("li[data-role=assistant]", { hasText: "중지할" }), 5000);
+  await stopBtn().click();
+  check("N25. one interrupt request", await waitFor(async () => (await counts()).interrupts === i0 + 1, 3000));
+  check("N25. stopped partial answer marked", await appears(chat.getByText("중지됨(부분)"), 8000));
+  check("N25. partial answer is display-only", await appears(chat.getByText(/이어서 질문해도 Codex는 이 내용을 보지 않습니다/)));
+  check("N25. stop is not a failure", (await chat.getByText("마지막 요청이 실패했습니다").count()) === 0);
+  check("N25. input unlocked after stop", await appears(input.and(chat.locator(":enabled")), 5000));
+
+  // review(62e0406): A 턴 중지 → A 종료로 입력 해제 → B 턴 전송 → A 중지 응답이 늦게 도착해도 B의 중지 버튼은 잠기지 않는다.
+  {
+    await page.route("**/api/research/sessions/*/interrupt", async (route) => {
+      const r = await route.fetch(); // 서버(모의)는 바로 중지하고 기록을 남긴다
+      await sleep(3000); // 응답 전달만 늦춘다
+      return route.fulfill({ response: r }).catch(() => {});
+    });
+    await input.fill("늦은 중지 A");
+    await input.press("Enter");
+    await appears(chat.locator("li[data-role=assistant]", { hasText: "늦은" }), 5000);
+    await stopBtn().click();
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 8000 });
+    await input.fill("다음 턴 B");
+    await input.press("Enter");
+    await stopBtn().waitFor({ timeout: 5000 });
+    await page.waitForTimeout(3500); // A의 늦은 응답이 도착한 뒤(B 턴 6초 안)
+    const b = stopBtn();
+    check("N25. late stop reply of turn A does not lock turn B's stop button", (await b.textContent())?.trim() === "중지" && (await b.isEnabled()), `${await b.textContent()} enabled=${await b.isEnabled()}`);
+    await page.unroute("**/api/research/sessions/*/interrupt");
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
+  }
+
+  // 계약 v1.2 idle 예외(PM 결정): 로컬 진행 중이면 idle 1건당 GET 1회, ready면 0회.
+  // 마운트 GET과 idle GET이 섞이지 않게(review a5ed24c), 다시 연 화면의 스트림 연결은 상세 GET에 응답한 뒤에 풀어 주고
+  // 그 시각 이후의 mock 상세 GET만 센다. 진행 중 경우는 연결을 풀기 전의 상세 GET에 모두 그 턴이 실행 중일 때 저장한
+  // 응답을 돌려준다(화면은 진행 중, 서버에는 진행 턴 없음 → 연결하면 idle). 화면이 몇 번 마운트되든 같은 조건이 된다.
+  {
+    const sessionGetsSince = async (t) => (await mockCalls()).filter((c) => c.method === "GET" && /^\/research\/sessions\/[^/]+$/.test(c.path) && c.at >= t).length;
+    let runningBody = null;
+    const keep = async (resp) => {
+      if (resp.request().method() !== "GET" || !/\/api\/research\/sessions\/[^/?]+$/.test(new URL(resp.url()).pathname)) return;
+      const body = await resp.text().catch(() => "");
+      if (body.includes('"state":"running"')) runningBody = body;
+    };
+    page.on("response", keep);
+    await setMock("turnMs=3000");
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
+    await input.fill("idle 예외 질문");
+    await input.press("Enter");
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
+    page.off("response", keep);
+    check("N25. captured a running record", runningBody !== null);
+    // 새로고침 뒤 대화창이 열려 있던 대화를 그대로 다시 열 수 있다. 목록이 보일 때만 고른다.
+    const reopen = async () => {
+      await openPanel();
+      await Promise.race([input.waitFor(), chat.getByRole("link", { name: /준비 대화/ }).waitFor()]).catch(() => {});
+      if (!(await input.isVisible())) await chat.getByRole("link", { name: /준비 대화/ }).click();
+      await input.waitFor();
+    };
+    // gate: 상세 GET 하나에 응답한 뒤 0.5초가 지나야 스트림 연결을 통과시킨다. stale이면 그 전의 상세 GET은 저장한 응답으로.
+    const gate = async (stale) => {
+      const g = { answered: false, releasedAt: null };
+      await page.route("**/api/research/sessions/*", (route) => {
+        if (route.request().method() !== "GET" || g.releasedAt !== null) return route.continue();
+        g.answered = true;
+        return stale ? route.fulfill({ status: 200, contentType: "application/json", body: runningBody ?? "{}" }) : route.continue();
+      });
+      await page.route("**/api/research/sessions/*/events*", async (route) => {
+        while (!g.answered) await sleep(50);
+        await sleep(500);
+        if (g.releasedAt === null) g.releasedAt = Date.now();
+        return route.continue();
+      });
+      return g;
+    };
+    const ungate = async () => {
+      await page.unroute("**/api/research/sessions/*/events*");
+      await page.unroute("**/api/research/sessions/*");
+    };
+    let g = await gate(true);
+    await page.reload();
+    await reopen();
+    check("N25. v1.2 idle while in progress: record confirmed", await appears(input.and(chat.locator(":enabled")), 10000));
+    check("N25. v1.2 idle recovered the answer", await appears(chat.getByText("모의 응답: idle 예외 질문")));
+    await page.waitForTimeout(2500);
+    let n = g.releasedAt === null ? -1 : await sessionGetsSince(g.releasedAt);
+    check("N25. v1.2 idle while in progress: exactly one GET after the stream connected", n === 1, String(n));
+    await ungate();
+    // ready에서 다시 열기: 스트림 연결 뒤 idle로는 GET하지 않는다.
+    g = await gate(false);
+    await page.reload();
+    await reopen();
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 10000 });
+    await page.waitForTimeout(3000);
+    n = g.releasedAt === null ? -1 : await sessionGetsSince(g.releasedAt);
+    check("N25. v1.2 idle while ready: no GET after the stream connected", n === 0, String(n));
+    await ungate();
+    await setMock("turnMs=6000");
+  }
+
+  // review(d02c691): 받는 중에 연결이 끊기고 다시 연결이 404(플래그 꺼짐)로 polling으로 돌아가도, polling이 받은 완료 기록으로
+  // 끝난다(끊긴 스트림의 running이 기록보다 앞서지 않는다). 끊긴 동안 실제 진행 중인 턴은 polling으로 이어진다.
+  {
+    await setMock("stream=on&turnMs=5000");
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
+    await input.fill("중간 끊김 질문");
+    await input.press("Enter");
+    await appears(chat.locator("li[data-role=assistant]", { hasText: "중간" }), 5000);
+    await setMock("stream=off&streamKick=1");
+    await page.waitForTimeout(1500);
+    check("N25. after drop -> 404 fallback, still in progress while the turn runs", await input.isDisabled());
+    check("N25. drop fallback: completed via polling, input unlocked", await appears(input.and(chat.locator(":enabled")), 12000));
+    check("N25. drop fallback: final answer recorded", await appears(chat.getByText("모의 응답: 중간 끊김 질문")));
+    check("N25. drop fallback: no thinking / stop left", (await chat.locator("[data-chat-thinking]").count()) === 0 && (await stopBtn().count()) === 0);
+    await setMock("stream=on");
+    await page.reload();
+    await openSession();
+  }
+
+  // 서버 알림·모르는 항목: 대화 전체는 그대로 보인다
+  await setMock("turnMs=1500");
+  await input.fill("/fixture/notice 알림 질문");
+  await input.press("Enter");
+  check("N25. partial_removed notice shown", await appears(chat.getByText(/보존 한도를 넘어 삭제되었습니다/), 10000));
+  check("N25. unknown item type shown without breaking the conversation", await appears(chat.getByText(/표시하지 못하는 기록 항목입니다 \(future_kind\)/)));
+
+  // 숨김 30초 → 닫기, 다시 보이면 cursor(after)로 이어 붙기
+  const a0 = (await counts()).streamAfter;
+  await setHidden(true);
+  check("N25. stream closed after 30s hidden", await waitFor(async () => (await counts()).streamOpen === 0, 36000));
+  await setHidden(false);
+  check("N25. reconnects with after= when visible", await waitFor(async () => (await counts()).streamOpen >= 1 && (await counts()).streamAfter > a0, 8000));
+
+  // 플래그 꺼짐(404 stream_disabled): 기존 polling으로 동작하고 중지 버튼은 없다
+  await setMock("stream=off&turnMs=3000");
+  await page.reload();
+  await openSession();
+  await input.fill("폴백 질문");
+  await input.press("Enter");
+  await chat.locator("[data-chat-thinking]").waitFor();
+  await page.waitForTimeout(1200);
+  check("N25. stream off: no stop button", (await stopBtn().count()) === 0);
+  check("N25. stream off: reply via polling", await appears(chat.getByText("모의 응답: 폴백 질문"), 10000));
+  await setMock("turnMs=2500");
+});
+
+// N26. #90 턴 단위 교체(모의 API): 실측(P5 V1)에서 스트림 itemId와 기록 id가 일부 또는 전부 다르다. 완료 기록으로 바뀔 때
+// 텍스트가 두 벌이 되거나 비는 순간이 없고(깜빡임 없음), 사용자 말풍선은 그대로이며, 바닥을 따라가던 중이면 바닥을 유지하고
+// 위로 올려 읽던 중이면 읽던 위치가 튀지 않는다. 일부만 같은 경우(partial)와 전부 다른 경우(distinct)를 모두 본다.
+await step("N26", async () => {
+  const counts = () => fetch(`${ORIGIN}/__mock/counts`).then((r) => r.json());
+  const waitFor = async (fn, ms) => {
+    for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) if (await fn()) return true;
+    return false;
+  };
+  const input = chat.getByLabel("메시지");
+  const scroller = chat.locator("[data-chat-scroll]");
+  const gap = () => scroller.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
+  const toolRows = () => chat.locator("li:has(> button[aria-expanded])").count();
+  // 이 낱말을 담은 답변 수를 DOM이 바뀔 때마다 기록한다(두 벌 = max>1, 빈 순간 = 나타난 뒤 0).
+  const watch = (word) =>
+    page.evaluate((w) => {
+      const root = document.querySelector("[data-chat-scroll]");
+      const st = { max: 0, appeared: false, gapAfter: false };
+      const count = () => [...root.querySelectorAll("li[data-role=assistant]")].filter((li) => (li.textContent ?? "").includes(w)).length;
+      const obs = new MutationObserver(() => {
+        const n = count();
+        st.max = Math.max(st.max, n);
+        if (n > 0) st.appeared = true;
+        else if (st.appeared) st.gapAfter = true;
+      });
+      obs.observe(root, { subtree: true, childList: true, characterData: true });
+      window.__n26 = { st, stop: () => obs.disconnect() };
+    }, word);
+  const watched = () => page.evaluate(() => (window.__n26.stop(), window.__n26.st));
+
+  await page.setViewportSize({ width: 1280, height: 420 });
+  for (const [mode, word] of [
+    ["distinct", "교체갑"],
+    ["partial", "교체을"],
+  ]) {
+    await setMock(`stream=on&turnMs=4000&streamIds=${mode}`);
+    await page.reload();
+    await openPanel();
+    await chat.getByRole("button", { name: "← 대화 목록" }).click().catch(() => {});
+    await chat.getByRole("link", { name: /준비 대화/ }).click();
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 10000 });
+    await waitFor(async () => (await counts()).streamOpen >= 1, 5000);
+
+    // 바닥을 따라가는 중
+    const tools0 = await toolRows();
+    await watch(`${word} 바닥`);
+    await input.fill(`${word} 바닥 질문`);
+    await input.press("Enter");
+    const userBubble = chat.locator("li[data-role=user]", { hasText: `${word} 바닥 질문` });
+    await userBubble.waitFor();
+    await userBubble.evaluate((el) => (window.__n26user = el));
+    await chat.locator("li[data-role=assistant]", { hasText: word }).waitFor({ timeout: 5000 });
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
+    await page.waitForTimeout(600);
+    let st = await watched();
+    check(`N26[${mode}]. bottom: never two copies of the answer`, st.max === 1, JSON.stringify(st));
+    check(`N26[${mode}]. bottom: no empty moment during replacement`, st.appeared && !st.gapAfter, JSON.stringify(st));
+    check(`N26[${mode}]. bottom: one final answer with full text`, (await chat.locator("li[data-role=assistant]", { hasText: `모의 응답: ${word} 바닥 질문` }).count()) === 1);
+    check(`N26[${mode}]. bottom: one tool row added (live row replaced, not kept)`, (await toolRows()) === tools0 + 1, `${tools0} -> ${await toolRows()}`);
+    check(`N26[${mode}]. bottom: user bubble unchanged`, await page.evaluate(() => window.__n26user.isConnected));
+    check(`N26[${mode}]. bottom: stays at the bottom after replacement`, (await gap()) <= 48, String(await gap()));
+
+    // 위로 올려 읽는 중
+    await watch(`${word} 위`);
+    await input.fill(`${word} 위 질문`);
+    await input.press("Enter");
+    await chat.locator("li[data-role=assistant]", { hasText: `${word} 위` }).waitFor({ timeout: 5000 });
+    // 화면 위쪽에 보이는 이전 말풍선 하나를 기준으로 잡고 위로 올린다.
+    const ref = await scroller.evaluate((el) => {
+      el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - 600);
+      const top = el.getBoundingClientRect().top;
+      const li = [...el.querySelectorAll("li[data-role]")].find((x) => x.getBoundingClientRect().top >= top);
+      window.__n26ref = li;
+      return { scroll: el.scrollTop, y: Math.round(li.getBoundingClientRect().top) };
+    });
+    await input.and(chat.locator(":enabled")).waitFor({ timeout: 15000 });
+    await page.waitForTimeout(600);
+    st = await watched();
+    const after = await scroller.evaluate((el) => ({ scroll: el.scrollTop, y: Math.round(window.__n26ref.getBoundingClientRect().top), connected: window.__n26ref.isConnected }));
+    check(`N26[${mode}]. scrolled up: never two copies, no empty moment`, st.max === 1 && st.appeared && !st.gapAfter, JSON.stringify(st));
+    check(`N26[${mode}]. scrolled up: reading position kept`, after.connected && after.scroll === ref.scroll && after.y === ref.y, `${JSON.stringify(ref)} -> ${JSON.stringify(after)}`);
+    check(`N26[${mode}]. scrolled up: one final answer`, (await chat.locator("li[data-role=assistant]", { hasText: `모의 응답: ${word} 위 질문` }).count()) === 1);
+  }
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await setMock("streamIds=same&turnMs=2500");
+});
+
 // N13. 연구 권한 상실(같은 계정 commenter로 변경): 준비 POST·상태 조회 없음, 기존 권한 안내
 await step("N13", async () => {
   const acc = (await me()).accountId;
@@ -957,7 +1269,7 @@ await step("N14", async () => {
 });
 
 check("N15. no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
-await setMock("codexRunner=&runner=&prepare=ok&runnerAll=&hint=&credHint=1&readyMs=2500&turnMs=2500&codex=fixture&csrf=normal&window=&remaining=&pendingInput=0");
+await setMock("codexRunner=&runner=&prepare=ok&runnerAll=&hint=&credHint=1&readyMs=2500&turnMs=2500&codex=fixture&csrf=normal&window=&remaining=&pendingInput=0&stream=off&streamIds=same");
 await browser.close();
 const failed = results.filter((r) => !r.ok);
 console.log(`\nRESULT ${results.length - failed.length}/${results.length} passed`);

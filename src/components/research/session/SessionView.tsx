@@ -1,10 +1,20 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from "react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import type { FetchFailure } from "@/lib/api/client";
-import { archiveSession, getSession, getSessionItemRaw, researchErrorMessage, sendSessionMessage } from "@/lib/research/api";
+import {
+  archiveSession,
+  getSession,
+  getSessionItemRaw,
+  interruptSession,
+  readCodexStatus,
+  researchErrorMessage,
+  sendSessionMessage,
+} from "@/lib/research/api";
+import { showLiveTurn, type LiveItem } from "@/lib/research/stream";
+import { useChatStream } from "@/components/research/session/useChatStream";
 import { useLoad, useMutation } from "@/lib/research/hooks";
 import { isUncertain, settlesRetry, uuidV4 } from "@/lib/research/idempotency";
 import {
@@ -16,7 +26,7 @@ import {
 import { storeGeneration } from "@/lib/research/pendingStore";
 import { clearDraft, loadDraft, saveDraft } from "@/lib/research/chatState";
 import { useAuth } from "@/hooks/useAuth";
-import type { PageDescriptor, SessionDetail, SessionItem, SessionSummary, ToolCallItem } from "@/lib/research/types";
+import type { NoticeItem, PageDescriptor, SessionDetail, SessionItem, SessionSummary, ToolCallItem, UnknownItem } from "@/lib/research/types";
 import { describePage, kindText, pageUnresolved, sameDescriptor, scopeLabel, useRegisteredPage } from "@/lib/research/pageContext";
 import { own } from "@/lib/research/own";
 import { BASE_PATH } from "@/lib/constants";
@@ -41,6 +51,7 @@ import {
   EMPTY_CONTINUITY,
   awaitingReply,
   chatStatus,
+  isPendingInput,
   reconcile,
   type ChatStatus,
   type Continuity,
@@ -55,12 +66,13 @@ import {
   runnerState,
   useCodexStatus,
 } from "@/components/research/CodexStatusBanner";
+import { useCodexRunner } from "@/components/research/CodexStatusProvider";
 import { useChat } from "@/components/chat/ChatProvider";
 import type { FetchResult } from "@/lib/api/client";
 import type { CodexStatus } from "@/lib/research/types";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
-import SafeMarkdown from "@/components/research/SafeMarkdown";
+import SafeMarkdown, { StreamingMarkdown } from "@/components/research/SafeMarkdown";
 import { SESSION_STATE_LABELS } from "@/components/research/ItemLists";
 
 const POLL_MS = 2000;
@@ -94,7 +106,7 @@ function RawItem({ sessionId, itemId, label = "저장된 원본 전체" }: { ses
   );
 }
 
-const TOOL_STATUS_LABELS: Record<string, string> = { rejected: "거부됨" };
+const TOOL_STATUS_LABELS: Record<string, string> = { rejected: "거부됨", inProgress: "진행 중", approval: "허가 확인 중" };
 
 // #22 research_document_update는 문서를 바꾸지 않고 제안(Proposal)을 만든다. #28 D1: research_document_save(새 문서)와
 // research_post_propose(글)도 제안이다. 도구 결과는 flat Proposal이며 출력(JSON 또는 text 조각)에서 제안 위치만 읽는다.
@@ -136,7 +148,26 @@ const commandPreview = (command: string | null) => {
   return line.length > 120 ? `${line.slice(0, 120)}…` : line;
 };
 
-function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }) {
+// #90 스트림 항목을 기록 도구 항목 모양으로 옮긴다(완료 뒤 같은 id의 기록 항목으로 바뀐다). 명령 출력은 최근 조각만 있다.
+function liveToolItem(item: LiveItem): ToolCallItem {
+  if (item.kind === "commandExecution") {
+    return {
+      id: item.itemId,
+      type: "tool_call",
+      name: SHELL_TOOL,
+      input: { command: item.command ?? null, cwd: null },
+      output: item.output ? { stdout: item.output.text, stderr: null, combinedOutput: true, exitCode: null, truncated: item.output.truncated } : null,
+      status: item.status,
+    };
+  }
+  if (item.kind === "fileChange") {
+    return { id: item.itemId, type: "tool_call", name: PATCH_TOOL, input: { changes: Array.isArray(item.changes) ? item.changes : [] }, output: null, status: item.status };
+  }
+  return { id: item.itemId, type: "tool_call", name: item.kind === "mcpToolCall" ? "MCP 도구" : "도구", input: null, output: null, status: item.status };
+}
+
+/** live: 스트림으로 받는 중인 항목(#90). 아직 기록이 없어 원본 보기를 두지 않는다. 같은 id의 기록 항목으로 바뀌어도 이어진다. */
+function ToolCall({ sessionId, item, live = false }: { sessionId: string; item: ToolCallItem; live?: boolean }) {
   const [open, setOpen] = useState(false);
   const [raw, setRaw] = useState(false);
   // #23: shell은 명령 실행으로 읽기 쉽게 보인다. 서버 기록은 그대로이며 모르는 값은 일반 도구처럼 표시한다.
@@ -175,7 +206,10 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
             {shell ? commandPreview(shell.command) || item.name : patch ? patchSummary(patch) || item.name : item.name}
           </span>
         </span>
-        <span className={`shrink-0 text-xs ${warn ? "font-medium text-amber-700" : "text-stone-500"}`}>{label ?? item.status}</span>
+        <span className={`shrink-0 text-xs ${warn ? "font-medium text-amber-700" : "text-stone-500"}`}>
+          {label ?? item.status}
+          {item.turnStatus === "interrupted" && " · 중지됨"}
+        </span>
       </button>
       {note && (
         <p className="px-3 pb-2 text-xs text-amber-800">
@@ -253,7 +287,7 @@ function ToolCall({ sessionId, item }: { sessionId: string; item: ToolCallItem }
               </div>
             </>
           )}
-          {raw ? (
+          {live ? null : raw ? (
             <RawItem sessionId={sessionId} itemId={item.id} />
           ) : (
             <button onClick={() => setRaw(true)} className="text-xs font-medium text-indigo-600 hover:text-indigo-800">
@@ -300,10 +334,13 @@ function Message({
   sessionId,
   item,
   sending,
+  live = false,
 }: {
   sessionId: string;
   item: Extract<SessionItem, { type: "message" }>;
   sending?: { page?: PageDescriptor };
+  // #90 스트림으로 받는 중인 답변(기록 전). 같은 id의 기록 항목으로 바뀌어도 같은 말풍선이다.
+  live?: boolean;
 }) {
   const [raw, setRaw] = useState(false);
   const mine = item.role === "user";
@@ -324,11 +361,21 @@ function Message({
         {mine ? "나" : "Codex"}
         {mine && scope && <ScopeBadge page={scope} />}
         {unrecorded && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-800">{NOT_RECORDED_LABEL}</span>}
+        {!mine && item.turnStatus === "interrupted" && (
+          <span className="rounded-full bg-stone-100 px-2 py-0.5 font-normal text-stone-600">{item.partial ? "중지됨(부분)" : "중지됨"}</span>
+        )}
       </p>
       {mine ? (
         <p className="whitespace-pre-wrap text-sm text-stone-900 [overflow-wrap:anywhere]">{item.text}</p>
+      ) : live ? (
+        <StreamingMarkdown content={item.text} />
       ) : (
         <SafeMarkdown content={item.text} compact />
+      )}
+      {item.displayOnly && (
+        <p className="mt-1 text-xs text-stone-500">
+          중지하기 전까지 받은 부분 답변입니다. Codex 대화 기록에는 남지 않아, 이어서 질문해도 Codex는 이 내용을 보지 않습니다.
+        </p>
       )}
       {item.modelMismatch && <ModelMismatchNote />}
       {unrecorded && (
@@ -337,13 +384,17 @@ function Message({
         </p>
       )}
       <div className="mt-1">
-        {sending ? (
+        {sending || live ? (
           // 서버 항목으로 바뀔 때 높이가 달라지지 않게 같은 자리를 비워 둔다.
           <span aria-hidden="true" className="invisible text-[13px]">
             원본 기록
           </span>
         ) : raw ? (
-          <RawItem sessionId={sessionId} itemId={item.id} label={platform ? "보존된 입력 기록 (Codex 원본 아님)" : undefined} />
+          <RawItem
+            sessionId={sessionId}
+            itemId={item.id}
+            label={platform ? "보존된 입력 기록 (Codex 원본 아님)" : item.displayOnly ? "표시 전용 부분 답변 (Codex 원본 아님)" : undefined}
+          />
         ) : (
           <button onClick={() => setRaw(true)} className="text-[13px] text-stone-500 hover:text-stone-700">
             {unrecorded ? "보존된 입력 기록" : "원본 기록"}
@@ -378,13 +429,31 @@ function Thinking({ slow, accepted }: { slow: boolean; accepted: boolean }) {
   );
 }
 
+// #90 서버 알림 항목. 모르는 code는 code만 보인다.
+const NOTICE_TEXT: Record<string, string> = {
+  partial_removed: "중지한 답변의 부분 내용이 보존 한도를 넘어 삭제되었습니다.",
+};
+function NoticeRow({ item }: { item: NoticeItem }) {
+  return (
+    <li data-notice={item.code} className="text-xs text-stone-500">
+      {own(NOTICE_TEXT, item.code) ?? `알림 (${item.code})`}
+    </li>
+  );
+}
+
+// 이 화면이 아직 모르는 기록 항목. 대화 전체는 그대로 보이고 이 항목만 종류를 알린다.
+function UnknownRow({ item }: { item: UnknownItem }) {
+  return <li className="text-xs text-stone-500">이 화면에서 표시하지 못하는 기록 항목입니다 ({item.originalType}).</li>;
+}
+
 // 스크린리더 알림은 상태가 바뀔 때 한 번만, 짧게 한다(대화 목록 자체는 live region이 아니다).
 // 화면에 보이는 안내와 같은 문구를 쓰지 않는다(같은 글자가 두 군데 있으면 화면 낭독이 겹치고 e2e 문구 찾기도 모호해진다).
 function announcement(prev: ChatStatus, next: ChatStatus, prevText: string): string {
   if (next === "submitted") return "메시지 전송됨, Codex 응답 대기";
   if (next === "waiting") return prev === "submitted" ? prevText : "Codex 응답 대기 중";
+  if (next === "streaming") return "Codex 답변 수신 중";
   if (next === "error") return "Codex 응답 실패";
-  if (next === "ready" && prev === "waiting") return "Codex 답변 도착";
+  if (next === "ready" && (prev === "waiting" || prev === "streaming")) return "Codex 답변 도착";
   return "";
 }
 
@@ -407,6 +476,13 @@ function ScopeHint({ page }: { page: PageDescriptor }) {
   );
 }
 
+interface StopControl {
+  label: string;
+  disabled: boolean;
+  note: string | null;
+  onStop: () => void;
+}
+
 function Composer({
   session,
   accountId,
@@ -415,6 +491,7 @@ function Composer({
   codex,
   awaiting,
   atBottom,
+  stop,
   onRecheck,
   onSending,
   onSent,
@@ -432,6 +509,8 @@ function Composer({
   awaiting: boolean;
   // 대화 바닥이 보이는지(아니면 "최신으로" 버튼).
   atBottom: boolean;
+  // #90 중지 버튼(스트림을 지원하는 서버에서 응답을 기다리는 동안만). null이면 보이지 않는다.
+  stop: StopControl | null;
   onRecheck: () => void;
   // 보내기 시작. local은 화면이 먼저 그릴 내 말풍선이다(결과 미확인 재전송은 서버에 이미 있을 수 있어 그리지 않는다).
   onSending: (local: LocalSend | null) => void;
@@ -632,8 +711,24 @@ function Composer({
           aria-label="메시지"
           className="block max-h-[40vh] w-full resize-y rounded-lg border border-stone-200 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100 disabled:bg-stone-50"
         />
+        {stop?.note && (
+          <p className="text-xs text-amber-800" role="status">
+            {stop.note}
+          </p>
+        )}
         <div className="flex items-center gap-2">
           <NextScope page={page} />
+          {stop && (
+            <button
+              type="button"
+              data-chat-stop=""
+              onClick={stop.onStop}
+              disabled={stop.disabled}
+              className="min-h-11 shrink-0 rounded-lg border border-stone-300 bg-white px-4 text-sm font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50 md:min-h-9"
+            >
+              {stop.label}
+            </button>
+          )}
           <button
             type="submit"
             disabled={busy || awaiting || blocked || text.trim() === "" || (unresolved && !retrying)}
@@ -648,15 +743,143 @@ function Composer({
 }
 
 /** 대화 하나. 공통 대화창이 그리며 상세 조회·진행 중 확인·Codex 상태 확인은 여기 한 곳에서만 한다. */
+function subscribeVisibility(onChange: () => void) {
+  document.addEventListener("visibilitychange", onChange);
+  return () => document.removeEventListener("visibilitychange", onChange);
+}
+
+interface StopState {
+  requestId: string;
+  // sending: 요청 중 / requested: 중지가 걸렸거나 확정 신호를 기다림 / awaitStart: runner가 아직 턴을 받기 전이라 시작되면 한 번 더 /
+  // failed: 확인하지 못함(다시 누를 수 있음)
+  phase: "sending" | "requested" | "awaitStart" | "failed";
+  resent: boolean;
+  // 이 중지 요청의 순번. 응답이 올 때 지금 화면의 중지 작업과 같을 때만 반영한다(review 62e0406: 이전 턴의 늦은 응답).
+  token: number;
+}
+
 export default function SessionView({ id, onArchived }: { id: string; onArchived: (id: string) => void }) {
-  const { user } = useAuth();
+  const { user, csrfToken, refresh: refreshAuth } = useAuth();
   const { result, refreshFailure, reload, reloadResult } = useLoad(`session:${id}`, () => getSession(id));
   const { run, busy } = useMutation();
   const [archiveFailure, setArchiveFailure] = useState<FetchFailure | null>(null);
   const running = result?.ok === true && result.data.state === "running";
   const chat = useChat();
-  // 열린 대화창에서만 일시 상태(환경 활성화 중·사용 대기·연결 확인)를 다시 조회한다.
-  const codex = useCodexStatus(chat.open);
+  const { push: pushStatus } = useCodexRunner();
+  const visible = useSyncExternalStore(subscribeVisibility, () => document.visibilityState === "visible", () => true);
+
+  // #89 보내는 중(접수 확인 전) 상태. #90 중지 상태와 마지막 접수 requestId(202 응답).
+  const [send, setSend] = useState<{ local: LocalSend | null } | null>(null);
+  const [stopping, setStopping] = useState<StopState | null>(null);
+  const [stopUnsupported, setStopUnsupported] = useState(false);
+  const [lastAccepted, setLastAccepted] = useState<string | null>(null);
+
+  // 화면 밖(언마운트) 뒤의 늦은 결과는 반영하지 않는다.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  // #90 중지 요청. 결과는 스트림의 확정 신호(turn.completed{interrupted})나 기록으로 확인한다. 자동으로 다시 보내지 않는다
+  // (단, runner가 아직 턴을 받기 전이라 not_running이면 턴이 시작될 때 같은 requestId로 한 번만 더 보낸다 — 계약 §2).
+  // 지금 화면의 중지 작업 순번(0이면 없음). 턴이 끝나 중지 상태를 지우면 0이 되어, 그 뒤에 온 이전 요청의 응답은 버린다.
+  const stopToken = useRef(0);
+  const activeStop = useRef(0);
+  // 스트림에서 시작(turn.started·진행 중 snapshot)을 확인한 턴. not_running 응답보다 시작이 먼저 온 경합에서 바로 한 번 더 보낸다.
+  const startedTurns = useRef(new Set<string>());
+  const requestStop = async (requestId: string, resent: boolean) => {
+    if (!csrfToken) return;
+    const token = ++stopToken.current;
+    activeStop.current = token;
+    setStopping({ requestId, phase: "sending", resent, token });
+    const res = await interruptSession(id, requestId, csrfToken);
+    // 화면을 떠났거나, 그사이 턴이 끝났거나, 다른 중지 요청(다른 턴·다시 누름)이 시작됐으면 이 응답은 버린다.
+    if (!alive.current || activeStop.current !== token) return;
+    if (res.ok) {
+      if (res.data.state === "not_running" && !resent) {
+        // runner가 아직 턴을 받기 전이었다. 그사이 이미 시작됐으면 지금, 아니면 시작될 때 같은 requestId로 한 번만 더 보낸다(계약 §2).
+        if (startedTurns.current.has(requestId)) {
+          void requestStop(requestId, true);
+          return;
+        }
+        setStopping({ requestId, phase: "awaitStart", resent, token });
+        return;
+      }
+      setStopping({ requestId, phase: "requested", resent, token });
+      return;
+    }
+    const f = res.failure;
+    if (f.kind === "http" && f.status === 409) {
+      // 서버 기록에서 그 턴이 이미 끝났다. 기록으로 확정한다.
+      activeStop.current = 0;
+      setStopping(null);
+      void refreshRecord();
+      return;
+    }
+    if (f.kind === "http" && f.status === 404) {
+      activeStop.current = 0;
+      setStopping(null);
+      setStopUnsupported(true);
+      return;
+    }
+    if (f.kind === "http" && (f.status === 401 || f.code === "csrf_invalid")) void refreshAuth();
+    setStopping({ requestId, phase: "failed", resent, token });
+  };
+
+  // #90 확정 신호(turn.completed·sync·끊김 등)의 기록 GET. 스트림이 연결된 동안은 polling이 멈춰 있으므로, 이 GET이 일시
+  // 실패(network·5xx·timeout)하면 성공할 때까지 늘려 가는 간격으로 다시 한다(GET만, POST는 다시 보내지 않는다 — review 1908aaf).
+  // 확정 실패(401·403·404)는 useLoad가 그대로 보이므로 멈춘다. 진행 중에 다시 요청되면 겹치지 않고 끝난 뒤 한 번 더 한다.
+  const refreshing = useRef<{ again: boolean } | null>(null);
+  const refreshRecord = async () => {
+    if (refreshing.current) {
+      refreshing.current.again = true;
+      return;
+    }
+    const run = { again: false };
+    refreshing.current = run;
+    try {
+      for (let attempt = 0; alive.current; ) {
+        run.again = false;
+        const r = await reloadResult();
+        // null: 더 나중의 조회에 밀렸다(그 결과를 알 수 없으므로 일시 실패처럼 다시 확인한다).
+        if (r === null || (!r.ok && isUncertain(r.failure))) {
+          await new Promise((resolve) => setTimeout(resolve, Math.min(CONFIRM_RETRY_MS * 2 ** attempt, CONFIRM_RETRY_MAX_MS)));
+          attempt++;
+          continue;
+        }
+        if (!run.again) break;
+        attempt = 0;
+      }
+    } finally {
+      refreshing.current = null;
+    }
+  };
+
+  // #90 실시간 스트림. 연결된 동안은 대화 상세·Codex 상태 polling을 멈추고, 확정 신호마다 기록을 다시 불러온다.
+  const stream = useChatStream(id, chat.open && visible, {
+    onRefresh: () => void refreshRecord(),
+    onRunner: (raw) => {
+      const status = readCodexStatus(raw);
+      if (status) pushStatus(status);
+    },
+    // 계약 v1.2 예외(PM 결정 #90, issuecomment-6872695326): 받는 순간 화면의 로컬 턴 상태가 진행 중(submitted·waiting·streaming,
+    // 또는 스트림이 진행 중으로 보던 턴)이면 그 턴은 연결 전에 끝났을 수 있으므로 기록 GET으로 확정한다. idle 1건당 최대 1회
+    // (일시 실패만 refreshRecord가 2–15초로 재시도), 메시지는 다시 보내지 않는다. 진행 중이 아니면 GET하지 않는다(v1.1대로).
+    onIdle: (wasRunning) => {
+      if (awaiting || wasRunning) void refreshRecord();
+    },
+    onTurnRunning: (requestId) => {
+      startedTurns.current.add(requestId);
+      if (stopping?.phase === "awaitStart" && stopping.requestId === requestId && !stopping.resent && activeStop.current === stopping.token)
+        void requestStop(requestId, true);
+    },
+  });
+  const streamLive = stream.live;
+  // 열린 대화창에서만 일시 상태(환경 활성화 중·사용 대기·연결 확인)를 다시 조회한다. 스트림이 연결된 동안은 runner 이벤트가 대신한다.
+  const codex = useCodexStatus(chat.open && !streamLive);
   const reloadCodex = codex.reload;
   const pathname = usePathname();
   const search = useSearchParams();
@@ -671,9 +894,9 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
     if (!loaded) return;
     const prev = seenSettled.current;
     seenSettled.current = { version: settledVersion };
-    // 처음 불러온 대화의 상태는 useCodexStatus가 이미 조회 중이므로 다시 묻지 않는다.
-    if (prev !== null && settledVersion !== null && settledVersion !== prev.version) void reloadCodex();
-  }, [loaded, settledVersion, reloadCodex]);
+    // 처음 불러온 대화의 상태는 useCodexStatus가 이미 조회 중이므로 다시 묻지 않는다. 스트림이 연결돼 있으면 runner 이벤트로 받는다.
+    if (prev !== null && settledVersion !== null && settledVersion !== prev.version && !streamLive) void reloadCodex();
+  }, [loaded, settledVersion, reloadCodex, streamLive]);
 
   // 서버가 알려 준 접수 종료 시각이 지나면 상태를 다시 확인한다. 잠금 판정은 브라우저 시계가 아니라 서버 응답으로 한다.
   // 브라우저 시계가 서버보다 빨라 일찍 물었거나 조회가 일시 실패해 여전히 이용 가능으로 남아 있으면,
@@ -699,13 +922,13 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
     };
   }, [expiresAt, reloadCodex]);
 
-  // 진행 중인 turn은 상세를 다시 조회해 확인한다. 재접속해도 같은 방식으로 이어진다.
+  // 진행 중인 turn은 상세를 다시 조회해 확인한다. 재접속해도 같은 방식으로 이어진다. 스트림이 연결된 동안은 멈춘다(#90).
   useEffect(() => {
-    if (!running) return;
+    if (!running || streamLive) return;
     const timer = setTimeout(() => void reload(), POLL_MS);
     return () => clearTimeout(timer);
     // 일시적 조회 실패(refreshFailure)에도 마지막 기록을 유지한 채 계속 확인한다.
-  }, [running, result, refreshFailure, reload]);
+  }, [running, streamLive, result, refreshFailure, reload]);
 
   // 이 화면에서 실행 중을 본 지 30초가 지나면 중립 안내를 보인다. 경과 시간은 실패·유실의 근거가 아니며 재전송을 열지 않는다.
   const [slowFor, setSlowFor] = useState<string | null>(null);
@@ -717,14 +940,41 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
   }, [running, id]);
   const slow = running && slowFor === id;
 
-  // #89 화면 상태: 보내는 중(submitted) → 서버 실행 중(waiting, "생각 중") → 완료(ready) / 오류(error). 한 번에 하나다.
-  // 보내기 요청이 끝나도 다음 조회가 끝날 때까지 submitted로 둔다(입력창이 잠깐 열렸다 닫히지 않게).
-  const [send, setSend] = useState<{ local: LocalSend | null } | null>(null);
-  const status = chatStatus(send !== null, result?.ok === true ? result.data.state : "idle");
+  // #90 스트림으로 받는 턴. 진행 중이거나, 끝났어도 기록이 아직 그 턴을 실행 중으로 보일 때(완료 뒤 GET 전)만 보인다.
+  // 기록이 실행 중인 다른 턴(pending-<requestId>)을 가리키면 이전 턴의 스트림은 보이지 않는다.
+  const items = result?.ok === true ? result.data.items : null;
+  const recordRequestId = items?.find(isPendingInput)?.id.replace(/^pending-/, "") ?? null;
+  const liveTurn = stream.turn;
+  // 스트림이 진행 중이라고 보는 턴은 연결돼 있을 때만 믿는다. 끊겼거나 polling으로 돌아갔으면 기록(polling)이 정한다
+  // (review d02c691: 끊긴 뒤 남은 running이 완료 기록보다 앞서 입력이 영구 잠김). 연결 중에는 이전 idle 기록이 새 턴을 지우지 않는다.
+  const liveRunning = liveTurn !== null && liveTurn.running && streamLive;
+  // 이 턴을 처음 본 순간의 기록 version. 그 뒤의 기록이 끝난 상태면 기록이 이 턴을 담은 것이므로 스트림 항목을 턴 단위로 바꾼다
+  // (P5 V1: 스트림 itemId와 기록 id는 일부 또는 전부 다르다 — id로 맞추지 않는다).
+  const [liveSeen, setLiveSeen] = useState<{ requestId: string; version: number } | null>(null);
+  if (liveTurn && result?.ok === true && liveSeen?.requestId !== liveTurn.requestId) setLiveSeen({ requestId: liveTurn.requestId, version: result.data.version });
+  const showLive =
+    liveTurn !== null &&
+    showLiveTurn({
+      turn: liveTurn,
+      connected: streamLive,
+      recordState: result?.ok === true ? result.data.state : null,
+      recordVersion: result?.ok === true ? result.data.version : null,
+      recordPendingRequestId: recordRequestId,
+      seenAtVersion: liveSeen?.requestId === liveTurn.requestId ? liveSeen.version : null,
+    });
+
+  // #89 화면 상태: 보내는 중(submitted) → 서버 실행 중(waiting, "생각 중") → #90 받는 중(streaming) → 완료(ready) / 오류(error).
+  // 한 번에 하나다. 보내기 요청이 끝나도 다음 조회가 끝날 때까지 submitted로 둔다(입력창이 잠깐 열렸다 닫히지 않게).
+  // 스트림이 턴 끝(turn.completed)을 알렸지만 기록 GET이 아직이면 받는 중으로 둔다("생각 중"이 잠깐 다시 보이지 않게).
+  const status = chatStatus(send !== null, result?.ok === true ? result.data.state : "idle", showLive && (liveRunning || liveTurn.outcome !== null));
   const awaiting = awaitingReply(status);
+  if (stopping && !awaiting) setStopping(null);
+  // 턴이 끝나 중지 상태를 지웠으면 진행 중이던 중지 요청의 늦은 응답은 버린다(커밋 직후, 다른 응답 처리보다 먼저).
+  useLayoutEffect(() => {
+    if (!awaiting) activeStop.current = 0;
+  }, [awaiting]);
 
   // 서버 기록이 바뀌어도(보낸 말풍선 → 접수 항목 → 기록 항목) 같은 말풍선으로 잇는다. 화면에 있는 동안의 key 별칭을 둔다.
-  const items = result?.ok === true ? result.data.items : null;
   const local = send?.local ?? null;
   const [view, setView] = useState<{ items: SessionItem[] | null; local: LocalSend | null; continuity: Continuity; entries: TranscriptEntry[] }>(
     { items: null, local: null, continuity: EMPTY_CONTINUITY, entries: [] }
@@ -736,22 +986,39 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
     setView({ items, local, continuity: next.next, entries });
   }
 
+  // #90 스트림 항목. 확정 기록이 이 턴을 담으면(showLive=false) 턴 단위로 기록 항목으로 바뀐다. id가 같은 항목은 같은 key라
+  // 그대로 이어지고, 다른 항목은 한 번 다시 그려진다. 같은 id가 기록에 이미 있으면 기록 쪽만 보인다(한 key 한 항목).
+  // 빈 답변 조각은 "생각 중"으로 둔다.
+  const recordIds = new Set(items?.map((i) => i.id) ?? []);
+  const liveItems = showLive ? liveTurn.items.filter((i) => !recordIds.has(i.itemId) && !(i.kind === "agentMessage" && i.text === "")) : [];
+  const lastLive = liveItems.at(-1);
+  // "생각 중"은 답변 조각을 받는 동안과, 끝난 턴의 기록을 기다리는 동안에는 보이지 않는다.
+  const answering = showLive && (liveTurn.outcome !== null || (liveRunning && !!lastLive && lastLive.kind === "agentMessage" && lastLive.status !== "completed"));
+
+  // #90 중지 대상: 스트림의 진행 중 턴 → 기록의 실행 중 턴 → 막 접수한 턴(202 응답).
+  const stopRequestId =
+    (liveRunning ? liveTurn.requestId : null) ?? (running ? recordRequestId : null) ?? (send !== null ? lastAccepted : null);
+  // 버튼은 지금 턴의 중지 작업만 반영한다(다른 턴의 상태로 잠기지 않게).
+  const turnStop = stopping && stopping.requestId === stopRequestId ? stopping : null;
+  const stop: StopControl | null =
+    stream.supported && !stopUnsupported && awaiting && stopRequestId && !(showLive && liveTurn.outcome)
+      ? {
+          label: turnStop?.phase === "sending" ? "중지 요청 중..." : turnStop && turnStop.phase !== "failed" ? "중지하는 중..." : "중지",
+          disabled: !!turnStop && turnStop.phase !== "failed",
+          note: turnStop?.phase === "failed" ? "중지를 확인하지 못했습니다. 응답은 계속 진행 중일 수 있습니다. 다시 눌러 주세요." : null,
+          onStop: () => void requestStop(stopRequestId, false),
+        }
+      : null;
+
   // 자동 스크롤: 바닥에 있을 때만 따라간다. 위로 올려 읽는 중이면 "최신으로" 버튼을 보인다.
   const contentRef = useRef<HTMLDivElement>(null);
   // 완료 때 "생각 중" 하나가 답변 하나로 바뀌면 항목 수는 같으므로, 마지막 항목과 대기 여부도 함께 본다(#89 review).
-  const scrollSignal = `${entries.length}|${entries.at(-1)?.key ?? ""}|${awaiting ? 1 : 0}`;
+  const scrollSignal = `${entries.length}|${entries.at(-1)?.key ?? ""}|${awaiting ? 1 : 0}|${liveItems.length}|${lastLive?.itemId ?? ""}`;
   const { atBottom, stick } = useStickToBottom(contentRef, { enabled: loaded, live: awaiting, signal: scrollSignal });
 
   // 접수(202)된 전송은 대화 조회가 그 버전 이상을 보여 줄 때까지 보내는 중으로 둔다. 조회가 일시 실패(네트워크·5xx)하면
   // 이전 idle 기록이 남아 polling도 시작되지 않으므로, 조회만 늘려 가는 간격으로 다시 한다(POST는 다시 보내지 않는다).
   // 확정 실패(401·403·404 등)는 useLoad가 그대로 보이므로 멈춘다. 화면을 떠나면 멈춘다.
-  const alive = useRef(true);
-  useEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-    };
-  }, []);
   const confirmAccepted = async (version: number) => {
     for (let attempt = 0; alive.current; attempt++) {
       const r = await reloadResult();
@@ -815,21 +1082,40 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
         <p className="text-sm text-stone-500">아직 주고받은 메시지가 없습니다.</p>
       ) : (
         <ol className="space-y-4">
-          {entries.map((entry) =>
-            entry.kind === "local" ? (
-              <Message
-                key={entry.key}
-                sessionId={s.id}
-                item={{ id: entry.key, type: "message", role: "user", text: entry.text }}
-                sending={{ page: entry.page }}
-              />
-            ) : entry.item.type === "message" ? (
-              <Message key={entry.key} sessionId={s.id} item={entry.item} />
-            ) : (
-              <ToolCall key={entry.key} sessionId={s.id} item={entry.item} />
-            )
-          )}
-          {awaiting && <Thinking key="thinking" slow={slow} accepted={status === "waiting"} />}
+          {/* 기록 항목·스트림 항목·"생각 중"은 한 목록(같은 key 공간)이어야 스트림 항목이 기록 항목으로 바뀔 때 remount되지 않는다. */}
+          {[
+            ...entries.map((entry) =>
+              entry.kind === "local" ? (
+                <Message
+                  key={entry.key}
+                  sessionId={s.id}
+                  item={{ id: entry.key, type: "message", role: "user", text: entry.text }}
+                  sending={{ page: entry.page }}
+                />
+              ) : entry.item.type === "message" ? (
+                <Message key={entry.key} sessionId={s.id} item={entry.item} />
+              ) : entry.item.type === "tool_call" ? (
+                <ToolCall key={entry.key} sessionId={s.id} item={entry.item} />
+              ) : entry.item.type === "notice" ? (
+                <NoticeRow key={entry.key} item={entry.item} />
+              ) : (
+                <UnknownRow key={entry.key} item={entry.item} />
+              )
+            ),
+            ...liveItems.map((item) =>
+              item.kind === "agentMessage" ? (
+                <Message key={item.itemId} sessionId={s.id} item={{ id: item.itemId, type: "message", role: "assistant", text: item.text }} live />
+              ) : (
+                <ToolCall key={item.itemId} sessionId={s.id} item={liveToolItem(item)} live />
+              )
+            ),
+            showLive && liveTurn.stopped ? (
+              <li key="stream-stopped" className="text-xs text-stone-500">
+                실시간 표시를 멈췄습니다. 답변이 끝나면 전체 기록으로 보입니다.
+              </li>
+            ) : null,
+            awaiting && !answering ? <Thinking key="thinking" slow={slow} accepted={status !== "submitted"} /> : null,
+          ]}
         </ol>
       )}
 
@@ -857,6 +1143,7 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
           codex={codex.result}
           awaiting={awaiting}
           atBottom={atBottom}
+          stop={stop}
           onRecheck={() => void reloadCodex()}
           onSending={(next) => {
             setSend({ local: next });
@@ -866,8 +1153,10 @@ export default function SessionView({ id, onArchived }: { id: string; onArchived
           onSent={async (accepted) => {
             // 보내지 못했으면 먼저 그린 말풍선을 바로 거둔다(입력은 Composer가 되돌린다). 입력 잠금은 다시 불러올 때까지 둔다.
             if (!accepted) setSend({ local: null });
+            if (accepted?.requestId) setLastAccepted(accepted.requestId);
             // 실패면 거절 사유(만료·한도·차단·환경 꺼짐)가, 성공이어도 runner 상태(idle 정지 등)가 바뀌었을 수 있다.
-            void reloadCodex();
+            // 스트림이 연결돼 있으면 runner 이벤트로 받으므로 조회하지 않는다.
+            if (!streamLive) void reloadCodex();
             if (accepted) await confirmAccepted(accepted.version);
             else await reload();
             setSend(null);
