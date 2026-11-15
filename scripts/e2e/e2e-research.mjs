@@ -884,11 +884,18 @@ async function confirmSingleTurn(label, text) {
     return route.continue();
   });
   const lastTool = () => chat.locator("li", { hasText: "research_list" }).last();
+  // #94: 범위 설명은 입력창 위 본문에서 없앴고, 입력창 옆 범위 이름(다음 질문 범위)의 도움말(title)로만 남는다.
+  // 그 설명이 도움말에 있고 본문에는 없는지 함께 본다.
+  const scopeHelp = async (text) => {
+    const inTitle = await appears(chat.locator(`form p[title*="${text}"]`));
+    const inBody = await chat.getByText(text, { exact: false }).count();
+    return inTitle && inBody === 0;
+  };
 
   // general 페이지: #14부터 소유자 도구 전부(화면은 참고일 뿐)
   check("R22. general page hint shown", await appears(chat.getByText("보고 있는 화면: 일반")));
-  check("R22. owner wording: no per-page tool limits", await appears(chat.getByText("연결 관계와 보관도 처리합니다", { exact: false })));
-  check("R22. web search saving wording", await appears(chat.getByText("출처 주소와 수집 시각을 붙여 자료로 저장합니다", { exact: false })));
+  check("R22. owner wording: no per-page tool limits (scope help, not body)", await scopeHelp("연결 관계와 보관도 처리합니다"));
+  check("R22. web search saving wording (scope help, not body)", await scopeHelp("출처 주소와 수집 시각을 붙여 자료로 저장합니다"));
   // #68 native shell: 실행기의 한 번에 하나·시간 상한 문구는 없어지고, 파일을 직접 고칠 수 있다고 적는다.
   check(
     "R22. shell wording: files edited directly, no executor limits (#68)",
@@ -941,7 +948,7 @@ async function confirmSingleTurn(label, text) {
   await page.goto(U(`/public/document/?id=${pub22.body.id}`));
   await chat.getByLabel("메시지").waitFor();
   check("R22. public document scope shown", await appears(chat.getByText("다음 질문 범위: 이 공개 글")));
-  check("R22. public wording: read only, no web search or shell", await appears(chat.getByText("웹 검색·명령 실행이나 저장·수정은 하지 않습니다", { exact: false })));
+  check("R22. public wording: read only, no web search or shell (scope help, not body)", await scopeHelp("웹 검색·명령 실행이나 저장·수정은 하지 않습니다"));
   await chat.getByLabel("메시지").fill("공개 글 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
   await chat.getByText("모의 응답: 공개 글 질문").waitFor({ timeout: 15000 });
