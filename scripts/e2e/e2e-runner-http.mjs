@@ -484,7 +484,16 @@ await step("P1", async () => {
   const g = await apiClient(E.page).get("/research/codex/status");
   check("P1 [real]. GET not_prepared (no registry row)", g.status === 200 && statusShape(g.body) && g.body.reason === "not_prepared" && !("retryAfterSeconds" in g.body), JSON.stringify(g.body));
   if (!(await E.chat.isVisible())) await E.page.getByRole("button", { name: "대화창 열기" }).click();
-  check("P1 [real]. UI 대화 준비 button", await appears(E.chat.getByRole("button", { name: "대화 준비" })));
+  // #94: 연결·실행 환경 상태 패널(목록의 준비 버튼 포함)은 관리자만 본다. 편집자는 대화의 입력창 위 안내에서 "대화 준비"를 누른다.
+  // 새 대화를 화면에서 만들어 입력창으로 들어간다(페이지 이동·재로그인 없음 → 새 진입 준비 POST 없음).
+  await E.chat.getByLabel("새 대화 제목").waitFor();
+  await E.chat.getByLabel("새 대화 제목").fill("E 준비 대화");
+  await E.chat.getByRole("button", { name: "새 대화" }).click();
+  await E.chat.getByLabel("메시지").waitFor();
+  await settle(E.page);
+  check("P1 [hybrid]. opening the conversation sends no preparation POST", E.net.posts.length === 1, String(E.net.posts.length));
+  check("P1 [real]. composer notice offers 대화 준비 (editor)", await appears(E.chat.getByRole("button", { name: "대화 준비" })));
+  check("P1 [real]. still no automatic re-request", E.net.posts.length === 1, String(E.net.posts.length));
   const n0 = E.net.responses.length;
   await E.chat.getByRole("button", { name: "대화 준비" }).first().click();
   await waitResponses(E, n0 + 1);
