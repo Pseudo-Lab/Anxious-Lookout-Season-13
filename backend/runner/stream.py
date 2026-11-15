@@ -50,6 +50,7 @@ SAMPLE_SECONDS, SAMPLE_RING = 1.0, 600
 
 STREAMED_KINDS = {"agentMessage", "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall"}
 STATUS_VALUES = {"inProgress", "completed", "failed", "declined", "approval", "interrupted"}
+TURN_STATUSES = {"completed", "interrupted", "failed", "inProgress"}  # #95 B2: native turn ends in runner_stream_summary
 
 
 def text_enabled():
@@ -375,6 +376,9 @@ class Hub:
         """Returns the Turn: the caller names it explicitly in bind/verified/partial_items/complete (review stage-1)."""
         with self.lock:
             turn = self.active = Turn(session, request)
+            # #95 B3: a subscriber that opened /events before the turn began (the usual flow) counts from the start;
+            # subscribe() raises the peak for later subscribers as before.
+            turn.stats["subscribersPeak"] = len(self.subscribers)
             self.ensure_flusher()
         self.wakeup.set()
         return turn
@@ -1005,7 +1009,11 @@ class Hub:
     def log_summary(self, turn):
         try:
             import logging
+            # #95 B2: `turnStatus` is the native turn's end (a user stop is "interrupted"); `stopped` stays the
+            # stream-side stop reason (budget, sanitize, ...), which is not a user stop.
+            status = (getattr(turn, "result", None) or {}).get("turnStatus")
             logging.getLogger("uvicorn.error").info("runner_stream_summary %s", json.dumps({
+                "turnStatus": status if status in TURN_STATUSES else None if status is None else "other",
                 "requestId": turn.request, "text": self.text, "stopped": turn.stopped, "discarded": turn.discarded,
                 **turn.stats, "retainedBytes": turn.retained(), "rawBytes": turn.raw_bytes, "items": len(turn.items),
                 "peaks": turn.peaks, "samples": len(turn.samples)}, sort_keys=True))
