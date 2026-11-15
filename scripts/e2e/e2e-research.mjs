@@ -509,8 +509,8 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
 {
   // 화면을 연 뒤에 접수 불가가 된 경우(열어 둔 화면에서 만료 등): 서버 선접수 거절 → 안내·입력 유지 → 상태 재확인으로 잠금
   for (const [mode, text] of [
-    ["auth_expired", "서버의 Codex 인증이 만료되어"],
-    ["not_enabled_for_account", "이 계정에는 아직 Codex가 열려 있지 않습니다"],
+    ["auth_expired", "서버 인증이 만료되어"],
+    ["not_enabled_for_account", "이 계정에는 아직 대화 기능이 열려 있지 않습니다"],
     ["model_unavailable", "고정된 모델을 사용할 수 없어"],
     ["budget_exhausted", "사용 한도에 도달해"],
     ["rate_limited", "제공자의 사용 한도에 걸려"],
@@ -590,8 +590,8 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
 //      provider 원문 비노출, 입력은 기록 여부대로 표시, 자동 재실행 없음, 상태 재확인으로 잠금, 운영자 재공급 뒤 같은 대화에서 이어짐
 {
   for (const [mode, text, recorded] of [
-    ["midturn_expired", "서버의 Codex 인증이 만료되어", false],
-    ["midturn_revoked", "서버의 Codex 인증이 더 이상 유효하지 않아", true],
+    ["midturn_expired", "서버 인증이 만료되어", false],
+    ["midturn_revoked", "서버 인증이 더 이상 유효하지 않아", true],
   ]) {
     await setMock("codex=fixture");
     await page.reload();

@@ -101,6 +101,8 @@ const TOOL_STATUS_LABELS: Record<string, string> = {
   completed: "완료",
   failed: "실패",
   declined: "거부됨",
+  // 스트림 item 상태 값(runner stream: inProgress | completed | failed | declined | approval | interrupted)
+  interrupted: "중지됨",
 };
 
 // #22 research_document_update는 문서를 바꾸지 않고 제안(Proposal)을 만든다. #28 D1: research_document_save(새 문서)와
