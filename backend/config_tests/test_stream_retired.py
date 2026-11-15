@@ -325,3 +325,63 @@ def test_a_lifetime_off_survives_the_loss_of_the_record(service):
         install(auth, envelope, token(base + step * (HOUR + 700), base + (step + 1) * (HOUR + 700)))
     hold_ = hold(auth)
     assert hold_.retired_state == 'off' and hold_.retired_excluded == 0
+
+
+# --- review r1 (2026-11-16): the first observation must commit with the install ------------------------------------
+
+def test_seen_commits_with_the_first_enabled_install_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(stream_retired, '_observed', {})
+    monkeypatch.setattr(stream_retired, '_cache', {})
+    monkeypatch.setattr(stream_retired, '_poisoned', set())
+    auth, home, envelope = setup(tmp_path)
+    monkeypatch.setenv('STREAM_RETIRED', 'false')
+    install(auth, envelope, token(NOW, NOW + 2 * HOUR))
+    assert stream_retired._markers(auth.journal)[0] is False      # switch off: nothing marked
+    seen_calls = []
+    real = stream_retired.observe_install
+    monkeypatch.setattr(stream_retired, 'observe_install',
+                        lambda *a, **k: (seen_calls.append(k.get('first')), real(*a, **k))[1])
+    monkeypatch.setenv('STREAM_RETIRED', 'true')
+    install(auth, envelope, token(NOW + HOUR, NOW + 3 * HOUR))
+    install(auth, envelope, token(NOW + 2 * HOUR, NOW + 4 * HOUR))
+    assert seen_calls == [True, False] and stream_retired._markers(auth.journal)[0] is True
+
+
+@pytest.mark.parametrize('failure', ['sidecar_write', 'crash_before_observe'])
+def test_a_failed_first_observation_and_a_restart_never_make_a_new_t0(tmp_path, monkeypatch, capsys, failure):
+    """review r1 blocker: a token installed with the switch on must never become pre-#95 history (A1)."""
+    from runner import stream_anchor
+    monkeypatch.setattr(stream_retired, '_observed', {})
+    monkeypatch.setattr(stream_retired, '_cache', {})
+    monkeypatch.setattr(stream_retired, '_poisoned', set())
+    monkeypatch.setattr(stream_prefix, '_write', lambda path, payload: (_ for _ in ()).throw(OSError(28, 'full')))
+    auth, home, envelope = setup(tmp_path)
+    monkeypatch.setenv('STREAM_RETIRED', 'true')
+    real_write, real_observe = stream_retired._write, stream_retired.observe_install
+    if failure == 'sidecar_write':
+        monkeypatch.setattr(stream_retired, '_write', lambda *a: (_ for _ in ()).throw(OSError(28, 'full')))
+        monkeypatch.setattr(stream_retired, '_mark', lambda journal, marker: False)  # OFF cannot be written either
+    else:
+        monkeypatch.setattr(stream_retired, 'observe_install', lambda *a, **k: None)  # the process died here
+    long_lived = install(auth, envelope, token(NOW, NOW + 300 * HOUR))
+    monkeypatch.setattr(stream_retired, '_write', real_write)
+    monkeypatch.setattr(stream_retired, 'observe_install', real_observe)
+    stream_retired._poisoned.clear()   # restart
+    stream_retired._cache.clear()
+    install(auth, envelope, token(NOW + HOUR, NOW + 3 * HOUR))
+    assert stream_retired.load(auth.control, auth.journal)[0] is None  # no new T0 was made
+    later = NOW + 2 * HOUR + stream_retired.ATTEST_TOLERANCE + stream_retired.G + 1
+    install(auth, envelope, token(later, later + HOUR))
+    retired = stream_retired.excluded(auth.control, auth.journal, frozenset())
+    assert retired[1] == 'off' and (len(long_lived), auth.journal.digest(long_lived)) not in retired[0]
+
+
+def test_switching_off_then_on_again_is_off_for_good(service, monkeypatch):
+    """Installs made while the switch was off were not observed: the history is incomplete (documented in B4)."""
+    auth, envelope = service
+    chain(auth, envelope)
+    monkeypatch.setenv('STREAM_RETIRED', 'false')
+    install(auth, envelope, token(NOW + 30 * HOUR, NOW + 31 * HOUR))
+    monkeypatch.setenv('STREAM_RETIRED', 'true')
+    install(auth, envelope, token(NOW + 40 * HOUR, NOW + 41 * HOUR))
+    assert hold(auth).retired_state == 'off'

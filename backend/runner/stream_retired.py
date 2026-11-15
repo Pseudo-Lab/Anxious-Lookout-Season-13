@@ -240,11 +240,26 @@ def _complete(payload, distinct):
     return type(distinct) is int and distinct == payload["t0Snapshots"] + len(tokens)
 
 
-def observe_install(control, journal, token, identifiers, iat, exp):
+def mark_seen(db, journal):
+    """Inside the service install's own transaction (review r1 blocker): write the SEEN marker if it is absent.
+    Returns True when this install is the first one observed for the journal. Atomic with the snapshot and the
+    literals of that install, so no install made with the switch on can ever be committed without SEEN: a sidecar
+    that is missing afterwards is a loss (permanent off), never a new T0 that would take such an install for
+    pre-#95 history. Not wrapped: it is the same row insert as the install's own literals, in the same failure domain."""
+    present = db.execute("SELECT 1 FROM literals WHERE length=? AND digest=?",
+                         (len(MARKER_SEEN), journal.digest(MARKER_SEEN))).fetchone()
+    if present:
+        return False
+    journal.remember(db, [MARKER_SEEN])
+    return True
+
+
+def observe_install(control, journal, token, identifiers, iat, exp, first=False):
     """After a service install's journal commit: record the kinds of this install's long literals, the provider time
-    and the lifetime. Never raises into the install. Any failure here (lock, read, write, a lost or damaged sidecar
-    after observation began, an incomplete history, an overflow, a lifetime over A1's bound) turns the owner off for
-    good: nothing is ever excluded again for this journal (review r0)."""
+    and the lifetime. Never raises into the install. `first`: the install wrote the SEEN marker in its own transaction
+    (mark_seen) - only then may a T0 be created. Any failure here (lock, read, write, a missing or damaged sidecar for
+    a later install, an incomplete history, an overflow, a lifetime over A1's bound) turns the owner off for good:
+    nothing is ever excluded again for this journal (review r0 / r1)."""
     if not enabled() or control is None or journal is None:
         return
     try:
@@ -256,25 +271,19 @@ def observe_install(control, journal, token, identifiers, iat, exp):
                 return
             payload, _ = load(control, journal)
             if payload is None:
-                if seen:
-                    # observation began earlier and its record is gone or damaged: the history is incomplete
+                if not first:
+                    # an install after the first one observed and no valid record: lost, damaged, or never written
+                    # (the first observation failed or crashed) - the history is incomplete, for good
                     _poison(control, journal, "record_lost")
                     return
                 # First observation (T0): every long row now present is a T0 row - conservative (this install's
-                # token included; it can never be proven). The seen marker goes first, so a sidecar write failing
-                # after it reads as a loss next time.
+                # token included; it can never be proven). SEEN was committed with this install (mark_seen).
                 _, rows = journal.stream_rows(P)
                 current = {(len(value), journal.digest(value)) for value in [token, *identifiers]
                            if isinstance(value, str) and len(value) > P}
                 if len(rows) > LIMIT:
-                    _mark(journal, MARKER_SEEN)
                     _poison(control, journal, "overflow")
                     return
-                if not _mark(journal, MARKER_SEEN):
-                    _poisoned.add(str(control))
-                    _log(control, "off", None, {"reason": "marker_write_failed"})
-                    return
-                _, _, distinct = _markers(journal)
                 payload = {"version": VERSION, "owner": journal.owner, "trialId": journal.trial,
                            "epoch": uuid.uuid4().hex, "t0Rows": sorted([list(row) for row in rows]),
                            "t0Snapshots": distinct, "t0Assumable": assumable(journal, rows, current), "records": [],
