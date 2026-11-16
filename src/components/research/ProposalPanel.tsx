@@ -10,7 +10,7 @@ import type { Draft, Proposal, ResearchDocument } from "@/lib/research/types";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import TextDiff from "@/components/research/TextDiff";
 
-// #22 Codex 제안(D2: 수락 전 제안). 제안은 수락하기 전에는 최신 문서가 아니며, 수락하면 새 버전 하나가 된다.
+// #97: 전환 전에 남은 Codex 제안 처리. 새 쓰기는 바로 저장되며 기존 pending 제안만 이 패널에서 처리한다.
 // 비교 기준은 현재 문서 또는 내 초안. 버린 제안·수락한 제안의 원문은 서버에 보존된다.
 
 const STATUS_LABELS: Record<Proposal["status"], string> = { pending: "검토 대기", accepted: "수락함", discarded: "버림" };
@@ -175,11 +175,16 @@ export default function ProposalPanel({
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
   const found = !!target && list.items.some((p) => p.id === target);
+  // 완료된 제안만 있는 페이지 뒤에도 pending이 남아 있을 수 있다.
+  const { loaded, loading, nextCursor, loadMore } = list;
+  useEffect(() => {
+    if (loaded && !loading && pending.length === 0 && nextCursor && !list.failure) void loadMore();
+  }, [loaded, loading, pending.length, nextCursor, list.failure, loadMore]);
   useEffect(() => {
     if (found) section.current?.scrollIntoView({ block: "start" });
   }, [found, tick]);
 
-  if (!list.items.length && !list.failure) return null;
+  if (!pending.length) return list.failure ? <ErrorNotice failure={list.failure} prefix="남은 제안 목록을 확인하지 못했습니다." /> : null;
 
   const row = (p: Proposal) => (
     <li key={p.id} className="rounded-lg ring-1 ring-stone-200">
@@ -218,7 +223,7 @@ export default function ProposalPanel({
     <section id="proposals" ref={section} className="scroll-mt-4">
       <h2 className="mb-1 text-lg font-semibold text-stone-900">대화 제안</h2>
       <p className="mb-3 text-xs text-stone-500">
-        대화에서 이 문서를 고치면 제안으로 남습니다. 수락하기 전에는 문서가 바뀌지 않으며, 비교한 뒤 수락하면 새 버전이 됩니다.
+        바로 저장으로 전환하기 전에 남은 제안입니다. 비교한 뒤 수락하면 새 버전으로 저장됩니다. 새 대화에서 고친 내용은 바로 저장되며, 되돌리기는 버전 기록에서 할 수 있습니다.
       </p>
       {list.failure && <ErrorNotice failure={list.failure} prefix="제안 목록을 불러오지 못했습니다." />}
       {pending.length > 0 ? (

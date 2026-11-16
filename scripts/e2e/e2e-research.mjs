@@ -1744,7 +1744,8 @@ let docEUrl;
   check("W2. proposal: accepted becomes new version", await appears(main.locator(".prose").getByText("Codex가 덧붙인 문장")));
   const v3 = await api.get(`/research/documents/${id}`);
   check("W2. proposal: exactly one version added", v3.latestVersion.number === v2.latestVersion.number + 1, `${v2.latestVersion.number} -> ${v3.latestVersion.number}`);
-  check("W2. proposal: moved to history", await appears(proposalsBox.getByRole("button", { name: /지난 제안 1건/ })));
+  await proposalsBox.waitFor({ state: "detached" });
+  check("W2. legacy proposal: panel hidden after last pending accepted", (await proposalsBox.count()) === 0);
 
   // 두 번째 제안은 버린다: 문서·버전 변화 없음
   await chat.getByLabel("메시지").fill("/fixture/propose 또 고쳐줘");
@@ -1752,7 +1753,8 @@ let docEUrl;
   await chat.getByText("모의 응답: /fixture/propose 또 고쳐줘").waitFor({ timeout: 15000 });
   await chat.getByRole("link", { name: "제안 검토" }).last().click();
   await proposalsBox.getByRole("button", { name: "제안 버리기" }).click();
-  check("W2. proposal discard: no pending left", await appears(proposalsBox.getByText("검토할 제안이 없습니다")));
+  await proposalsBox.waitFor({ state: "detached" });
+  check("W2. legacy proposal discard: panel hidden with no pending", (await proposalsBox.count()) === 0);
   check("W2. proposal discard: document unchanged", (await api.get(`/research/documents/${id}`)).version === v3.version);
 
   // 이전 버전으로 되돌리기 = 그 내용을 새 버전으로 저장(원래 버전은 그대로)

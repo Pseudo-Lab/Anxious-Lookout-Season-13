@@ -16,7 +16,7 @@ import Notice from "@/components/research/Notice";
 import BodyDiff from "@/components/blocks/BodyDiff";
 import PostMetaDiff from "./PostMetaDiff";
 
-// #28 Codex 글 제안(D1: 언제나 제안 → 사람의 수락). 수락하기 전에는 글·초안이 바뀌지 않으며, 수락하면 새 버전 하나가 된다.
+// #97: 바로 저장 전환 전에 남은 Codex 글 제안을 처리한다. 수락하면 새 버전 하나가 된다.
 // 새 글 제안은 수락할 때 처음 글이 만들어진다.
 // #32: 본문 비교는 글자(projection)와 서식·배치를 따로 보인다. 현재 글(또는 새 글 연결 초안)과 비교할 때는
 // 서버 comparison API로 지금 기준에서 다시 계산한 서식 변화를 쓴다(수락 CAS는 그대로).
@@ -268,11 +268,15 @@ export default function PostProposalPanel({
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
   const found = !!target && list.items.some((p) => p.id === target);
+  const { loaded, loading, nextCursor, loadMore } = list;
+  useEffect(() => {
+    if (loaded && !loading && pending.length === 0 && nextCursor && !list.failure) void loadMore();
+  }, [loaded, loading, pending.length, nextCursor, list.failure, loadMore]);
   useEffect(() => {
     if (found) section.current?.scrollIntoView({ block: "start" });
   }, [found, tick]);
 
-  if (!list.items.length && !list.failure) return null;
+  if (!pending.length) return list.failure ? <ErrorNotice failure={list.failure} prefix="남은 제안 목록을 확인하지 못했습니다." describe={postErrorMessage} /> : null;
   const row = (p: PostProposal) => (
     <li key={p.id} className="rounded-lg ring-1 ring-stone-200">
       <button
@@ -308,7 +312,7 @@ export default function PostProposalPanel({
     <section id="proposals" ref={section} className="scroll-mt-4">
       <h2 className="mb-1 text-lg font-semibold text-stone-900">대화 제안</h2>
       <p className="mb-3 text-xs text-stone-500">
-        대화에서 이 글을 고치면 제안으로 남습니다. 수락하기 전에는 글이 바뀌지 않으며, 비교한 뒤 수락하면 새 버전이 됩니다(발행은 따로).
+        바로 저장으로 전환하기 전에 남은 제안입니다. 비교한 뒤 수락하면 새 버전으로 저장됩니다(발행은 따로). 새 대화에서 고친 내용은 바로 저장되며, 되돌리기는 버전 기록에서 할 수 있습니다.
       </p>
       {list.failure && <ErrorNotice failure={list.failure} prefix="제안 목록을 불러오지 못했습니다." describe={postErrorMessage} />}
       {pending.length > 0 ? <ul className="space-y-2">{pending.map(row)}</ul> : !list.failure && <p className="text-sm text-stone-500">검토할 제안이 없습니다.</p>}

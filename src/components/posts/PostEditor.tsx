@@ -370,7 +370,7 @@ export default function PostEditor({
   return (
     <div className="space-y-4">
       <p className="text-xs text-stone-500">
-        입력은 초안으로 자동 저장되어 새로고침하거나 다른 기기에서 열어도 이어 쓸 수 있습니다. 버전은 ‘{post ? "새 버전으로 저장" : "글 저장"}’을 누를 때만
+        입력은 초안으로 자동 저장되어 새로고침하거나 다른 기기에서 열어도 이어 쓸 수 있습니다. 직접 편집한 내용은 ‘{post ? "새 버전으로 저장" : "글 저장"}’을 누르면 새 버전으로
         만들어지고, 발행한 글은 다시 발행하기 전까지 바뀌지 않습니다.
       </p>
       <Field label="제목">
