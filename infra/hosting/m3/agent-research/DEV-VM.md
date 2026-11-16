@@ -5,6 +5,14 @@ marker, audit/settlement command, image or model budget is valid for r2. Current
 actual model allowance is zero. Back prepares code and Docker pure units;
 review/PM own VM execution. This document grants no VM/credential/model permission.
 
+Code/local Docker/DB gate at `cb0159b` is approved (649 pure,398 DB plus3
+subtests,43 listeners,15 reviewer adversarial checks). That approval does not
+cover activation, complete feature/PR gates or VM work. The next source-review
+candidate is [DEV-FIXTURE-PLAN.md](DEV-FIXTURE-PLAN.md): exact temporary objects,
+file-inode probe, world443/TLS passthrough, internal wrong-purpose checks and
+UID/RV-guarded restoration. After source review, PM approves a dev window and
+review executes it. Actual model allowance remains zero until separately granted.
+
 ## Before execution
 
 Confirm the development guest identity and occupancy and follow

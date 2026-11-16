@@ -63,6 +63,19 @@ kubectl --context "$R2_PROD_CONTEXT" --request-timeout=10s -n m2-hosting get ing
 
 **통과 증거:** 실제 runner Pod UID·정책 revision·peer443·Cilium world 허용·CA/SNI 검증·API health200이 한 요청에 연결돼야 한다. host curl, 일반 외부 HTTPS, dev synthetic TLS fixture는 이 증거가 아니다. Pod exec 성공은 Pod 경로 증거이며 r2 native sandbox 내부 network/file-root 증명은 별도 dev gate다. 같은 HTTPS 도메인이라도 실제 OCI public IP hairpin인지 peer IP/route 증거로 구분하며 split DNS/internal 경로를 hairpin이라고 부르지 않는다.
 
+### B 단계의 실제 probe 원문
+
+검토할 실제 probe 원문은 `backend/ops/research_https_preflight.py`이다. stdlib만 사용하므로 기존 idle Pod 이미지를 교체하지 않고, 승인된 exec stdin으로 **검토 SHA와 hash가 일치하는 소스**를 공급할 수 있다. 아래 context/Pod/UID/origin은 실행 승인 때 실측 값으로 채운다.
+
+```sh
+kubectl --context "$R2_PROD_CONTEXT" --request-timeout=25s -n codex-runner \
+  exec -i "$R2_APPROVED_IDLE_POD" -c runner -- \
+  python -I - --origin "$R2_APPROVED_ORIGIN" --base-path "$R2_APPROVED_BASE" \
+  < backend/ops/research_https_preflight.py
+```
+
+probe는 전체20초 alarm·HTTPS10초 상한, platform CA의 고정 경로·hostname/SNI 확인, 고정 health GET 한 번뿐이다. proxy/CA/keylog 환경, redirect/재시도, 자격/쿠키/응답 원문 출력은 없다. exec 직전·직후 GET에서 승인 Pod UID/node/idle 상태를 확인하며 교체됐으면 결과를 승인 대상으로 귀속하지 않는다. 이 명령 원문 준비는 실행 승인이 아니다.
+
 ## 5. idle Pod가 없는 경우
 
 runner를 깨우거나 사용자 admission/native turn을 만들지 않는다. A만 보고하고 B는 **source Pod 없음으로 미검증** 처리한다.
