@@ -45,9 +45,26 @@ configuration, API/runner image source and manifest digests, origin/basePath,
 effective research flags, all selecting network policies, D1 spec, namespace
 labels, VAP/binding, endpoint identities/policy revisions, routes/Service443 and
 original object UIDs/RVs. Never publish full env/Secrets/kubeconfig. The API
-must already be008-compatible/ready, with a known008-compatible recovery image
-and certified human read/save procedure. No migration/image rollout is hidden
-in this fixture. If those preconditions are missing, report and stop.
+must already be008-compatible/ready. Per the
+[PM recovery decision](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/97#issuecomment-6924958948),
+this window's recovery target is the **current baseline API8804a97 + DB0008**,
+with the original origin/config/routes and temporary-object removal. Record its
+actual manifest digest again; the preflight observed
+`sha256:a7e03d1e8d1e71a2ed4ec9d9377f5e358e81041165a46ee3d37d497ad08bb8f1`.
+This window does not replace the API image or migrate/restore the DB.
+
+**First, before fixture changes**, certify that baseline using a new synthetic
+browser session: read the synthetic owner's research resource, save a new version
+through the ordinary human cookie+CSRF API, then read it back and verify the
+author is `human`. Record source/digest, owner/resource/version IDs, HTTP results
+and safe author evidence. Keep the test data only under that synthetic owner;
+never publish session/CSRF secrets. Failure stops fixture setup and is reported.
+This is a human save, with no model turn or research grant.
+
+The imported2e4da86 runtime/ordinary runner has **not** been certified by boot or
+human read/save. That separate image-switch certification is outside this window
+and remains the **B3 final-PR gate** in [DEV-VM.md](DEV-VM.md#b3--recovery-certification-before-final-pr-approval).
+Image presence and the baseline certificate above cannot satisfy that gate.
 
 Require empty basePath and disabled RESEARCH_AGENT_API_ENABLE /
 CODEX_RUNNER_RESEARCH_API_ENABLE / RUNNER_RESEARCH_API_ENABLE in their actual
@@ -78,7 +95,7 @@ Regenerate only within an approved window if the one-hour certificates expire.
 Use create-only requests for the three absent TLS objects and the Pod. A collision
 or changed baseline RV is a refusal, not a reason to apply/overwrite automatically.
 
-## A — actual kernel file-root probe, first
+## A — actual kernel file-root probe, after baseline certification
 
 Create the generated Pod with fresh volumes. Save its UID/spec and wait for the
 endpoint to realize the unchanged policy. Confirm no controller adoption/change.
@@ -209,10 +226,13 @@ later explicitly budgeted gate. Do not forge live status to claim them here.
    /output/new-restore`. It emits a patch only if current UID/spec match the
    original plus the exact origin change. Apply its current-RV tests. Any other
    drift stops automated restoration and is reported to PM; do not overwrite it.
-3. Wait for original origin/readiness/image/config to return. Confirm original
-   HTTP route and origin-bound synthetic session behavior using existing approved
-   read-only probes. No schema rollback, session deletion or data cleanup occurs
-   in this phase because it created no login/account/research data.
+3. Wait for original8804a97 origin/readiness/image/config to return with DB0008.
+   Confirm original HTTP route and origin-bound session behavior using approved
+   read-only probes. Track/logout the window's new synthetic browser session
+   through the ordinary human auth flow; leave the certified synthetic resource
+   versions with their owner as evidence. No schema rollback, backup restore,
+   provenance deletion or surgical data cleanup occurs. The baseline certification
+   is an expected human write, not a zero-data-change fixture claim.
 4. DELETE temporary IngressRoute, Middleware, TLS Secret and measurement Pod using
    each saved UID in `DeleteOptions.preconditions.uid`; Pod grace is bounded.
    Use the review operator's existing Kubernetes client, no policy/RBAC change.
@@ -231,7 +251,7 @@ later explicitly budgeted gate. Do not forge live status to claim them here.
 ## Approval report
 
 Submit final source SHA, pure counts/source hashes, exact proposed changes above,
-the admitted deviations and recovery prerequisites to review. Review's source
+the admitted deviations and baseline-certification prerequisites to review. Review's source
 approval is followed by PM's dev-window approval; this document is neither.
 Execution report separates kernel inode, world classification, TLS health, API
 path and internal-auth observations from all remaining limitations. Update

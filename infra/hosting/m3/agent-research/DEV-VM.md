@@ -24,9 +24,16 @@ Pod security to get user namespaces working.
 
 Build ordinary `runtime` and `runner` targets from the exact reviewed SHA with
 matching build metadata. Record manifest digests separately from Docker config
-IDs. Keep an imported,008-compatible API+ordinary runner fallback and certify
-human read/save. Back up/drain before the reviewed additive008 migration. Never
-downgrade008, delete provenance or apply an obsolete source just to start it.
+IDs. The separate B3 final-PR gate below requires an imported,008-compatible
+API+ordinary runner fallback and certified human read/save. The current fixture
+window makes no API image switch: its approved recovery is the already running
+8804a97 API/DB0008 baseline plus temporary-object restoration.
+Its first step is a new synthetic browser session's owner read → human save →
+readback with `human` author, before any fixture setup. See the
+[PM decision](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/97#issuecomment-6924958948).
+The fixture does not switch API images or migrate the DB. Back up/drain before
+any separately reviewed additive migration; never downgrade008, delete provenance
+or apply an obsolete source just to start it.
 If retired `research-fence.json` exists on control storage, stop and report;
 do not delete it, replay a mutation, or try a removed settlement/audit command.
 
@@ -57,6 +64,41 @@ do not delete it, replay a mutation, or try a removed settlement/audit command.
    app records, old token invalidity, safe API-owned receipts and F2/e2e. Human
    drafts/public snapshots stay unchanged. A failed model is not marked successful
    because one API write committed.
+
+## B3 — recovery certification before final PR approval
+
+This remains mandatory before final PR approval and production deployment.
+It is a separate reviewed image-switch/recovery exercise, not part of the current
+no-model TLS/inode fixture window. The imported2e4da86 fallback's actual boot /
+owner read / human save certification remains incomplete; import/config metadata
+alone is insufficient. Re-certify the recovery combination against the final
+reviewed task SHA rather than reusing an earlier baseline result.
+
+1. Fix the final reviewed source SHA and the exact008-compatible recovery API
+   runtime + ordinary runner source/image manifest digests/build metadata. Identify
+   the recovery target explicitly, distinguishing config IDs from manifests.
+   Submit the exact image/config changes and restoration commands to review/PM
+   before this separate execution; do not silently start the historical fallback.
+2. Snapshot the current API/runner/binding/origin/routes/flags and DB0008 state,
+   verify idle/drain and private recoverable inputs, and preserve the original
+   account/resource IDs and immutable data. No downgrade, old-backup restore,
+   provenance deletion, retired MCP process or policy/privilege expansion.
+3. Boot the designated recovery runtime/API and ordinary runner as planned, with
+   matching source/digests and readiness/schema checks. Runner bootstrap must not
+   issue a research grant or start a model turn; no actual-model budget is implied.
+4. With a new synthetic browser session, perform **owner read → human save →
+   readback** through the ordinary cookie+CSRF API against an owned synthetic
+   resource. Save using the read version/CAS, verify a new immutable version and
+   `human` author, and retain history/ownership and original content evidence.
+   Health-only, mock/compose success or an agent save cannot substitute for this.
+5. Restore the recorded baseline image/config/bindings/origin through the approved
+   commands, recheck readiness/DB0008 and human reads, and close the test session.
+   Keep synthetic test versions with their owner; do not delete history to claim
+   unchanged data. Report failures before any unapproved retry or correction.
+6. Record exact source/image manifests, guest/Pod UIDs, procedure, status/version/
+   author evidence and restoration result in #97. Missing evidence leaves B3 and
+   the final PR/deployment gate open. Production OCI/network preflight remains
+   separately authorized.
 
 Development fixture success is not OCI production hairpin proof. Production
 execution remains separately approved under
