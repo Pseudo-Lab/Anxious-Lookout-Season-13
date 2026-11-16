@@ -78,6 +78,39 @@ def test_invalid_success_rolls_back_write_and_idempotency_but_records_failure(cl
     assert 'saved' not in record['researchCalls'][-1]
 
 
+@pytest.mark.parametrize('known', [True, False])
+def test_domain_error_after_mutation_rolls_back_action_but_commits_safe_failure(client, admin, monkeypatch, known):
+    from app.research import ResearchError
+    from app.research_api import dispatch
+    _, _, session, runner, _, _ = prepared(client, admin)
+    def fail_after_write(store, operation, arguments):
+        dispatch(store, operation, arguments)
+        raise ResearchError('unsupported_content' if known else 'future_internal', 'private message', 422,
+            {'code': 'unsupported_content', 'path': '/contentInput/text'} if known else {'private': 'private detail'})
+    monkeypatch.setattr('app.research_api.dispatch', fail_after_write)
+    key = str(uuid.uuid4())
+    reply = callback(client, session, runner, 'research_document_save',
+                     {'title': 'Rollback domain error', 'content': 'Must not commit', 'mutationId': key})
+    reason = 'unsupported_content' if known else 'not_ready'
+    assert reply.status_code == (422 if known else 503)
+    assert reply.json()['error']['code'] == reason
+    if known:
+        assert reply.json()['error']['details'] == {'code': reason, 'path': '/contentInput/text'}
+    else:
+        assert 'details' not in reply.json()['error']
+    with admin.connect() as db:
+        assert db.execute(text("SELECT count(*) FROM research.versions WHERE title='Rollback domain error'")).scalar_one() == 0
+        assert db.execute(text('SELECT count(*) FROM research.idempotency WHERE key=:key'), {'key': key}).scalar_one() == 0
+        record = db.execute(text('SELECT native_record FROM research.conversations WHERE id=:id'), {'id': session['id']}).scalar_one()
+    # The initial prepared read and exactly one failed call remain committed.
+    assert len(record['researchCalls']) == 2
+    failure = record['researchCalls'][-1]
+    assert failure['status'] == 'failed' and failure['code'] == reason
+    assert not ({'saved', 'target', 'details', 'arguments'} & failure.keys())
+    assert 'private' not in reply.text + json.dumps(failure)
+    assert client.app.state.engine.pool.checkedout() == 0
+
+
 def test_receipts_commit_with_mutation_and_refresh_cannot_forge_or_erase_them(client, admin):
     _, _, session, runner, token, _ = prepared(client, admin)
     saved = callback(client, session, runner, 'research_document_save', {'title': 'Real save',

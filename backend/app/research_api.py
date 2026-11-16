@@ -29,6 +29,19 @@ def require_schema(connection):
         fail('not_ready', 'Research schema is not ready', 503)
 
 
+def operation_failure(error):
+    """Preserve known domain statuses/details; unknown categories fail closed."""
+    known = isinstance(error, ResearchError) and error.code in receipts.ERRORS
+    reason = error.code if known else 'not_ready' if isinstance(error, ResearchError) else 'validation_error'
+    code = error.status if known else 503 if isinstance(error, ResearchError) else 422
+    if reason == 'not_ready':
+        code = 503
+    result = {'error': {'code': reason, 'message': 'Research operation failed'}}
+    if known and error.details is not None:
+        result['error']['details'] = redact(error.details)
+    return result, code
+
+
 def current_binding(db, owner, result):
     """Fresh SQL only, supplied connection. Never Registry._current/RPC/checkout."""
     from .runner_registry import Registry
@@ -136,16 +149,8 @@ def register(app, sessions, settings, response, runner_for):
                         value = receipts.receipt(operation, result, body, request_id,
                                                  turn_id=status['nativeTurnId'])
                 except (ResearchError, ValidationError) as error:
-                    reason = error.code if isinstance(error, ResearchError) and error.code in receipts.ERRORS else 'validation_error'
-                    if isinstance(error, ResearchError) and error.code not in receipts.ERRORS:
-                        reason = 'not_ready'
-                    code = error.status if isinstance(error, ResearchError) else 422
-                    if reason == 'not_ready':
-                        code = 503
-                    result = {'error': {'code': reason, 'message': 'Research operation failed'}}
-                    if isinstance(error, ResearchError) and error.details is not None:
-                        result['error']['details'] = redact(error.details)
-                    value = receipts.receipt(operation, None, {}, request_id, code=reason,
+                    result, code = operation_failure(error)
+                    value = receipts.receipt(operation, None, {}, request_id, code=result['error']['code'],
                                              turn_id=status['nativeTurnId'])
                 receipts.append(row, value)
                 db.flush()

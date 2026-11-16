@@ -235,6 +235,7 @@ def test_cli_post_save_reads_current_source_through_r2_router(client, admin, tmp
     post = draft = None
     if kind in {'post', 'read-failure'}:
         post = commit(client, auth, make_draft(client, auth, content='Human words', **fields))
+        fields['slug'] = post['latestVersion']['slug']
         draft = make_draft(client, auth, post, content='Human words', **fields)
         page = {'kind': 'post', 'resourceId': post['id']}
     elif kind == 'draft':
@@ -292,7 +293,9 @@ def test_cli_post_save_reads_current_source_through_r2_router(client, admin, tmp
     saved = invoke('research_post_save', args)
     assert calls[-1] == ('research_post_save', args)
     assert saved['latestVersion']['author'] == {'kind': 'codex', 'conversationId': session['id']}
-    assert saved['latestVersion']['slug'] == 'human-slug' and saved['latestVersion']['tags'] == ['kept']
+    assert saved['latestVersion']['tags'] == ['kept']
+    persisted = client.get('/api/research/posts/' + saved['id']).json()
+    assert persisted['latestVersion'] == saved['latestVersion']
     assert saved['latestVersion']['materialIds'] == [material['id']]
     assert saved['latestVersion']['textProjection'].endswith('Explicit API revision')
     if kind in {'post', 'draft'}:
@@ -300,6 +303,10 @@ def test_cli_post_save_reads_current_source_through_r2_router(client, admin, tmp
         assert client.get('/api/research/post-drafts/' + draft['id']).json() == draft
     if kind == 'post':
         assert saved['id'] == post['id'] and saved['latestVersion']['number'] == 2
+        assert saved['latestVersion']['slug'] == post['latestVersion']['slug'] == args['slug']
     else:
         assert 'postId' not in args and saved['latestVersion']['number'] == 1
+        slug = saved['latestVersion']['slug']
+        assert slug.startswith('post-') and len(slug) == len('post-') + 32
+        assert uuid.UUID(hex=slug.removeprefix('post-')).hex == slug.removeprefix('post-')
     assert client.get('/api/research/post-proposals').json()['items'] == []

@@ -69,6 +69,58 @@ def test_schema_drift_maps_to_fixed_503_without_exception_text(monkeypatch, revi
     assert 'private' not in caught.value.message
 
 
+@pytest.mark.parametrize('boundary,reason,status,path', [
+    ('surrogate', 'unsupported_content', 422, '/contentInput/text'),
+    ('html', 'unsupported_content', 422, '/contentInput/text'),
+    ('bytes', 'payload_too_large', 413, '/contentInput/text'),
+    ('length', 'content_limit_exceeded', 422, '/contentInput/text'),
+    ('schema', 'unsupported_schema_version', 422, '/content/version'),
+    ('shape', 'invalid_block_document', 422, '/content/blocks'),
+])
+def test_real_content_errors_keep_http_pointer_and_safe_failure_receipt(boundary, reason, status, path):
+    from app.post_blocks import canonicalize
+    from app.post_block_markdown import convert
+    from app.post_proposals import MarkdownInput
+    from app.research_api import operation_failure
+    with pytest.raises(ResearchError) as caught:
+        if boundary == 'surrogate':
+            MarkdownInput.model_validate({'format': 'markdown', 'text': '\ud800'})
+        elif boundary == 'html':
+            convert('<script>private body</script>', 'unit')
+        elif boundary in {'bytes', 'length'}:
+            MarkdownInput.model_validate({'format': 'markdown', 'text': 'x' * (1048577 if boundary == 'bytes' else 200001)})
+        elif boundary == 'schema':
+            canonicalize({'format': 'post-blocks', 'version': 2, 'blocks': []})
+        else:
+            canonicalize({'format': 'post-blocks', 'version': 1, 'blocks': 'invalid'})
+    result, http_status = operation_failure(caught.value)
+    assert http_status == status and result['error']['code'] == reason
+    assert result['error']['details'] == {'code': reason, 'path': path}
+    value = receipts.receipt('research_post_save', None, {}, uuid4(), code=result['error']['code'])
+    assert value['status'] == 'failed' and value['code'] == reason
+    assert not ({'saved', 'target', 'details', 'arguments'} & value.keys())
+    assert 'private body' not in json.dumps(result) + json.dumps(value)
+
+
+def test_unknown_domain_error_fails_closed_without_copying_private_details():
+    from app.research_api import operation_failure
+    result, status = operation_failure(ResearchError('future_internal', 'private message', 422,
+                                                    {'code': 'future_internal', 'private': 'private detail'}))
+    assert status == 503 and result == {'error': {'code': 'not_ready', 'message': 'Research operation failed'}}
+    value = receipts.receipt('research_post_save', None, {}, uuid4(), code=result['error']['code'])
+    assert value['status'] == 'failed' and value['code'] == 'not_ready'
+
+
+def test_pydantic_input_error_keeps_422_without_raw_input():
+    from pydantic import ValidationError
+    from app.post_proposals import MarkdownInput
+    from app.research_api import operation_failure
+    with pytest.raises(ValidationError) as caught:
+        MarkdownInput.model_validate({'format': 'private-invalid-format', 'text': 'private raw body'})
+    result, status = operation_failure(caught.value)
+    assert status == 422 and result == {'error': {'code': 'validation_error', 'message': 'Research operation failed'}}
+
+
 @pytest.mark.parametrize('name', ['runner_shell_authorize', 'research_page_context'])
 def test_internal_exceptions_stay_on_callback_helper_without_public_api_auth(monkeypatch, name):
     from tests.test_page_chat import callback

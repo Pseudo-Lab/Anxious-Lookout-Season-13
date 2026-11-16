@@ -119,20 +119,28 @@ def test_pre_migration_commit_replay_adapts_cached_shape_without_second_write(cl
     assert replay.json()['post']['latestVersion']['content']['format']=='post-blocks'
     assert replay.json()['post']['latestVersion']['number']==1
 
-def test_codex_boundary_errors_have_safe_json_pointer(client,admin):
+@pytest.mark.parametrize('bad_text', ['\ud800', '<script>private body</script>'])
+def test_codex_boundary_errors_have_safe_json_pointer(client,admin,bad_text):
     owner,auth=identity(client,admin);session,runner=turn(client,auth,owner)
     value=content();value.pop('content');value['mutationId']=str(uuid.uuid4())
-    value['contentInput']={'format':'markdown','text':'\ud800'}
-    # HTTP JSON encoder can represent the escaped surrogate; the callback helper
-    # itself uses httpx's strict UTF-8 serializer, so exercise the shared tool model.
-    from app.post_proposals import Propose
-    with pytest.raises(ResearchError) as caught: Propose.model_validate(value)
-    assert caught.value.details['path']=='/contentInput/text'
-    assert caught.value.status==422
+    value['contentInput']={'format':'markdown','text':bad_text}
+    before=post_storage_snapshot(admin)
+    # Exercise escaped surrogate parsing and Markdown conversion through the
+    # production router, including its action savepoint and failure receipt.
     from tests.research_api_fixture import call
     result=call(client.app,session['id'],runner,'research_post_save',value,raw_json=True)
     assert result.status_code==422,result.text
-    assert result.json()['error']['details']['path']=='/contentInput/text'
+    assert result.json()['error']['code']=='unsupported_content'
+    assert result.json()['error']['details']=={'path':'/contentInput/text','code':'unsupported_content'}
+    assert post_storage_snapshot(admin)==before
+    with admin.connect() as db:
+        record=db.execute(text('SELECT native_record FROM research.conversations WHERE id=:id'),{'id':session['id']}).scalar_one()
+    assert len(record['researchCalls'])==1
+    receipt=record['researchCalls'][0]
+    assert receipt['status']=='failed' and receipt['code']=='unsupported_content'
+    assert not ({'saved','target','details','arguments'} & receipt.keys())
+    assert 'private body' not in result.text+json.dumps(receipt)
+    assert client.app.state.engine.pool.checkedout()==0
 
 
 def legacy_cache(admin, owner, key, operation, body, cached):
