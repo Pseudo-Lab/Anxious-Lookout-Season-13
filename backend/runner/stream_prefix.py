@@ -230,7 +230,7 @@ class HoldPolicy:
         # #94 (8): where `legacy` comes from (observation only; `legacy` = max of the two). current: a long literal
         # of the credential in memory has no fingerprint; retired: only a journal row of an earlier credential has none.
         self.legacy_current, self.legacy_retired = legacy_current, legacy_retired
-        self.retired_state, self.retired_excluded, self.retired_excluded_assumed = "off", 0, 0  # #95 B1 (set by policy)
+        self.retired_state, self.retired_excluded = "off", 0  # #99 (set by policy)
 
     @classmethod
     def none(cls):
@@ -271,7 +271,7 @@ class HoldPolicy:
         return max(cut, 0)
 
 
-def policy(journal, control, current=(), latest=None, retired=None):
+def policy(journal, control, current=(), latest=None, retired=None, *, verified=None):
     """The HoldPolicy of `journal` (verified rows) and the fingerprint file in `control`. Raises when the journal
     cannot be read (the caller stops text); a fingerprint problem only makes literals legacy. `current`: the secrets
     in memory (refresh writes them to the journal first; any not covered still counts, fail-safe).
@@ -283,11 +283,12 @@ def policy(journal, control, current=(), latest=None, retired=None):
     or an empty `latest`, the split treats all of `current` as the latest credential (an over-report of "current",
     never of "retired").
 
-    #95 B1: `retired` = (rows, state, file state) from stream_retired.excluded - journal rows proven to be retired,
-    expired service access tokens. They leave the `legacy` length only: the journal, the spans (redaction) and every
-    literal of `current` / `latest` are untouched, whatever `retired` says. The file state joins the policy state, so
-    a change of the record discards an in-flight plan."""
-    short, rows = journal.stream_rows(P)
+    #99: service auth supplies `retired = (state, snapshot identity)` only after its locked ledger/snapshot check.
+    `unconditional` drops every unprotected legacy long row from the holdback. Other states retain all rows.
+    `verified` supplies the rows read in that same validated transaction; without it, read the journal normally.
+    The snapshot identity joins the policy state so a concurrent install discards an in-flight plan. No row or
+    prefix entry is removed from redaction or from the covered-prefix rules."""
+    short, rows = journal.stream_rows(P) if verified is None else verified
     entries, state = load(control, journal) if control is not None else (None, ("no-control",))
     covered_entries = {item for item in (entries or ()) if (item[2], item[3]) in rows}
     covered_rows = {(item[2], item[3]) for item in covered_entries}
@@ -296,12 +297,11 @@ def policy(journal, control, current=(), latest=None, retired=None):
         if isinstance(value, str) and len(value) > P:
             protected.add((len(value), journal.digest(value)))
     dropped = frozenset()
-    retired_state, retired_file = "off", None
-    if retired is not None and retired[1] == "off":
-        retired = None  # the switch off: exactly the pre-#95 policy (same identity)
+    retired_state = "off"
     if retired is not None:
-        dropped = frozenset(row for row in retired[0] if row in rows and row not in protected)
-        retired_state, retired_file = retired[1], retired[2]
+        retired_state = retired[0]
+        if retired_state == 'unconditional':
+            dropped = frozenset(rows - protected - covered_rows)
     kept = rows - covered_rows - dropped
     legacy = max((length for length, _ in kept), default=0)
     uncovered = set()
@@ -323,11 +323,8 @@ def policy(journal, control, current=(), latest=None, retired=None):
         groups[digest] = max(groups.get(digest, 0), length)
         filters.setdefault(prefix_filter, set()).add(digest)
     hold = HoldPolicy(short, bool(covered_entries), legacy, groups, filters, journal.key,
-                      state if retired is None else (state, retired_file, retired_state),
+                      state if retired is None else (state, retired),
                       legacy_current, legacy_retired)
     hold.retired_state = retired_state
-    assumed_rows = frozenset(retired[3]) if retired is not None and len(retired) > 3 else frozenset()
-    effective = dropped - covered_rows  # rows that would have held text without #95
-    hold.retired_excluded_assumed = len(effective & assumed_rows)
-    hold.retired_excluded = len(effective - assumed_rows)  # proven
+    hold.retired_excluded = len(dropped)
     return hold

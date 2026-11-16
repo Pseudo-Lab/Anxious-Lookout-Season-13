@@ -19,7 +19,7 @@ Defaults in `values.example.json`: cap3, idle1800, native5GiB/control1GiB.
 - `enable` → api `RESEARCH_STREAM_ENABLE`;
 - `text` → `CODEX_RUNNER_STREAM_TEXT` on both;
 - `trace` → `CODEX_RUNNER_STREAM_TRACE` on both, plus api `STREAM_TRACE`;
-- `retired` (#95, optional, default false) → `CODEX_RUNNER_STREAM_RETIRED` on both → runner Pod `STREAM_RETIRED`. This is the retired-literal holdback switch; see #95 and the B4 procedure before turning it on.
+- `retired` (#99, optional, default false) → `CODEX_RUNNER_STREAM_RETIRED` on both → runner Pod `STREAM_RETIRED`. This is the service retired-literal holdback switch; see [the #99 procedure](../../chat-stream/RETIRED-HOLDBACK-99.md). On excludes unprotected legacy rows after verifying the installed snapshot; off retains full legacy holdback. No anchor or broker replacement is required.
 
 The renderer owns these keys, so a value inherited from the live api Deployment or its ConfigMap is dropped. **If the key is absent, every flag is off:** an apply without `stream` turns streaming off in production. To keep the #93 state, put `"stream": {"enable": true, "text": true, "trace": false}` in the values file. Only `"true"` keys are written, so with every flag off the render is the same as before #94.
 

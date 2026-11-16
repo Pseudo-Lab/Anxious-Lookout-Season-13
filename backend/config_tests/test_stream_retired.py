@@ -1,387 +1,319 @@
-"""#95 B1 (independent scope, review r3): retired service access tokens leave the stream holdback only when proven
-retired and expired by provider times, recorded at install. Real ServiceAccessAuth installs; synthetic JWTs."""
+"""#99: unconditional service legacy exclusion with a verified current snapshot. Synthetic, no network/DB server."""
 import base64
+from contextlib import contextmanager
 import json
 import logging
-import os
+import threading
 import time
 from uuid import uuid4
 
 import pytest
 
-from runner import stream_prefix, stream_retired
+from runner import stream_prefix
+from runner.service_access import ServiceAccessAuth, ServiceJournal
+from runner.stream import Holdback, SanitizeUnavailable, Sanitizer
 from runner.stream_prefix import P, policy
-from test_service_access import ACCOUNT, setup
-
-NOW = int(time.time())
-HOUR = 3600
+from test_service_access import ACCOUNT, setup, refreshed
+from test_runner_stream import new_hub, start_item, note, events
 
 
-def token(iat, exp, email='synthetic-operator@example.invalid', pad='x'):
+def long_token(expiry=None):
     def encode(value):
         return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip('=')
-    payload = {'exp': exp, 'nonce': str(uuid4()) + pad * 40, 'email': email,
-               'https://api.openai.com/auth': {'chatgpt_account_id': ACCOUNT}}
-    if iat is not None:
-        payload['iat'] = iat
-    return encode({'alg': 'RS256'}) + '.' + encode(payload) + '.synthetic-signature'
+    return '.'.join((encode({'alg': 'RS256'}), encode({
+        'exp': expiry or int(time.time()) + 7200, 'padding': 'o' * 1600,
+        'email': 'old-operator@example.invalid',
+        'https://api.openai.com/auth': {'chatgpt_account_id': ACCOUNT}}), 'synthetic-signature'))
 
 
-def install(auth, envelope, value):
-    claims = json.loads(base64.urlsafe_b64decode(value.split('.')[1] + '=='))
-    update = {**envelope, 'accessToken': value, 'expiresAt': claims['exp'], 'snapshotId': str(uuid4())}
-    auth.install(update)
-    return value
+def envelope_with(envelope, token):
+    return {**envelope, 'accessToken': token, 'snapshotId': str(uuid4())}
 
 
 @pytest.fixture
 def service(tmp_path, monkeypatch):
     monkeypatch.setenv('STREAM_RETIRED', 'true')
-    monkeypatch.setattr(stream_retired, '_observed', {})
-    monkeypatch.setattr(stream_retired, '_cache', {})
-    monkeypatch.setattr(stream_retired, '_poisoned', set())
-    # the prefix write fails: the tokens stay uncovered, so the retired rows really hold the stream (production #93)
-    monkeypatch.setattr(stream_prefix, '_write', lambda path, payload: (_ for _ in ()).throw(OSError(28, 'full')))
+    monkeypatch.setenv('RUNNER_STREAM_TEXT', 'true')
     auth, home, envelope = setup(tmp_path)
-    return auth, envelope
+    old = long_token(envelope['expiresAt'])
+    with monkeypatch.context() as patch:
+        patch.setattr(stream_prefix, '_write', lambda *a: (_ for _ in ()).throw(OSError('full')))
+        auth.install(envelope_with(envelope, old))
+    auth.install(envelope)  # current covered, historical token/email remain legacy
+    return auth, home, envelope, old
 
 
 def hold(auth):
-    retired = stream_retired.excluded(auth.control, auth.journal, frozenset())
-    return policy(auth.journal, auth.control, list(auth.secrets), list(auth.latest_secrets), retired)
+    return Sanitizer(auth).generation()[2]
 
 
-def chain(auth, envelope, lifetime=2 * HOUR):
-    """T0 install, then two tokens each issued after the previous one expired (provider time)."""
-    first = install(auth, envelope, token(NOW, NOW + lifetime))
-    second = install(auth, envelope, token(NOW + lifetime + 700, NOW + 2 * lifetime + 700))
-    third = install(auth, envelope, token(NOW + 2 * lifetime + 1400, NOW + 3 * lifetime + 1400))
-    return first, second, third
+def test_first_flush_after_install_excludes_legacy_without_iat_or_anchor(service):
+    auth, _, envelope, old = service
+    result = hold(auth)
+    assert result.retired_state == 'unconditional' and result.retired_excluded == 2
+    assert result.legacy == result.legacy_current == result.legacy_retired == 0
+    assert result.start('ordinary text ' * 10) == len('ordinary text ' * 10) - (P - 1)
+    assert auth.sanitize(old) == '[redacted]'
+    assert not (auth.control / 'stream-retired.json').exists()
 
 
-def test_a_retired_token_proven_expired_by_provider_time_leaves_the_holdback(service):
-    auth, envelope = service
-    first, second, third = chain(auth, envelope)
-    hold_ = hold(auth)
-    # the first token is a T0 row (pending, never proven); the second is proven: retired and expired before the
-    # third was issued; the third is current
-    assert hold_.retired_state == 'proven' and hold_.retired_excluded == 1
-    assert hold_.legacy_retired == len(first) and hold_.legacy == max(len(first), len(third))
-    assert hold_.legacy_current == len(third)
+def test_new_pod_first_turn_keeps_exclusion_after_install(service):
+    previous, home, envelope, old = service
+    auth = ServiceAccessAuth(previous.control, previous.owner, previous.state_id, ACCOUNT)
+    auth.install(envelope)
+    auth.attach(home)
+    assert hold(auth).legacy == 0
+    hub, _ = new_hub(auth)
+    hub.verified()
+    start_item(hub)
+    note(hub, 'item/agentMessage/delta', itemId='msg-1', delta='ordinary text ' * 10)
+    hub.flush(hub.active, final=False)
+    assert any(kind == 'item.delta' for _, kind, _ in events(hub))
+    assert hub.active.stats['retiredExcludedRows'] == 2
+    assert hub.active.stats['retiredFallbackMissing'] == hub.active.stats['retiredFallbackMismatch'] == 0
+    auth.close()
 
 
-def test_the_switch_off_changes_nothing(service, monkeypatch):
-    auth, envelope = service
-    first, second, third = chain(auth, envelope)
-    on = hold(auth)
-    monkeypatch.setenv('STREAM_RETIRED', 'false')
-    off = policy(auth.journal, auth.control, list(auth.secrets), list(auth.latest_secrets),
-                 stream_retired.excluded(auth.control, auth.journal, frozenset()))
-    plain = policy(auth.journal, auth.control, list(auth.secrets), list(auth.latest_secrets))
-    assert off.retired_state == 'off' and off.legacy == plain.legacy and off.legacy_retired == plain.legacy_retired
-    assert plain.legacy_retired == max(len(first), len(second))  # without #95 both retired rows hold
-    assert on.legacy_retired == len(first)                        # with it only the T0 row still does
-    assert off.state == plain.state                               # the switch off leaves the policy identity as before
+@pytest.mark.parametrize('mode', ['empty', 'stale'])
+def test_snapshot_claims_protect_current_even_if_current_latest_are_empty_or_stale(service, monkeypatch, mode):
+    auth, _, envelope, old = service
+    auth.secrets = set() if mode == 'empty' else {old}
+    auth.latest_secrets = set() if mode == 'empty' else {old}
+    (auth.control / stream_prefix.FILE).unlink()
+    monkeypatch.setattr(stream_prefix, '_write', lambda *a: (_ for _ in ()).throw(OSError('full')))
+    result = hold(auth)
+    assert result.legacy_current == (len(envelope['accessToken']) if mode == 'empty' else len(old))
+    assert result.legacy >= len(envelope['accessToken'])
+    assert result.retired_excluded == (2 if mode == 'empty' else 1)
+    for literal in (envelope['accessToken'], ACCOUNT, 'synthetic-operator@example.invalid'):
+        # All split points of the still-current literals are held/redacted.
+        for split in range(len(literal) + 1):
+            buffer, emitted = Holdback(), []
+            for chunk in (literal[:split], literal[split:]):
+                buffer.feed(chunk)
+                out, consumed, joined = Holdback.plan(buffer.raw, auth.journal.spans(buffer.raw), result, False, buffer.joined)
+                buffer.commit(consumed, joined, len(buffer.raw))
+                emitted.append(out)
+            out, _, _ = Holdback.plan(buffer.raw, auth.journal.spans(buffer.raw), result, True, buffer.joined)
+            assert ''.join(emitted) + out == '[redacted]'
 
 
-def test_redaction_is_unchanged(service):
-    auth, envelope = service
-    first, second, third = chain(auth, envelope)
-    for value in (first, second, third):
-        text = 'before ' + value + ' after'
-        assert value not in auth.journal.text(text)  # the retired, excluded token is still redacted
+def test_missing_snapshot_before_first_install_keeps_all_journal_rows(service):
+    prior, _, _, old = service
+    auth = ServiceAccessAuth(prior.control, prior.owner, prior.state_id, ACCOUNT)
+    auth.journal = ServiceJournal(auth, auth.state())
+    result = hold(auth)
+    assert result.retired_state == 'snapshot_missing'
+    assert result.retired_excluded == 0 and result.legacy == len(old)
 
 
-def test_t0_rows_are_never_proven_by_later_records(service):
-    auth, envelope = service
-    first = install(auth, envelope, token(NOW, NOW + HOUR))
-    # the same value can never come back (the ledger refuses a retired credential), so later records can only be
-    # for other values; the T0 row stays out of `proven` whatever comes after
-    for step in range(1, 4):
-        install(auth, envelope, token(NOW + step * (HOUR + 700), NOW + (step + 1) * HOUR + step * 700))
-    payload, _ = stream_retired.load(auth.control, auth.journal)
-    t0 = {tuple(item) for item in payload['t0Rows']}
-    row = (len(first), auth.journal.digest(first))
-    assert row in t0
-    assert row not in stream_retired.excluded(auth.control, auth.journal, frozenset())[0]
-
-
-def test_an_identifier_record_forbids_exclusion(service):
-    """review r0 counterexample: an e-mail claim equal to a token value."""
-    auth, envelope = service
-    install(auth, envelope, token(NOW, NOW + HOUR))                                     # T0
-    second = install(auth, envelope, token(NOW + HOUR + 700, NOW + 2 * HOUR + 700))      # recorded as token
-    install(auth, envelope, token(NOW + 2 * HOUR + 1400, NOW + 3 * HOUR + 1400, email=second))  # ... and identifier
-    install(auth, envelope, token(NOW + 3 * HOUR + 2100, NOW + 4 * HOUR + 2100))
-    row = (len(second), auth.journal.digest(second))
-    assert row not in stream_retired.excluded(auth.control, auth.journal, frozenset())[0]
-
-
-@pytest.mark.parametrize('iat', [None, 'x', True, 1.5])
-def test_a_missing_or_odd_iat_is_unproven(service, iat):
-    auth, envelope = service
-    chain(auth, envelope)
-    install(auth, envelope, token(iat, NOW + 10 * HOUR))
-    hold_ = hold(auth)
-    assert hold_.retired_state == 'unproven' and hold_.retired_excluded == 0
-
-
-def test_an_iat_going_back_is_unproven_until_a_later_token_exceeds_the_high_water(service):
-    auth, envelope = service
-    first, second, third = chain(auth, envelope)
-    install(auth, envelope, token(NOW + HOUR, NOW + 10 * HOUR))   # lower than the third token's iat
-    assert hold(auth).retired_state == 'unproven'
-    install(auth, envelope, token(NOW + 20 * HOUR, NOW + 21 * HOUR))
-    assert hold(auth).retired_state == 'proven'
-
-
-def test_iat_after_exp_is_an_anomaly(service):
-    auth, envelope = service
-    chain(auth, envelope)
-    install(auth, envelope, token(NOW + 30 * HOUR, NOW + 20 * HOUR))
-    assert hold(auth).retired_state == 'unproven'
-
-
-def test_a_lifetime_over_the_limit_turns_the_owner_off_for_good(service):
-    auth, envelope = service
-    chain(auth, envelope)
-    long = stream_retired.LIFETIME_LIMIT + HOUR
-    install(auth, envelope, token(NOW + 10 * HOUR, NOW + 10 * HOUR + long))
-    assert hold(auth).retired_state == 'off'
-    install(auth, envelope, token(NOW + 10 * HOUR + long + 700, NOW + 11 * HOUR + long + 700))
-    assert hold(auth).retired_state == 'off' and hold(auth).retired_excluded == 0
-
-
-def test_the_local_clock_is_never_used(service, monkeypatch):
-    auth, envelope = service
-    chain(auth, envelope)
-    before = stream_retired.excluded(auth.control, auth.journal, frozenset())[0]
-    monkeypatch.setattr(time, 'time', lambda: NOW + 365 * 86400)   # forward a year
-    monkeypatch.setattr(stream_retired, '_cache', {})
-    monkeypatch.setattr(stream_retired, '_poisoned', set())
-    assert stream_retired.excluded(auth.control, auth.journal, frozenset())[0] == before
-    monkeypatch.setattr(time, 'time', lambda: 0)                      # and back
-    monkeypatch.setattr(stream_retired, '_cache', {})
-    monkeypatch.setattr(stream_retired, '_poisoned', set())
-    assert stream_retired.excluded(auth.control, auth.journal, frozenset())[0] == before
-
-
-@pytest.mark.parametrize('damage', ['tamper', 'foreign', 'symlink', 'shared', 'garbage'])
-def test_a_damaged_or_foreign_record_excludes_nothing(service, damage, tmp_path):
-    auth, envelope = service
-    chain(auth, envelope)
-    path = auth.control / stream_retired.FILE
-    payload = json.loads(path.read_text())
-    if damage == 'tamper':
-        payload['maxIat'] += 10 ** 6
-        path.write_text(json.dumps(payload))
-    elif damage == 'foreign':
-        payload['owner'] = str(uuid4())
-        path.write_text(json.dumps(payload))
-    elif damage == 'symlink':
-        target = auth.control / 'elsewhere.json'
-        path.rename(target)
-        path.symlink_to(target)
-    elif damage == 'shared':
-        os.chmod(path, 0o644)
+@pytest.mark.parametrize('damage', ['missing', 'token', 'account', 'claims_cache'])
+def test_snapshot_fallback_is_visible_in_summary(service, damage):
+    auth, _, _, old = service
+    if damage == 'missing':
+        auth.snapshot = None
+    elif damage == 'token':
+        auth.snapshot = {**auth.snapshot, 'accessToken': old}
+    elif damage == 'account':
+        auth.snapshot = {**auth.snapshot, 'chatgptAccountId': 'other-account'}
     else:
-        path.write_text('{')
-    stream_retired._cache.clear()
-    hold_ = hold(auth)
-    # review r0: once observation began, a damaged, foreign, linked or shared record is permanently off
-    assert hold_.retired_state == 'off' and hold_.retired_excluded == 0
+        auth._stream_installed = None
+    result = hold(auth)
+    assert result.retired_excluded == 0 and result.legacy == len(old)
+    assert result.retired_state == ('snapshot_missing' if damage == 'missing' else 'snapshot_mismatch')
+    hub, _ = new_hub(auth)
+    hub.verified()
+    start_item(hub)
+    note(hub, 'item/agentMessage/delta', itemId='msg-1', delta='ordinary text')
+    hub.flush(hub.active, final=False)
+    assert hub.active.stats['retiredFallbackMissing'] == int(damage == 'missing')
+    assert hub.active.stats['retiredFallbackMismatch'] == int(damage != 'missing')
+    assert not any(kind == 'item.delta' for _, kind, _ in events(hub))
 
 
-def test_a_failed_record_write_never_creates_an_exclusion(service, monkeypatch):
-    auth, envelope = service
-    install(auth, envelope, token(NOW, NOW + HOUR))
-    monkeypatch.setattr(stream_retired, '_write', lambda *a: (_ for _ in ()).throw(OSError(28, 'full')))
-    install(auth, envelope, token(NOW + HOUR + 700, NOW + 2 * HOUR + 700))
-    install(auth, envelope, token(NOW + 2 * HOUR + 1400, NOW + 3 * HOUR + 1400))
-    assert hold(auth).retired_excluded == 0  # the second token was never recorded
+def test_another_writer_install_makes_old_memory_fall_back(service):
+    auth, _, envelope, old = service
+    other = ServiceAccessAuth(auth.control, auth.owner, auth.state_id, ACCOUNT)
+    updated = refreshed(envelope)
+    other.install(updated)
+    result = hold(auth)
+    assert result.retired_state == 'snapshot_mismatch' and result.retired_excluded == 0
+    assert result.legacy >= len(updated['accessToken']) or result.covered
+    assert result.legacy == len(old)
 
 
-def test_current_and_latest_literals_are_never_excluded(service):
-    auth, envelope = service
-    first, second, third = chain(auth, envelope)
-    retired = (frozenset({(len(third), auth.journal.digest(third)), (len(second), auth.journal.digest(second))}),
-               'proven', ('x',))
-    hold_ = policy(auth.journal, auth.control, list(auth.secrets), list(auth.latest_secrets), retired)
-    assert hold_.legacy_current == len(third) and hold_.legacy >= len(third)
+@pytest.mark.parametrize('damage', ['row_mac', 'missing_db', 'context'])
+def test_storage_or_context_failure_stops_text(service, damage):
+    auth, _, _, _ = service
+    if damage == 'row_mac':
+        with auth.store.transaction() as db:
+            db.execute('UPDATE literals SET mac=? WHERE length > ?', ('0' * 64, P))
+    elif damage == 'missing_db':
+        (auth.control / 'service-access.sqlite3').unlink()
+    else:
+        auth.journal.trial = str(uuid4())
+    with pytest.raises(SanitizeUnavailable):
+        Sanitizer(auth).generation()
 
 
-def test_a_change_of_the_record_changes_the_policy_identity(service):
-    auth, envelope = service
-    first, second, third = chain(auth, envelope)
-    before = hold(auth)
-    install(auth, envelope, token(NOW + 30 * HOUR, NOW + 31 * HOUR))
-    assert hold(auth) != before
+def test_switch_off_matches_original_policy_identity_holdback_and_redaction(service, monkeypatch):
+    auth, _, envelope, old = service
+    monkeypatch.setenv('STREAM_RETIRED', 'false')
+    off = hold(auth)
+    original = policy(auth.journal, auth.control, list(auth.secrets), list(auth.latest_secrets))
+    assert off == original and off.retired_state == 'off' and off.retired_excluded == 0
+    assert off.legacy == len(old) and off.legacy_current == 0
+    assert off.start('text ' * 1000) == original.start('text ' * 1000)
+    assert auth.sanitize([old, envelope['accessToken']]) == ['[redacted]', '[redacted]']
 
 
-def test_logs_hold_states_and_counts_only_and_repeat_nothing(service, caplog):
+def test_non_service_mode_does_not_exclude_even_when_switch_on(tmp_path, monkeypatch):
+    from test_stream_prefix import journal_with, control_dir
+    from test_stream_prefix_observe import FakeAuth
+    monkeypatch.setenv('STREAM_RETIRED', 'true')
+    old = long_token()
+    journal = journal_with([old, 'synthetic-current-token'])
+    auth = FakeAuth(journal, control_dir(tmp_path), {'synthetic-current-token'}, {'synthetic-current-token'})
+    assert hold(auth).legacy == len(old) and hold(auth).retired_state == 'off'
+
+
+def test_old_sidecar_and_markers_are_ignored_but_preserved(service):
+    auth, _, _, _ = service
+    sidecar = auth.control / 'stream-retired.json'
+    sidecar.write_text('{old-invalid-sidecar')
+    with auth.store.transaction() as db:
+        auth.journal.remember(db, ['#95-retired-seen', '#95-retired-off!'])
+    result = hold(auth)
+    assert result.retired_excluded == 2 and result.legacy == 0
+    assert sidecar.read_text() == '{old-invalid-sidecar'
+    assert auth.sanitize('#95-retired-off!') == '[redacted]'
+
+
+def test_current_covered_prefix_still_holds_partial_token(service):
+    auth, _, envelope, _ = service
+    token = envelope['accessToken']
+    result = hold(auth)
+    assert result.legacy == 0
+    assert result.start('hello ' + token[:P + 5]) == len('hello ')
+
+
+def test_redaction_still_finds_excluded_literals_and_final_command_summary(service):
+    auth, _, envelope, old = service
+    before = auth.journal.spans('before ' + old + ' after')
+    assert hold(auth).retired_excluded == 2
+    assert auth.journal.spans('before ' + old + ' after') == before
+    assert auth.sanitize('before ' + old + ' after') == 'before [redacted] after'
+    hub, _ = new_hub(auth)
+    hub.verified()
+    start_item(hub, 'cmd', 'commandExecution', command='echo ' + old)
+    hub.flush(hub.active, final=True)
+    raw = b''.join(frame for _, frame in hub.active.events)
+    assert old.encode() not in raw and b'[redacted]' in raw
+
+
+def test_install_changes_generation_even_if_prefix_and_literal_rows_are_identical(service):
+    auth, _, envelope, _ = service
+    before = Sanitizer(auth).generation()
+    auth.install({**envelope, 'snapshotId': str(uuid4())})
+    after = Sanitizer(auth).generation()
+    assert before != after and before[1] == after[1]
+
+
+def test_install_between_plan_and_validation_discards_the_flush(service, monkeypatch):
+    auth, _, envelope, _ = service
+    hub, _ = new_hub(auth)
+    hub.verified()
+    start_item(hub)
+    note(hub, 'item/agentMessage/delta', itemId='msg-1', delta='ordinary text ' * 10)
+    original, changed = hub.sanitizer.spans, []
+    def rotate(text):
+        if not changed:
+            changed.append(True)
+            auth.install({**envelope, 'snapshotId': str(uuid4())})
+        return original(text)
+    monkeypatch.setattr(hub.sanitizer, 'spans', rotate)
+    hub.flush(hub.active, final=False)
+    assert hub.active.stats['staleFlushes'] == 1
+    assert not any(kind == 'item.delta' for _, kind, _ in events(hub))
+
+
+def test_generation_waits_for_install_commit_and_memory_publication(service, monkeypatch):
+    auth, _, envelope, _ = service
+    committed, release, attempting, finished = (threading.Event() for _ in range(4))
+    original = auth.store.transaction
+    installer_id, result, errors = [], [], []
+    @contextmanager
+    def pause_after_commit(*args, **kwargs):
+        with original(*args, **kwargs) as db:
+            yield db
+        if threading.get_ident() in installer_id:
+            committed.set()
+            assert release.wait(5)
+    monkeypatch.setattr(auth.store, 'transaction', pause_after_commit)
+    update = refreshed(envelope)
+    def install():
+        try:
+            installer_id.append(threading.get_ident())
+            auth.install(update)
+        except BaseException as error:
+            errors.append(error)
+    def read():
+        attempting.set()
+        try:
+            result.append(hold(auth))
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            finished.set()
+    installer = threading.Thread(target=install)
+    installer.start()
+    assert committed.wait(5)
+    reader = threading.Thread(target=read)
+    reader.start()
+    assert attempting.wait(5)
+    try:
+        assert not finished.wait(.05)  # the install mutex spans durable commit through memory publication
+    finally:
+        release.set()
+        installer.join(5)
+        reader.join(5)
+    assert not installer.is_alive() and not reader.is_alive() and not errors
+    assert result[0].retired_state == 'unconditional' and result[0].legacy_current == 0
+    assert auth.snapshot['accessToken'] == update['accessToken']
+
+
+def test_one_transaction_per_generation_no_reparse_no_new_sidecar_no_value_logs(service, monkeypatch, caplog):
+    auth, _, envelope, old = service
     caplog.set_level(logging.INFO, logger='uvicorn.error')
-    auth, envelope = service
-    values = chain(auth, envelope)
-    lines = [json.loads(r.getMessage().partition(' ')[2]) for r in caplog.records
-             if r.getMessage().startswith('runner_stream_retired ')]
-    assert lines and set(lines[-1]) == {'state', 't0Rows', 'records', 'proven', 'iatAnomaly', 'disabled',
-                                        'lifetimeHoursMax', 'lifetimeCount', 'assumed', 't0Assumable', 'anchor',
-                                        'anchorAttempts', 'reason'}
-    assert lines[-1]['lifetimeHoursMax'] == 2 and lines[-1]['lifetimeCount'] == 3
-    assert (lines[-1]['assumed'], lines[-1]['anchor'], lines[-1]['anchorAttempts']) == (0, False, 0)
-    for value in values:
-        assert value[:P] not in caplog.text and auth.journal.digest(value) not in caplog.text
-    count = len(lines)
-    for _ in range(20):
-        hold(auth)
-    assert len([r for r in caplog.records if r.getMessage().startswith('runner_stream_retired ')]) == count
+    original = auth.store.transaction
+    calls = []
+    @contextmanager
+    def count(*args, **kwargs):
+        calls.append(1)
+        with original(*args, **kwargs) as db:
+            yield db
+    monkeypatch.setattr(auth.store, 'transaction', count)
+    monkeypatch.setattr('runner.service_access.claims', lambda *a: (_ for _ in ()).throw(AssertionError('reparse')))
+    for _ in range(10):
+        assert hold(auth).retired_excluded == 2
+    assert len(calls) == 10
+    assert not (auth.control / 'stream-retired.json').exists()
+    assert old not in caplog.text and envelope['accessToken'] not in caplog.text
+    assert auth.journal.digest(old) not in caplog.text
 
 
-# --- review r0 (2026-11-16) counterexamples ----------------------------------------------------------------------------
-
-def test_a_failed_observation_ends_an_existing_exclusion(service, monkeypatch):
-    auth, envelope = service
-    chain(auth, envelope)
-    assert hold(auth).retired_excluded == 1
-    monkeypatch.setattr(stream_retired, '_write', lambda *a: (_ for _ in ()).throw(OSError(28, 'full')))
-    install(auth, envelope, token(None, NOW + 10 * HOUR))
-    hold_ = hold(auth)
-    assert hold_.retired_state == 'off' and hold_.retired_excluded == 0
+def test_close_discards_install_claims_and_keeps_full_holdback(service):
+    auth, _, _, old = service
+    auth.close()
+    assert auth._stream_installed is None and not auth.secrets and not auth.latest_secrets
+    result = hold(auth)
+    assert result.retired_state == 'snapshot_missing' and result.legacy == len(old)
 
 
-def test_a_failed_identifier_observation_is_never_lost_by_a_later_success(service, monkeypatch):
-    """Even when the OFF marker cannot be written and the process restarts: the history count catches it."""
-    auth, envelope = service
-    first, second, third = chain(auth, envelope)
-    real_write, real_mark = stream_retired._write, stream_retired._mark
-    monkeypatch.setattr(stream_retired, '_write', lambda *a: (_ for _ in ()).throw(OSError(28, 'full')))
-    monkeypatch.setattr(stream_retired, '_mark', lambda journal, marker: False)
-    install(auth, envelope, token(NOW + 20 * HOUR, NOW + 21 * HOUR, email=second))  # second used as an identifier
-    monkeypatch.setattr(stream_retired, '_write', real_write)
-    monkeypatch.setattr(stream_retired, '_mark', real_mark)
-    stream_retired._poisoned.clear()  # a restart: the process flag is gone
-    stream_retired._cache.clear()
-    assert hold(auth).retired_state == 'off'  # incomplete against the snapshots even before the next install
-    install(auth, envelope, token(NOW + 30 * HOUR, NOW + 31 * HOUR))
-    row = (len(second), auth.journal.digest(second))
-    assert row not in stream_retired.excluded(auth.control, auth.journal, frozenset())[0]
-    assert hold(auth).retired_state == 'off' and hold(auth).retired_excluded == 0
-
-
-@pytest.mark.parametrize('change', ['chmod', 'hardlink'])
-def test_a_file_safety_change_after_caching_ends_the_exclusion(service, tmp_path, change):
-    auth, envelope = service
-    chain(auth, envelope)
-    assert hold(auth).retired_excluded == 1  # cached now
-    path = auth.control / stream_retired.FILE
-    if change == 'chmod':
-        os.chmod(path, 0o644)
-    else:
-        os.link(path, auth.control / 'second-link')
-    hold_ = hold(auth)
-    assert hold_.retired_state == 'off' and hold_.retired_excluded == 0
-
-
-def test_a_lock_failure_never_breaks_the_install_and_turns_the_owner_off(service):
-    auth, envelope = service
-    chain(auth, envelope)
-    lock = auth.control / stream_retired.LOCK
-    lock.unlink(missing_ok=True)
-    lock.symlink_to(auth.control / 'elsewhere')
-    install(auth, envelope, token(NOW + 20 * HOUR, NOW + 21 * HOUR))  # does not raise
-    assert auth.snapshot is not None
-    hold_ = hold(auth)
-    assert hold_.retired_state == 'off' and hold_.retired_excluded == 0
-
-
-def test_a_t0_overflow_is_off_for_good(tmp_path, monkeypatch):
-    monkeypatch.setattr(stream_retired, '_observed', {})
-    monkeypatch.setattr(stream_retired, '_cache', {})
-    monkeypatch.setattr(stream_retired, '_poisoned', set())
-    monkeypatch.setattr(stream_prefix, '_write', lambda path, payload: (_ for _ in ()).throw(OSError(28, 'full')))
-    monkeypatch.setattr(stream_retired, 'LIMIT', 4)
-    auth, home, envelope = setup(tmp_path)
-    monkeypatch.setenv('STREAM_RETIRED', 'false')
-    for i in range(6):
-        install(auth, envelope, token(NOW + i * HOUR, NOW + (i + 2) * HOUR))
-    monkeypatch.setenv('STREAM_RETIRED', 'true')
-    for i in range(6, 10):
-        install(auth, envelope, token(NOW + i * (HOUR + 700), NOW + (i + 1) * (HOUR + 700)))
-    hold_ = hold(auth)
-    assert hold_.retired_state == 'off' and hold_.retired_excluded == 0
-
-
-def test_a_lifetime_off_survives_the_loss_of_the_record(service):
-    auth, envelope = service
-    chain(auth, envelope)
-    long = stream_retired.LIFETIME_LIMIT + HOUR
-    install(auth, envelope, token(NOW + 10 * HOUR, NOW + 10 * HOUR + long))
-    assert hold(auth).retired_state == 'off'
-    (auth.control / stream_retired.FILE).unlink()
-    stream_retired._poisoned.clear()  # a restart
-    stream_retired._cache.clear()
-    base = NOW + 10 * HOUR + long
-    for step in range(3):
-        install(auth, envelope, token(base + step * (HOUR + 700), base + (step + 1) * (HOUR + 700)))
-    hold_ = hold(auth)
-    assert hold_.retired_state == 'off' and hold_.retired_excluded == 0
-
-
-# --- review r1 (2026-11-16): the first observation must commit with the install ------------------------------------
-
-def test_seen_commits_with_the_first_enabled_install_only(tmp_path, monkeypatch):
-    monkeypatch.setattr(stream_retired, '_observed', {})
-    monkeypatch.setattr(stream_retired, '_cache', {})
-    monkeypatch.setattr(stream_retired, '_poisoned', set())
-    auth, home, envelope = setup(tmp_path)
-    monkeypatch.setenv('STREAM_RETIRED', 'false')
-    install(auth, envelope, token(NOW, NOW + 2 * HOUR))
-    assert stream_retired._markers(auth.journal)[0] is False      # switch off: nothing marked
-    seen_calls = []
-    real = stream_retired.observe_install
-    monkeypatch.setattr(stream_retired, 'observe_install',
-                        lambda *a, **k: (seen_calls.append(k.get('first')), real(*a, **k))[1])
-    monkeypatch.setenv('STREAM_RETIRED', 'true')
-    install(auth, envelope, token(NOW + HOUR, NOW + 3 * HOUR))
-    install(auth, envelope, token(NOW + 2 * HOUR, NOW + 4 * HOUR))
-    assert seen_calls == [True, False] and stream_retired._markers(auth.journal)[0] is True
-
-
-@pytest.mark.parametrize('failure', ['sidecar_write', 'crash_before_observe'])
-def test_a_failed_first_observation_and_a_restart_never_make_a_new_t0(tmp_path, monkeypatch, capsys, failure):
-    """review r1 blocker: a token installed with the switch on must never become pre-#95 history (A1)."""
-    from runner import stream_anchor
-    monkeypatch.setattr(stream_retired, '_observed', {})
-    monkeypatch.setattr(stream_retired, '_cache', {})
-    monkeypatch.setattr(stream_retired, '_poisoned', set())
-    monkeypatch.setattr(stream_prefix, '_write', lambda path, payload: (_ for _ in ()).throw(OSError(28, 'full')))
-    auth, home, envelope = setup(tmp_path)
-    monkeypatch.setenv('STREAM_RETIRED', 'true')
-    real_write, real_observe = stream_retired._write, stream_retired.observe_install
-    if failure == 'sidecar_write':
-        monkeypatch.setattr(stream_retired, '_write', lambda *a: (_ for _ in ()).throw(OSError(28, 'full')))
-        monkeypatch.setattr(stream_retired, '_mark', lambda journal, marker: False)  # OFF cannot be written either
-    else:
-        monkeypatch.setattr(stream_retired, 'observe_install', lambda *a, **k: None)  # the process died here
-    long_lived = install(auth, envelope, token(NOW, NOW + 300 * HOUR))
-    monkeypatch.setattr(stream_retired, '_write', real_write)
-    monkeypatch.setattr(stream_retired, 'observe_install', real_observe)
-    stream_retired._poisoned.clear()   # restart
-    stream_retired._cache.clear()
-    install(auth, envelope, token(NOW + HOUR, NOW + 3 * HOUR))
-    assert stream_retired.load(auth.control, auth.journal)[0] is None  # no new T0 was made
-    later = NOW + 2 * HOUR + stream_retired.ATTEST_TOLERANCE + stream_retired.G + 1
-    install(auth, envelope, token(later, later + HOUR))
-    retired = stream_retired.excluded(auth.control, auth.journal, frozenset())
-    assert retired[1] == 'off' and (len(long_lived), auth.journal.digest(long_lived)) not in retired[0]
-
-
-def test_switching_off_then_on_again_is_off_for_good(service, monkeypatch):
-    """Installs made while the switch was off were not observed: the history is incomplete (documented in B4)."""
-    auth, envelope = service
-    chain(auth, envelope)
-    monkeypatch.setenv('STREAM_RETIRED', 'false')
-    install(auth, envelope, token(NOW + 30 * HOUR, NOW + 31 * HOUR))
-    monkeypatch.setenv('STREAM_RETIRED', 'true')
-    install(auth, envelope, token(NOW + 40 * HOUR, NOW + 41 * HOUR))
-    assert hold(auth).retired_state == 'off'
+def test_existing_turn_protection_does_not_depend_on_expiry_checks(service, monkeypatch):
+    auth, _, _, _ = service
+    before = hold(auth)
+    monkeypatch.setattr(time, 'time', lambda: 0)
+    assert hold(auth) == before
+    monkeypatch.setattr(time, 'time', lambda: 10 ** 12)
+    assert hold(auth) == before
