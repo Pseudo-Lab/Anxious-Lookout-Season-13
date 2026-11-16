@@ -160,7 +160,7 @@ export function VersionHistoryView<V extends VersionLike>({
   };
 
   return (
-    <section>
+    <section id="version-history">
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <h2 className="text-lg font-semibold text-stone-900">버전 기록</h2>
         {items.length >= 2 && !compare && (

@@ -1064,6 +1064,12 @@ function handleRead(owner, path, url) {
     const list = [...sessions.values()].filter((s) => s.owner === owner && !s.archived).sort(byUpdated).map(sessionSummary);
     return ok(200, page(list, url));
   }
+  if ((m = /^\/research\/sessions\/([^/]+)\/research-calls$/.exec(path))) {
+    const s = sessions.get(m[1]);
+    if (!s || s.owner !== owner) return fail(404, "not_found", "Not found");
+    // #97 r2: native/옛 fixture tool output으로 receipt를 만들지 않는다. 전용 시험은 endpoint 응답을 주입한다.
+    return ok(200, { items: [] });
+  }
   if ((m = /^\/research\/sessions\/([^/]+)(?:\/items\/([^/]+))?$/.exec(path))) {
     const s = sessions.get(m[1]);
     if (!s || s.owner !== owner) return fail(404, "not_found", "Not found");
