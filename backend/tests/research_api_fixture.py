@@ -64,7 +64,8 @@ def api_client(app):
         return existing
 
 
-def call(app, conversation, runner, name, arguments):
+def grant_token(app, conversation, runner):
+    """Synthetic DB fixture only, not native activation or a runtime bypass."""
     with LOCK:
         with app.state.sessions.begin() as db:
             row = db.scalar(select(Conversation).where(Conversation.id == uuid.UUID(str(conversation))).with_for_update())
@@ -83,6 +84,18 @@ def call(app, conversation, runner, name, arguments):
                     for entry in row.native_record['platformRequests']]}
                 tokens[key] = token
             token = tokens[key]
-        fixture = api_client(app)
-    return fixture.post('/api/research/agent/v1/' + name, json=arguments,
-                        headers={'Authorization': 'Bearer ' + token})
+        return token
+
+
+def call(app, conversation, runner, name, arguments, *, raw_json=False):
+    token = grant_token(app, conversation, runner)
+    if token is None:
+        return None
+    fixture = api_client(app)
+    headers = {'Authorization': 'Bearer ' + token}
+    if raw_json:
+        import json
+        headers['Content-Type'] = 'application/json'
+        return fixture.post('/api/research/agent/v1/' + name,
+                            content=json.dumps(arguments), headers=headers)
+    return fixture.post('/api/research/agent/v1/' + name, json=arguments, headers=headers)

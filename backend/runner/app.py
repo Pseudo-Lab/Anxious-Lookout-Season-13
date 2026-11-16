@@ -34,6 +34,7 @@ from . import native_policy as policy
 from . import stream as streams
 from .native_policy import Decision
 from app.page_scope import Scope, POLICIES, tool_allowed, turn_prompt, shell_allowed
+from app.research_tools import public_context_definitions
 
 
 class Turn(BaseModel):
@@ -1149,9 +1150,8 @@ class Native:
                     raise CodexFailure("policy_refused")
             else:
                 result = self.rpc("thread/start", {"model": self.model, "cwd": str(self.work),
-                                  **self.thread_policy, "config": config, "dynamicTools": [
-                                      tool for tool in body.tools if tool.get('name') == 'research_page_context'
-                                      and kind in {'public_document', 'public_post'}],
+                                  **self.thread_policy, "config": config,
+                                  "dynamicTools": public_context_definitions(),
                                   "historyMode": "legacy", "ephemeral": False})
             self.ensure_model(result, required=True)
             policy.check_thread(result, self.work)  # Applied to this thread, start and resume alike.

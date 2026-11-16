@@ -13,6 +13,13 @@ accepts only shell authorization and the narrow public `research_page_context`;
 owner research operations cannot use it. Public modes have no shell or research
 API grant and can read only their admitted snapshot/direct references.
 
+The server registers one canonical public loader at every native thread start.
+The pinned protocol cannot add dynamic tools on thread resume, so this preserves
+the original thread when moving from an owner page to a public page. Registration
+does not grant access: native and API callback boundaries both deny the loader
+in owner mode. Caller-supplied tool descriptions/schemas cannot replace it;
+owner research operations remain absent from the native catalog.
+
 The shared response validator `app/research_results.py` is preserved for API
 success/receipt validation. It validates actual serializer shapes and resource,
 version, saved destination, CAS and provenance relationships; arbitrary 2xx JSON

@@ -295,18 +295,25 @@ def test_old_schema_refuses_writing_and_never_falls_back_to_direct_tool_update(c
     session = create_session(client, auth)
     assert client.post('/api/research/sessions/'+session['id']+'/messages',
         json={'text': 'propose', 'expectedVersion': 1}, headers=headers(auth)).status_code == 202
+    from tests.research_api_fixture import grant_token
+    grant_token(client.app, session['id'], runner)
+    mutation_id = str(uuid.uuid4())
     with admin.begin() as db:
         original_marker = db.execute(text('SELECT version_num FROM research.alembic_version')).scalar_one()
         db.execute(text("UPDATE research.alembic_version SET version_num='0004_publication'"))
     try:
         assert client.post(ROOT, json={'title': '', 'content': ''}, headers=headers(auth)).status_code == 503
         reply = callback(client, session, runner, 'research_document_update', {'id': doc['id'],
-            'expectedVersion': 1, 'title': 'Not direct', 'content': 'Not direct', 'mutationId': str(uuid.uuid4())})
-        assert reply.status_code == 503
+            'expectedVersion': 1, 'title': 'Not direct', 'content': 'Not direct', 'mutationId': mutation_id})
+        assert reply.status_code == 503 and reply.json()['error']['code'] == 'not_ready'
         assert client.get('/api/research/documents/'+doc['id']).status_code == 503
         with admin.connect() as db:
             assert db.execute(text('SELECT content FROM research.versions WHERE item_id=:id'), {'id': doc['id']}).scalar_one() == doc['content']
             assert db.execute(text('SELECT count(*) FROM research.versions WHERE item_id=:id'), {'id': doc['id']}).scalar_one() == 1
+            assert db.execute(text('SELECT count(*) FROM research.idempotency WHERE key=:key'), {'key': mutation_id}).scalar_one() == 0
+            record = db.execute(text('SELECT native_record FROM research.conversations WHERE id=:id'), {'id': session['id']}).scalar_one()
+            assert record.get('researchCalls', []) == []
+        assert client.app.state.engine.pool.checkedout() == 0
     finally:
         with admin.begin() as db:
             db.execute(text('UPDATE research.alembic_version SET version_num=:marker'), {'marker': original_marker})

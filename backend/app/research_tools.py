@@ -88,6 +88,15 @@ def definitions():
             for name, (model, description) in TOOLS.items()]
 
 
+def public_context_definitions():
+    """Fixed public-only name, retained on a thread across page mode changes.
+
+    Codex0.160.1 has no dynamicTools override on thread/resume. Registration is
+    not authority: both callback boundaries still reject this name in owner mode.
+    """
+    return [tool for tool in definitions() if tool['name'] == 'research_page_context']
+
+
 def dispatch(store, name, arguments, context=None):
     if name not in TOOLS:
         fail("validation_error", "Unknown storage tool", 422)

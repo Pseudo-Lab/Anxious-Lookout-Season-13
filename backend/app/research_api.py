@@ -19,6 +19,16 @@ from .version_authors import VersionAuthor
 OPERATIONS = frozenset(TOOLS) - {'research_page_context'}
 
 
+def require_schema(connection):
+    from .research_schema_contract import validate_research
+    try:
+        revision = validate_research(connection)
+    except RuntimeError:
+        fail('not_ready', 'Research schema is not ready', 503)
+    if revision != '0008_version_authors':
+        fail('not_ready', 'Research schema is not ready', 503)
+
+
 def current_binding(db, owner, result):
     """Fresh SQL only, supplied connection. Never Registry._current/RPC/checkout."""
     from .runner_registry import Registry
@@ -107,9 +117,7 @@ def register(app, sessions, settings, response, runner_for):
                     raise
                 except Exception:
                     fail('research_turn_inactive', 'Research runner binding changed', 401)
-                from .research_schema_contract import validate_research
-                if validate_research(db.connection()) != '0008_version_authors':
-                    fail('not_ready', 'Research schema is not ready', 503)
+                require_schema(db.connection())
                 receipts.ensure_capacity(row, request_id)
                 resolve(row, token, metadata, datetime.now(timezone.utc))
                 if login.expires_at <= datetime.now(timezone.utc):

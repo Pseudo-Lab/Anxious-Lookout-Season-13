@@ -128,7 +128,8 @@ for line in sys.stdin:
             emit({"method": "turn/" + event, "params": {"threadId": early_thread, "turn": early}})
         if prompt == "/fixture/rerouted":
             emit({"method": "model/rerouted", "params": {"threadId": thread, "turnId": turn, "fromModel": params["model"], "toModel": "fixture-wrong-model", "reason": "highRiskCyberActivity"}})
-        tool = "research_page_context" if "/fixture/page-context" in prompt or "/fixture/page-reference " in prompt else "research_document_save"
+        public = page.get('kind') in {'public_document', 'public_post'}
+        tool = "research_page_context" if public or "/fixture/page-context" in prompt or "/fixture/page-reference " in prompt else "research_document_save"
         args = {} if tool == "research_page_context" else {"title": "Fixture document", "content": "Complete fixture tool input", "mutationId": str(uuid.uuid4())}
         post_step = None
         if '/fixture/post-propose' in prompt:
@@ -155,6 +156,9 @@ for line in sys.stdin:
             args["content"] = json.loads((path.parent / "auth.json").read_text())["tokens"]["access_token"]
         if "/fixture/page-reference " in prompt:
             args = {"materialId": prompt.split("/fixture/page-reference ", 1)[1].strip()}
+        if tool == 'research_page_context' and tool not in {entry['name'] for entry in records[thread]['tools']}:
+            emit({'id': identity, 'error': {'code': -32602, 'message': 'Public loader was not registered'}})
+            continue
         tool_id = "tool-" + turn
         pending = {"thread": thread, "turn": turn, "items": [{"id": "user-" + turn, "type": "userMessage", "content": params["input"]},
                    {"id": tool_id, "type": "dynamicToolCall", "tool": tool, "arguments": args}]}

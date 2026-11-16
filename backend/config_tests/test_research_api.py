@@ -55,6 +55,62 @@ def test_enable_refuses_non_https443_before_routes_or_credentials(monkeypatch):
                               SimpleNamespace(origin=origin), None, None)
 
 
+@pytest.mark.parametrize('revision', [None, '0007_post_blocks', RuntimeError('private schema detail')])
+def test_schema_drift_maps_to_fixed_503_without_exception_text(monkeypatch, revision):
+    from app.research_api import require_schema
+    def checked(_):
+        if isinstance(revision, Exception):
+            raise revision
+        return revision
+    monkeypatch.setattr('app.research_schema_contract.validate_research', checked)
+    with pytest.raises(ResearchError) as caught:
+        require_schema(None)
+    assert caught.value.status == 503 and caught.value.code == 'not_ready'
+    assert 'private' not in caught.value.message
+
+
+@pytest.mark.parametrize('name', ['runner_shell_authorize', 'research_page_context'])
+def test_internal_exceptions_stay_on_callback_helper_without_public_api_auth(monkeypatch, name):
+    from tests.test_page_chat import callback
+    monkeypatch.setattr('tests.research_api_fixture.call', lambda *a, **k: pytest.fail('Internal exception reached public API'))
+    posts = []
+    client = SimpleNamespace(post=lambda path, **kwargs: posts.append((path, kwargs)) or 'response')
+    runner = SimpleNamespace(last={'requestId': 'request', 'toolToken': 'internal-only'})
+    assert callback(client, {'id': 'session'}, runner, name, {}) == 'response'
+    assert posts[0][0] == '/api/internal/research/tools'
+    assert posts[0][1]['json']['name'] == name
+
+
+@pytest.mark.parametrize('kind', ['general', 'public_document'])
+def test_thread_catalog_is_canonical_public_exception_despite_body_schema_injection(monkeypatch, kind):
+    from app.research_tools import public_context_definitions
+    from config_tests.test_runner_stream_app import bare_native, scripted_turn
+    native = bare_native(monkeypatch=monkeypatch)
+    page = {'kind': kind, **({'resourceId': str(uuid4())} if kind == 'public_document' else {})}
+    tampered = [{'name': 'research_page_context', 'description': 'Attacker instructions',
+                 'inputSchema': {'type': 'object', 'additionalProperties': True}},
+                {'name': 'research_document_save', 'inputSchema': {}}]
+    requests = []
+    scripted_turn(native, monkeypatch, 'completed', [], tools=tampered, scope={'page': page},
+                  on_rpc=lambda method, params: requests.append((method, params)))
+    start = next(params for method, params in requests if method == 'thread/start')
+    assert start['dynamicTools'] == public_context_definitions()
+    assert [tool['name'] for tool in start['dynamicTools']] == ['research_page_context']
+
+
+def test_registered_public_loader_still_cannot_execute_in_owner_scope(monkeypatch):
+    from config_tests.test_runner_stream_app import bare_native
+    native = bare_native(monkeypatch=monkeypatch)
+    native.check_binding = lambda: None
+    requests = []
+    monkeypatch.setattr('runner.app.httpx.Client', lambda **kwargs: requests.append(kwargs) or pytest.fail('Owner callback reached HTTP'))
+    native.reply_tool({'id': 1, 'params': {'threadId': 'th', 'turnId': 'tu', 'callId': 'call',
+        'tool': 'research_page_context', 'arguments': {}}},
+        {'thread': 'th', 'turnId': 'tu', 'scope': {'page': {'kind': 'general'}}, 'request': 'r', 'session': 's'})
+    assert requests == [] and native.sent[0]['result']['success'] is False
+    assert json.loads(native.sent[0]['result']['contentItems'][0]['text'])['error']['code'] == 'tool_not_allowed'
+
+
 @pytest.mark.parametrize('damage', ['owner', 'request', 'conversation', 'hash', 'purpose', 'scope', 'archived', 'idle', 'public', 'revoke'])
 def test_changed_or_revoked_principal_cannot_use_cached_owner_or_scope(damage):
     row, token, metadata = principal()

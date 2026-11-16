@@ -19,7 +19,7 @@ from sqlalchemy import select, text
 from .models import Account, LoginSession
 from .research import Expected, Input, Store, ResearchError, fail, page_query, encode_cursor, parse_id, stamp
 from .research_models import Conversation
-from .research_tools import definitions, dispatch
+from .research_tools import public_context_definitions, dispatch
 from .codex_policy import MODEL, REASONS, ERRORS, RUNNER_PREFLIGHT_ERRORS, personal_origin_enabled
 from .page_scope import Page, resolve_scope, scope_summary, request_metadata, tool_allowed
 from . import research_credentials as credentials
@@ -432,9 +432,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                     return
                 metadata = request_metadata(row, request_id)
                 payload = {"requestId": str(request_id), "text": row.pending_text,
-                           "tools": [tool for tool in definitions() if tool['name'] == 'research_page_context'
-                                     and (metadata or {}).get('scope', {}).get('page', {}).get('kind')
-                                     in {'public_document', 'public_post'}], "toolToken": token,
+                           "tools": public_context_definitions(), "toolToken": token,
                            "scope": metadata["scope"] if metadata else {"page": {"kind": "general"}, "context": None}}
                 if research_grant is not None:
                     if not app.state.research_agent_api_enabled:

@@ -28,6 +28,8 @@ def test_public_router_requires_separate_bearer_and_internal_callback_cannot_use
     assert api.post(path, json={'type': 'document'}).status_code == 401
     assert api.post(path, json={'type': 'document'}, headers={
         'Authorization': 'Bearer ' + runner.last['toolToken']}).status_code == 401
+    assert api.post(path, json={'type': 'document', 'ownerId': str(uuid.uuid4())}, headers={
+        'Authorization': 'Bearer ' + token}).status_code == 422
     assert api.post('/api/research/agent/v1/research_post_publish', json={}, headers={
         'Authorization': 'Bearer ' + token}).status_code == 403
     internal = client.post('/api/internal/research/tools', json={'sessionId': session['id'],

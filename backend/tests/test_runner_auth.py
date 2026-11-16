@@ -35,15 +35,23 @@ def grant_fixture(tmp_path):
 def native_fixture(control, root, owner, monkeypatch, calls):
     original = HTTP_CLIENT
     def callback(request):
-        calls.append(json.loads(request.content))
-        return httpx.Response(200, json={"content": "Synthetic callback complete"})
+        value = json.loads(request.content)
+        calls.append(value)
+        assert value['name'] == 'research_page_context' and value['arguments'] == {}
+        return httpx.Response(200, json={'id': str(uuid.UUID(int=98)),
+            'documentId': str(uuid.UUID(int=97)), 'versionId': str(uuid.UUID(int=99)),
+            'title': 'Accepted synthetic snapshot', 'content': 'Synthetic callback complete', 'materials': []})
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: original(transport=httpx.MockTransport(callback), **kwargs))
     return Native(root, MODEL, "/usr/local/bin/codex-fixture", "http://fixture.invalid/tool", auth=PersonalAuth(control, owner))
 
 
 def message(text="Synthetic explicit turn"):
-    return Turn(requestId=uuid.uuid4(), text=text, tools=[], toolToken="s" * 40,
-                scope={"page": {"kind": "document_workspace"}})
+    # A permitted non-storage callback proves protocol progress without
+    # restoring removed owner dynamic tools or manufacturing an active grant.
+    from app.research_tools import definitions
+    return Turn(requestId=uuid.uuid4(), text=text,
+                tools=[tool for tool in definitions() if tool['name'] == 'research_page_context'], toolToken="s" * 40,
+                scope={"page": {"kind": "public_document", "resourceId": str(uuid.UUID(int=97))}})
 
 
 def test_fixed_model_applies_to_start_resume_turn_and_rejects_override(tmp_path, monkeypatch):

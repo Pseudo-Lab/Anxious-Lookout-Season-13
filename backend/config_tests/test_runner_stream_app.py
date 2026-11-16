@@ -92,7 +92,7 @@ def test_interrupt_only_this_running_request_and_once(monkeypatch):
     assert native.interrupt(SESSION, "req") == "not_running"
 
 
-def scripted_turn(native, monkeypatch, status, read_items):
+def scripted_turn(native, monkeypatch, status, read_items, *, tools=None, scope=None, on_rpc=None):
     """run_turn with scripted RPCs: thread/start, turn/start, then the completion, then thread/read."""
     monkeypatch.setattr(policy, "check_thread", lambda result, work: None)
     native.check_binding = lambda: None
@@ -107,6 +107,8 @@ def scripted_turn(native, monkeypatch, status, read_items):
 
     def rpc(method, params, turn=None):
         calls.append(method)
+        if on_rpc is not None:
+            on_rpc(method, params)
         if method == "thread/start":
             return {"thread": {"id": "th"}, "model": MODEL}
         if method == "turn/start":
@@ -126,7 +128,7 @@ def scripted_turn(native, monkeypatch, status, read_items):
             hub.note(message)
         native.completed[("th", "tu")] = {"status": status}
     native.receive = receive
-    body = runner_app.Turn(requestId=uuid.uuid4(), text="q", tools=[], toolToken="t" * 40)
+    body = runner_app.Turn(requestId=uuid.uuid4(), text="q", tools=tools or [], scope=scope, toolToken="t" * 40)
     native.run_turn(SESSION, body)
     assert not native.lock.locked()
     return calls

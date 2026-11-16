@@ -38,7 +38,7 @@ class HeldRunner:
 def callback(client, session, runner, name, arguments, **overrides):
     # Owner operations now use the public production router/DB transaction.
     # The runner status is a double; public context stays on its narrow callback.
-    if name != 'research_page_context' and not overrides:
+    if name not in {'research_page_context', 'runner_shell_authorize'} and not overrides:
         from tests.research_api_fixture import call
         result = call(client.app, session['id'], runner, name, arguments)
         if result is not None:
@@ -128,7 +128,9 @@ def test_general_descriptor_grants_owner_tools_not_old_public_context(client, ad
     from app.page_scope import OWNER_TOOLS
     assert reply.json()["page"] == {"kind": "general"} and reply.json()["allowedTools"] == OWNER_TOOLS and reply.json()["capability"] == "owner_research"
     assert runner.last["scope"] == {"page": {"kind": "general"}, "context": None}
-    assert runner.last['tools'] == []  # Production no longer provides native dynamic tools.
+    assert [tool['name'] for tool in runner.last['tools']] == ['research_page_context']
+    # The fixed public-only loader remains registered for later resume, but
+    # owner execution is denied and all owner operations use the HTTPS API.
     assert callback(client, session, runner, "research_list", {"type": "document"}).status_code == 200
     assert callback(client, session, runner, "research_document_save", {
         "mutationId": str(uuid.uuid4()), "title": "Draft", "content": "Draft"}).status_code == 200
@@ -202,7 +204,12 @@ def test_detail_scope_fixed_on_acceptance_reads_updates_conflicts_and_history(cl
     detail = client.get(root).json()
     assert detail["items"][0]["text"] == "work on this" and detail["items"][0]["page"] == accepted.json()["page"]
     assert detail["page"] == accepted.json()["page"]
-    assert callback(client, session, runner, "research_get", {"type": kind, "id": target["id"]}).status_code == 404
+    inactive = callback(client, session, runner, "research_get", {"type": kind, "id": target["id"]})
+    assert inactive.status_code == 401 and inactive.json()['error']['code'] == 'unauthenticated'
+    with admin.connect() as db:
+        terminal = db.execute(text('SELECT native_record FROM research.conversations WHERE id=:id'),
+                              {'id': session['id']}).scalar_one()
+    assert terminal['platformRequests'][0]['researchGrant']['hash'] is None
     # Same conversation, changing the page does not remove owner authority.
     runner.record = {"turns": runner.record["turns"]}
     runner.state = "running"

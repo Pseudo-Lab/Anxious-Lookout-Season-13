@@ -129,10 +129,8 @@ def test_codex_boundary_errors_have_safe_json_pointer(client,admin):
     with pytest.raises(ResearchError) as caught: Propose.model_validate(value)
     assert caught.value.details['path']=='/contentInput/text'
     assert caught.value.status==422
-    result=client.post('/api/internal/research/tools',content=json.dumps({
-        'sessionId':session['id'],'requestId':runner.last['requestId'],
-        'name':'research_post_save','arguments':value}),headers={
-        'Authorization':'Bearer '+runner.last['toolToken'],'Content-Type':'application/json'})
+    from tests.research_api_fixture import call
+    result=call(client.app,session['id'],runner,'research_post_save',value,raw_json=True)
     assert result.status_code==422,result.text
     assert result.json()['error']['details']['path']=='/contentInput/text'
 
