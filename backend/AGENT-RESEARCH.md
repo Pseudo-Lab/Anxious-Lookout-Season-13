@@ -43,6 +43,18 @@ use a compatible image; never downgrade or delete provenance to make an older
 image start. The compatible image and exact recovery procedure are deployment
 prerequisites and are not yet certified by this development checkpoint.
 
+For the development VM, PM fixed the exact cleanup targets on 2026-11-16: keep
+the `8804a971aa908586b451baac3341029bbc003805` candidate runtime and ordinary
+runner (or a later explicitly recorded review-passed candidate), including on
+C1 latency failure. Before applying 0008, import the separate storage-only
+fallback runtime and ordinary runner from
+`2e4da866bb12a1ad2bf2669917cff3e52899a185`. Select that pair only if the candidate
+API fails startup/health. Keep 0008 and all data in either case. The exact image
+metadata/archive are relayed through the review inbox; Docker config IDs must
+not be mistaken for imported manifest digests. Follow the full stop/binding,
+flags/session cleanup and certification steps in
+[the development procedure](../infra/hosting/m3/agent-research/DEV-VM.md).
+
 ## Verification ownership
 
 Back runs Docker pure unit tests. `config_tests/test_agent_saves.py` uses fake Store

@@ -131,13 +131,42 @@ fail and must stay unverified until actual evidence exists.
 
 ## Cleanup and recovery-image gate
 
-Stop the synthetic runner through normal lifecycle APIs, prove Pod/drain release,
-revoke the temporary browser session, and restore recorded VM image/flag bindings
-through the reviewed flow. Keep failed/ambiguous reservations and immutable
-evidence. Do not delete retained research or native records to hide a failed turn.
+PM decision (2026-11-16, #97): **keep 0008 and the candidate**, including when C1
+exceeds +1000 ms. Before applying 0008, import both exact-SHA storage fallback
+images below and record their containerd manifest digests. An archive on the
+host alone does not satisfy that prerequisite. DB downgrade and restoring the
+pre-migration database backup are not cleanup steps.
 
-For B3 separately, start the agreed 0008-compatible recovery image (source candidate
-storage checkpoint `2e4da866bb12a1ad2bf2669917cff3e52899a185` or a later reviewed
-compatible fix; record its built digest). On migrated 0008, prove existing owner
-reads and a new human save work with intact version provenance and signatures.
-The pre-#97 main image fails closed; DB downgrade is never a recovery step.
+Normal cleanup target:
+
+- API runtime and ordinary runner from source
+  `8804a971aa908586b451baac3341029bbc003805`, or a later review-passed candidate
+  explicitly recorded by PM. Keep the schema at 0008.
+- Stop the synthetic runner through normal lifecycle APIs, prove Pod/drain release,
+  and select the **ordinary runner** image through the reviewed STOPPED
+  binding-image flow. `retain` and `restart` benchmark images are never cleanup
+  targets. Do not restore the pre-0008 API image or its old runner image binding.
+- Restore only temporary measurement flags that were changed, retaining the
+  intended #90/#95 baseline. Revoke the temporary browser session and record
+  exact API/runner source and manifest digests plus the final stopped state.
+- If C1 fails, stop further model turns and lifecycle implementation, publish
+  the evidence, and await PM's next design decision. Keeping the candidate on
+  this isolated VM is not C1 acceptance, production approval, or permission to
+  run additional turns.
+
+Emergency fallback (only if the candidate API fails startup or health): runtime
+**and ordinary runner** from storage-only source
+`2e4da866bb12a1ad2bf2669917cff3e52899a185`. Use the separately supplied images and
+immutable metadata/archive, not a benchmark image. Keep 0008 and all research and
+native records. Change the API and the stopped runner binding through the reviewed
+image flow; verify research health, existing owner reads and a new human save.
+C1 threshold failure alone does not select this fallback. If this pair also fails
+health, keep the synthetic runner stopped and report the failure to PM; do not
+try an older API or downgrade/reset the database.
+
+For B3, certify the fallback's actual built/imported digests and the above
+0008-compatible read/save behavior on the development VM. Preserve signatures,
+version provenance, failed/ambiguous turn reservations and native evidence. The
+fallback source has passed storage probes but its VM recovery behavior is not
+certified until review records the actual result. This decision applies to the
+development VM; production recovery and rollout still need separate approval.
