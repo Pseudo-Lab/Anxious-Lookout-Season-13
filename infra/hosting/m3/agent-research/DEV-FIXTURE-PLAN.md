@@ -95,9 +95,16 @@ UID. It creates only synthetic canaries and token-free placeholder markers
 
 1. An old sandbox opens the exact grant file/FD and proves readonly access.
 2. Parent atomically replaces it with a fresh inode while that sandbox stays alive.
-3. Old FD and old path must still see only the old marker/inode; a fresh sandbox
-   must see the new marker. Sibling/parent listing, outside symlink, private
-   home/CODEX_HOME/control and parent/proc/fd reads must fail.
+3. Old FD and old path must still see only the old marker and the same device/
+   inode; a fresh sandbox must see the new marker. Reopening the authorized FD
+   through `/proc/self/fd` may be refused or expose only that same old inode and
+   marker, both before and after replacement. The virtual parent may refuse
+   listing or expose only the allowed filename `turn.json` (including an empty
+   filtered list). Original parent/sibling canaries, outside symlink, private
+   home/CODEX_HOME/control and external parent process/root/FD reads must fail.
+   The trusted parent holds a positively read control-canary FD across the probe;
+   its `/proc/<parent>/fd/<control-fd>` and FD listing remain inaccessible. Parent
+   FD numbers are passed only as non-secret locators and are not inherited.
 4. Only fixed boolean checks leave the sandbox; marker values/private data never
    become output. Process groups are bounded/killed and synthetic files removed.
 

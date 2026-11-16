@@ -96,17 +96,31 @@ def denied(path, listing=False, writing=False):
             with open(path, 'rb') as f: f.read(1)
     except OSError: return True
     return False
+def same_fd_view(path, identity):
+    try: source=open(path)
+    except OSError: return True  # Reopening an authorized FD need not be available.
+    with source:
+        try:
+            info=os.fstat(source.fileno())
+            return (info.st_dev,info.st_ino)==identity and json.load(source)=={'available':False,'probeMarker':'old'}
+        except (OSError,ValueError): return False
+def scoped_parent():
+    try: return set(os.listdir('/state/research-api')) <= {'turn.json'}
+    except OSError: return True  # A virtual parent may be unlistable.
 fd=os.open(grant, os.O_RDONLY|os.O_NOFOLLOW)
-before=os.fstat(fd).st_ino
+info=os.fstat(fd); before=(info.st_dev,info.st_ino)
 checks={'old_read': json.loads(os.read(fd,4096))=={'available':False,'probeMarker':'old'},
         'readonly':denied(grant,writing=True)}
-for name,path in [('sibling','/state/research-api/sibling'), ('home','/state/home/sentinel'),
+for name,path in [('sibling','/state/research-api/sibling'), ('parent-canary','/state/research-api/parent-canary'),
+                  ('home','/state/home/sentinel'),
                   ('control','/control/issue97-sentinel'), ('codex','/state/codex/sentinel'),
                   ('alias',str(work/'private-alias')), ('proc-parent','/proc/'+sys.argv[1]+'/environ'),
                   ('proc-root','/proc/'+sys.argv[1]+'/root/control/issue97-sentinel'),
-                  ('proc-self-fd','/proc/self/fd/'+str(fd))]:
+                  ('proc-control-fd','/proc/'+sys.argv[1]+'/fd/'+sys.argv[2])]:
     checks[name]=denied(path)
-checks['parent-list']=denied('/state/research-api',listing=True)
+checks['proc-parent-fds']=denied('/proc/'+sys.argv[1]+'/fd',listing=True)
+checks['proc-self-fd']=same_fd_view('/proc/self/fd/'+str(fd),before)
+checks['parent-list']=scoped_parent()
 checks['credential-env']=not any(k in os.environ for k in ('RUNNER_TOKEN','OPENAI_API_KEY','CODEX_API_KEY','ISSUE97_PARENT_CANARY'))
 (work/'ready').write_text('ready')
 until=time.monotonic()+15
@@ -116,7 +130,10 @@ while not (work/'advance').exists():
 os.lseek(fd,0,0)
 checks['old-fd']=json.loads(os.read(fd,4096))=={'available':False,'probeMarker':'old'}
 checks['old-path']=read(grant)=={'available':False,'probeMarker':'old'}
-checks['old-inode']=os.stat(grant).st_ino==before
+info=os.stat(grant)
+checks['old-inode']=(info.st_dev,info.st_ino)==before
+checks['proc-self-fd-after']=same_fd_view('/proc/self/fd/'+str(fd),before)
+checks['parent-list-after']=scoped_parent()
 os.close(fd)
 print(json.dumps(checks),flush=True)
 sys.exit(0 if all(checks.values()) else 1)
@@ -142,15 +159,21 @@ def replace_marker(marker):
 def inode():
     fresh_layout()
     process = None
+    control_fd = None
     try:
         for path in ROOTS:
             path.mkdir(mode=0o700)
-        for path in [GRANT.with_name('sibling'), ROOTS[2]/'sentinel', ROOTS[3]/'sentinel', Path('/control/issue97-sentinel')]:
+        for path in [GRANT.with_name('sibling'), GRANT.with_name('parent-canary'),
+                     ROOTS[2]/'sentinel', ROOTS[3]/'sentinel', Path('/control/issue97-sentinel')]:
             path.write_text('issue97-private-canary')
+        control_fd = os.open('/control/issue97-sentinel', os.O_RDONLY | os.O_NOFOLLOW)
+        if os.read(control_fd, 4096) != b'issue97-private-canary':
+            raise RuntimeError('Outside control FD is unavailable')
+        os.lseek(control_fd, 0, os.SEEK_SET)
         (WORK/'private-alias').symlink_to(GRANT.with_name('sibling'))
         replace_marker('old')
         old_inode = GRANT.stat().st_ino
-        process = subprocess.Popen(SANDBOX + ['python', '-I', '-c', INNER, str(os.getpid())],
+        process = subprocess.Popen(SANDBOX + ['python', '-I', '-c', INNER, str(os.getpid()), str(control_fd)],
             env=ENV, cwd=WORK, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, close_fds=True, start_new_session=True)
         until = time.monotonic() + 20
@@ -180,6 +203,8 @@ def inode():
     finally:
         if process is not None:
             stop(process)
+        if control_fd is not None:
+            os.close(control_fd)
         for path in ROOTS:
             if path.exists():
                 shutil.rmtree(path)
