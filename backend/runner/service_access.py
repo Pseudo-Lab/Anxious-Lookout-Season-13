@@ -19,7 +19,6 @@ from .access import AccessAuth, claims
 from .auth import read_private
 from .binding import canonical_uuid
 from . import stream_prefix
-from . import stream_retired
 from .projection import ProjectionJournal, BASE, MASK, rolling, merge_spans, redact
 from .service_store import ServiceStore, LEDGER, LEGACY, refuse, private_file
 
@@ -95,12 +94,17 @@ class ServiceJournal(ProjectionJournal):
         with self.auth.store.transaction() as db:
             metadata = self.auth._state(db)
             refuse(metadata['projectionKey'] == self.key.hex() and metadata['trialId'] == self.trial)
-            short = db.execute('SELECT MAX(length) FROM literals WHERE length <= ?', (limit,)).fetchone()[0] or 0
-            rows = set()
-            for length, filter_hash, digest, mac in db.execute(
-                    'SELECT length, filter, digest, mac FROM literals WHERE length > ?', (limit,)):
-                refuse(hmac.compare_digest(self.row_mac(length, int(filter_hash), digest), mac))
-                rows.add((length, digest))
+            short, rows = self._stream_rows(db, limit)
+        return short, rows
+
+    def _stream_rows(self, db, limit):
+        """Read within an already validated service transaction (also used by the stream generation)."""
+        short = db.execute('SELECT MAX(length) FROM literals WHERE length <= ?', (limit,)).fetchone()[0] or 0
+        rows = set()
+        for length, filter_hash, digest, mac in db.execute(
+                'SELECT length, filter, digest, mac FROM literals WHERE length > ?', (limit,)):
+            refuse(hmac.compare_digest(self.row_mac(length, int(filter_hash), digest), mac))
+            rows.add((length, digest))
         return short, rows
 
     def text(self, value):
@@ -116,6 +120,7 @@ class ServiceAccessAuth(AccessAuth):
         self.expected_account = expected_account
         self.store = ServiceStore(self.control)
         self.mutex = threading.RLock()
+        self._stream_installed = None  # immutable validated claims, published with the snapshot under mutex
 
     def _validate(self, value):
         refuse(isinstance(value, dict) and set(value) == FIELDS and type(value['version']) is int
@@ -221,8 +226,6 @@ class ServiceAccessAuth(AccessAuth):
                 self._save(db, ledger)
                 journal = ServiceJournal(self, ledger)
                 journal.remember(db, literals)  # Atomic redaction history + snapshot.
-                # #95 (review r1): "observation began" commits with this snapshot (switch on only)
-                first_observed = stream_retired.mark_seen(db, journal) if stream_retired.enabled() else False
             # Publish plaintext only after the durable commit has succeeded.
             self.snapshot = {'accessToken': envelope['accessToken'], 'chatgptAccountId': account}
             plan = value.get('https://api.openai.com/auth', {}).get('chatgpt_plan_type')
@@ -231,13 +234,47 @@ class ServiceAccessAuth(AccessAuth):
             self.secrets = literals  # Historical plaintext need not stay in memory.
             self.latest_secrets = literals  # #94 (8): the installed credential (here equal to `secrets`)
             self.journal = journal
+            self._stream_installed = (digest, account, value['exp'] - 60, frozenset(literals))
             # #90 r4: prefix fingerprints after the committed journal rows; never raises (failure = legacy).
             stream_prefix.remember(self.control, journal, literals)
-            # #95 B1: the kinds of this install's literals and its provider times, for the retired-literal holdback
-            # (STREAM_RETIRED only; never raises; a missing record never excludes anything).
-            stream_retired.observe_install(self.control, journal, envelope['accessToken'],
-                                           [item for item in literals if item != envelope['accessToken']],
-                                           value.get('iat'), value['exp'], first=first_observed)
+
+    def stream_generation(self):
+        """#99, switch on only: refresh and verify one coherent installed credential under the install mutex.
+
+        Fuse the existing refresh, generation and row reads into one validated store transaction, rather than
+        adding a ledger transaction to each flush. No sidecar, provider call, clock or history-count proof.
+        A missing/stale snapshot keeps the full holdback; invalid storage/context still raises (text stops).
+        """
+        with self.mutex:
+            journal = self.journal
+            current, latest = set(self.secrets), set(self.latest_secrets or ())
+            with self.store.transaction() as db:
+                ledger = self._state(db)
+                refuse(journal.owner == self.owner and journal.trial == ledger['trialId']
+                       and journal.key.hex() == ledger['projectionKey'])
+                state = 'snapshot_missing'
+                if self.snapshot:
+                    state = 'snapshot_mismatch'
+                    access = self.snapshot.get('accessToken')
+                    installed = self._stream_installed
+                    if (isinstance(access, str) and fingerprint(access) == ledger['snapshotFingerprint']
+                            and self.snapshot.get('chatgptAccountId') == ledger['accountId']
+                            and installed is not None
+                            and installed[:3] == (ledger['snapshotFingerprint'], ledger['accountId'], ledger['deadline'])):
+                        # Rebuild from install-validated claims, not possibly empty/stale secrets/latest. Do not
+                        # reparse a JWT or re-run its install-time expiry gate on every flush of an existing turn.
+                        current |= installed[3]
+                        latest |= installed[3]
+                        state = 'unconditional'
+                # Same refresh as remember_secrets(), with reconstructed current literals protected as well.
+                journal.remember(db, current)
+                verified = journal._stream_rows(db, stream_prefix.P)
+                count = db.execute('SELECT COUNT(*) FROM literals').fetchone()[0]
+                identity = (ledger['snapshotId'], ledger['snapshotFingerprint'])
+            stream_prefix.remember(self.control, journal, current)
+            hold = stream_prefix.policy(journal, self.control, current, latest,
+                                        retired=(state, identity), verified=verified)
+            return id(journal), count, hold
 
     def attach(self, codex_home):
         with self.mutex:
@@ -319,3 +356,8 @@ class ServiceAccessAuth(AccessAuth):
 
     def status(self):
         return {}  # No trial remainingAdmissions/accessExpiresAt fields.
+
+    def close(self, clean=False):
+        with self.mutex:
+            self._stream_installed = None
+            super().close(clean)

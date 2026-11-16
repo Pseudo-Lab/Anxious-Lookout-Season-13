@@ -110,6 +110,8 @@ class Sanitizer:
             return (None, 0, HoldPolicy.none())
         for _ in range(3):  # `secrets` can change size while another thread installs a credential
             try:
+                if getattr(self.auth, "service", False) and stream_retired.enabled():
+                    return self.auth.stream_generation()  # #99: coherent ledger/current snapshot, install mutex
                 self.auth.refresh_projection_secrets()  # current secrets enter the journal (and fingerprints) first
                 journal = self.auth.journal
                 count, _ = journal.generation()
@@ -120,12 +122,7 @@ class Sanitizer:
                 # an over-report of "current" (never of "retired", which would favour the §6 B case)
                 latest = [value for value in list(latest or ()) if isinstance(value, str)] or None
                 control = getattr(self.auth, "control", None)
-                retired = None
-                if getattr(self.auth, "service", False) and stream_retired.enabled():
-                    # #95 B1: rows proven retired and expired leave the holdback only (service mode, switch on);
-                    # the protected set is computed again inside the policy, so this is a candidate list.
-                    retired = stream_retired.excluded(control, journal, frozenset())
-                return (id(journal), count, hold_policy(journal, control, current, latest, retired))
+                return (id(journal), count, hold_policy(journal, control, current, latest))
             except RuntimeError:
                 continue
             except Exception:
@@ -247,7 +244,8 @@ class Turn:
         self.started_at = time.monotonic()
         self.stats = {"deltaIn": {}, "eventsOut": 0, "eventBytes": 0, "flushes": 0, "compactions": 0,
                       "firstDeltaMs": None, "firstEventMs": None, "holdbackPeakChars": 0, "legacyL": 0, "legacyCurrentL": 0,
-                      "legacyRetiredL": 0, "retiredState": "off", "retiredExcludedProven": 0, "retiredExcludedAssumed": 0,
+                      "legacyRetiredL": 0, "retiredState": "off", "retiredExcludedRows": 0,
+                      "retiredFallbackMissing": 0, "retiredFallbackMismatch": 0,
                       "cutDelayPeakChars": 0,
                       "bufferPeakBytes": 0, "outputDroppedBytes": 0, "subscribersPeak": 0, "staleFlushes": 0}
         self.samples = deque(maxlen=SAMPLE_RING)
@@ -697,12 +695,11 @@ class Hub:
             # #94 (8): the split of legacyL - a current-credential literal without a fingerprint, or only earlier ones
             turn.stats["legacyCurrentL"] = max(turn.stats["legacyCurrentL"], getattr(before[2], "legacy_current", 0))
             turn.stats["legacyRetiredL"] = max(turn.stats["legacyRetiredL"], getattr(before[2], "legacy_retired", 0))
-            # #95 B1: the retired-literal record state of the plan and how many rows it took out of the holdback
+            # #99: exclusion count and fallback reasons, never values or fingerprints.
             turn.stats["retiredState"] = getattr(before[2], "retired_state", "off")
-            turn.stats["retiredExcludedProven"] = max(turn.stats["retiredExcludedProven"],
-                                                      getattr(before[2], "retired_excluded", 0))
-            turn.stats["retiredExcludedAssumed"] = max(turn.stats["retiredExcludedAssumed"],
-                                                       getattr(before[2], "retired_excluded_assumed", 0))
+            turn.stats["retiredExcludedRows"] = max(turn.stats["retiredExcludedRows"], before[2].retired_excluded)
+            turn.stats["retiredFallbackMissing"] += int(before[2].retired_state == 'snapshot_missing')
+            turn.stats["retiredFallbackMismatch"] += int(before[2].retired_state == 'snapshot_mismatch')
             turn.stats["cutDelayPeakChars"] = max([turn.stats["cutDelayPeakChars"]] + delays)
             if before != after:
                 # A literal was observed meanwhile: nothing of this pass is published (text, output or summary).
