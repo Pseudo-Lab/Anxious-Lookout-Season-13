@@ -22,12 +22,13 @@ PROFILE = {':minimal': 'read', ':workspace_roots': {'.': 'write'}, '/control': '
            str(ROOT / 'home'): 'deny'}
 SYSTEM = {'default_permissions': 'native', 'approvals_reviewer': 'user', 'agents': {'enabled': False},
           'shell_environment_policy': {'set': {'HOME': '/usr/local/share/anxious-shell-home'}},
-          'permissions': {'native': {'filesystem': PROFILE}}}
+          'permissions': {'native': {'filesystem': {**PROFILE, str(ROOT / 'research-api' / 'turn.json'): 'read'},
+                                     'network': {'enabled': True}}}}
 REQUIREMENTS = {'allowedApprovalPolicies': ['untrusted'], 'allowedApprovalsReviewers': ['user'],
                 'featureRequirements': {'unified_exec': False, 'multi_agent_v2': False, 'view_image': False,
                                         'goals': False}}
 THREAD_POLICY = {'approvalPolicy': 'untrusted', 'approvalsReviewer': 'user', 'activePermissionProfile': {'id': 'native'},
-                 'sandbox': {'type': 'workspaceWrite', 'writableRoots': [], 'networkAccess': False}}
+                 'sandbox': {'type': 'workspaceWrite', 'writableRoots': [], 'networkAccess': True}}
 
 
 def emit(body):

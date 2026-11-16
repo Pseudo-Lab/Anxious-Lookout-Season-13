@@ -28,14 +28,16 @@ LABEL = 'anxious.io/'
 # containers exit 0. 20s covers the app-server stop escalation (EOF, terminate, kill: 5s each);
 # it is not an upper bound of every close path (Native worker join alone allows 20s).
 GRACE_SECONDS = 20
-# #90 P5-0: process env of the components that render and verify runner Pods (runner-controller, API) -> runner Pod
+# Optional rollout flags: process env of runner-controller/API -> runner Pod.
+# #97 adds the separately approved research-grant enable; no credential is an env value.
 # env. Default false: no key is added and the Pod is rendered exactly as before. Only the exact value "true" is passed.
 STREAM_FLAGS = (("CODEX_RUNNER_STREAM_TEXT", "RUNNER_STREAM_TEXT"), ("CODEX_RUNNER_STREAM_TRACE", "STREAM_TRACE"),
-                ("CODEX_RUNNER_STREAM_RETIRED", "STREAM_RETIRED"))  # #95 B1: the retired-literal kill switch (default off)
+                ("CODEX_RUNNER_STREAM_RETIRED", "STREAM_RETIRED"),
+                ("CODEX_RUNNER_RESEARCH_API_ENABLE", "RUNNER_RESEARCH_API_ENABLE"))
 
 
 def stream_env():
-    """The runner Pod's #90 stream env for this process: {} by default. Anything but "true"/"false" refuses."""
+    """Optional runner rollout env: {} by default; only exact true/false are accepted."""
     result = {}
     for source, target in STREAM_FLAGS:
         value = os.environ.get(source, "false")

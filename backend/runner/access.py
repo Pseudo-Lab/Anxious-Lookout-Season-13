@@ -186,7 +186,11 @@ class AccessAuth:
 
     def sanitize(self, value):
         self.remember_secrets()
-        return self.journal.sanitize(value)
+        result = self.journal.sanitize(value)
+        if getattr(self, 'research_api_redaction', False):
+            from app.research_credentials import redact
+            result = redact(result)
+        return result
 
     def projection_mac(self, session, thread, record):
         return self.journal.projection_mac(session, thread, record)

@@ -23,6 +23,8 @@ def change_permissions(url, github_id, approved, role, actor, reason):
             account.updated_at = datetime.now(timezone.utc)
             db.add(PermissionAudit(actor=actor, account_id=account.id, reason=reason, before=before, after={"role": role, "isApproved": approved}))
             db.execute(delete(LoginSession).where(LoginSession.account_id == account.id))
+            from .research_credentials import revoke_sessions
+            revoke_sessions(db, owner=account.id)
     finally:
         engine.dispose()
 

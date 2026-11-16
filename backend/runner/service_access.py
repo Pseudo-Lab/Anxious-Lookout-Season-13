@@ -318,6 +318,19 @@ class ServiceAccessAuth(AccessAuth):
             with self.store.transaction() as db:
                 self._check(self._state(db))
 
+    def research_authorized(self):
+        """Fresh local auth only; never refresh/RPC or wait behind an install."""
+        if not self.mutex.acquire(blocking=False):
+            return False
+        try:
+            with self.store.transaction(blocking=False, timeout=.1) as db:
+                self._check(self._state(db))
+            return True
+        except Exception:
+            return False
+        finally:
+            self.mutex.release()
+
     def consume(self, request):
         request = canonical_uuid(request)
         with self.mutex, self.store.transaction() as db:

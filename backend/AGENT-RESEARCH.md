@@ -3,8 +3,8 @@
 Branch: `task/agent-research-api-97`. The approved direction is owner native shell
 calling the public research HTTPS API using the `anxious-research` skill/CLI.
 MCP, per-turn process restarts, persistent peers, mutation fences, settlement/ACK
-and benchmark images are removed. This removal checkpoint does not yet enable
-research API credentials or certify a release.
+and benchmark images are removed. The API/CLI implementation is a review
+candidate, with credential issuance disabled by default, not a certified release.
 
 Document/material/post direct saves, immutable versions, CAS, idempotency, server
 Codex conversation authors, retained proposals and human drafts are preserved.
@@ -37,6 +37,53 @@ that old state. The superseded persistent candidate was not deployed according
 to review's VM record; verify actual state rather than assuming it is absent.
 
 ## Activation and validation
+
+`POST <basePath>/api/research/agent/v1/{operation}` accepts the existing owner
+operation JSON with a purpose-separated turn Bearer. It does not accept cookies,
+PATs or internal callback tokens as research authority. Human APIs retain their
+cookie+CSRF checks. Owner admission issues a token only with
+`RESEARCH_AGENT_API_ENABLE=true` and the dynamic user-runner transport selected.
+Runner/controller/API Pod-rendering configuration must separately set
+`CODEX_RUNNER_RESEARCH_API_ENABLE=true`, which renders
+`RUNNER_RESEARCH_API_ENABLE=true` in the Pod. Both flags default false. Enabling
+them or deploying the new network profile requires the independent gates below.
+
+The native profile allows network under unchanged D1 and one exact read-only
+`/state/research-api/turn.json` root. No directory/writable root or Pod security
+grant is added. Placeholder/grant changes use fresh inode atomic replacement.
+Plaintext is never persisted in API metadata or injected into prompts/env/argv.
+The runner journals it before file exposure, invalidates authority in memory on
+reader refusal/completion/interrupt/EOF and clears the file in worker cleanup.
+Private raw working native files may contain an echoed token; they remain
+inaccessible to the user/API/sandbox and must be invalid before preservation.
+
+Authentication does candidate lookup (connection returned), bound live runner
+status (connection returned), then a fresh locked transaction in Account→mutation
+lock→Conversation order. No final-transaction RPC/nested checkout occurs. Status
+uses a nonblocking local service-auth read, never Native RPC/callback or refresh.
+The authorization deadline is15s, positive status freshness5s, pool wait at most3s
+(early refusal if it cannot fit), SQL3s/lock1s/status HTTP2s. Already observed
+requests can finish under the original C/R; this is not an atomic native drain.
+
+Token hard TTL is min(30min, original login expiry), independent of overall turn
+length. Expiry is401 research_token_expired; no renewal/retry/replay. New admission,
+terminal refresh, interrupt, logout, role change and restore revoke hashes under
+conversation locks. Every call rechecks fresh login/role/scope and binding before
+idempotency replay. Schema008 and original authors remain unchanged.
+
+API mutations and strict safe receipts share one commit. Failed actions roll back
+their savepoint before a fixed failure receipt; unknown commit is never success.
+`GET <basePath>/api/research/sessions/{id}/research-calls` uses ordinary owned cookie
+authentication and reads those records without refreshing native history/writing.
+Refresh preserves API-owned receipts/grants; #90 SSE remains DB-write-free.
+Current and retired research token syntax is always redacted. A durable usage
+marker keeps a fixed124-character streaming syntax holdback across restart,
+including uncovered retired tokens, without changing #95/#99 provider flags.
+
+The root-owned CLI exposes `schema [operation]` and JSON stdin operation calls.
+It reads the fixed file, verifies HTTPS443 against the explicit platform CA,
+ignores proxy/CA/keylog env, follows no redirect and has a60s wall limit without
+retry. See the root-owned `anxious-research` skill for direct-save/CAS guidance.
 
 The approved B0 is recorded on #97:
 https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/97#issuecomment-6920408220

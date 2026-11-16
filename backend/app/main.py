@@ -306,6 +306,8 @@ def create_app(settings=None):
                     # Keep the session if cleanup fails so the user can retry.
                     # The runtime fences dispatch before attempting deletion.
                     stop_runtime(app, owner)
+                from .research_credentials import revoke_sessions
+                revoke_sessions(db, owner=owner, login_hash=session.token_hash)
                 db.delete(session)
         response = Response(status_code=204, headers={"Cache-Control": "no-store"})
         clear_cookie(response, SESSION_COOKIE, settings.cookie_path)

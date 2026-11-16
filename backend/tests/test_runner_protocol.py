@@ -111,7 +111,8 @@ def test_offline_native_protocol_tool_roundtrip_and_process_restart(tmp_path, mo
     root = tmp_path / "account-one"
     native = Native(root, "gpt-6.1-sol", "/usr/local/bin/codex-fixture", "https://fixture.invalid/tools")
     session, request = str(uuid.uuid4()), uuid.uuid4()
-    body = Turn(requestId=request, text="Save fixture", tools=definitions(), toolToken="t" * 40, scope={"page": {"kind": "document_workspace"}})
+    scope = {'page': {'kind': 'public_document', 'resourceId': str(uuid.uuid4())}}
+    body = Turn(requestId=request, text="/fixture/page-context", tools=definitions(), toolToken="t" * 40, scope=scope)
     try:
         native.accept(session, body)
         first = wait_idle(native, session)
@@ -126,11 +127,11 @@ def test_offline_native_protocol_tool_roundtrip_and_process_restart(tmp_path, mo
         assert restarted.read(session)["record"] == first["record"]
         restarted.accept(session, body)
         assert len(requests) == 1
-        restarted.accept(session, Turn(requestId=uuid.uuid4(), text="Continue fixture", tools=definitions(), toolToken="u" * 40, scope={"page": {"kind": "document_workspace"}}))
+        restarted.accept(session, Turn(requestId=uuid.uuid4(), text="/fixture/page-context followup", tools=definitions(), toolToken="u" * 40, scope=scope))
         continued = wait_idle(restarted, session)
         assert len(continued["record"]["turns"]) == 2 and len(requests) == 2
         item = continued["record"]["turns"][0]["items"][1]
-        assert item["arguments"]["content"] == "Complete fixture tool input"
+        assert item['tool'] == 'research_page_context' and item['arguments'] == {}
         assert "Complete fixture output" in item["contentItems"][0]["text"]
     finally:
         restarted.close()
@@ -172,15 +173,15 @@ def test_document_update_fixture_command(tmp_path, monkeypatch, valid):
         if not valid:
             assert result["state"] == "failed" and calls == []
             return
-        assert result["state"] == "idle" and len(calls) == 1
+        assert result["state"] == "idle" and calls == []
         item = result["record"]["turns"][0]["items"][1]
         assert item["tool"] == "research_document_update"
         assert item["arguments"]["id"] == document
         assert item["arguments"]["expectedVersion"] == 7
         assert item["arguments"]["content"] == "Complete fixture proposal content"
-        assert "pending" in item["contentItems"][0]["text"]
+        assert item['status'] == 'failed' and 'tool_not_allowed' in item['contentItems'][0]['text']
         native.accept(session, body)
-        assert len(calls) == 1
+        assert calls == []
     finally:
         native.close()
 
@@ -239,10 +240,10 @@ def test_native_turn_binding_waits_for_start_response_and_rejects_stale_calls(mo
     native.auth, native.blocked_reason = None, None
     native.callback_url, native.send = "https://fixture.invalid/tools", sent.append
     turn = {"thread": "same-thread", "turnId": None, "pendingTools": [], "session": str(uuid.uuid4()),
-            "request": str(uuid.uuid4()), "token": "private-current-token", "scope": {"page": {"kind": "document_workspace"}}}
+            "request": str(uuid.uuid4()), "token": "private-current-token", "scope": {"page": {"kind": "public_document"}}}
     for identity, native_turn in (("old-call", "previous-turn"), ("new-call", "current-turn")):
         native.messages.put({"id": identity, "method": "item/tool/call", "params": {"callId": identity,
-                            "threadId": "same-thread", "turnId": native_turn, "tool": "research_list", "arguments": {"type": "document"}}})
+                            "threadId": "same-thread", "turnId": native_turn, "tool": "research_page_context", "arguments": {}}})
     native.messages.put({"id": 7, "result": {"turn": {"id": "current-turn"}}})
     started = native.rpc("turn/start", {"threadId": "same-thread", "input": []}, turn)
     assert calls == [] and len(turn["pendingTools"]) == 2
@@ -253,7 +254,7 @@ def test_native_turn_binding_waits_for_start_response_and_rejects_stale_calls(mo
     assert next(reply for reply in sent if reply.get("id") == "old-call")["result"]["success"] is False
     native.completed[("same-thread", "current-turn")] = {"status": "completed"}
     native.reply_tool({"id": "late", "params": {"callId": "late", "threadId": "same-thread", "turnId": "current-turn",
-                      "tool": "research_list", "arguments": {"type": "document"}}}, turn)
+                      "tool": "research_page_context", "arguments": {}}}, turn)
     assert len(calls) == 1
 
 
@@ -268,8 +269,9 @@ def test_history_rpc_does_not_reject_admission_and_keeps_true_busy_dedup(tmp_pat
     reading, release = threading.Event(), threading.Event()
     reader_result, reader_errors = [], []
     session = str(uuid.uuid4())
-    first = Turn(requestId=uuid.uuid4(), text="first", tools=definitions(), toolToken="t" * 40, scope={"page": {"kind": "document_workspace"}})
-    second = Turn(requestId=uuid.uuid4(), text="explicit followup", tools=definitions(), toolToken="u" * 40, scope={"page": {"kind": "document_workspace"}})
+    scope = {'page': {'kind': 'public_document', 'resourceId': str(uuid.uuid4())}}
+    first = Turn(requestId=uuid.uuid4(), text="/fixture/page-context", tools=definitions(), toolToken="t" * 40, scope=scope)
+    second = Turn(requestId=uuid.uuid4(), text="/fixture/page-context followup", tools=definitions(), toolToken="u" * 40, scope=scope)
     try:
         native.accept(session, first)
         assert wait_idle(native, session)["state"] == "idle"

@@ -11,6 +11,19 @@ in a command, prompt, research content or output. Public pages provide only the
 non-shell `research_page_context` loader for the admitted snapshot and direct
 references; do not use shell or owner operations there.
 
+Discover arguments with `anxious-research schema` or
+`anxious-research schema research_material_save`. Call an operation by piping its
+JSON arguments to the fixed CLI, for example:
+
+```sh
+printf '%s' '{"type":"document","limit":30}' | anxious-research research_list
+```
+
+The CLI reads `/state/research-api/turn.json` itself. There is no token argument,
+custom endpoint, proxy, redirect, TLS bypass or automatic retry option. It returns
+the API JSON and exits nonzero on error. Use the schema for mutation payloads;
+do not guess fields or use curl with a token literal.
+
 Collect source text as materials, synthesize documents, then write posts from
 chosen documents and materials. Preserve sourceUrl, actual collectedAt and
 contentKind: full only for a complete captured source, excerpt for a portion,

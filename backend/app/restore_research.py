@@ -61,6 +61,8 @@ def restore_candidate(url, password, expected_database):
             # personal conversations, versions, relations or original homes.
             connection.execute(text("DELETE FROM auth.sessions"))
             connection.execute(text("DELETE FROM auth.oauth_transactions"))
+            from .research_credentials import revoke_sessions
+            revoke_sessions(connection)
             if marker in {"0003_sessions", "0004_publication", "0005_writing", "0006_posts", "0007_post_blocks", "0008_version_authors"}:
                 connection.execute(text("""
                     UPDATE research.conversations

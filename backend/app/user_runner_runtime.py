@@ -120,6 +120,8 @@ class BoundRunner:
         runtime = self.runtime
         runtime.namespace()
         # Serialize dispatch with stop; never use a stale cached Pod address.
+        from .research_api_budget import checkout
+        checkout()
         with runtime.engine.begin() as db:
             Registry(db)._eligible(self.owner)
             state = runtime.state(db, self.owner)
@@ -136,11 +138,24 @@ class BoundRunner:
             from .conversations import Runner
             result = Runner('http://'+host+':8080', runtime.token, self.owner, str(state.state_id)).call(method, path, body)
             require(result.get('podUid') == str(state.pod_uid))
+            if path.endswith('/research-authorize'):
+                # This generation is trusted transport evidence from the locked
+                # registry, bound to the live authenticated Pod UID, not input
+                # from the sandbox/HTTP caller or an inferred Pod env default.
+                result = {**result, 'generation': state.generation}
             return result
 
     def interrupt(self, identity, request_id):
         # #90 Stop: an ordinary POST call, so the same check -> dispatch transaction as every runner write.
         return self.call('POST', '/sessions/'+str(identity)+'/interrupt', {'requestId': str(request_id)})
+
+    def research_authorize(self, identity, request_id):
+        return self.call('POST', '/sessions/'+str(identity)+'/research-authorize', {'requestId': str(request_id)})
+
+    def research_binding(self, db, result):
+        from .research_api import current_binding
+        state = current_binding(db, self.owner, result)
+        require(Identity.of(state) == self.runtime.plan.identity)
 
     def stream_target(self, identity):
         """#90: the same Pod checks as a GET call, read inside one registry transaction. Only the address is

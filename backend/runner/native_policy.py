@@ -84,6 +84,7 @@ def covers_codex_runtime_root(path, root):
 def filesystem(root):
     """The effective `permissions.native.filesystem` table, as config/read returns it."""
     table = {':minimal': 'read', ':workspace_roots': {'.': 'write'}}
+    table[str(PurePosixPath(root) / 'research-api' / 'turn.json')] = 'read'
     table.update({path: 'deny' for path in deny_paths(root)})
     return table
 
@@ -98,7 +99,7 @@ def system_config(root):
     return {'default_permissions': PROFILE, 'approvals_reviewer': 'user',
             'agents': {'enabled': False},
             'shell_environment_policy': {'set': {'HOME': SHELL_HOME}},
-            'permissions': {PROFILE: {'filesystem': filesystem(root)}}}
+            'permissions': {PROFILE: {'filesystem': filesystem(root), 'network': {'enabled': True}}}}
 
 
 def requirements(root):
@@ -162,7 +163,8 @@ def check_requirements(result):
 
 def without_nulls(value):
     """config/read fills every unset field with null (measured on 0.160.1: permissions.native gets description,
-    extends, network, workspace_roots and filesystem.glob_scan_max_depth as null). Dropping only nulls keeps the
+    extends, workspace_roots and filesystem.glob_scan_max_depth as null). The configured network is retained.
+    Dropping only nulls keeps the
     comparison exact: any set field, expected or not, still counts."""
     if isinstance(value, dict):
         return {key: without_nulls(item) for key, item in value.items() if item is not None}
@@ -205,11 +207,11 @@ def check_thread(result, work):
     require(result.get('approvalsReviewer') == 'user', 'thread.approvals_reviewer')
     require(isinstance(profile, dict) and profile.get('id') == PROFILE, 'thread.permission_profile')
     require(result.get('cwd') == str(work), 'thread.cwd')
-    # The only writable and project root is the workspace; no extra writable root, no network.
+    # One workspace writable root; network uses unchanged #62 D1 egress policy.
     require(result.get('runtimeWorkspaceRoots') == [str(work)], 'thread.workspace_roots')
     sandbox = result.get('sandbox')
     require(isinstance(sandbox, dict) and sandbox.get('type') == 'workspaceWrite'
-            and sandbox.get('writableRoots') == [] and sandbox.get('networkAccess') is False, 'thread.sandbox')
+            and sandbox.get('writableRoots') == [] and sandbox.get('networkAccess') is True, 'thread.sandbox')
 
 
 COMMAND_FIELDS = frozenset({'kind', 'threadId', 'turnId', 'itemId', 'startedAtMs', 'approvalId', 'environmentId',

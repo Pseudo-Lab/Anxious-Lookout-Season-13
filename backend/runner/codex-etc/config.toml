@@ -20,6 +20,10 @@ HOME = "/usr/local/share/anxious-shell-home"
 "/control" = "deny"
 "/run/codex-broker" = "deny"
 "/state/home" = "deny"
+"/state/research-api/turn.json" = "read"
+
+[permissions.native.network]
+enabled = true
 
 [permissions.native.filesystem.":workspace_roots"]
 "." = "write"

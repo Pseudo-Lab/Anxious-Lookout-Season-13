@@ -30,13 +30,14 @@ class FixtureRunner:
     def submit(self, identity, body):
         self.dispatches += 1
         self.last = body
+        self.session_id, self.state = identity, 'running'
         record_file = self.root / (str(identity) + ".json")
         previous = json.loads(record_file.read_text()) if record_file.exists() else {"record": {"turns": []}}
         arguments = {"mutationId": str(uuid.uuid4()), "title": "Saved by tool", "content": "Complete [link](https://example.com)"}
         with TestClient(self.app, base_url=self.app.state.settings.origin, raise_server_exceptions=False) as tool_client:
-            result = tool_client.post("/api/internal/research/tools", json={"sessionId": str(identity), "requestId": body["requestId"],
-                         "name": "research_document_save", "arguments": arguments}, headers={"Authorization": "Bearer " + body["toolToken"]})
-            allowed = body.get("scope", {}).get("page", {}).get("kind") not in {None, "public_document"}
+            from tests.test_page_chat import callback
+            result = callback(tool_client, {'id': str(identity)}, self, 'research_document_save', arguments)
+            allowed = body.get("scope", {}).get("page", {}).get("kind") not in {None, "public_document", "public_post"}
             assert result.status_code == (200 if allowed else 403), result.text
         turn = {"id": str(uuid.uuid4()), "items": [{"id": "user-" + body["requestId"], "type": "userMessage", "content": [{"type": "text", "text": body["text"]}]},
                 {"id": "tool-" + body["requestId"], "type": "dynamicToolCall", "tool": "research_document_save", "arguments": arguments,
@@ -45,6 +46,7 @@ class FixtureRunner:
         record = {"ownerId": str(self.owner), "requestId": body["requestId"], "turnId": turn["id"], "state": "idle",
                   "record": {"turns": previous["record"]["turns"] + [turn]}}
         record_file.write_text(json.dumps(record))
+        self.state = 'idle'
         return record
 
     def read(self, identity):

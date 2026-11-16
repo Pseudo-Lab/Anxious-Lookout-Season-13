@@ -25,6 +25,8 @@ class Pool:
 
     @contextmanager
     def bound(self, owner):
+        from .research_api_budget import checkout
+        checkout()
         with self.engine.begin() as db:
             validate(db)
             state = Registry(db).read(owner)
@@ -85,6 +87,16 @@ class PooledRunner:
     def interrupt(self, identity, request_id):
         with self.pool.bound(self.owner) as runtime:
             return runtime.runner(self.owner).interrupt(identity, request_id)
+
+    def research_authorize(self, identity, request_id):
+        with self.pool.bound(self.owner) as runtime:
+            return runtime.runner(self.owner).research_authorize(identity, request_id)
+
+    def research_binding(self, db, result):
+        from .research_api import current_binding
+        state = current_binding(db, self.owner, result)
+        plan = Bindings(db).resolve(state, self.pool.config['namespace'], self.pool.namespace_uid)
+        require(plan is not None and plan.identity.state_id == state.state_id)
 
     def stream_target(self, identity):
         # Plain data (URL, headers, expected hello): nothing of the per-operation client outlives the scope.

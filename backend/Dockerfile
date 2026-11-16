@@ -53,6 +53,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap \
 RUN install -d -o root -g root -m 0755 /etc/codex
 COPY --chown=0:0 --chmod=644 backend/runner/codex-etc/config.toml backend/runner/codex-etc/requirements.toml /etc/codex/
 COPY --chown=0:0 --chmod=755 backend/runner/skills /etc/codex/skills
+COPY --chown=0:0 --chmod=755 backend/runner/research_cli.py /usr/local/bin/anxious-research
+RUN install -d -o root -g root -m 0755 /usr/local/share/anxious-research \
+    && python -c 'import json; from app.research_tools import TOOLS; json.dump({name:{"description":description,"argumentsSchema":model.model_json_schema()} for name,(model,description) in TOOLS.items() if name != "research_page_context"},open("/usr/local/share/anxious-research/operations.json","w"))'
 USER 10001:10001
 # #68 build gate: the image as built, as the runner user (pins, bubblewrap, link, /etc/codex, no git), and the
 # pinned Codex itself loading /etc/codex (an offline app-server answering two config reads).

@@ -28,6 +28,7 @@ class HeldRunner:
     def submit(self, identity, body):
         self.dispatches += 1
         self.last = body
+        self.session_id = identity
 
     def read(self, identity):
         return {"requestId": self.last["requestId"], "state": self.state, "turnId": "held-turn" if self.record["turns"] else None,
@@ -35,6 +36,13 @@ class HeldRunner:
 
 
 def callback(client, session, runner, name, arguments, **overrides):
+    # Owner operations now use the public production router/DB transaction.
+    # The runner status is a double; public context stays on its narrow callback.
+    if name != 'research_page_context' and not overrides:
+        from tests.research_api_fixture import call
+        result = call(client.app, session['id'], runner, name, arguments)
+        if result is not None:
+            return result
     return client.post("/api/internal/research/tools", json={"sessionId": session["id"], "requestId": runner.last["requestId"],
                        "name": name, "arguments": arguments, **overrides}, headers={"Authorization": "Bearer " + runner.last["toolToken"]})
 

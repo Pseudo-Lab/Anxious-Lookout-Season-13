@@ -382,6 +382,12 @@ class Store:
 
 
 def register_research(app, sessions, settings, current_session, error):
+    from .research_credentials import enabled, redact
+    app.state.research_agent_api_enabled = enabled()
+    if app.state.research_agent_api_enabled:
+        origin = urlsplit(settings.origin)
+        if origin.scheme != 'https' or origin.port not in {None, 443}:
+            raise ValueError('Research agent API requires public HTTPS443')
     policy = os.getenv("RESEARCH_ACCESS_POLICY", "editors")
     if policy not in {"pending", "approved", "editors"}:
         raise ValueError("Invalid research access policy")
@@ -391,7 +397,7 @@ def register_research(app, sessions, settings, current_session, error):
     @app.exception_handler(ResearchError)
     async def domain_error(request, exc):
         if exc.details is not None:
-            return JSONResponse({'error': {'code': exc.code, 'message': exc.message, 'details': exc.details}},
+            return JSONResponse(redact({'error': {'code': exc.code, 'message': exc.message, 'details': exc.details}}),
                                 status_code=exc.status, headers={'Cache-Control': 'no-store'})
         return error(exc.code, exc.message, exc.status)
 
@@ -455,7 +461,7 @@ def register_research(app, sessions, settings, current_session, error):
         return JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})
 
     def response(result, status=200):
-        return JSONResponse(result, status_code=status, headers={"Cache-Control": "no-store"})
+        return JSONResponse(redact(result), status_code=status, headers={"Cache-Control": "no-store"})
 
     def write(store, request, model, body, action, status=200):
         post_route = any(segment in request.url.path for segment in ("/post-drafts", "/post-proposals", "/posts/"))
