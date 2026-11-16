@@ -184,7 +184,19 @@ export default function ProposalPanel({
     if (found) section.current?.scrollIntoView({ block: "start" });
   }, [found, tick]);
 
-  if (!pending.length) return list.failure ? <ErrorNotice failure={list.failure} prefix="남은 제안 목록을 확인하지 못했습니다." /> : null;
+  if (!pending.length) return list.failure ? (
+    <div className="space-y-2">
+      <ErrorNotice failure={list.failure} prefix="남은 제안 목록을 확인하지 못했습니다." />
+      <button
+        type="button"
+        disabled={list.loading}
+        onClick={() => list.nextCursor ? void list.loadMore() : setTick((t) => t + 1)}
+        className="text-sm font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50"
+      >
+        남은 제안 다시 불러오기
+      </button>
+    </div>
+  ) : null;
 
   const row = (p: Proposal) => (
     <li key={p.id} className="rounded-lg ring-1 ring-stone-200">
