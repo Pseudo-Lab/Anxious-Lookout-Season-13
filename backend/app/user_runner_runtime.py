@@ -142,9 +142,6 @@ class BoundRunner:
         # #90 Stop: an ordinary POST call, so the same check -> dispatch transaction as every runner write.
         return self.call('POST', '/sessions/'+str(identity)+'/interrupt', {'requestId': str(request_id)})
 
-    def research_settlement(self, identity, body):
-        return self.call('POST', '/sessions/'+str(identity)+'/research-settlement', body)
-
     def stream_target(self, identity):
         """#90: the same Pod checks as a GET call, read inside one registry transaction. Only the address is
         returned: the API's event stream opens after the transaction (a GET never needed the stop fence), and the

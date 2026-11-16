@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.migrate import migrate
 from app.research import Store
+from app.research_results import success
 from tests.test_research import create, identity, headers, material
 from tests.test_conversations import create_session
 from tests.test_page_chat import HeldRunner, callback
@@ -40,6 +41,7 @@ def test_document_direct_save_authors_conflicts_retry_and_human_draft(client, ad
     result = callback(client, session, runner, 'research_document_update', args)
     assert result.status_code == 200, result.text
     saved = result.json()
+    assert success('research_document_update', saved, args)
     assert saved['version'] == saved['latestVersion']['number'] == 2
     assert saved['latestVersion']['author'] == {'kind': 'codex', 'conversationId': session['id']}
     assert saved['saved']['versionId'] == saved['latestVersion']['id']
@@ -66,6 +68,7 @@ def test_new_post_save_preserves_draft_and_rejects_old_propose_publish_and_archi
     result = callback(client, session, runner, 'research_post_save', args)
     assert result.status_code == 200, result.text
     post = result.json()
+    assert success('research_post_save', post, args)
     assert post['latestVersion']['textProjection'] == 'Codex source'
     assert post['latestVersion']['author'] == {'kind': 'codex', 'conversationId': session['id']}
     assert post['saved']['destination']['path'] == '/write/' and post['publication'] is None
@@ -84,6 +87,7 @@ def test_agent_versions_do_not_modify_public_snapshots_or_expose_conversation_in
     session, runner = turn(client, owner, auth)
     args = {**material(), 'mutationId': str(uuid.uuid4())}
     source = callback(client, session, runner, 'research_material_save', args).json()
+    assert success('research_material_save', source, args)
     doc = create(client, auth, 'documents')
     connect(client, auth, doc, source)
     publication = publish(client, auth, doc)
@@ -124,3 +128,27 @@ def test_foreign_and_public_context_cannot_write(client, admin):
     public, public_runner = turn(client, other, other_auth, {'kind': 'public_document', 'resourceId': doc['id']})
     assert callback(client, public, public_runner, 'research_document_update', args).status_code == 403
     assert callback(client, public, public_runner, 'research_page_context', {}).status_code == 200
+
+
+def test_every_mutation_real_response_satisfies_shared_terminal_contract(client, admin):
+    owner, auth = identity(client, admin)
+    session, runner = turn(client, owner, auth)
+    def checked(name, args):
+        body = {**args, 'mutationId': str(uuid.uuid4())}
+        reply = callback(client, session, runner, name, body)
+        assert reply.status_code == 200, reply.text
+        result = reply.json()
+        assert success(name, result, body), (name, 'callback contract mismatch')
+        assert success(name, result), (name, 'stored result contract mismatch')
+        return result
+    document = checked('research_document_save', {'title': 'Document', 'content': 'Sources'})
+    source = checked('research_material_save', material())
+    checked('research_document_update', {'id': document['id'], 'expectedVersion': 1,
+        'title': 'Revised document', 'content': 'Updated source'})
+    checked('research_material_update', {**material(), 'id': source['id'], 'expectedVersion': 1})
+    relation = checked('research_relation_save', {'source': {'type': 'document', 'id': document['id']},
+        'target': {'type': 'material', 'id': source['id']}, 'kind': 'cites', 'description': '', 'directed': True})
+    revised = checked('research_relation_update', {'id': relation['id'], 'expectedVersion': 1,
+        'kind': 'supports', 'description': 'Verified source'})
+    checked('research_post_save', {**proposal_content(content='Cited source'), 'documentIds': [document['id']]})
+    checked('research_archive', {'type': 'relation', 'id': relation['id'], 'expectedVersion': revised['version']})

@@ -22,6 +22,22 @@ ETC = Path(__file__).resolve().parents[1] / 'runner' / 'codex-etc'
 RUNNER = Path(__file__).resolve().parents[1] / 'runner'
 
 
+def test_discarded_write_intent_stops_replacement_before_native_start(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from app.codex_policy import MODEL
+    monkeypatch.setenv('APP_ENV', 'test')
+    control = tmp_path / 'control'
+    control.mkdir()
+    old = control / 'research-fence.json'
+    old.write_text('{"phase":"execute_intent"}')
+    root = tmp_path / 'state'
+    with pytest.raises(CodexFailure) as caught:
+        Native(root, MODEL, '/usr/local/bin/codex-fixture', 'http://unused.invalid',
+               auth=SimpleNamespace(control=control))
+    assert caught.value.reason == 'policy_refused'
+    assert old.read_text() == '{"phase":"execute_intent"}' and not root.exists()
+
+
 # --- the image's policy files ---------------------------------------------------------------
 
 def test_image_files_are_exactly_the_checked_policy():

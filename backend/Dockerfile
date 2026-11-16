@@ -59,18 +59,6 @@ USER 10001:10001
 RUN --network=none python -m runner.image_check
 CMD ["uvicorn", "runner.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log", "--no-proxy-headers"]
 
-# Development VM C1 only. The pinned Pod command/env/security envelope is unchanged.
-# Both variants use the identical runner base; only this immutable mode marker differs.
-# This stage is never a production/recovery image. No runtime flag enables it in runner.
-FROM runner AS runner-research-gate
-USER root
-ARG RESEARCH_MCP_GATE_MODE
-RUN case "$RESEARCH_MCP_GATE_MODE" in retain|restart) ;; *) exit 1 ;; esac \
-    && printf '%s\n' "$RESEARCH_MCP_GATE_MODE" > /etc/codex/research-gate-mode \
-    && chmod 444 /etc/codex/research-gate-mode \
-    && printf '\nfrom ops.research_mcp_gate import install as _install_research_gate\n_install_research_gate()\n' >> /app/runner/app.py
-USER 10001:10001
-
 # Isolated tests of the actual pinned bundle plus existing offline protocol cases.
 FROM test AS runner-test
 COPY --from=runner --chmod=755 /usr/local/bin/codex /usr/local/bin/codex

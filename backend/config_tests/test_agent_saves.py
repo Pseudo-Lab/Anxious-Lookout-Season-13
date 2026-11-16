@@ -1,4 +1,4 @@
-"""Pure unit boundaries; DB/HTTP transactions and real MCP are review's gates."""
+"""Pure unit boundaries; DB/HTTP transactions and actual sandbox/API are review's gates."""
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4

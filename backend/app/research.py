@@ -374,10 +374,6 @@ class Store:
         if stored:
             if not hmac.compare_digest(stored.fingerprint, fingerprint):
                 fail("idempotency_conflict", "This key was used for a different request", 409)
-            if (stored.status == 409 and isinstance(stored.response, dict)
-                    and isinstance(stored.response.get('error'), dict)
-                    and stored.response['error'].get('code') == 'mutation_not_applied'):
-                fail('mutation_not_applied', 'The original storage operation was not applied', 409)
             return stored.response, stored.status
         result = action()
         self.db.add(Idempotency(owner_id=self.owner, key=identity, fingerprint=fingerprint, status=status, response=result))

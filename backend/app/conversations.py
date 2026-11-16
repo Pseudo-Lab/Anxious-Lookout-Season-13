@@ -19,7 +19,7 @@ from sqlalchemy import select, text
 from .models import Account, LoginSession
 from .research import Expected, Input, Store, ResearchError, fail, page_query, encode_cursor, parse_id, stamp
 from .research_models import Conversation
-from .research_tools import dispatch
+from .research_tools import definitions, dispatch
 from .codex_policy import MODEL, REASONS, ERRORS, RUNNER_PREFLIGHT_ERRORS, personal_origin_enabled
 from .page_scope import Page, resolve_scope, scope_summary, request_metadata, tool_allowed
 
@@ -75,9 +75,6 @@ class Runner:
 
     def interrupt(self, identity, request_id):
         return self.call("POST", "/sessions/" + str(identity) + "/interrupt", {"requestId": str(request_id)})
-
-    def research_settlement(self, identity, body):
-        return self.call('POST', '/sessions/' + str(identity) + '/research-settlement', body)
 
     def stream_target(self, identity):
         """#90: where the API opens this session's runner event stream, and what its hello must say."""
@@ -142,11 +139,9 @@ def owned(store, identity, lock=False):
 
 def summary(row):
     metadata = request_metadata(row)
-    storage = row.native_record.get('researchStorage') or {}
     return {"id": str(row.id), "title": row.title, "state": row.state, "version": row.version,
             "createdAt": stamp(row.created_at), "updatedAt": stamp(row.updated_at),
             **scope_summary(metadata["scope"] if metadata else None),
-            **({'storage': {'state': storage['state']}} if storage.get('state') in {'checking', 'applied', 'not_applied', 'unknown'} else {}),
             "context": {"documentId": row.context["documentId"], "publicationId": row.context["id"], "title": row.context["title"]} if row.context else None}
 
 
@@ -346,8 +341,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
         return runner
 
     def refresh(store, row):
-        prior_storage = row.native_record.get('researchStorage') or {}
-        if row.state != "running" and prior_storage.get('state') not in {'checking', 'unknown'}:
+        if row.state != "running":
             return
         if app.state.user_runners_enabled and not selected(app, store.owner):
             return
@@ -380,20 +374,10 @@ def register_conversations(app, authorized, sessions, settings, response, write,
             fail("codex_unavailable", "Codex history is unavailable", 503)
         # Native snapshots cannot overwrite platform-retained failed inputs.
         scopes = row.native_record.get("platformRequests", [])
-        storage = None
-        if 'researchFence' in result:
-            from .research_settlement import reconcile
-            storage = reconcile(sessions, store.owner, row, runner, result)
-        elif result.get('researchStorageState') == 'unknown':
-            storage = 'unknown'
-        elif prior_storage:
-            storage = prior_storage.get('state')
         turn_id = result.get("turnId")
         if isinstance(turn_id, str) and any(turn.get("id") == turn_id for turn in record.get("turns", [])):
             scopes = [{**entry, "turnId": turn_id} if entry["requestId"] == str(row.request_id) and not entry.get("turnId") else entry for entry in scopes]
         row.native_record = {**record, "unrecordedInputs": row.native_record.get("unrecordedInputs", []), "platformRequests": scopes}
-        if storage in {'checking', 'applied', 'not_applied', 'unknown'}:
-            row.native_record['researchStorage'] = {'state': storage}
         if thread_id is not None:
             row.native_record["nativeThreadId"] = thread_id  # Server-only mapping, excluded from browser summaries/items.
         if result["state"] != row.state:
@@ -424,7 +408,9 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                     return
                 metadata = request_metadata(row, request_id)
                 payload = {"requestId": str(request_id), "text": row.pending_text,
-                           "tools": [], "toolToken": token,
+                           "tools": [tool for tool in definitions() if tool['name'] == 'research_page_context'
+                                     and (metadata or {}).get('scope', {}).get('page', {}).get('kind')
+                                     in {'public_document', 'public_post'}], "toolToken": token,
                            "scope": metadata["scope"] if metadata else {"page": {"kind": "general"}, "context": None}}
                 if row.native_record.get("nativeThreadId") is not None:
                     payload["expectedThreadId"] = row.native_record["nativeThreadId"]
@@ -541,8 +527,6 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                 Store.expect(row, parsed.expectedVersion)
                 if row.state == "running":
                     fail("conflict", "A turn is already running", 409)
-                if (row.native_record.get('researchStorage') or {}).get('state') in {'checking', 'unknown'}:
-                    fail('conflict', 'The previous storage operation is still being checked', 409)
                 scope = resolve_scope(store, parsed.page)
                 if row.native_record.get("turns") and not row.native_record.get("nativeThreadId") and app.state.codex_verification != "fixture":
                     fail("codex_policy_refused", "Existing conversation binding requires reconciliation", 503)
@@ -560,7 +544,6 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                 row.pending_text, row.request_id, row.state = parsed.text, uuid.uuid4(), "running"
                 row.native_record = {**row.native_record, "platformRequests": row.native_record.get("platformRequests", []) +
                                      [{"requestId": str(row.request_id), "text": parsed.text, "scope": scope}]}
-                row.native_record.pop('researchStorage', None)
                 row.version += 1
                 row.updated_at, row.error_code = datetime.now(timezone.utc), None
                 store.db.flush()
@@ -667,8 +650,6 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                 Store.expect(row, parsed.expectedVersion)
                 if row.state == "running":
                     fail("conflict", "Wait for the current turn before archiving", 409)
-                if (row.native_record.get('researchStorage') or {}).get('state') in {'checking', 'unknown'}:
-                    fail('conflict', 'Wait for storage confirmation before archiving', 409)
                 row.archived, row.version, row.tool_token_hash = True, row.version + 1, None
                 row.updated_at = datetime.now(timezone.utc)
                 store.db.flush()
@@ -706,7 +687,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                 if body.arguments != {} or not shell_allowed(scope):
                     fail('tool_not_allowed', 'Shell is unavailable in this request mode', 403)
                 return response({'authorized': True})
-            if not tool_allowed(scope, body.name, body.arguments):
+            if body.name != 'research_page_context' or not tool_allowed(scope, body.name, body.arguments):
                 fail("tool_not_allowed", "Tool is unavailable in this request's research mode", 403)
             from .version_authors import VersionAuthor
             store = Store(db, row.owner_id, author=VersionAuthor(row.id))

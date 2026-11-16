@@ -86,10 +86,6 @@ class PooledRunner:
         with self.pool.bound(self.owner) as runtime:
             return runtime.runner(self.owner).interrupt(identity, request_id)
 
-    def research_settlement(self, identity, body):
-        with self.pool.bound(self.owner) as runtime:
-            return runtime.runner(self.owner).research_settlement(identity, body)
-
     def stream_target(self, identity):
         # Plain data (URL, headers, expected hello): nothing of the per-operation client outlives the scope.
         with self.pool.bound(self.owner) as runtime:

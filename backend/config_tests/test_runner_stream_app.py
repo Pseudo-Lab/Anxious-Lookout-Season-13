@@ -147,47 +147,6 @@ def test_user_stop_is_idle_interrupted_with_display_only_text(monkeypatch):
     assert native.real_verified is False  # only a completed turn verifies the model
 
 
-def test_unproved_research_bootstrap_fails_before_turn_start(monkeypatch):
-    native = bare_native(monkeypatch=monkeypatch)
-    class Bridge:
-        def prepare(self, *_): pass
-        def before_model(self, _): raise runner_app.CodexFailure('policy_refused')
-        def revoke(self): pass
-    native.research = Bridge()
-    calls = scripted_turn(native, monkeypatch, 'completed', [])
-    assert 'thread/start' in calls and 'turn/start' not in calls
-    assert native.mapping[SESSION]['state'] == 'failed'
-    assert native.active_session is None
-
-
-def test_uncertain_research_never_turns_into_success_after_interrupt(monkeypatch):
-    native = bare_native(monkeypatch=monkeypatch)
-    class Bridge:
-        def prepare(self, *_): pass
-        def before_model(self, _): pass
-        def revoke(self): pass
-        def bind(self, turn):
-            native.abort_research_turn(turn['session'], turn['request'], turn['thread'], turn['turnId'])
-    native.research = Bridge()
-    scripted_turn(native, monkeypatch, 'interrupted', [])
-    assert native.mapping[SESSION]['researchUncertain'] is True
-    assert native.mapping[SESSION]['state'] == 'failed'
-    assert native.mapping[SESSION]['turnStatus'] == 'failed'
-    # The user's already-sent stop is not duplicated by the storage failure.
-    assert len([value for value in native.sent if value.get('method') == 'turn/interrupt']) == 1
-
-
-def test_research_admission_barrier_preserves_active_turn_stop_transport(monkeypatch):
-    from types import SimpleNamespace
-    native = bare_native(monkeypatch=monkeypatch)
-    native.process = SimpleNamespace(poll=lambda: None)
-    native.research = SimpleNamespace(admission_ready=lambda: False)
-    native.active_session = SESSION
-    assert native.availability() is None  # Existing API Stop path can still reach this active runner.
-    native.active_session = None
-    assert native.availability() == 'unavailable'  # New admission remains blocked after that turn.
-
-
 def test_codex_recorded_item_wins_even_if_shorter(monkeypatch):
     native = bare_native(monkeypatch=monkeypatch)
     scripted_turn(native, monkeypatch, "interrupted", [{"id": "m1", "type": "agentMessage", "text": "part"}])
