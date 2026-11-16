@@ -133,14 +133,14 @@ def test_two_users_dedicated_transport_native_process_history_and_tool_owner(cli
             detail = client.get("/api/research/sessions/" + session["id"]).json()
             assert detail["state"] == "idle" and next(item for item in detail["items"] if item["type"] == "tool_call")["status"] == "completed"
             assert detail["items"][0]["text"] == "my private draft"
-            docs = client.get("/api/research/document-proposals").json()["items"]
+            docs = client.get("/api/research/documents").json()["items"]
             assert len(docs) == 1
             details.append((detail, docs))
         assert len(callbacks) == 2 and {item["sessionId"] for item in callbacks} == {session_a["id"], session_b["id"]}
         assert details[0][1][0]["id"] != details[1][1][0]["id"]
         assert runner_a.app.state.native.read(session_b["id"]) is None and runner_b.app.state.native.read(session_a["id"]) is None
         assert client.get("/api/research/sessions/" + session_a["id"]).status_code == 404
-        assert client.get("/api/research/document-proposals/" + details[0][1][0]["id"]).status_code == 404
+        assert client.get("/api/research/documents/" + details[0][1][0]["id"]).status_code == 404
         with pytest.raises(httpx.HTTPStatusError):
             Runner("http://runner-b", "a" * 40, owner_a, applications[0][1]).health()
         with pytest.raises(ValueError):
@@ -155,7 +155,8 @@ def test_two_users_dedicated_transport_native_process_history_and_tool_owner(cli
         refused = [item for item in continued["items"] if item["type"] == "tool_call"][-1]
         assert refused["status"] == "completed"
         assert [item["page"]["kind"] for item in continued["items"] if item.get("role") == "user"] == ["document_workspace", "general"]
-        assert len(callbacks) == 3 and len(client.get("/api/research/document-proposals").json()["items"]) == 2
+        assert len(callbacks) == 3 and len(client.get("/api/research/documents").json()["items"]) == 2
+        assert client.get('/api/research/document-proposals').json()['items'] == []
         # A third, unmapped editor never borrows either runner.
         client.cookies.clear()
         _, auth_c = identity(client, admin, "333333")
@@ -188,7 +189,7 @@ def test_mapping_rejects_shared_or_ambiguous_bindings(tmp_path, monkeypatch, dam
 
 
 @pytest.mark.parametrize('kind', ['post', 'draft', 'new', 'read-failure'])
-def test_offline_post_proposal_reads_current_source(tmp_path, monkeypatch, kind):
+def test_offline_post_save_reads_current_source(tmp_path, monkeypatch, kind):
     from tests.test_posts import content
     identity = str(uuid.uuid4())
     source = content(title='Human title', content='Human words', slug='human-slug', tags=['kept'], materialIds=[str(uuid.uuid4())])
@@ -216,7 +217,7 @@ def test_offline_post_proposal_reads_current_source(tmp_path, monkeypatch, kind)
             assert [call['name'] for call in calls] == ['research_get']
             return
         proposal = calls[-1]
-        assert proposal['name'] == 'research_post_propose'
+        assert proposal['name'] == 'research_post_save'
         args = proposal['arguments']
         assert 'Complete fixture post proposal' in args['title']
         assert args['contentInput']['text'].endswith('Complete fixture post proposal')

@@ -19,7 +19,7 @@ from sqlalchemy import select, text
 from .models import Account, LoginSession
 from .research import Expected, Input, Store, ResearchError, fail, page_query, encode_cursor, parse_id, stamp
 from .research_models import Conversation
-from .research_tools import definitions, dispatch
+from .research_tools import dispatch
 from .codex_policy import MODEL, REASONS, ERRORS, RUNNER_PREFLIGHT_ERRORS, personal_origin_enabled
 from .page_scope import Page, resolve_scope, scope_summary, request_metadata, tool_allowed
 
@@ -408,7 +408,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                     return
                 metadata = request_metadata(row, request_id)
                 payload = {"requestId": str(request_id), "text": row.pending_text,
-                           "tools": definitions(), "toolToken": token,
+                           "tools": [], "toolToken": token,
                            "scope": metadata["scope"] if metadata else {"page": {"kind": "general"}, "context": None}}
                 if row.native_record.get("nativeThreadId") is not None:
                     payload["expectedThreadId"] = row.native_record["nativeThreadId"]

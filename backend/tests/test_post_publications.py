@@ -197,13 +197,22 @@ def test_populated_0005_upgrade_preserves_documents_drafts_and_public_snapshot(a
         monkeypatch.setenv('ADMIN_DATABASE_URL', url.render_as_string(hide_password=False))
         migrate('0005_writing')
         candidate = create_engine(url)
-        with Session(candidate) as db, db.begin():
+        # Populate the actual 0005 schema with raw SQL. The current ORM includes
+        # 0008 author columns and must not be used to invent pre-upgrade rows.
+        with candidate.begin() as db:
             owner = db.execute(text("INSERT INTO auth.accounts(github_id,login,is_approved,role) VALUES('555555','upgrade',true,'editor') RETURNING id")).scalar_one()
-            store = Store(db, owner)
-            doc = store.create_item('document', DocumentInput(title='Existing document', content='Original 0005 words'))
-            draft = create_draft(store, DraftCreate(title='Uncommitted', content='Draft to preserve', documentId=doc['id'], baseDocumentVersion=1, baseVersionId=doc['latestVersion']['id']))
-            shown = document_preview(store, doc['id'])
-            released = document_publish(store, doc['id'], Publish(expectedVersion=1, versionId=shown['versionId'], previewToken=shown['previewToken']))
+            document_id = db.execute(text("INSERT INTO research.items(owner_id,kind,version) VALUES(:owner,'document',2) RETURNING id"), {'owner':owner}).scalar_one()
+            version_id = db.execute(text("INSERT INTO research.versions(item_id,owner_id,kind,number,title,content) VALUES(:item,:owner,'document',1,'Existing document','Original 0005 words') RETURNING id"), {'item':document_id,'owner':owner}).scalar_one()
+            draft_id = db.execute(text("INSERT INTO research.document_drafts(owner_id,document_id,base_document_version,base_version_id,title,content) VALUES(:owner,:item,1,:version,'Uncommitted','Draft to preserve') RETURNING id"), {'owner':owner,'item':document_id,'version':version_id}).scalar_one()
+            release_id = uuid.uuid4()
+            released = {'id':str(release_id),'documentId':str(document_id),'versionId':str(version_id),
+                        'title':'Existing document','content':'Original 0005 words','publishedAt':'2026-11-16T00:00:00Z',
+                        'materials':[],'author':{'login':'upgrade'}}
+            db.execute(text('INSERT INTO research.publications(id,document_id,owner_id,version_id,snapshot) VALUES(:id,:doc,:owner,:version,CAST(:snapshot AS jsonb))'),
+                       {'id':release_id,'doc':document_id,'owner':owner,'version':version_id,'snapshot':json.dumps(released)})
+            db.execute(text('INSERT INTO research.publication_heads(document_id,owner_id,publication_id) VALUES(:doc,:owner,:id)'),
+                       {'doc':document_id,'owner':owner,'id':release_id})
+            doc, draft = {'id':str(document_id)}, {'id':str(draft_id)}
         migrate('0006_posts')
         with candidate.connect() as db:
             assert db.execute(text('SELECT content FROM research.versions WHERE item_id=:id'), {'id':doc['id']}).scalar_one() == 'Original 0005 words'

@@ -10,7 +10,7 @@ from app.migrate import migrate
 
 @pytest.fixture(scope="session", autouse=True)
 def schema():
-    migrate()
+    migrate('0008_version_authors')  # Current API schema; isolated migration tests create their own DBs.
 
 
 @pytest.fixture

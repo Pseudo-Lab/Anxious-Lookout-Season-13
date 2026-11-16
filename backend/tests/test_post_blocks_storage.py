@@ -12,6 +12,7 @@ from tests.test_research import identity, headers
 from tests.test_posts import content, make_draft, commit, ROOT
 from tests.test_post_proposals import turn
 from tests.test_page_chat import callback
+from tests.retained_proposals import seed_proposal
 
 @pytest.fixture(scope='module',autouse=True)
 def block_schema(schema): migrate('0007_post_blocks')
@@ -32,7 +33,7 @@ def test_proposal_comparison_recomputed_and_d1(client,admin):
     session,runner=turn(client,auth,owner)
     value=content();value.pop('content')
     value.update(contentInput={'format':'markdown','text':'same'},postId=post['id'],expectedVersion=1,mutationId=str(uuid.uuid4()))
-    response=callback(client,session,runner,'research_post_propose',value)
+    response=seed_proposal(client,session,runner,'research_post_propose',value)
     assert response.status_code==200,response.text
     proposal=response.json()
     assert client.get('/api/research/posts/'+post['id']).json()['version']==1
@@ -130,7 +131,7 @@ def test_codex_boundary_errors_have_safe_json_pointer(client,admin):
     assert caught.value.status==422
     result=client.post('/api/internal/research/tools',content=json.dumps({
         'sessionId':session['id'],'requestId':runner.last['requestId'],
-        'name':'research_post_propose','arguments':value}),headers={
+        'name':'research_post_save','arguments':value}),headers={
         'Authorization':'Bearer '+runner.last['toolToken'],'Content-Type':'application/json'})
     assert result.status_code==422,result.text
     assert result.json()['error']['details']['path']=='/contentInput/text'
@@ -164,7 +165,7 @@ def test_legacy_changed_wire_retry_owner_fingerprint_and_no_writes(client,admin,
         method='PUT';path=ROOT+'/'+draft['id'];body['expectedDraftRevision']=1;status=200
     elif operation=='accept':
         session,runner=turn(client,auth,owner)
-        proposed=callback(client,session,runner,'research_post_propose',{
+        proposed=seed_proposal(client,session,runner,'research_post_propose',{
             **proposal_content(),'mutationId':str(uuid.uuid4())})
         assert proposed.status_code==200,proposed.text
         path='/api/research/post-proposals/'+proposed.json()['id']+'/accept'
@@ -191,23 +192,21 @@ def test_legacy_changed_wire_retry_owner_fingerprint_and_no_writes(client,admin,
     assert post_storage_snapshot(admin)==before
 
 
-def test_legacy_propose_tool_retry_before_new_shape_validation(client,admin):
+def test_retired_propose_tool_never_replays_or_mutates_retained_data(client,admin):
     from tests.test_posts import proposal_content
     owner,auth=identity(client,admin);session,runner=turn(client,auth,owner)
     key=str(uuid.uuid4());body={**proposal_content(),'mutationId':key}
-    result=callback(client,session,runner,'research_post_propose',body)
+    result=seed_proposal(client,session,runner,'research_post_propose',body)
     assert result.status_code==200,result.text
     legacy={k:v for k,v in body.items() if k!='contentInput'};legacy['content']='# Text'
     legacy_cache(admin,owner,key,'tool:research_post_propose',legacy,result.json())
     other,other_auth=identity(client,admin,'222222');other_session,other_runner=turn(client,other_auth,other)
     before=post_storage_snapshot(admin)
     replay=callback(client,session,runner,'research_post_propose',legacy)
-    assert replay.status_code==200,replay.text
-    assert replay.json()['content']['format']=='post-blocks'
-    assert replay.json()['id']==result.json()['id']
-    assert callback(client,session,runner,'research_post_propose',{**legacy,'content':'changed'}).status_code==409
-    assert callback(client,session,runner,'research_post_propose',{**legacy,'mutationId':str(uuid.uuid4())}).status_code==422
-    assert callback(client,other_session,other_runner,'research_post_propose',legacy).status_code==422
+    assert replay.status_code==403,replay.text
+    assert callback(client,session,runner,'research_post_propose',{**legacy,'content':'changed'}).status_code==403
+    assert callback(client,session,runner,'research_post_propose',{**legacy,'mutationId':str(uuid.uuid4())}).status_code==403
+    assert callback(client,other_session,other_runner,'research_post_propose',legacy).status_code==403
     assert client.post('/api/internal/research/tools',json={'sessionId':session['id'],'requestId':runner.last['requestId'],
         'name':'research_post_propose','arguments':legacy}).status_code in (401,403)
     assert post_storage_snapshot(admin)==before
@@ -227,7 +226,7 @@ def test_v11_client_revision_gate_prevents_old_bundle_writes(client,admin,operat
             path+='/commit';body={'expectedDraftRevision':1}
     elif operation=='accept':
         session,runner=turn(client,auth,owner)
-        proposed=callback(client,session,runner,'research_post_propose',{
+        proposed=seed_proposal(client,session,runner,'research_post_propose',{
             **proposal_content(),'mutationId':str(uuid.uuid4())})
         assert proposed.status_code==200,proposed.text
         path='/api/research/post-proposals/'+proposed.json()['id']+'/accept'

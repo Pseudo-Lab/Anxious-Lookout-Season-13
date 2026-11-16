@@ -50,7 +50,7 @@ def test_document_direct_save_authors_conflicts_retry_and_human_draft(client, ad
     assert client.get('/api/research/document-drafts/' + draft['id']).json() == draft
     versions = client.get('/api/research/documents/' + doc['id'] + '/versions').json()['items']
     assert [version['author']['kind'] for version in versions] == ['codex', 'human']
-    human = client.put('/api/research/documents/' + doc['id'],
+    human = client.patch('/api/research/documents/' + doc['id'],
                        json={'title': 'Restored', 'content': doc['content'], 'expectedVersion': 2}, headers=headers(auth))
     assert human.status_code == 200, human.text
     assert human.json()['latestVersion']['author'] == {'kind': 'human', 'conversationId': None}

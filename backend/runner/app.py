@@ -82,7 +82,7 @@ class Drain(BaseModel):
 TOOL_NAMES = frozenset({
     "research_archive", "research_document_save", "research_document_update", "research_get", "research_list",
     "research_material_save", "research_material_update", "research_page_context", "research_post_draft_get",
-    "research_post_propose", "research_relation_save", "research_relation_update", "research_relations",
+    "research_post_save", "research_relation_save", "research_relation_update", "research_relations",
     "research_version_get", "research_versions", "runner_shell_authorize"})
 REPLY_CODES = frozenset({
     # runner/app.py _reply_tool
@@ -326,6 +326,11 @@ class Native:
         command, environment = native_command(binary, home, codex_home, work, file_auth=bool(auth) and not self.external,
                                               external=self.external, fixture=self.fixture)
         self.command, self.environment = command, environment
+        self.base_command = list(command)
+        self.research = None
+        if not self.fixture:
+            from .research_bridge import ResearchBridge
+            self.research = ResearchBridge(self)
         self.thread_policy = {"approvalPolicy": "untrusted", "approvalsReviewer": "user", "permissions": policy.PROFILE}
         self.thread_web_modes = {}
         try:
@@ -333,6 +338,11 @@ class Native:
         except Exception:
             if hasattr(self, "process"):
                 self.close()
+            else:
+                if self.research is not None:
+                    self.research.close()
+                if self.auth:
+                    self.auth.close(clean=False)
             raise
         # Interrupted dispatches are reconciled from originals, never replayed.
         for entry in self.mapping.values():
@@ -385,6 +395,29 @@ class Native:
             except CodexFailure:
                 policy.refuse("rpc." + method)
             check(result)
+            if method == 'config/read':
+                bridge = getattr(self, 'research', None)
+                expected = bridge.config() if bridge is not None else {}
+                actual = policy.without_nulls(result.get('config', {}).get('mcp_servers') or {})
+                policy.require(actual == expected, 'config.research_mcp')
+
+    def prepare_research(self, session, body):
+        """A fresh trusted MCP child/capability per request; the original thread is resumed below."""
+        bridge = getattr(self, 'research', None)
+        if bridge is None:
+            return
+        config = bridge.prepare(session, str(body.requestId), body.scope)
+        # JSON objects are not TOML inline tables: serialize only the fixed server
+        # table, quoting the one generated grant filename with the existing helper.
+        server = config['research']
+        table = '{research={command=%s,args=[%s],startup_timeout_sec=20.0,tool_timeout_sec=30.0}}' % (
+            toml_basic_string(server['command']), ','.join(toml_basic_string(arg) for arg in server['args']))
+        self.command = self.base_command + ['-c', 'mcp_servers=' + table]
+        self.reset_thread_tools()
+
+    def release_research(self):
+        if getattr(self, 'research', None) is not None:
+            self.research.revoke()
 
     def reply_server(self, message, turn):
         if message.get("method") == "item/tool/call":
@@ -924,7 +957,7 @@ class Native:
     def _reply_tool(self, message, turn, outcome):
         params = message.get("params", {})
         failure = None
-        valid = (not self.blocked_reason and turn and turn.get("turnId") and params.get("threadId") == turn["thread"]
+        valid = (getattr(self, 'research', None) is None and not self.blocked_reason and turn and turn.get("turnId") and params.get("threadId") == turn["thread"]
                  and params.get("turnId") == turn["turnId"] and isinstance(params.get("callId"), str)
                  and params["callId"] and (turn["thread"], turn["turnId"]) not in self.completed)
         if not valid:
@@ -1077,6 +1110,7 @@ class Native:
             stream_turn = hub.begin(session, entry["request"])
         try:
             self.check_binding()
+            self.prepare_research(session, body)
             kind = (body.scope or {}).get("page", {}).get("kind")
             web_mode = "live" if kind in POLICIES and kind not in {"public_document", "public_post"} else "disabled"
             if entry["thread"] in self.thread_web_modes and self.thread_web_modes[entry["thread"]] != web_mode:
@@ -1092,7 +1126,8 @@ class Native:
                     raise CodexFailure("policy_refused")
             else:
                 result = self.rpc("thread/start", {"model": self.model, "cwd": str(self.work),
-                                  **self.thread_policy, "config": config, "dynamicTools": body.tools,
+                                  **self.thread_policy, "config": config,
+                                  **({"dynamicTools": body.tools} if self.fixture else {}),
                                   "historyMode": "legacy", "ephemeral": False})
             self.ensure_model(result, required=True)
             policy.check_thread(result, self.work)  # Applied to this thread, start and resume alike.
@@ -1119,6 +1154,8 @@ class Native:
                 self.blocked_reason = "policy_refused"
                 raise CodexFailure("policy_refused")
             turn["turnId"] = turn_id
+            if getattr(self, 'research', None) is not None:
+                self.research.bind(turn)
             if hub is not None:
                 hub.bind(turn_id=turn_id, turn=stream_turn)
                 hub.verified(stream_turn)  # the pinned model answered turn/start: structural events may leave
@@ -1178,6 +1215,7 @@ class Native:
                     pass
         finally:
             try:
+                self.release_research()
                 with self.state_lock:
                     try:
                         self.save()
@@ -1269,6 +1307,11 @@ class Native:
             if worker:
                 worker.join(timeout=20)
         finally:
+            if getattr(self, 'research', None) is not None:
+                try:
+                    self.research.close()
+                except Exception:
+                    forced = True  # Still close authentication; never claim a clean receipt.
             clean = (binding_ok and alive_at_start and not forced and not active_at_start
                      and self.active_session is None and self.process.poll() == 0
                      and not (worker and worker.is_alive()))

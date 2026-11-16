@@ -7,6 +7,7 @@ from app.migrate import migrate
 from tests.test_research import identity, headers, create
 from tests.test_conversations import create_session
 from tests.test_page_chat import HeldRunner, callback
+from tests.retained_proposals import seed_proposal
 from tests.test_policy_publication import publish
 
 ROOT = '/api/research/document-drafts'
@@ -40,9 +41,9 @@ def propose(client, admin, document, auth, owner):
     assert reply.status_code == 202, reply.text
     args = {'id': document['id'], 'expectedVersion': document['version'], 'title': 'Codex proposal',
             'content': '# Suggested content', 'mutationId': str(uuid.uuid4())}
-    reply = callback(client, session, runner, 'research_document_update', args)
+    reply = seed_proposal(client, session, runner, 'research_document_update', args)
     assert reply.status_code == 200, reply.text
-    assert callback(client, session, runner, 'research_document_update', args).json() == reply.json()
+    assert seed_proposal(client, session, runner, 'research_document_update', args).json() == reply.json()
     return reply.json()
 
 
@@ -302,8 +303,10 @@ def test_old_schema_refuses_writing_and_never_falls_back_to_direct_tool_update(c
         reply = callback(client, session, runner, 'research_document_update', {'id': doc['id'],
             'expectedVersion': 1, 'title': 'Not direct', 'content': 'Not direct', 'mutationId': str(uuid.uuid4())})
         assert reply.status_code == 503
-        assert client.get('/api/research/documents/'+doc['id']).json()['content'] == doc['content']
-        assert len(versions(client, doc)) == 1
+        assert client.get('/api/research/documents/'+doc['id']).status_code == 503
+        with admin.connect() as db:
+            assert db.execute(text('SELECT content FROM research.versions WHERE item_id=:id'), {'id': doc['id']}).scalar_one() == doc['content']
+            assert db.execute(text('SELECT count(*) FROM research.versions WHERE item_id=:id'), {'id': doc['id']}).scalar_one() == 1
     finally:
         with admin.begin() as db:
             db.execute(text('UPDATE research.alembic_version SET version_num=:marker'), {'marker': original_marker})

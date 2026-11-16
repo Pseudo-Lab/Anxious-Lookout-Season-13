@@ -52,11 +52,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap \
 # The directory first: COPY --chmod would also give a directory it creates mode 644 (not searchable).
 RUN install -d -o root -g root -m 0755 /etc/codex
 COPY --chown=0:0 --chmod=644 backend/runner/codex-etc/config.toml backend/runner/codex-etc/requirements.toml /etc/codex/
+COPY --chown=0:0 --chmod=755 backend/runner/skills /etc/codex/skills
 USER 10001:10001
 # #68 build gate: the image as built, as the runner user (pins, bubblewrap, link, /etc/codex, no git), and the
 # pinned Codex itself loading /etc/codex (an offline app-server answering two config reads).
 RUN --network=none python -m runner.image_check
 CMD ["uvicorn", "runner.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log", "--no-proxy-headers"]
+
+# Development VM C1 only. The pinned Pod command/env/security envelope is unchanged.
+# Both variants use the identical runner base; only this immutable mode marker differs.
+# This stage is never a production/recovery image. No runtime flag enables it in runner.
+FROM runner AS runner-research-gate
+USER root
+ARG RESEARCH_MCP_GATE_MODE
+RUN case "$RESEARCH_MCP_GATE_MODE" in retain|restart) ;; *) exit 1 ;; esac \
+    && printf '%s\n' "$RESEARCH_MCP_GATE_MODE" > /etc/codex/research-gate-mode \
+    && chmod 444 /etc/codex/research-gate-mode \
+    && printf '\nfrom ops.research_mcp_gate import install as _install_research_gate\n_install_research_gate()\n' >> /app/runner/app.py
+USER 10001:10001
 
 # Isolated tests of the actual pinned bundle plus existing offline protocol cases.
 FROM test AS runner-test

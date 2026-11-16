@@ -136,7 +136,7 @@ for line in sys.stdin:
             elif page.get('kind') == 'post_workspace' and page.get('draftId'):
                 tool, args, post_step = 'research_post_draft_get', {'draftId': page['draftId']}, 'draft'
             else:
-                tool, args = 'research_post_propose', post_candidate()
+                tool, args = 'research_post_save', post_candidate()
         if prompt.startswith("/fixture/document-update"):
             try:
                 command, document_id, version = prompt.split()
@@ -193,10 +193,10 @@ for line in sys.stdin:
             pending['postStep'] = None
             pending['callId'] = 'proposal-' + pending['turn']
             pending['items'].append({'id': pending['callId'], 'type': 'dynamicToolCall',
-                                     'tool': 'research_post_propose', 'arguments': args})
+                                     'tool': 'research_post_save', 'arguments': args})
             emit({'id': pending['callId'], 'method': 'item/tool/call', 'params': {
                 'threadId': pending['thread'], 'turnId': pending['turn'], 'callId': pending['callId'],
-                'tool': 'research_post_propose', 'arguments': args}})
+                'tool': 'research_post_save', 'arguments': args}})
             continue
         answer = "Offline fixture answer"
         if pending.get("stream"):

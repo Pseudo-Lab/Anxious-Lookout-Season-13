@@ -120,15 +120,14 @@ def test_general_descriptor_grants_owner_tools_not_old_public_context(client, ad
     from app.page_scope import OWNER_TOOLS
     assert reply.json()["page"] == {"kind": "general"} and reply.json()["allowedTools"] == OWNER_TOOLS and reply.json()["capability"] == "owner_research"
     assert runner.last["scope"] == {"page": {"kind": "general"}, "context": None}
-    from app.research_tools import definitions
-    assert runner.last['tools'] == definitions()  # Catalog is not effective permission.
+    assert runner.last['tools'] == []  # Production no longer provides native dynamic tools.
     assert callback(client, session, runner, "research_list", {"type": "document"}).status_code == 200
     assert callback(client, session, runner, "research_document_save", {
         "mutationId": str(uuid.uuid4()), "title": "Draft", "content": "Draft"}).status_code == 200
     rejected = callback(client, session, runner, "research_page_context", {})
     assert rejected.status_code == 403 and rejected.json()["error"]["code"] == "tool_not_allowed"
-    assert len(client.get("/api/research/documents").json()["items"]) == 1
-    assert len(client.get('/api/research/document-proposals').json()['items']) == 1
+    assert len(client.get("/api/research/documents").json()["items"]) == 2
+    assert len(client.get('/api/research/document-proposals').json()['items']) == 0
 
 
 def test_foreign_archived_wrong_type_and_missing_pages_fail_before_runner_and_key_reservation(client, admin):
@@ -183,11 +182,8 @@ def test_detail_scope_fixed_on_acceptance_reads_updates_conflicts_and_history(cl
     assert callback(client, session, runner, "research_" + kind + "_update", update).status_code == 409
     update.update(expectedVersion=2, title="Tool edit", mutationId=str(uuid.uuid4()))
     result = callback(client, session, runner, "research_" + kind + "_update", update).json()
-    if kind == 'document':
-        assert result['status'] == 'pending' and result['baseDocumentVersion'] == 2
-        assert client.get('/api/research/documents/'+target['id']).json()['version'] == 2
-    else:
-        assert result['version'] == 3
+    assert result['version'] == 3
+    assert result['latestVersion']['author'] == {'kind': 'codex', 'conversationId': session['id']}
     with admin.connect() as db:
         stored = db.execute(text("SELECT native_record FROM research.conversations WHERE id=:id"), {"id": session["id"]}).scalar_one()
         assert stored["platformRequests"][0]["scope"]["context"]["version"] == 1
@@ -222,13 +218,7 @@ def test_workspace_allows_both_owned_types_but_never_foreign_data(client, admin,
     created = callback(client, session, runner, "research_" + kind + "_save", data)
     assert created.status_code == 200
     created_id = created.json()['id']
-    if kind == 'document':
-        assert callback(client, session, runner, 'research_list', {'type': kind}).json()['items'] == []
-        proposed = created.json()
-        result = client.post('/api/research/document-proposals/'+proposed['id']+'/accept',
-            json={'expectedProposalVersion': 1, 'title': proposed['title'], 'content': proposed['content']}, headers=headers(auth))
-        assert result.status_code == 200, result.text
-        created_id = result.json()['document']['id']
+    assert created.json()['latestVersion']['number'] == 1
     listed = callback(client, session, runner, "research_list", {"type": kind}).json()["items"]
     assert [item['id'] for item in listed] == [created_id] and foreign['id'] not in json.dumps(listed)
     for name, args in [("research_list", {"type": "document" if kind == "material" else "material"}),
@@ -278,7 +268,7 @@ def test_owner_workflow_on_any_page_preserves_versions_ownership_and_archive(cli
         json={'text': 'Collect, revise and draft', 'expectedVersion': 1, 'page': page}, headers=headers(auth))
     assert accepted.status_code == 202
     assert accepted.json()['capability'] == 'owner_research'
-    assert {'research_post_propose', 'research_post_draft_get', 'research_document_save'} <= set(accepted.json()['allowedTools'])
+    assert {'research_post_save', 'research_post_draft_get', 'research_document_save'} <= set(accepted.json()['allowedTools'])
 
     def call(name, args, status=200):
         response = callback(client, session, runner, name, args)
@@ -300,11 +290,8 @@ def test_owner_workflow_on_any_page_preserves_versions_ownership_and_archive(cli
     assert old['content'] == collected['content']
     draft = call('research_document_save', {'title': 'Draft', 'content': 'Cites [source](https://example.com/article).',
                 'mutationId': str(uuid.uuid4())})
-    assert draft['status'] == 'pending' and draft['documentId'] is None
-    accepted = client.post('/api/research/document-proposals/'+draft['id']+'/accept',
-        json={'expectedProposalVersion': 1, 'title': draft['title'], 'content': draft['content']}, headers=headers(auth))
-    assert accepted.status_code == 200, accepted.text
-    draft = accepted.json()['document']
+    assert draft['latestVersion']['number'] == 1
+    assert client.get('/api/research/document-proposals').json()['items'] == []
     relation = call('research_relation_save', {'source': {'type': 'document', 'id': draft['id']},
         'target': {'type': 'material', 'id': saved['id']}, 'kind': 'references', 'directed': True,
         'mutationId': str(uuid.uuid4())})

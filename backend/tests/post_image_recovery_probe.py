@@ -34,7 +34,7 @@ def run(mode):
             db.execute(text('CREATE DATABASE restore_post_image_candidate'))
         os.environ['ADMIN_DATABASE_URL'] = source_url.render_as_string(hide_password=False)
         os.environ['POST_IMAGE_ROOT'] = '/recovery/source'
-        migrate('0007_post_blocks')
+        migrate('0008_version_authors')
         with Session(source) as db, db.begin():
             owner = db.execute(text("INSERT INTO auth.accounts(github_id,login,is_approved,role) VALUES('999999','image-recovery',true,'editor') RETURNING id")).scalar_one()
             store = Store(db, owner)
@@ -55,7 +55,7 @@ def run(mode):
         target = create_engine(target_url, hide_parameters=True)
         with source.connect() as original, target.connect() as restored:
             assert signature(original) == signature(restored)
-        assert restore_candidate(target_url, os.environ['API_DATABASE_PASSWORD'], 'restore_post_image_candidate') == '0007_post_blocks'
+        assert restore_candidate(target_url, os.environ['API_DATABASE_PASSWORD'], 'restore_post_image_candidate') == '0008_version_authors'
         shutil.copytree('/recovery/backup', '/recovery/restored')
         os.environ['POST_IMAGE_ROOT'] = '/recovery/restored'
         with Session(target) as db:
