@@ -176,7 +176,7 @@ export default function DocumentEditor({
       }
     }
     setFailure(res.failure);
-    if (isReason(res.failure, "base_changed", "document_version")) {
+    if (isReason(res.failure, "base_changed", "document_version", "resource_version")) {
       await onReloadDocument?.();
       setComparing(true);
     }
@@ -271,7 +271,7 @@ export default function DocumentEditor({
       {stopped && (
         <Notice tone="warn">
           자동 저장을 멈췄습니다. {researchErrorMessage(stopped) ?? "초안을 저장하지 못했습니다."} 입력은 이 화면에 그대로 있습니다.{" "}
-          {isReason(stopped, "base_changed", "document_version") && onReloadDocument && (
+          {isReason(stopped, "base_changed", "document_version", "resource_version") && onReloadDocument && (
             <button
               type="button"
               onClick={() => {
@@ -288,7 +288,7 @@ export default function DocumentEditor({
               새 초안으로 계속
             </button>
           )}
-          {!isReason(stopped, "base_changed", "document_version", "draft_closed", "archived") && (
+          {!isReason(stopped, "base_changed", "document_version", "resource_version", "draft_closed", "archived") && (
             <button type="button" onClick={() => editor.resume()} className="font-medium underline hover:no-underline">
               다시 시도
             </button>

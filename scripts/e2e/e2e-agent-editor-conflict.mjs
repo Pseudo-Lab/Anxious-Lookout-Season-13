@@ -2,7 +2,9 @@
 // review가 모의 API 뒤에서 실행한다. 실제 Codex의 저장 경로·작성자 검증은 별도 개발 VM gate다.
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
-import { fromMarkdown } from "./mock-blocks.mjs";
+
+// run.sh는 선택한 파일만 Playwright의 /tmp/t로 복사하므로 상대 모듈 import 없이 입력을 만든다.
+const bodyOf = (text) => ({ format: "post-blocks", version: 1, blocks: [{ id: crypto.randomUUID(), type: "paragraph", runs: [{ text, marks: [] }], align: "left" }] });
 
 const ORIGIN = process.env.ORIGIN ?? "http://127.0.0.1:8080";
 const BASE = process.env.BASE_PATH ?? "";
@@ -62,7 +64,7 @@ try {
   console.log("PASS #97 F4 document: commit conflict preserves both versions, shows diff, saves only after confirmation");
 
   // 글: 편집기를 연 뒤 첫 초안을 만들기 전에 다른 작성자가 새 버전을 만든 경우(create 409).
-  const text = { title: "충돌 확인 글", content: fromMarkdown("첫 글 본문"), description: "", tags: [], coverImageId: null, documentIds: [], materialIds: [] };
+  const text = { title: "충돌 확인 글", content: bodyOf("첫 글 본문"), description: "", tags: [], coverImageId: null, documentIds: [], materialIds: [] };
   const draft = await send("POST", "/post-drafts", text);
   const initial = (await send("POST", `/post-drafts/${draft.id}/commit`, { expectedDraftRevision: draft.revision })).post;
   await page.goto(U(`/write/?id=${initial.id}`));
@@ -70,7 +72,7 @@ try {
   const body = main.locator(".ProseMirror");
   await body.waitFor();
   const otherDraft = await send("POST", "/post-drafts", {
-    ...text, content: fromMarkdown("다른 작성자가 저장한 글"), postId: initial.id,
+    ...text, content: bodyOf("다른 작성자가 저장한 글"), postId: initial.id,
     basePostVersion: initial.version, baseVersionId: initial.latestVersion.id,
   });
   const other = (await send("POST", `/post-drafts/${otherDraft.id}/commit`, { expectedDraftRevision: otherDraft.revision, expectedVersion: initial.version })).post;

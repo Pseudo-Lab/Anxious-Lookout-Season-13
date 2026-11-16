@@ -10,6 +10,8 @@ import { formatDateTime } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import SafeMarkdown from "@/components/research/SafeMarkdown";
 import TextDiff from "@/components/research/TextDiff";
+import VersionAuthor from "@/components/research/VersionAuthor";
+import type { VersionAuthor as Author } from "@/lib/research/versionAuthor";
 
 /** 버전 목록·본문을 가져오는 곳(자료·문서 #22, 글 #28). 렌더마다 새로 만들어도 key가 같으면 다시 부르지 않는다. */
 export interface VersionSource<V extends VersionLike> {
@@ -33,6 +35,7 @@ interface VersionLike {
   title: string;
   content?: unknown;
   createdAt: string;
+  author?: Author;
 }
 
 const markdownOf = (v: VersionLike) => (typeof v.content === "string" ? v.content : "");
@@ -53,6 +56,7 @@ function VersionBody<V extends VersionLike>({
   return (
     <div className="space-y-3 rounded-lg bg-stone-50 p-4">
       <p className="font-medium text-stone-900">{v.title}</p>
+      <VersionAuthor author={v.author} />
       {source.meta?.(v)}
       {source.body ? source.body(v) : <SafeMarkdown content={markdownOf(v)} ownImages={source.ownImages} />}
       {onRestore && (
@@ -237,6 +241,7 @@ export function VersionHistoryView<V extends VersionLike>({
               </span>
               <span className="shrink-0 text-xs text-stone-500">{formatDateTime(v.createdAt)}</span>
             </button>
+            <div className="px-4 pb-2"><VersionAuthor author={v.author} /></div>
             {open === v.id && (
               <div className="space-y-2 px-4 pb-4">
                 <VersionBody source={source} versionId={v.id} onRestore={v.id === latestVersionId ? undefined : onRestore} />

@@ -320,7 +320,7 @@ export default function PostEditor({
       }
     }
     setFailure(res.failure);
-    if (isReason(res.failure, "base_changed", "post_version")) {
+    if (isReason(res.failure, "base_changed", "post_version", "resource_version")) {
       await onReloadPost?.();
       setComparing(true);
     }
@@ -457,7 +457,7 @@ export default function PostEditor({
       {stopped && (
         <Notice tone="warn">
           자동 저장을 멈췄습니다. {postErrorMessage(stopped) ?? "초안을 저장하지 못했습니다."} 입력은 이 화면에 그대로 있습니다.{" "}
-          {isReason(stopped, "base_changed", "post_version") && onReloadPost && (
+          {isReason(stopped, "base_changed", "post_version", "resource_version") && onReloadPost && (
             <button
               type="button"
               onClick={() => {
@@ -479,7 +479,7 @@ export default function PostEditor({
               새로고침
             </button>
           ) : (
-            !isReason(stopped, "base_changed", "post_version", "draft_closed", "archived") && (
+            !isReason(stopped, "base_changed", "post_version", "resource_version", "draft_closed", "archived") && (
               <button type="button" onClick={() => editor.resume()} className="font-medium underline hover:no-underline">
                 다시 시도
               </button>
