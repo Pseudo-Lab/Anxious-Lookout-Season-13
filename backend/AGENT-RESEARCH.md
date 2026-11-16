@@ -57,6 +57,24 @@ flags/session cleanup and certification steps in
 
 ## Verification ownership
 
+The persistent-process replacement is being built after the original per-turn
+restart candidate failed C1. `runner/research_authority.py` contains independent
+pre-model bootstrap, exact process/dedicated connection and per-request one-use
+permit primitives. `runner/research_fence.py` provides a write-ahead fence on the
+existing private durable control volume, with file and directory synchronization
+before dispatch and exact terminal receipts. These modules are **not wired into
+the runtime yet**. The active bridge still uses the previous restart candidate.
+No new settlement bearer or Prepare operation is introduced. The API-driven
+settlement wire is undergoing review before runtime integration.
+
+The local tests use fake native events plus real local Unix/process IPC and
+storage fault injection, without a model, API or DB. They check duplicate JSON
+keys, sender credentials (including an inherited-descriptor writer), nonce
+consumption, process exit/generation, event/frame ordering, permit tombstones,
+revoke/claim ordering, unsettled drain blocking and durable fence receipts. They
+do not prove the pinned binary's pre-model MCP readiness/parent structure,
+metadata/approval behavior, deployed isolation or remote transaction settlement.
+
 Back runs Docker pure unit tests. `config_tests/test_agent_saves.py` uses fake Store
 and post functions to verify dispatch/CAS/draft non-mutation boundaries; it does
 not establish transaction isolation, SQL constraints, real authentication or MCP.
