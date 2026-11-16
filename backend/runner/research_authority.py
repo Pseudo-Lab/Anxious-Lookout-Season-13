@@ -63,6 +63,7 @@ class ProcessIdentity:
     """A live kernel process, never a numeric PID/argv/descendant heuristic."""
     def __init__(self, pid):
         self.pid, self.fd = pid, None
+        self.lock = threading.Lock()
         try:
             before = _process_stat(pid)
             self.fd = os.pidfd_open(pid, 0)
@@ -76,16 +77,18 @@ class ProcessIdentity:
             raise AuthorityError('process_unavailable') from None
 
     def alive(self):
-        try:
-            return (self.fd is not None and not select.select([self.fd], [], [], 0)[0]
-                    and _process_stat(self.pid) == (self.parent, self.start))
-        except (OSError, ValueError):
-            return False
+        with self.lock:
+            try:
+                return (self.fd is not None and not select.select([self.fd], [], [], 0)[0]
+                        and _process_stat(self.pid) == (self.parent, self.start))
+            except (OSError, ValueError):
+                return False
 
     def close(self):
-        if self.fd is not None:
-            os.close(self.fd)
-            self.fd = None
+        with self.lock:
+            if self.fd is not None:
+                descriptor, self.fd = self.fd, None
+                os.close(descriptor)
 
 
 class PeerConnection:
@@ -104,14 +107,20 @@ class PeerConnection:
         self.credentials = struct.unpack('3i', connection.getsockopt(
             socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('3i')))
         self.identity = None
+        self.parent_identity = None
 
     def alive(self):
-        if self.identity is None or not self.identity.alive() or self.socket.fileno() < 0:
+        identity, parent = self.identity, self.parent_identity
+        try:
+            if (identity is None or parent is None or not identity.alive()
+                    or not parent.alive() or self.socket.fileno() < 0):
+                return False
+            poll = select.poll()
+            ended = select.POLLHUP | select.POLLERR | select.POLLNVAL | select.POLLRDHUP
+            poll.register(self.socket, ended)
+            return not any(events & ended for _, events in poll.poll(0))
+        except (OSError, ValueError):
             return False
-        poll = select.poll()
-        ended = select.POLLHUP | select.POLLERR | select.POLLNVAL | select.POLLRDHUP
-        poll.register(self.socket, ended)
-        return not any(events & ended for _, events in poll.poll(0))
 
     def receive(self):
         while b'\n' not in self.buffer:
@@ -150,9 +159,9 @@ class PeerConnection:
 
     def close(self):
         self.socket.close()
-        if self.identity is not None:
-            self.identity.close()
-            self.identity = None
+        identity, self.identity = self.identity, None
+        if identity is not None:
+            identity.close()
 
 
 class Bootstrap:
@@ -210,6 +219,7 @@ class Bootstrap:
                 identity.close()
                 raise
             self.nonce = None
+            peer.parent_identity = self.parent
             peer.identity, self.peer, self.phase = identity, peer, 'registered'
 
     def catalogue_ready(self, generation):
@@ -279,6 +289,7 @@ class Epoch:
         self.generation, self.session, self.request = generation, session, request
         self.token, self.scope, self.thread, self.peer = token, canonical(scope), thread, peer
         self.turn, self.revoked, self.inflight, self.unsettled = None, False, 0, False
+        self.peer_lost = False
         self.items = {}
 
 
@@ -303,7 +314,7 @@ class Epochs:
 
     def bind(self, epoch, turn):
         with self.condition:
-            if (self.current is not epoch or epoch.revoked or epoch.turn is not None
+            if (self.current is not epoch or epoch.turn is not None
                     or not isinstance(turn, str) or not turn or len(turn) > 200):
                 raise AuthorityError('epoch_binding')
             epoch.turn = turn
@@ -341,6 +352,13 @@ class Epochs:
                 if (self.current is not epoch or epoch.revoked or item is None
                         or item['state'] != 'pending' or item['call'] != call):
                     raise AuthorityError('permit_refused')
+                # Nonblocking pidfd/proc identity and Unix hangup checks belong
+                # to claim itself. A delayed reader/revoke is not exit evidence.
+                # No HTTP, native RPC or durable storage runs under this lock.
+                if not epoch.peer.alive():
+                    epoch.revoked = True
+                    self.condition.notify_all()
+                    raise AuthorityError('peer_exited')
                 if epoch.turn is not None:
                     if epoch.turn != call.turn:
                         item['state'] = 'cancelled'

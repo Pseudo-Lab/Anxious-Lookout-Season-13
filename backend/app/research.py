@@ -32,6 +32,16 @@ def fail(code, message, status, details=None):
     raise ResearchError(code, message, status, details)
 
 
+def mutation_fingerprint(operation, payload):
+    return hashlib.sha256(json.dumps([operation, payload], sort_keys=True,
+        separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+
+
+def mutation_lock(owner, identity):
+    return int.from_bytes(hashlib.sha256((str(owner) + str(identity)).encode()).digest()[:8],
+                          'big', signed=True)
+
+
 class Input(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -357,13 +367,17 @@ class Store:
 
     def mutate(self, key, operation, payload, action, status=200):
         identity = parse_id(key)
-        fingerprint = hashlib.sha256(json.dumps([operation, payload], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-        lock = int.from_bytes(hashlib.sha256((str(self.owner) + str(identity)).encode()).digest()[:8], "big", signed=True)
+        fingerprint = mutation_fingerprint(operation, payload)
+        lock = mutation_lock(self.owner, identity)
         self.db.execute(text("SELECT pg_advisory_xact_lock(:lock)"), {"lock": lock})
         stored = self.db.get(Idempotency, (self.owner, identity))
         if stored:
             if not hmac.compare_digest(stored.fingerprint, fingerprint):
                 fail("idempotency_conflict", "This key was used for a different request", 409)
+            if (stored.status == 409 and isinstance(stored.response, dict)
+                    and isinstance(stored.response.get('error'), dict)
+                    and stored.response['error'].get('code') == 'mutation_not_applied'):
+                fail('mutation_not_applied', 'The original storage operation was not applied', 409)
             return stored.response, stored.status
         result = action()
         self.db.add(Idempotency(owner_id=self.owner, key=identity, fingerprint=fingerprint, status=status, response=result))

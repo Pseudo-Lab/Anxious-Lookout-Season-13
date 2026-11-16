@@ -50,7 +50,13 @@ holdback/trace settings; keep both modes identical. Preserve #95 retired-secret
 flags at their current values. No authentication/budget/security bypass is part
 of this procedure.
 
-## C1: first text latency, 12 reserved real turns
+## C1: first text latency (historical 12-turn comparison)
+
+The original 12-turn run at 8804a97 failed (+1516.035 ms warm median delta).
+Its unused allowance is closed: **currently authorized actual turns: 0**. A new
+9-turn plan is pending separate user/PM authorization. The recipe below records
+the comparison protocol; it grants no turns. Follow the next explicit PM
+reservation/allocation if it differs, and do not silently expand 9 into 12/15.
 
 Before the first message POST, review must have an explicit approved turn budget
 and a durable, shared reservation ledger. Reserve before sending; failures and
@@ -80,12 +86,13 @@ client connection time. Also report `firstDeltaMs`, `runner_turn_timing.threadMs
 `dispatchMs`, `totalMs`, and the reader's send-to-first-text elapsed time separately.
 Capture only allowlisted summary/timing records, not raw provider/stdout/answers.
 
-The `retain` benchmark initializes the same real MCP child/catalogue once and
-retains app-server/MCP for warm turns. **Every MCP call is refused** in that mode,
-so its retained capability can never invoke the research API or borrow a later
-turn. It is solely a text-latency control. Any attempted tool call invalidates
+The new `retain` benchmark uses the persistent pre-model bootstrap/catalogue and
+retains app-server/MCP for warm turns. **Every MCP call is refused** in that mode;
+the child has no reusable research capability. It is solely a text-latency
+control. Any attempted tool call invalidates
 that text sample and is recorded without retry. The `restart` image uses the
-candidate's normal per-request grant/restart path. No fake model/transport layer
+previous per-request grant/restart path for comparison; the candidate's normal
+runner uses the new persistent path. No fake model/transport layer
 provides C1 evidence. Unit tests use a fake Native + mock HTTP and are labeled so.
 
 Save the per-request raw **numeric** samples plus image/source/flag metadata,
@@ -99,6 +106,15 @@ clear C1; they do not approve the whole change. If measurement cannot run, repor
 that limitation rather than a simulated pass.
 
 ## C2: actual pinned MCP, original resume, approval and streaming
+
+Before a model reservation, prove model-less bootstrap on the exact binary:
+one-use nonce, exact app-server parent and live pidfds, fixed child connection,
+native `mcpServerStatus/list` with that original thread reporting research
+connected and the exact catalogue. No turn/start may be sent on missing proof.
+Include no-nonce/same-argv/UID/parallel registration, dead/disconnected peer before
+claim, inherited descriptor writer, pending/declined approval tuple theft,
+metadata mismatch, consumed permit replay and completion/interrupt ordering.
+Pure tests and pinned source inspection do not replace these binary checks.
 
 After C1 passes, use the normal runner image and original native threads. Inspect
 the actual MCP startup/catalogue with pinned native 0.160.1. In a real model turn,
@@ -131,17 +147,24 @@ fail and must stay unverified until actual evidence exists.
 
 ## Cleanup and recovery-image gate
 
-PM decision (2026-11-16, #97): **keep 0008 and the candidate**, including when C1
-exceeds +1000 ms. Before applying 0008, import both exact-SHA storage fallback
+PM's latest fence recovery decision (2026-11-16, #97) replaces the earlier
+8804a97 cleanup target. **Keep 0008 and the new persistent candidate**, including
+on C1 failure. Before applying 0008, import both exact-SHA storage fallback
 images below and record their containerd manifest digests. An archive on the
 host alone does not satisfy that prerequisite. DB downgrade and restoring the
 pre-migration database backup are not cleanup steps.
 
 Normal cleanup target:
 
-- API runtime and ordinary runner from source
-  `8804a971aa908586b451baac3341029bbc003805`, or a later review-passed candidate
-  explicitly recorded by PM. Keep the schema at 0008.
+- API runtime and the **fence-aware ordinary runner** from the new persistent
+  candidate's exact source/digests in the delivery metadata. Keep schema 0008.
+- Before new turns, runner replacement or rollback, prove **zero unsettled
+  execute_intent fences** on the durable control PVC. An ambiguous callback must
+  reach matching committed DB terminal settlement first. Never delete control
+  files or infer not_applied from timeout/process death or a missing success row.
+  If zero cannot be proved, stop and report to PM. A terminal receipt is retained
+  proof, not an unsettled fence. Record native drain separately from storage
+  settlement. Do not switch to an image that ignores the barrier while pending.
 - Stop the synthetic runner through normal lifecycle APIs, prove Pod/drain release,
   and select the **ordinary runner** image through the reviewed STOPPED
   binding-image flow. `retain` and `restart` benchmark images are never cleanup
@@ -154,7 +177,8 @@ Normal cleanup target:
   this isolated VM is not C1 acceptance, production approval, or permission to
   run additional turns.
 
-Emergency fallback (only if the candidate API fails startup or health): runtime
+Emergency fallback (**only with zero unsettled fences proved**, and if the
+candidate API fails startup or health): runtime
 **and ordinary runner** from storage-only source
 `2e4da866bb12a1ad2bf2669917cff3e52899a185`. Use the separately supplied images and
 immutable metadata/archive, not a benchmark image. Keep 0008 and all research and
@@ -163,6 +187,56 @@ image flow; verify research health, existing owner reads and a new human save.
 C1 threshold failure alone does not select this fallback. If this pair also fails
 health, keep the synthetic runner stopped and report the failure to PM; do not
 try an older API or downgrade/reset the database.
+
+The prior 8804a97 candidate may also be selected only after zero unsettled fences
+is proved. Neither old pair understands the new admission barrier. These image
+exceptions do not authorize a rollback while settlement remains checking/unknown.
+
+### Read-only fence inventory before image changes
+
+Close new admissions through the existing reviewed controls, end/drain native
+writers and settle uncertain callbacks **on the current image**. Do not replace
+a runner to discover whether it had a fence. Enumerate every affected owner/state
+from the verified runtime registry and binding plans, and join native/control PVC
+names **and Kubernetes UIDs** to the actual mounted volumes. Include stopped and
+noPod bindings. Review records this complete inventory, current Pod UID or noPod,
+namespace/registry identity and the exact candidate API/ordinary-runner manifests.
+Pod0, a missing polling field, an unmounted volume or a failed read is not zero.
+
+Use the exact candidate's read-only command inside the reviewed operator/audit
+container, with each verified native and control PVC mounted **read-only** and
+the runner UID (10001), not a replacement runner or changed runner command:
+
+```sh
+python -B -m ops.research_fence_audit \
+  --native /audit-native --control /audit-control --inputs /audit-inputs/binding.json
+```
+
+The private 0600 inventory input in a 0700 directory is
+`{ownerId,stateId,nativePvcUid,controlPvcUid,writersQuiescent:true}` with canonical
+UUID strings. PVC UIDs and writer quiescence must be independently checked by
+review against the registry/Kubernetes inventory before supplying them; the
+command cannot discover or prove its mount source. It starts no native/model,
+makes no network calls and creates no lock/fence/ledger file. It validates the
+native owner/state binding and the existing service control ledger in SQLite
+read-only mode, checks an existing fence lock without creating it, and reads the
+private fence strictly. A missing/unsupported control ledger, pending journal,
+unproved binding, corrupt/inaccessible file or busy lock returns unknown/nonzero.
+This conservative command supports service-access control ledgers; unsupported
+personal/legacy controls require separate reviewed proof, never an assumed zero.
+
+Only `absent` or `terminal` with bindingValidated=true can contribute a zero to
+the complete, quiescent inventory. `unsettled` or `unknown` stops image switching
+and rollback, including API-health failures, and is reported to PM. For a terminal
+receipt, separately confirm its matching DB success/not_applied terminal record
+and commit using protected operation identifiers; publish only the matched result
+and counts. The audit summary omits raw arguments, tokens, mutation fingerprints
+and native tuples. Record `{ownerId,stateId,nativePvcUid,controlPvcUid,status,
+bindingValidated,outcome?,dbTerminalMatched?}`, the checked source/manifests and
+native/lifecycle drain evidence separately. Keep detailed DB matching inputs
+private. Never delete or reinitialize control, replay content/model/user messages,
+or attach an old intent to a new turn to obtain zero. This procedure consumes no
+model turns and does not grant a model budget or production rollout permission.
 
 For B3, certify the fallback's actual built/imported digests and the above
 0008-compatible read/save behavior on the development VM. Preserve signatures,

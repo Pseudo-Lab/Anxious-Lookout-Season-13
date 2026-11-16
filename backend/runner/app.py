@@ -57,6 +57,13 @@ class Interrupt(BaseModel):
     requestId: uuid.UUID
 
 
+class ResearchSettlement(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    binding: dict
+    outcome: str
+    podUid: str | None
+
+
 class IdleCheck(BaseModel):
     model_config = ConfigDict(extra='forbid')
     idleSeconds: int = Field(strict=True, gt=0, le=999999999)
@@ -89,7 +96,7 @@ REPLY_CODES = frozenset({
     "native_turn_mismatch", "tool_not_allowed", "not_ready",
     # the api's /api/internal/research/tools and its dispatch (ResearchError codes)
     "not_found", "forbidden", "unauthenticated", "validation_error", "conflict", "payload_too_large",
-    "storage_quota_exceeded", "idempotency_conflict", "content_limit_exceeded", "post_contract_upgrade_required",
+    "storage_quota_exceeded", "idempotency_conflict", "mutation_not_applied", "content_limit_exceeded", "post_contract_upgrade_required",
     # CodexFailure reasons (app/codex_policy.py REASONS) from the permission check
     "not_configured", "not_enabled_for_account", "auth_expired", "auth_revoked", "model_unavailable",
     "policy_refused", "budget_exhausted", "provider_rate_limited", "unavailable"})
@@ -328,12 +335,12 @@ class Native:
         self.command, self.environment = command, environment
         self.base_command = list(command)
         self.research = None
-        if not self.fixture:
-            from .research_bridge import ResearchBridge
-            self.research = ResearchBridge(self)
         self.thread_policy = {"approvalPolicy": "untrusted", "approvalsReviewer": "user", "permissions": policy.PROFILE}
         self.thread_web_modes = {}
         try:
+            if not self.fixture:
+                self.research = self.create_research()
+                self.configure_research()
             self.launch_process()
         except Exception:
             if hasattr(self, "process"):
@@ -357,6 +364,9 @@ class Native:
         self.process = subprocess.Popen(self.command,
                     env=self.environment, cwd=self.work, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        bridge = getattr(self, 'research', None)
+        if bridge is not None and hasattr(bridge, 'process_started'):
+            bridge.process_started()
         self.reader_thread = threading.Thread(target=self.reader, daemon=True)
         self.reader_thread.start()
         try:
@@ -401,19 +411,25 @@ class Native:
                 actual = policy.without_nulls(result.get('config', {}).get('mcp_servers') or {})
                 policy.require(actual == expected, 'config.research_mcp')
 
-    def prepare_research(self, session, body):
-        """A fresh trusted MCP child/capability per request; the original thread is resumed below."""
-        bridge = getattr(self, 'research', None)
-        if bridge is None:
+    def create_research(self):
+        from .research_persistent import PersistentResearchBridge
+        return PersistentResearchBridge(self)
+
+    def configure_research(self):
+        config = self.research.config()
+        if not config:
             return
-        config = bridge.prepare(session, str(body.requestId), body.scope)
         # JSON objects are not TOML inline tables: serialize only the fixed server
         # table, quoting the one generated grant filename with the existing helper.
         server = config['research']
         table = '{research={command=%s,args=[%s],startup_timeout_sec=20.0,tool_timeout_sec=30.0}}' % (
             toml_basic_string(server['command']), ','.join(toml_basic_string(arg) for arg in server['args']))
         self.command = self.base_command + ['-c', 'mcp_servers=' + table]
-        self.reset_thread_tools()
+
+    def prepare_research(self, session, body):
+        bridge = getattr(self, 'research', None)
+        if bridge is not None:
+            bridge.prepare(session, str(body.requestId), body.scope)
 
     def release_research(self):
         if getattr(self, 'research', None) is not None:
@@ -640,6 +656,10 @@ class Native:
             return self.blocked_reason
         if self.process.poll() is not None:
             return "unavailable"
+        bridge = getattr(self, 'research', None)
+        if (bridge is not None and hasattr(bridge, 'admission_ready')
+                and self.active_session is None and not bridge.admission_ready()):
+            return 'unavailable'
         if not self.auth and not self.fixture:
             return "not_configured"
         if self.auth:
@@ -800,12 +820,19 @@ class Native:
     def reader(self):
         try:
             for line in self.process.stdout:
-                message = json.loads(line)
+                from .research_authority import strict_json
+                message = strict_json(line)
+                bridge = getattr(self, 'research', None)
+                if bridge is not None and hasattr(bridge, 'note') and isinstance(message, dict):
+                    bridge.note(message)
                 if isinstance(message, dict) and message.get("method") in APPROVAL_KINDS and "id" in message:
                     self.approval_arrived(message)  # #68 P-A: stamped as read from Codex's stdout, before the queue
                 self.messages.put(message)
         except Exception:
             pass
+        bridge = getattr(self, 'research', None)
+        if bridge is not None and hasattr(bridge, 'process_lost'):
+            bridge.process_lost()
         self.messages.put({"fatal": True})
 
     def write_lock(self):
@@ -1083,6 +1110,9 @@ class Native:
                     or entry.get("state") != "running"):
                 return "not_running"
             self.interrupt_request = (session, request)
+        bridge = getattr(self, 'research', None)
+        if bridge is not None:
+            bridge.revoke()
         self.send_interrupt(session, entry)
         return "interrupting"
 
@@ -1097,6 +1127,26 @@ class Native:
             self.next_id += 1
             self.send({"id": self.next_id - 1, "method": "turn/interrupt",
                        "params": {"threadId": entry["thread"], "turnId": entry["turn_id"]}})
+
+    def abort_research_turn(self, session, request, thread, turn_id):
+        """Uncertain storage ends this model turn, without fabricating a user stop."""
+        with self.state_lock:
+            entry = self.mapping.get(session)
+            if (self.active_session != session or entry is None or entry.get('request') != request
+                    or entry.get('thread') != thread):
+                return
+            entry['researchUncertain'] = True
+            if entry.get('researchInterruptSent') or entry.get('interruptSent'):
+                return
+            entry['researchInterruptSent'] = True
+            entry['interruptSent'] = True
+        bridge = getattr(self, 'research', None)
+        if bridge is not None:
+            bridge.revoke()
+        with self.write_lock():
+            self.next_id += 1
+            self.send({'id': self.next_id - 1, 'method': 'turn/interrupt',
+                       'params': {'threadId': thread, 'turnId': turn_id}})
 
     def run_turn(self, session, body):
         started_at = time.monotonic()
@@ -1144,6 +1194,9 @@ class Native:
             # callback boundaries, while page data is only a compact hint.
             content = turn_prompt(body.text, body.scope)
             timing["promptChars"] = len(content)
+            bridge = getattr(self, 'research', None)
+            if bridge is not None and hasattr(bridge, 'before_model'):
+                bridge.before_model(turn)  # Peer + native catalogue proof before any turn/start.
             model_started_at = time.monotonic()
             started = self.rpc("turn/start", {"threadId": entry["thread"], "model": MODEL, "input": [{"type": "text", "text": content}]}, turn)
             timing["dispatchMs"] = (time.monotonic() - model_started_at) * 1000
@@ -1172,7 +1225,7 @@ class Native:
             status = completed.get("status")
             # #90: a user stop (this request's interrupt) ends the turn normally; any other interruption is a failure.
             interrupted = status == "interrupted" and getattr(self, "interrupt_request", None) == (session, entry["request"])
-            entry["state"] = "idle" if (status == "completed" or interrupted) and not self.blocked_reason else "failed"
+            entry["state"] = "idle" if (status == "completed" or interrupted) and not self.blocked_reason and not entry.get('researchUncertain') else "failed"
             entry["turnStatus"] = "interrupted" if interrupted and entry["state"] == "idle" else (
                 "completed" if entry["state"] == "idle" else "failed")
             if entry["state"] == "failed":
@@ -1268,8 +1321,10 @@ class Native:
                 if key in entry["record"]:
                     record[key] = entry["record"][key]
             extra = {"turnStatus": entry["turnStatus"]} if state != "running" and entry.get("turnStatus") else {}
-            return {"requestId": entry["request"], "threadId": entry.get("thread"), "turnId": entry.get("turn_id"), "state": state,
+            value = {"requestId": entry["request"], "threadId": entry.get("thread"), "turnId": entry.get("turn_id"), "state": state,
                     "record": record, "errorCode": entry.get("error"), "model": MODEL, **extra}
+        bridge = getattr(self, 'research', None)
+        return {**value, **(bridge.snapshot(session) if bridge is not None and hasattr(bridge, 'snapshot') else {})}
 
     def close(self):
         if self.closed:
@@ -1641,6 +1696,20 @@ def create_app():
         result = native.interrupt(str(identity), str(body.requestId))
         return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, "sessionId": str(identity),
                 "requestId": str(body.requestId), "state": result}
+
+    @app.post('/sessions/{identity}/research-settlement')
+    def research_settlement(identity: uuid.UUID, body: ResearchSettlement):
+        with lifecycle_lock:
+            native = app.state.native
+            bridge = getattr(native, 'research', None)
+            if app.state.stopping or bridge is None or not hasattr(bridge, 'settle'):
+                return JSONResponse({'ownerId': owner, 'error': 'codex_unavailable'}, status_code=503)
+            if body.podUid != pod_uid:
+                return JSONResponse({'ownerId': owner, 'error': 'codex_policy_refused'}, status_code=503)
+            result = bridge.settle(str(identity), body.binding, body.outcome)
+            return {'ownerId': owner, 'stateId': state_id, 'podUid': pod_uid,
+                    'requestId': result['requestId'], 'fenceId': result['fenceId'],
+                    'outcome': result['outcome']}
 
     @app.get("/sessions/{identity}/events")
     async def events(identity: uuid.UUID, request: Request, after: str | None = None):

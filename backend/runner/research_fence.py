@@ -83,14 +83,18 @@ class MutationFence:
             os.close(descriptor)
         return validate(strict_json(data), self.owner, self.state)
 
-    def pending(self):
+    def status(self):
         with self.locked():
             value = self._read()
             if value and value['phase'] == 'terminal':
                 # A prior ACK may have failed after replace but before dir fsync.
                 # Do not turn that in-memory visibility into admission evidence.
                 self._sync_terminal()
-            return value if value and value['phase'] == 'execute_intent' else None
+            return value
+
+    def pending(self):
+        value = self.status()
+        return value if value and value['phase'] == 'execute_intent' else None
 
     def _sync_terminal(self):
         descriptor = private_file(self.path)

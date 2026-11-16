@@ -273,3 +273,26 @@ def test_no_base_http_middleware_remains(api, runner):
     for app in (api, client.app):
         classes = [entry.cls for entry in app.user_middleware]
         assert len(classes) == 1 and not issubclass(classes[0], BaseHTTPMiddleware)
+
+
+def test_research_settlement_ack_reuses_service_state_and_pod_authentication(runner):
+    from types import SimpleNamespace
+    client, headers, ids = runner
+    identity, request, fence = (str(uuid4()) for _ in range(3))
+    seen = []
+    def settle(session, binding, outcome):
+        seen.append((session, binding, outcome))
+        return {'requestId': request, 'fenceId': fence, 'outcome': outcome}
+    client.app.state.native.research = SimpleNamespace(settle=settle)
+    route = '/sessions/' + identity + '/research-settlement'
+    body = {'binding': {'requestId': request, 'fenceId': fence}, 'outcome': 'not_applied', 'podUid': ids['pod']}
+    assert client.post(route, json=body).status_code == 401
+    assert client.post(route, json=body, headers={'Authorization': headers['Authorization'],
+                                               'X-Runner-State-Id': str(uuid4())}).status_code == 503
+    assert client.post(route, json={**body, 'podUid': str(uuid4())}, headers=headers).status_code == 503
+    assert seen == []
+    reply = client.post(route, json=body, headers=headers)
+    assert reply.status_code == 200 and reply.json() == {'ownerId': ids['owner'], 'stateId': ids['state'],
+        'podUid': ids['pod'], 'requestId': request, 'fenceId': fence, 'outcome': 'not_applied'}
+    assert reply.headers['cache-control'] == 'no-store'
+    assert len(seen) == 1

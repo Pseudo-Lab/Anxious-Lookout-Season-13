@@ -2,14 +2,14 @@
 
 Use the two benchmark images built from the same runner base, with an immutable
 root-owned mode marker (restart or retain). `retain` disables every MCP call; it
-only compares model text latency with the same initialized MCP catalogue. It
-cannot authorize an API operation with a reused process capability. C2 uses the
-normal (restart) factory with actual calls. No shell/security policy is relaxed.
+only compares model text latency with the persistent bootstrap/catalogue. It
+cannot authorize an API operation. The restart variant retains the previous
+per-turn-reset adapter as the comparison. C2 uses the normal persistent factory
+with actual calls. No shell/security policy is relaxed.
 """
 import os
 from pathlib import Path
 import stat
-import threading
 
 from app.codex_policy import CodexFailure
 from runner import app as runner_app
@@ -29,28 +29,24 @@ def mode():
 
 
 class GateNative(BaseNative):
+    def create_research(self):
+        if mode() == 'restart':
+            from runner.research_bridge import ResearchBridge
+            return ResearchBridge(self)
+        return super().create_research()
+
     def prepare_research(self, session, body):
         selected = mode()
         if os.environ.get('APP_ENV') != 'operator-service' or (body.scope or {}).get('page', {}).get('kind') != 'general':
             raise CodexFailure('policy_refused')
         bridge = self.research
         if selected == 'restart':
-            return super().prepare_research(session, body)
-        bridge.calls_disabled = True
-        if bridge.grant is None:
-            return super().prepare_research(session, body)  # First/cold turn, excluded from warm comparison.
-        with bridge.lock:
-            bridge.session, bridge.request, bridge.scope = session, str(body.requestId), body.scope
-            bridge.turn = None
-            bridge.ready = threading.Event()
-
-    def release_research(self):
-        if mode() == 'retain' and self.research is not None:
-            with self.research.lock:
-                self.research.turn = None
-                self.research.ready.set()
+            bridge.prepare(session, str(body.requestId), body.scope)
+            self.configure_research()
+            self.reset_thread_tools()
             return
-        return super().release_research()
+        bridge.calls_disabled = True
+        return super().prepare_research(session, body)
 
 
 def install():

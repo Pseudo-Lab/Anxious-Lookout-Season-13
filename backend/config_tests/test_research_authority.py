@@ -235,9 +235,51 @@ def test_authorization_json_rejects_ambiguous_keys_and_non_json_numbers(data):
 def make_epoch(epochs, **overrides):
     fields = dict(generation='generation-1', session='conversation-1', request='request-1',
                   token='original-api-token', scope={'page': {'kind': 'general'}},
-                  thread='native-thread', peer=object())
+                  thread='native-thread', peer=SimpleNamespace(alive=lambda: True))
     fields.update(overrides)
     return epochs.begin(**fields)
+
+
+def test_registered_child_exit_before_claim_never_issues_work(registration):
+    child, peer, _ = register(registration)
+    registration.bootstrap.catalogue_ready('generation-1')
+    registration.bootstrap.activate('generation-1')
+    epochs = Epochs()
+    epoch = make_epoch(epochs, peer=peer)
+    epochs.bind(epoch, 'native-turn')
+    message = observe(epochs, epoch)
+    child.terminate()
+    child.wait(timeout=3)
+    assert not peer.alive()
+    with pytest.raises(AuthorityError, match='peer_exited'):
+        epochs.claim(epoch, message)
+    assert epoch.revoked and epoch.inflight == 0
+
+
+def test_disconnected_peer_before_claim_never_issues_work(registration):
+    _, peer, _ = register(registration)
+    epochs = Epochs()
+    epoch = make_epoch(epochs, peer=peer)
+    epochs.bind(epoch, 'native-turn')
+    message = observe(epochs, epoch)
+    peer.socket.shutdown(socket.SHUT_RDWR)
+    assert peer.identity.alive() and not peer.alive()
+    with pytest.raises(AuthorityError, match='peer_exited'):
+        epochs.claim(epoch, message)
+    assert epoch.revoked and epoch.inflight == 0
+
+
+def test_parent_identity_invalidation_before_claim_never_issues_work(registration):
+    _, peer, _ = register(registration)
+    epochs = Epochs()
+    epoch = make_epoch(epochs, peer=peer)
+    epochs.bind(epoch, 'native-turn')
+    message = observe(epochs, epoch)
+    registration.bootstrap.parent.close()
+    assert peer.identity.alive() and not peer.alive()
+    with pytest.raises(AuthorityError, match='peer_exited'):
+        epochs.claim(epoch, message)
+    assert epoch.revoked and epoch.inflight == 0
 
 
 def call(**overrides):
