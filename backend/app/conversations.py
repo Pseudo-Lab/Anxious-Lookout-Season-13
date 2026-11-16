@@ -317,7 +317,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
             return {**result, "reason": "unavailable"}
 
     def require_schema(store):
-        if store.db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() not in {"0003_sessions", "0004_publication", "0005_writing", "0006_posts", "0007_post_blocks"}:
+        if store.db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() not in {"0003_sessions", "0004_publication", "0005_writing", "0006_posts", "0007_post_blocks", "0008_version_authors"}:
             fail("not_ready", "Conversation schema is not ready", 503)
 
     def runner_for(owner, store=None):
@@ -674,7 +674,8 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                 fail("forbidden", "Storage tool permission was revoked", 403)
             from .research_schema_contract import validate_research
             try:
-                validate_research(db.connection())
+                if validate_research(db.connection()) != '0008_version_authors':
+                    raise RuntimeError('Version provenance schema is required')
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
             metadata = request_metadata(row)
@@ -686,5 +687,6 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                 return response({'authorized': True})
             if not tool_allowed(scope, body.name, body.arguments):
                 fail("tool_not_allowed", "Tool is unavailable in this request's research mode", 403)
-            store = Store(db, row.owner_id)
+            from .version_authors import VersionAuthor
+            store = Store(db, row.owner_id, author=VersionAuthor(row.id))
             return response(dispatch(store, body.name, body.arguments, context=scope.get("context")))

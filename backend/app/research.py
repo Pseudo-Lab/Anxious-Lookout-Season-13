@@ -173,8 +173,10 @@ def page_query(statement, model, limit, cursor):
 
 
 class Store:
-    def __init__(self, db, owner):
+    def __init__(self, db, owner, *, author=None):
+        from .version_authors import VersionAuthor
         self.db, self.owner = db, owner
+        self.author = author or VersionAuthor()
 
     def owned_item(self, identity, kind=None, active=False, lock=False):
         query = select(Item).where(Item.id == parse_id(identity), Item.owner_id == self.owner)
@@ -196,8 +198,9 @@ class Store:
         return row
 
     def serialize_version(self, row, content=True):
+        from .version_authors import value as author_value
         result = {"id": str(row.id), "itemId": str(row.item_id), "number": row.number,
-                  "title": row.title, "createdAt": stamp(row.created_at)}
+                  "title": row.title, "createdAt": stamp(row.created_at), "author": author_value(row)}
         if content:
             result["content"] = row.content
         if row.kind == "material":
@@ -205,12 +208,14 @@ class Store:
         return result
 
     def serialize_item(self, row, content=True):
+        from .version_authors import value as author_value
         latest = self.db.scalar(select(ContentVersion).where(ContentVersion.item_id == row.id,
                                  ContentVersion.owner_id == self.owner, ContentVersion.number == row.content_number))
         result = {"id": str(row.id), "type": row.kind, "title": latest.title,
                   "createdAt": stamp(row.created_at), "updatedAt": stamp(row.updated_at),
                   "version": row.version, "archived": row.archived,
-                  "latestVersion": {"id": str(latest.id), "number": latest.number, "createdAt": stamp(latest.created_at)}}
+                  "latestVersion": {"id": str(latest.id), "number": latest.number, "createdAt": stamp(latest.created_at),
+                                    "author": author_value(latest)}}
         if content:
             result["content"] = latest.content
         if row.kind == "material":
@@ -222,6 +227,7 @@ class Store:
 
     def add_snapshot(self, row, body):
         self.db.add(ContentVersion(item_id=row.id, owner_id=self.owner, kind=row.kind,
+                                  **self.author.columns(),
                                   number=row.content_number, title=body.title, content=body.content,
                                   source_url=getattr(body, "sourceUrl", None),
                                   collected_at=datetime.fromisoformat(body.collectedAt) if row.kind == "material" else None,
@@ -239,7 +245,9 @@ class Store:
     def change_item(self, identity, kind, body):
         self.graph_lock()
         row = self.owned_item(identity, kind, active=True, lock=True)
-        self.expect(row, body.expectedVersion)
+        if row.version != body.expectedVersion:
+            fail('conflict', 'The resource changed; reload before retrying', 409,
+                 {'reason': 'resource_version', 'current': self.serialize_item(row)})
         row.version += 1
         row.content_number += 1
         row.updated_at = datetime.now(timezone.utc)
@@ -417,7 +425,8 @@ def register_research(app, sessions, settings, current_session, error):
                     fail("csrf_invalid", "Invalid CSRF token", 403)
             from .research_schema_contract import validate_research
             try:
-                validate_research(db.connection())
+                if validate_research(db.connection()) != '0008_version_authors':
+                    raise RuntimeError('Version provenance schema is required')
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
             yield Store(db, account.id)
@@ -429,7 +438,8 @@ def register_research(app, sessions, settings, current_session, error):
         from .research_schema_contract import validate_research
         with sessions() as db:
             try:
-                validate_research(db.connection())
+                if validate_research(db.connection()) != '0008_version_authors':
+                    raise RuntimeError('Version provenance schema is required')
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
         return JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})

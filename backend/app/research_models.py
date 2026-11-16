@@ -34,6 +34,9 @@ class ContentVersion(Base):
     source_url: Mapped[str | None] = mapped_column(Text)
     collected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     content_kind: Mapped[str | None] = mapped_column(String(16))
+    author_kind: Mapped[str] = mapped_column(String(16), server_default='human')
+    author_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
+    author_credential_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
 
