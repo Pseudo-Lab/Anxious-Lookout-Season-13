@@ -1,5 +1,6 @@
 // 실제 API + 실제 adapter + offline protocol fixture(backend/compose.m3-offline.yml)에서 세션 UI를 브라우저로 확인한다.
 // 모델/Codex provider/credential 없음(verification=fixture, 응답 "Offline fixture answer"). UI 모의 제어(__mock) 미사용.
+// #97의 이 fixture는 테스트용 dynamicToolCall 경로다. 실제 MCP/C2/F2 envelope 증거가 아니다.
 // 조율(live-offline.sh): <name>.id → 승인 → <name>.ok, 승인 후 <name>.account(accountId) → runner 구성 → offline.ready,
 // 재시작 요청 restart.request → restart.done.
 import { chromium } from "playwright";
@@ -133,11 +134,24 @@ async function writeBody(lines) {
 }
 const chat = chatOf(page);
 const api = apiClient(page);
-// #28 D1: fixture의 research_document_save는 문서를 바로 만들지 않고 새 문서 제안을 남긴다. 도구 쓰기 횟수는 그 제안 수로 센다.
+// #97: 새 쓰기는 직접 자원·버전을 만든다. proposal을 쓰기 횟수로 세지 않는다.
+async function allItems(path, p = api) {
+  const items = [];
+  let cursor = null;
+  do {
+    const result = await p.get(`${path}${path.includes("?") ? "&" : "?"}limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+    if (result.status !== 200 || !Array.isArray(result.body?.items)) throw new Error(`list failed: ${path} (${result.status})`);
+    items.push(...result.body.items);
+    cursor = result.body.nextCursor;
+  } while (cursor);
+  return items;
+}
+const fixtureDocItems = async (p = api) => (await allItems("/research/documents", p)).filter((d) => d.title === "Fixture document");
 const fixtureDocs = async (p = api) =>
-  (await p.get("/research/document-proposals?limit=100")).body.items.filter((d) => d.title === "Fixture document" && d.documentId === null).length;
-const directFixtureDocs = async (p = api) =>
-  (await p.get("/research/documents?limit=100")).body.items.filter((d) => d.title === "Fixture document").length;
+  (await fixtureDocItems(p)).length;
+const sessionIdOf = (url) => new URL(url).searchParams.get("id");
+const codexAuthor = (author, sessionUrl) => author?.kind === "codex" && author.conversationId === sessionIdOf(sessionUrl);
+const versionState = async (p = api) => (await fixtureDocItems(p)).map((d) => [d.id, d.version, d.latestVersion.id, d.latestVersion.number]).sort((a, b) => a[0].localeCompare(b[0]));
 // 1×1 PNG(서버가 실제로 decode·재인코딩한다)
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 const userMsgs = (m, text) => m.locator("li[data-role=user]", { hasText: text });
@@ -219,6 +233,7 @@ await page.goto(U("/research/"));
 // O2. 일반 메시지: 실제 adapter → 실제 storage tool callback → 전체 도구 입력·출력과 원본
 const s1 = await newSession(page, "오프라인 세션 1");
 const docs0 = await fixtureDocs();
+const proposals0 = (await allItems("/research/document-proposals")).length;
 await send(chat, "자료를 정리해줘");
 check("O2. running shown", await appears(chat.getByText("응답하는 중입니다."), 10000));
 check("O2. offline answer shown", await appears(chat.getByText("Offline fixture answer")));
@@ -228,9 +243,14 @@ check("O2. tool call listed", await appears(toolBtn));
 await toolBtn.first().click();
 check("O2. full tool input shown inert", await appears(chat.locator("pre", { hasText: "Complete fixture tool input" })));
 check("O2. no raw record entry (#94)", (await chat.getByRole("button", { name: /원본 기록/ }).count()) === 0);
-check("O2. tool left one new-document proposal via real API", (await fixtureDocs()) === docs0 + 1, `${docs0} -> ${await fixtureDocs()}`);
-check("O2. D1: no document created directly", (await directFixtureDocs()) === 0, String(await directFixtureDocs()));
-check("O2. chat links the new-document proposal", await appears(chat.getByText("새 문서 제안이 만들어졌습니다", { exact: false })));
+check("O2. tool saved one document directly via real API", (await fixtureDocs()) === docs0 + 1, `${docs0} -> ${await fixtureDocs()}`);
+{
+  const saved = (await fixtureDocItems()).find((d) => codexAuthor(d.latestVersion.author, s1));
+  const versions = saved ? await allItems(`/research/documents/${saved.id}/versions`) : [];
+  const snapshot = saved ? (await api.get(`/research/documents/${saved.id}/versions/${saved.latestVersion.id}`)).body : null;
+  check("O2. exactly one immutable snapshot with conversation author", versions.length === 1 && saved?.latestVersion.number === 1 && codexAuthor(snapshot?.author, s1) && snapshot?.content.includes("Complete fixture tool input"));
+}
+check("O2. direct save created no proposal", (await allItems("/research/document-proposals")).length === proposals0);
 
 // O3. 미기록 실패 입력: failed + platform 표시, 후속 명시 입력 성공 후에도 보존
 await send(chat, "/fixture/unrecorded");
@@ -276,6 +296,7 @@ async function dropFirstSend(p) {
   check("O5. lost send -> uncertain notice", await appears(chat.getByRole("button", { name: "다시 보내기" })));
   await appears(chat.getByText("Offline fixture answer").nth(3));
   await settled(chat);
+  const savedState = await versionState();
   await chat.getByRole("button", { name: "다시 보내기" }).click();
   await chat.getByRole("button", { name: "보내기", exact: true }).waitFor();
   await page.unroute("**/api/research/sessions/*/messages");
@@ -284,27 +305,32 @@ async function dropFirstSend(p) {
   check("O5. replay kept same key", keys.length === 2 && keys[0] === keys[1], JSON.stringify(keys));
   check("O5. one user message", (await userMsgs(chat, "재전송 질문").count()) === 1);
   check("O5. one tool document (no second dispatch)", (await fixtureDocs()) === before + 1, `${before} -> ${await fixtureDocs()}`);
+  check("O5. replay preserved snapshot ids and version counts", JSON.stringify(await versionState()) === JSON.stringify(savedState));
 }
 
 // O6. 응답 유실 → 새로고침(재접속) → 입력·key 복구 → 재전송: 중복 없음
 {
   const before = await fixtureDocs();
-  await dropFirstSend(page);
+  const keys = await dropFirstSend(page);
   await send(chat, "새로고침 질문");
-  // 알림은 요청 중에도 보이므로, 실패 처리가 끝난("다시 보내기") 뒤에 route를 해제한다.
+  // 알림은 요청 중에도 보이므로, 실패 처리가 끝난("다시 보내기") 뒤에 새로고침한다.
   await chat.getByRole("button", { name: "다시 보내기" }).waitFor();
-  await page.unroute("**/api/research/sessions/*/messages");
+  // 같은 handler는 두 번째 요청부터 통과시킨다. 재접속 뒤의 재전송 key까지 기록한다.
   await page.reload();
   await chat.getByLabel("메시지").waitFor();
   check("O6. text restored after reload", (await chat.getByLabel("메시지").inputValue()) === "새로고침 질문");
   await appears(userMsgs(chat, "새로고침 질문"));
   await settled(chat);
+  const savedState = await versionState();
   await chat.getByRole("button", { name: "다시 보내기" }).click();
   await chat.getByRole("button", { name: "보내기", exact: true }).waitFor();
+  await page.unroute("**/api/research/sessions/*/messages");
   await page.reload();
   await chat.getByLabel("메시지").waitFor();
   check("O6. one user message after reconnect replay", (await userMsgs(chat, "새로고침 질문").count()) === 1);
   check("O6. one tool document", (await fixtureDocs()) === before + 1, `${before} -> ${await fixtureDocs()}`);
+  check("O6. reconnect reused the original key", keys.length === 2 && keys[0] === keys[1], JSON.stringify(keys));
+  check("O6. reconnect replay preserved snapshots", JSON.stringify(await versionState()) === JSON.stringify(savedState));
 }
 
 // O7. 같은 계정 다른 세션 busy(hold 중) / B runner 독립
@@ -337,6 +363,7 @@ async function dropFirstSend(p) {
   await page.unroute("**/api/research/sessions/*/messages");
   await appears(chat.getByText("Offline fixture answer").nth(6));
   await settled(chat);
+  const savedState = await versionState();
   await fs.writeFile(`${SHARED}/restart.request`, "1");
   await waitFile("restart.done");
   await page.reload();
@@ -346,6 +373,7 @@ async function dropFirstSend(p) {
   await chat.getByRole("button", { name: "다시 보내기" }).click();
   await chat.getByRole("button", { name: "보내기", exact: true }).waitFor();
   check("O8. old tuple replay creates no new document", (await fixtureDocs()) === before + 1, `${before} -> ${await fixtureDocs()}`);
+  check("O8. restart and replay preserved snapshot ids and versions", JSON.stringify(await versionState()) === JSON.stringify(savedState));
   await send(chat, "재시작 후 이어하기");
   const continued = await appears(chat.getByText("Offline fixture answer").nth(7), 30000);
   check(
@@ -444,6 +472,10 @@ async function dropFirstSend(p) {
   check("I4. replay accepted (no conflict error)", (await chat.getByText("메시지를 보내지 못했습니다").count()) === 0);
   check("I4. one user message", (await userMsgs(chat, "범위 고정 재전송").count()) === 1);
   check("I4. no second dispatch (one document)", (await fixtureDocs()) === docs + 1, `${docs} -> ${await fixtureDocs()}`);
+  {
+    const saved = (await fixtureDocItems()).filter((d) => codexAuthor(d.latestVersion.author, s3));
+    check("I1-I4. four direct saves attributed to this conversation, each v1", saved.length === 4 && saved.every((d) => d.latestVersion.number === 1));
+  }
   await page.unroute("**/api/research/sessions/*/messages");
   await page.route("**/api/research/sessions/*/messages", record);
   docs = await fixtureDocs();
@@ -514,42 +546,46 @@ async function dropFirstSend(p) {
   await chat.getByLabel("메시지").waitFor();
 }
 
-// IW. #22 실제 제안 경로(offline native → research_document_update → 실제 API pending 제안):
-//     문서는 그대로이고, 대화의 '제안 검토' → diff → 수락하면 버전이 하나 늘어난다.
+// IW. #97 offline native → 직접 문서 v2 저장. 사람의 active 초안은 그대로 두고 commit 충돌/diff로 보호한다.
 {
-  const d = await api.send("POST", "/research/documents", { title: "제안 대상 문서", content: "제안 전 본문\n" });
+  const d = await api.send("POST", "/research/documents", { title: "직접 저장 대상 문서", content: "직접 저장 전 본문\n" });
   check("IW. setup: document", d.status === 201, String(d.status));
   const id = d.body.id;
   await openAt(page, s1, U(`/research/document/?id=${id}`));
+  await main.getByRole("button", { name: "내용 수정" }).click();
+  await main.getByLabel("본문").fill("보존할 사람 문서 초안");
+  await main.getByText("초안 자동 저장됨").waitFor();
+  const draftBefore = (await api.get(`/research/documents/${id}/draft`)).body?.draft;
   await send(chat, `/fixture/document-update ${id} ${d.body.version}`);
   await settled(chat);
-  // #28 D1 뒤로는 이전 research_document_save 차례에도 '제안 검토'(새 문서 제안) 링크가 있으므로 이 도구 항목의 링크를 기다린다.
-  const updLink = chat.locator("li", { hasText: "research_document_update" }).last().getByRole("link", { name: "제안 검토" });
-  check("IW. chat shows proposal with review link", await appears(updLink));
   const head = (await api.get(`/research/documents/${id}`)).body;
-  const props = (await api.get(`/research/documents/${id}/proposals`)).body?.items ?? [];
+  const props = await allItems(`/research/documents/${id}/proposals`);
   check(
-    "IW. real API: pending proposal, document unchanged",
-    head.content === "제안 전 본문\n" && head.latestVersion.number === 1 && props.length === 1 && props[0].status === "pending",
-    JSON.stringify({ n: head.latestVersion.number, props: props.map((p) => p.status) })
+    "IW. direct update appends Codex v2 without a proposal",
+    head.content === "Complete fixture proposal content" && head.latestVersion.number === 2 && head.title === "Fixture proposal" && codexAuthor(head.latestVersion.author, s1) && props.length === 0
   );
-  await updLink.click();
-  const box = main.locator("#proposals");
-  check("IW. proposal diff shown", await appears(box.locator('[data-diff="add"]', { hasText: "Complete fixture proposal content" })));
-  await box.getByRole("button", { name: "제안 수락" }).click();
-  await box.getByRole("button", { name: "수락 확인" }).click();
-  check("IW. accepted content shown", await appears(main.locator(".prose").getByText("Complete fixture proposal content")));
+  const versions = await allItems(`/research/documents/${id}/versions`);
+  const saved = (await api.get(`/research/documents/${id}/versions/${head.latestVersion.id}`)).body;
+  const old = (await api.get(`/research/documents/${id}/versions/${d.body.latestVersion.id}`)).body;
+  check("IW. exactly two immutable snapshots with separate authors", versions.length === 2 && saved.content === "Complete fixture proposal content" && codexAuthor(saved.author, s1) && old.content === "직접 저장 전 본문\n" && old.author?.kind === "human");
+  const draftAfter = (await api.get(`/research/documents/${id}/draft`)).body?.draft;
+  check("IW. agent save leaves active human draft unchanged", !!draftBefore && draftAfter?.state === "active" && JSON.stringify(draftAfter) === JSON.stringify(draftBefore));
+  check("IW. editor input kept during agent save", (await main.getByLabel("본문").inputValue()) === "보존할 사람 문서 초안");
+  await main.getByRole("button", { name: "새 버전으로 저장" }).click();
+  await main.getByRole("button", { name: "비교했고 이 내용으로 저장" }).waitFor();
+  check("IW. conflict diff shows the saved agent text", await appears(main.locator('[data-diff="del"]', { hasText: "Complete fixture proposal content" })));
+  check("IW. conflict preserves the dirty input", (await main.getByLabel("본문").inputValue()) === "보존할 사람 문서 초안");
+  check("IW. conflicting save does not append another snapshot", (await allItems(`/research/documents/${id}/versions`)).length === 2);
+  check("IW. Codex version has a platform conversation link", await appears(main.getByRole("link", { name: "작성 대화로 이동" })) && (await main.getByRole("link", { name: "작성 대화로 이동" }).first().getAttribute("href")) === new URL(s1).pathname + new URL(s1).search);
+  await main.getByRole("button", { name: "비교했고 이 내용으로 저장" }).click();
+  await main.getByRole("button", { name: "내용 수정" }).waitFor();
   const after = (await api.get(`/research/documents/${id}`)).body;
-  const accepted = (await api.get(`/research/documents/${id}/proposals`)).body?.items ?? [];
-  check(
-    "IW. real API: exactly one version, proposal accepted",
-    after.latestVersion.number === 2 && after.title === "Fixture proposal" && accepted[0]?.status === "accepted" && accepted[0]?.acceptedVersionId === after.latestVersion.id,
-    JSON.stringify({ n: after.latestVersion.number, s: accepted[0]?.status })
-  );
+  check("IW. explicit conflict resolution saves human v3", after.latestVersion.number === 3 && after.content === "보존할 사람 문서 초안" && after.latestVersion.author?.kind === "human");
+  check("IW. no legacy proposal panel for direct writes", (await main.locator("#proposals").count()) === 0);
 }
 
 // IP. #28 글(실제 API + 실제 runner): 이관 글 공개 → /write 초안 자동 저장·복구 → 저장 → 발행·익명 공개 → 재발행 diff → 발행 취소.
-//     D1: fixture research_document_save는 새 문서 제안 → 검토 → 수락해야 문서가 생긴다. 공개 글 대화 범위는 public_post(postId).
+//     #97: fixture 문서/글 저장은 즉시 버전 생성, 사람 초안은 유지. 공개 글 대화 범위는 public_post(postId).
 {
   const anonCtx = await browser.newContext();
   const anon = await anonCtx.newPage();
@@ -696,21 +732,25 @@ async function dropFirstSend(p) {
     `${media.status()} ${media.headers()["cache-control"]}`
   );
 
-  // Codex 글 수정 제안(실제 fixture research_post_propose): 수락 전 글·발행본 그대로 → 검토 → 수락 = 새 버전 1개
+  // #97: 제어 문구는 그대로지만 fixture의 실제 호출은 research_post_save다. 즉시 새 버전, 발행본 불변.
   await openAt(page, s1, U(`/write/?id=${postId}`));
   const beforeProp = (await api.get(`/research/posts/${postId}`)).body;
+  const postProposalsBefore = (await allItems("/research/post-proposals")).length;
   await send(chat, "/fixture/post-propose 다듬어줘");
   await settled(chat);
-  check("IP9. chat: post proposal link", await appears(chat.getByText("글 수정 제안이 만들어졌습니다", { exact: false })));
-  check("IP9. real API: post unchanged before acceptance", (await api.get(`/research/posts/${postId}`)).body.latestVersion.number === beforeProp.latestVersion.number);
-  await chat.locator("li", { hasText: "research_post_propose" }).last().getByRole("link", { name: "제안 검토" }).click();
-  const propBox = main.locator("#proposals");
-  check("IP9. proposal diff shown", await appears(propBox.locator('[data-diff="add"]', { hasText: "Complete fixture post proposal" })));
-  await propBox.getByRole("button", { name: "제안 수락" }).click();
-  await propBox.getByRole("button", { name: "수락 확인" }).click();
-  check("IP9. accepted content shown", await appears(main.locator(".prose").getByText("Complete fixture post proposal")));
   const afterProp = (await api.get(`/research/posts/${postId}`)).body;
-  check("IP9. exactly one version, publication unchanged", afterProp.latestVersion.number === beforeProp.latestVersion.number + 1 && afterProp.publication?.versionId === beforeProp.publication?.versionId);
+  check("IP9. direct save appends exactly one Codex version, publication unchanged", afterProp.latestVersion.number === beforeProp.latestVersion.number + 1 && afterProp.version === beforeProp.version + 1 && codexAuthor(afterProp.latestVersion.author, s1) && JSON.stringify(afterProp.publication) === JSON.stringify(beforeProp.publication));
+  const savedPostVersion = (await api.get(`/research/posts/${postId}/versions/${afterProp.latestVersion.id}`)).body;
+  const oldPostVersion = (await api.get(`/research/posts/${postId}/versions/${beforeProp.latestVersion.id}`)).body;
+  check("IP9. immutable new snapshot contains saved text and author", savedPostVersion.textProjection.includes("Complete fixture post proposal") && codexAuthor(savedPostVersion.author, s1));
+  check("IP9. older snapshot content is preserved", JSON.stringify(oldPostVersion.content) === JSON.stringify(beforeProp.latestVersion.content));
+  check("IP9. no new post proposal created", (await allItems("/research/post-proposals")).length === postProposalsBefore);
+  await page.reload();
+  check("IP9. saved post is visible without acceptance", await appears(main.locator(".prose").getByText("Complete fixture post proposal", { exact: false })));
+  check("IP9. no legacy proposal panel for the direct save", (await main.locator("#proposals").count()) === 0);
+  await main.getByRole("button", { name: "버전 비교" }).click();
+  check("IP9. version history diff shows the direct update", await appears(main.getByRole("region", { name: "버전 비교" }).locator('[data-diff="add"]', { hasText: "Complete fixture post proposal" })));
+  await main.getByRole("region", { name: "버전 비교" }).getByRole("button", { name: "비교 닫기" }).click();
 
   // 공개 글 대화 범위: public_post + PublicPost.postId, 소유자 도구 없음
   const bodies = [];
@@ -720,13 +760,15 @@ async function dropFirstSend(p) {
   };
   await page.route("**/api/research/sessions/*/messages", record);
   await openAt(page, s1, U(`/posts/${slug}/`));
+  const docsBeforePublic = await fixtureDocs();
   await page.locator("article h1").first().waitFor();
   check("IP5. public post scope shown (bounded)", await appears(chat.getByText("다음 질문 범위: 이 발행 글")));
   await send(chat, "/fixture/page-context 발행 글 질문");
   await settled(chat);
   check("IP5. page sent as public_post with postId", bodies.at(-1)?.page?.kind === "public_post" && bodies.at(-1)?.page?.resourceId === postId, JSON.stringify(bodies.at(-1)?.page));
   check("IP5. server admitted public_post scope", await appears(userMsgs(chat, "발행 글 질문").first().getByText(/보낸 범위: 이 발행 글/)));
-  check("IP5. no new-document proposal from public scope", !(await chat.locator("li", { hasText: "발행 글 질문" }).last().innerText()).includes("research_document_save"));
+  check("IP5. public scope created no document", (await fixtureDocs()) === docsBeforePublic);
+  check("IP5. public scope created no proposal", (await allItems("/research/document-proposals")).length === proposals0);
 
   // 새 글 초안 화면의 문맥: post_workspace + draftId
   await page.goto(U("/write/new/"));
@@ -742,6 +784,7 @@ async function dropFirstSend(p) {
       ip6Responses.push(`${r.status()} ${(await r.text().catch(() => "")).slice(0, 300)}`);
   };
   page.on("response", onIp6);
+  const docsBeforeContext = new Set((await fixtureDocItems()).map((d) => d.id));
   await send(chat, "초안 문맥 질문");
   await settled(chat);
   await page.waitForTimeout(1000);
@@ -750,39 +793,36 @@ async function dropFirstSend(p) {
   check("IP6. page sent as post_workspace with draftId", bodies.at(-1)?.page?.kind === "post_workspace" && bodies.at(-1)?.page?.draftId === ctxDraft, JSON.stringify(bodies.at(-1)?.page));
   check("IP6. server accepted the draft context", (await appears(userMsgs(chat, "초안 문맥 질문"))), `${ip6Responses.join(" | ")} || ${(await chat.innerText()).slice(-300)}`);
   await page.unroute("**/api/research/sessions/*/messages", record);
-  const docProposalLink = chat.locator("li", { hasText: "research_document_save" }).last().getByRole("link", { name: "제안 검토" });
-  const docProposalHref = await docProposalLink.getAttribute("href");
+  const contextDocs = (await fixtureDocItems()).filter((d) => !docsBeforeContext.has(d.id));
+  check("IP6. document save in draft context creates exactly one Codex v1", contextDocs.length === 1 && contextDocs[0].latestVersion.number === 1 && codexAuthor(contextDocs[0].latestVersion.author, s1));
 
-  // 작성 중인 새 글 초안에 대한 Codex 제안(fixture가 research_post_draft_get으로 최신 revision을 읽음) → 수락하면 새 글, 초안 닫힘
+  // 새 글 저장은 별도 post를 만든다. 명시한 사람 draft는 active·내용·revision·post 연결 그대로 유지한다.
+  const humanDraftBefore = (await api.get(`/research/post-drafts/${ctxDraft}`)).body;
+  const postsBeforeSave = new Set((await allItems("/research/posts")).map((p) => p.id));
   await send(chat, "/fixture/post-propose 이어서 써줘");
   await settled(chat);
-  check("IP10. chat: new post proposal", await appears(chat.getByText("새 글 제안이 만들어졌습니다", { exact: false })));
-  const props10 = (await api.get("/research/post-proposals?limit=100")).body?.items ?? [];
-  check("IP10. real API: proposal bound to the open draft", props10.some((x) => x.postId === null && x.baseDraftId === ctxDraft && x.status === "pending"), JSON.stringify(props10.map((x) => x.baseDraftId)));
-  await chat.locator("li", { hasText: "research_post_propose" }).last().getByRole("link", { name: "제안 검토" }).click();
-  await page.waitForURL(/\/write\/new\/\?proposal=/, { timeout: 20000 }).catch(() => {});
-  check("IP10. review diff from the draft", await appears(main.locator('[data-diff="add"]', { hasText: "Complete fixture post proposal" })));
-  check("IP10. W1: no slug asked when accepting a new post", (await main.getByLabel(/주소\(slug\)/).count()) === 0);
-  await main.getByRole("button", { name: "제안 수락" }).click();
-  await main.getByRole("button", { name: "수락 확인" }).click();
-  await page.waitForURL(/\/write\/\?id=/, { timeout: 20000 }).catch(() => {});
-  check("IP10. accepted: new post page", await appears(main.getByRole("region", { name: "발행" })));
-  check("IP10. real API: base draft committed", (await api.get(`/research/post-drafts/${ctxDraft}`)).body?.state === "committed");
-  {
-    const accepted = new URL(page.url()).searchParams.get("id");
-    const generated = accepted ? (await api.get(`/research/posts/${accepted}`)).body?.latestVersion?.slug : null;
-    check("IP10. W1: accept generated a server slug (fixture slug ignored)", /^post-[0-9a-f]{32}$/.test(generated ?? ""), String(generated));
-  }
+  const createdPosts = (await allItems("/research/posts")).filter((p) => !postsBeforeSave.has(p.id));
+  check("IP10. direct save creates exactly one post with Codex v1", createdPosts.length === 1 && createdPosts[0].latestVersion.number === 1 && codexAuthor(createdPosts[0].latestVersion.author, s1));
+  check("IP10. no post proposal created", (await allItems("/research/post-proposals")).length === postProposalsBefore);
+  const humanDraftAfter = (await api.get(`/research/post-drafts/${ctxDraft}`)).body;
+  check("IP10. human draft stays active and unchanged, including post association", humanDraftBefore?.state === "active" && humanDraftAfter?.state === "active" && JSON.stringify(humanDraftAfter) === JSON.stringify(humanDraftBefore));
+  check("IP10. active editor and input stay on the human draft", new URL(page.url()).searchParams.get("draft") === ctxDraft && (await main.getByLabel("제목").inputValue()) === "문맥 초안");
+  check("IP10. W1: no slug requested", (await main.getByLabel(/주소\(slug\)/).count()) === 0);
+  if (createdPosts.length !== 1) throw new Error("IP10: expected exactly one directly saved post");
+  const newPost = (await api.get(`/research/posts/${createdPosts[0].id}`)).body;
+  check("IP10. server-generated slug, unpublished snapshot with fixture text", /^post-[0-9a-f]{32}$/.test(newPost.latestVersion.slug) && newPost.publication === null && newPost.latestVersion.textProjection.includes("Complete fixture post proposal"));
+  check("IP10. exactly one immutable Codex snapshot", (await allItems(`/research/posts/${newPost.id}/versions`)).length === 1 && codexAuthor((await api.get(`/research/posts/${newPost.id}/versions/${newPost.latestVersion.id}`)).body?.author, s1));
+  await page.goto(U(`/write/?id=${newPost.id}`));
+  check("IP10. directly saved post can be opened without acceptance", await appears(main.getByRole("heading", { name: newPost.latestVersion.title, exact: true })));
 
-  // D1: 그 turn의 research_document_save는 새 문서 제안 → 대화 '제안 검토' → 수락하면 문서 1개
-  const direct = await directFixtureDocs();
-  check("IP7. chat linked the new-document proposal", !!docProposalHref && docProposalHref.includes("/research/document/new/?proposal="), String(docProposalHref));
-  await page.goto(U(docProposalHref ?? "/"));
-  await page.waitForURL(/\/research\/document\/new\/\?proposal=/, { timeout: 20000 }).catch(() => {});
-  await main.getByRole("button", { name: "제안 수락(새 문서 만들기)" }).click();
-  await page.waitForURL(/\/research\/document\/\?id=/, { timeout: 20000 }).catch(() => {});
-  check("IP7. accepted: document created from proposal", await appears(main.getByRole("heading", { name: "Fixture document" })));
-  check("IP7. exactly one document added", (await directFixtureDocs()) === direct + 1, `${direct} -> ${await directFixtureDocs()}`);
+  // IP6에서 직접 만든 문서를 owner 경로로 열어 저장 내용·snapshot·작성자를 확인한다. F2 링크 계약을 가정하지 않는다.
+  if (contextDocs.length !== 1) throw new Error("IP7: expected exactly one directly saved document");
+  const savedDocument = contextDocs[0];
+  await page.goto(U(`/research/document/?id=${savedDocument.id}`));
+  check("IP7. directly saved document opens without acceptance", await appears(main.getByRole("heading", { name: "Fixture document", exact: true })));
+  check("IP7. saved body shown", await appears(main.locator(".prose").getByText("Complete fixture tool input")));
+  check("IP7. exactly one immutable Codex snapshot", (await allItems(`/research/documents/${savedDocument.id}/versions`)).length === 1 && codexAuthor((await api.get(`/research/documents/${savedDocument.id}/versions/${savedDocument.latestVersion.id}`)).body?.author, s1));
+  check("IP7. no new-document proposals from owner turns", (await allItems("/research/document-proposals")).length === proposals0);
 
   // 발행 취소: 익명 404, 목록에서 빠짐
   await page.goto(U(`/write/?id=${postId}`));
