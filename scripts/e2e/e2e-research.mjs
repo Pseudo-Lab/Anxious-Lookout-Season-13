@@ -704,7 +704,7 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
   await setMock("codex=fixture&window=8");
   await sk.goto(sessionUrl);
   const sm = sk.locator("#chat-panel");
-  await sm.getByText(/이용 가능 기한/).waitFor();
+  await sm.getByText(/기한:/).waitFor();
   armed = true;
   const readsBefore = reads.length;
   await sm.getByLabel("메시지").fill("시계 차이 질문");
@@ -719,7 +719,7 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
 {
   await setMock("codex=fixture&window=4");
   await page.goto(sessionUrl);
-  await chat.getByText(/이용 가능 기한/).waitFor();
+  await chat.getByText(/기한:/).waitFor();
   let failing = true;
   let aborted = 0;
   await page.route("**/api/research/codex/status", async (route) => {
@@ -730,7 +730,7 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
     return route.continue();
   });
   await chat.getByLabel("메시지").fill("조회 실패 질문");
-  check("R9y. failed expiry recheck shown, last status kept", await appears(chat.getByText("연결 상태를 다시 확인하지 못했습니다"), 20000));
+  check("R9y. failed expiry recheck shown, last status kept", await appears(chat.getByText("연결 확인 실패"), 20000));
   check("R9y. not locked from a failed read alone", !(await chat.getByRole("button", { name: "보내기" }).isDisabled()));
   await page.waitForTimeout(8000);
   failing = false;
@@ -763,7 +763,7 @@ async function dropFirstMessagePost() {
   await dropFirstMessagePost();
   await chat.getByLabel("메시지").fill("중복 방지 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
-  check("R12. lost send -> uncertain notice", await appears(chat.getByText("이전 전송의 결과를 확인하지 못했습니다")));
+  check("R12. lost send -> uncertain notice", await appears(chat.getByText("전송 결과를 확인하세요.")));
   check("R12. turn completed on server meanwhile", await appears(chat.getByText("모의 응답: 중복 방지 질문"), 15000));
   await chat.getByRole("button", { name: "다시 보내기" }).click();
   await chat.getByRole("button", { name: "보내기", exact: true }).waitFor();
@@ -780,7 +780,7 @@ async function dropFirstMessagePost() {
   await dropFirstMessagePost();
   await chat.getByLabel("메시지").fill("재접속 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
-  await chat.getByText("이전 전송의 결과를 확인하지 못했습니다").waitFor();
+  await chat.getByText("전송 결과를 확인하세요.").waitFor();
   await page.unroute("**/api/research/sessions/*/messages");
   await page.reload();
   await chat.getByLabel("메시지").waitFor();
@@ -807,7 +807,7 @@ async function makeUnconfirmedSend(text) {
   await dropFirstMessagePost();
   await chat.getByLabel("메시지").fill(text);
   await chat.getByRole("button", { name: "보내기" }).click();
-  await chat.getByText("이전 전송의 결과를 확인하지 못했습니다").waitFor();
+  await chat.getByText("전송 결과를 확인하세요.").waitFor();
   await page.unroute("**/api/research/sessions/*/messages");
   await chat.getByText(`모의 응답: ${text}`).first().waitFor({ timeout: 15000 });
 }
@@ -1060,7 +1060,7 @@ async function confirmSingleTurn(label, text) {
   });
   await chat.getByLabel("메시지").fill("범위 고정 재전송");
   await chat.getByRole("button", { name: "보내기" }).click();
-  await chat.getByText("이전 전송의 결과를 확인하지 못했습니다").waitFor();
+  await chat.getByText("전송 결과를 확인하세요.").waitFor();
   await chat.getByText("모의 응답: 범위 고정 재전송").first().waitFor({ timeout: 15000 });
   await header.getByRole("link", { name: "상태" }).first().click();
   await page.waitForURL(/\/status\/$/);
@@ -1482,7 +1482,7 @@ let docEUrl;
     const input = () => rc.getByLabel("메시지").inputValue();
     await rc.getByLabel("메시지").fill("미확인 질문 A");
     await rc.getByRole("button", { name: "보내기" }).click();
-    await rc.getByText("이전 전송의 결과를 확인하지 못했습니다").waitFor();
+    await rc.getByText("전송 결과를 확인하세요.").waitFor();
     await rc.getByText("모의 응답: 미확인 질문 A").waitFor({ timeout: 15000 });
     await rc.getByLabel("메시지").and(rc.locator(":enabled")).waitFor({ timeout: 15000 });
     await rc.getByLabel("메시지").fill("새 초안 B");
