@@ -236,8 +236,10 @@ check("R5. incoming relation on material A reads inverse", await appears(main.ge
   await main.getByRole("button", { name: "+ 근거 위치 추가" }).click();
   await main.getByRole("button", { name: "+ 근거 위치 추가" }).click();
   for (let i = 0; i < 50 && held.length < 2; i++) await page.waitForTimeout(100);
+  check("R5e. both version requests held", held.length >= 2, String(held.length));
+  // 붙잡은 요청을 먼저 함께 풀고 나서 핸들러를 해제한다(해제가 먼저면 보류 route가 처리되어 continue가 실패한다).
+  await Promise.all(held.splice(0).map((r) => r.continue()));
   await page.unroute(VERSIONS);
-  for (const r of held.splice(0)) await r.continue();
   const filled = await page
     .waitForFunction(
       () => {
