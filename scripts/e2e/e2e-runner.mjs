@@ -1,7 +1,7 @@
 // #10 사용자별 실행 환경 화면 검증(모의 API, api-contracts/issue10-user-runners-interface-v1.md).
 // 실제 controller·Pod 생성·중복 방지·격리 검증이 아니다(모의 서버의 계정별 합침은 backend 증거가 아님).
 // - 진입 준비 POST: 탭 진입·로그인·새로고침·계정 전환·자격 false→true 때만 1회, 이동·대화창·조회·표시 변화·시간 경과로는 없음
-// - 상태: 환경 활성화 중/사용 대기/연결 확인/정리 중/쉬는 중/준비 전/확인 필요, 일시 상태와 안내 간격이 있는 운영자 토큰 오류만
+// - 상태: 환경 준비 중/사용 대기/연결 확인/정리 중/쉬는 중/준비 전/확인 필요, 일시 상태와 안내 간격이 있는 운영자 토큰 오류만
 //   열린 대화창·보이는 탭에서 다시 조회(#16 api-contracts/issue16-multi-user-runners-draft.md)
 // - 전송 버튼만 잠금, 초안 입력 가능·유지, 자동 전송 없음, 접수 전 거절 코드는 미확인 보관 없음
 // - 이전 API(404/405)·403·500·codexRunner false·자격 전환·계정 전환의 늦은 응답·연구 권한 상실
@@ -171,14 +171,14 @@ await step("N1", async () => {
   await sleep(3500); // 준비 완료(readyMs)
 });
 
-// N2. 환경 활성화 중: 입력은 가능, 보내기만 잠금, 열린 대화창·보이는 탭에서만 다시 조회, 준비되면 자동 전송 없이 보내기 가능
+// N2. 환경 준비 중: 입력은 가능, 보내기만 잠금, 열린 대화창·보이는 탭에서만 다시 조회, 준비되면 자동 전송 없이 보내기 가능
 await step("N2", async () => {
   await setMock("prepare=hold&runnerAll=");
   await page.goto(U(`/research/session/?id=${sid}`));
   await settle();
   await openPanel();
-  check("N2. provisioning shown as 환경 활성화 중", await appears(chat.getByText("환경 활성화 중").first()));
-  check("N2. progress indicator", (await chat.locator(".motion-safe\\:animate-spin").count()) > 0);
+  check("N2. provisioning shown as 환경 준비 중", await appears(chat.getByText("환경 준비 중").first()));
+  check("N2. progress indicator", (await sendBtn().isDisabled()));
   await chat.getByLabel("메시지").fill("준비 중에 쓴 초안");
   check("N2. draft editable while preparing", (await chat.getByLabel("메시지").inputValue()) === "준비 중에 쓴 초안");
   check("N2. only send button locked", (await sendBtn().isDisabled()) && (await chat.getByLabel("메시지").isEnabled()));
@@ -213,7 +213,7 @@ await step("N2", async () => {
   await setMock("runnerAll=ready");
   check("N2. becomes sendable when ready", await appears(chat.locator("button:not([disabled])", { hasText: /^보내기$/ }), 8000));
   check("N2. draft kept, nothing sent automatically", (await chat.getByLabel("메시지").inputValue()) === "준비 중에 쓴 초안" && (await messagePosts()) === posts0);
-  check("N2. service mode shows no trial window fields", (await chat.getByText(/이용 가능 기한|남은 요청 횟수/).count()) === 0);
+  check("N2. service mode shows no trial window fields", (await chat.getByText(/기한:|남은 요청:/).count()) === 0);
   await chat.getByLabel("메시지").fill("");
 });
 
@@ -230,7 +230,7 @@ await step("N3", async () => {
   check("N3. capacity polling respects 15s hint", r1 - r0 <= 1, `${r1 - r0}`);
 });
 
-// N4. 쉬는 중(유휴 회수): 보내면 접수 전 거절(초안 유지·미확인 보관 없음), "환경 다시 켜기"는 새 key의 준비 요청, 자동 전송 없음
+// N4. 쉬는 중(유휴 회수): 보내면 접수 전 거절(초안 유지·미확인 보관 없음), "다시 켜기"는 새 key의 준비 요청, 자동 전송 없음
 await step("N4", async () => {
   await setMock("runnerAll=ready&prepare=ok&readyMs=3000");
   await chat.getByRole("link", { name: /준비 대화/ }).click();
@@ -241,57 +241,57 @@ await step("N4", async () => {
   const posts0 = await messagePosts();
   const prep0 = await prepares();
   await sendBtn().click();
-  check("N4. preflight refusal message", await appears(chat.getByText(/환경이 꺼져 있거나 정리 중이라 보내지 않았습니다/)));
+  check("N4. preflight refusal message", await appears(chat.getByText(/환경이 꺼져 있거나 정리 중입니다/)));
   check("N4. definite refusal: draft kept, no pending send", (await chat.getByLabel("메시지").inputValue()) === "쉬는 중에 보낸 질문" && (await pendingSends()) === 0);
-  check("N4. idle state + resume button", await appears(chat.getByText("환경이 쉬는 중").first()) && (await chat.getByRole("button", { name: "환경 다시 켜기" }).count()) > 0);
+  check("N4. idle state + resume button", await appears(chat.getByText("쉬는 중").first()) && (await chat.getByRole("button", { name: "다시 켜기" }).count()) > 0);
   await shot("idle-stopped-refused");
-  await chat.getByRole("button", { name: "환경 다시 켜기" }).first().click();
+  await chat.getByRole("button", { name: "다시 켜기" }).first().click();
   const prep1 = await prepares();
   check("N4. resume sends one new-key POST", prep1.length === prep0.length + 1 && !prep0.some((p) => p.idempotencyKey === prep1.at(-1).idempotencyKey));
-  check("N4. resume shows 환경 활성화 중", await appears(chat.getByText("환경 활성화 중").first()));
+  check("N4. resume shows 환경 준비 중", await appears(chat.getByText("환경 준비 중").first()));
   check("N4. ready again without auto send", await appears(chat.locator("button:not([disabled])", { hasText: /^보내기$/ }), 10000));
   check("N4. only the refused message was posted", (await messagePosts()) === posts0 + 1 && (await chat.getByLabel("메시지").inputValue()) === "쉬는 중에 보낸 질문");
   await chat.getByLabel("메시지").fill("");
 });
 
 // N5. 확인 필요(#16 runner_failed): 다시 시도 버튼 없음, 진입 준비는 409 뒤 상태 조회를 그대로 표시하고 반복하지 않음,
-// 운영자 확인 뒤(쉬는 중) 다시 켜기. 준비 전 → 대화 준비, 모르는 reason은 일반 안내·잠금, 7개 접수 전 거절 문구
+// 운영자 확인 뒤(쉬는 중) 다시 켜기. 준비 전 → 준비하기, 모르는 reason은 일반 안내·잠금, 7개 접수 전 거절 문구
 await step("N5", async () => {
   await setMock("runnerAll=runner_failed&prepare=ok&readyMs=1500");
   await chat.getByRole("button", { name: "← 대화 목록" }).click();
-  check("N5. failed state: 확인이 필요합니다", await appears(chat.getByText("확인이 필요합니다").first()));
-  check("N5. failed offers no prepare/retry/resume button", (await chat.getByRole("button", { name: /^(대화 준비|다시 시도|환경 다시 켜기)$/ }).count()) === 0);
+  check("N5. failed state: 운영자 확인 필요", await appears(chat.getByText("운영자 확인 필요").first()));
+  check("N5. failed offers no prepare/retry/resume button", (await chat.getByRole("button", { name: /^(준비하기|다시 켜기)$/ }).count()) === 0);
   await shot("runner-failed");
   const prep0 = (await prepares()).length;
   const reads0 = await statusReads();
   await page.goto(U(`/research/session/?id=${sid}`));
   await openPanel();
-  check("N5. entry during failed: one POST answered 409 runner_reconciliation_required", await appears(chat.getByText("확인이 필요합니다").first()) && (await prepares()).length === prep0 + 1);
+  check("N5. entry during failed: one POST answered 409 runner_reconciliation_required", await appears(chat.getByText("운영자 확인 필요").first()) && (await prepares()).length === prep0 + 1);
   check("N5. 409 followed by a status read", (await statusReads()) > reads0);
   await sleep(4000);
   check("N5. no automatic retry after 409", (await prepares()).length === prep0 + 1, String((await prepares()).length - prep0));
   // 운영자 확인이 끝나면(쉬는 중) 화면을 다시 볼 때 다시 켜기를 고를 수 있다.
   await setMock("runnerAll=idle_stopped");
   await chat.getByRole("button", { name: "← 대화 목록" }).click();
-  check("N5. after reconciliation: idle + resume button", await appears(chat.getByRole("button", { name: "환경 다시 켜기" })));
+  check("N5. after reconciliation: idle + resume button", await appears(chat.getByRole("button", { name: "다시 켜기" })));
   await setMock("runnerAll=not_prepared&prepare=ok");
   await chat.getByRole("link", { name: /준비 대화/ }).click();
   await chat.getByRole("button", { name: "← 대화 목록" }).click();
-  check("N5. not prepared + 대화 준비 button", await appears(chat.getByRole("button", { name: "대화 준비" })));
+  check("N5. not prepared + 준비하기 button", await appears(chat.getByRole("button", { name: "준비하기" })));
   await shot("not-prepared");
   await setMock("runnerAll=mystery_state");
   await chat.getByRole("link", { name: /준비 대화/ }).click();
-  check("N5. unknown reason -> generic copy", await appears(chat.getByText(/지금은 사용할 수 없습니다/)));
+  check("N5. unknown reason -> generic copy", await appears(chat.getByText(/연결 안 됨/)));
   await chat.getByLabel("메시지").fill("모르는 상태 질문");
   check("N5. unknown reason locks send, input kept", (await sendBtn().isDisabled()) && (await chat.getByLabel("메시지").inputValue()) === "모르는 상태 질문");
   // 접수 전 거절 6개: 상태 표시는 사용 가능, 서버만 거절하는 경합(상태가 늦은 경우)
   for (const [st, text] of [
-    ["not_prepared", /대화 환경이 아직 준비되지 않아 보내지 않았습니다/],
-    ["provisioning", /환경 활성화 중이라 보내지 않았습니다/],
-    ["capacity_wait", /사용 대기 중이라 보내지 않았습니다/],
-    ["runner_unreachable", /환경 연결을 확인하는 중이라 보내지 않았습니다/],
-    ["runner_failed", /환경 확인이 필요해 보내지 않았습니다/],
-    ["stopping", /환경이 꺼져 있거나 정리 중이라 보내지 않았습니다/],
+    ["not_prepared", /환경 준비 필요/],
+    ["provisioning", /환경 준비 중/],
+    ["capacity_wait", /사용 대기 중/],
+    ["runner_unreachable", /연결 확인 중/],
+    ["runner_failed", /운영자 확인 필요/],
+    ["stopping", /환경이 꺼져 있거나 정리 중입니다/],
   ]) {
     await setMock("runnerAll=ready");
     await chat.getByRole("button", { name: "← 대화 목록" }).click();
@@ -310,7 +310,7 @@ await step("N6", async () => {
   for (const hint of ["0", "120", "x"]) {
     await setMock(`runnerAll=provisioning&hint=${hint}`);
     await chat.getByRole("button", { name: "← 대화 목록" }).click();
-    await chat.getByText("환경 활성화 중").first().waitFor();
+    await chat.getByText("환경 준비 중").first().waitFor();
     const r0 = await statusReads();
     await sleep(5000);
     const n = (await statusReads()) - r0;
@@ -319,12 +319,12 @@ await step("N6", async () => {
   }
   await setMock("hint=&runnerAll=runner_unreachable");
   await chat.getByRole("button", { name: "← 대화 목록" }).click();
-  check("N6. unreachable shown", await appears(chat.getByText("환경 연결 확인 중").first()));
+  check("N6. unreachable shown", await appears(chat.getByText("연결 확인 중").first()));
   // 생성 결과 확인 중에도 쓰이는 상태: 짧게 끝난다·새 환경을 만든다·복구됐다고 안내하지 않고, 준비 버튼도 없다.
   {
     const text = await chat.innerText();
     check("N6. unreachable makes no recovery/new-environment claim", !/잠시|켜지면|새 환경|복구/.test(text), text.replace(/\s+/g, " ").slice(0, 160));
-    check("N6. unreachable offers no prepare/retry button", (await chat.getByRole("button", { name: /^(대화 준비|다시 시도|환경 다시 켜기)$/ }).count()) === 0);
+    check("N6. unreachable offers no prepare/retry button", (await chat.getByRole("button", { name: /^(준비하기|다시 켜기)$/ }).count()) === 0);
   }
   const r0 = await statusReads();
   await sleep(16000);
@@ -341,17 +341,17 @@ await step("N7", async () => {
   await chat.locator("button:not([disabled])", { hasText: /^보내기$/ }).waitFor({ timeout: 8000 });
   const posts0 = await messagePosts();
   await sendBtn().click();
-  check("N7. runner lost failure copy", await appears(chat.getByText(/실행 중 환경이 중단되어 이 요청을 마치지 못했습니다/), 10000));
+  check("N7. runner lost failure copy", await appears(chat.getByText(/실행 환경이 중단됐습니다/), 10000));
   check("N7. no automatic resend", (await messagePosts()) === posts0 + 1);
   await setMock("codex=fixture&turnMs=34000");
   await chat.getByLabel("메시지").fill("오래 걸리는 질문");
   await chat.locator("button:not([disabled])", { hasText: /^보내기$/ }).waitFor({ timeout: 8000 });
   await sendBtn().click();
   check("N7. running notice first", await appears(chat.getByText("응답하는 중입니다.", { exact: false })));
-  check("N7. neutral copy after 30s", await appears(chat.getByText(/응답을 기다리거나 실행 결과를 확인 중입니다/), 36000));
+  check("N7. neutral copy after 30s", await appears(chat.getByText(/결과 확인 중/), 36000));
   check("N7. still one message post (no resend)", (await messagePosts()) === posts0 + 2);
   await chat.getByText("모의 응답: 오래 걸리는 질문").waitFor({ timeout: 15000 });
-  check("N7. neutral copy cleared after completion", (await chat.getByText(/응답을 기다리거나 실행 결과를 확인 중입니다/).count()) === 0);
+  check("N7. neutral copy cleared after completion", (await chat.getByText(/결과 확인 중/).count()) === 0);
   await setMock("turnMs=2500");
 });
 
@@ -364,8 +364,8 @@ await step("N19", async () => {
   const prep0 = (await prepares()).length;
   await page.goto(U(`/research/session/?id=${sid}`));
   await openPanel();
-  check("N19. stopping shown as 환경 정리 중 with progress", (await appears(chat.getByText("환경 정리 중").first())) && (await chat.locator(".motion-safe\\:animate-spin").count()) > 0);
-  check("N19. stopping offers no button", (await chat.getByRole("button", { name: /^(대화 준비|다시 시도|환경 다시 켜기)$/ }).count()) === 0);
+  check("N19. stopping shown as 환경 정리 중 with progress", (await appears(chat.getByText("환경 정리 중").first())) && (await sendBtn().isDisabled()));
+  check("N19. stopping offers no button", (await chat.getByRole("button", { name: /^(준비하기|다시 켜기)$/ }).count()) === 0);
   {
     const text = await chat.innerText();
     check("N19. stopping makes no automatic restart claim", !/자동으로 (다시 )?켜|곧 켜/.test(text), text.replace(/\s+/g, " ").slice(0, 160));
@@ -381,7 +381,7 @@ await step("N19", async () => {
   await chat.getByLabel("메시지").fill("정리 중에 쓴 초안");
   check("N19. stopping: only send locked, draft editable", (await sendBtn().isDisabled()) && (await chat.getByLabel("메시지").inputValue()) === "정리 중에 쓴 초안");
   await setMock("runnerAll=idle_stopped");
-  check("N19. stop verified → idle + resume button via polling", await appears(chat.getByRole("button", { name: "환경 다시 켜기" }), 9000));
+  check("N19. stop verified → idle + resume button via polling", await appears(chat.getByRole("button", { name: "다시 켜기" }), 9000));
   check("N19. no POST until the user resumes", (await prepares()).length === prep0 + 1);
   await chat.getByLabel("메시지").fill("");
 });
@@ -393,9 +393,9 @@ await step("N20", async () => {
   await page.goto(U(`/research/session/?id=${sid}`));
   await openPanel();
   const prep0 = (await prepares()).length;
-  check("N20. auth_expired: operator copy + periodic recheck note",
-    (await appears(chat.getByText(/서버 인증이 만료되어/).first())) && (await appears(chat.getByText(/상태를 주기적으로 다시 확인합니다/).first())));
-  check("N20. credential error offers no button", (await chat.getByRole("button", { name: /^(대화 준비|다시 시도|환경 다시 켜기)$/ }).count()) === 0);
+  check("N20. auth_expired: short admin code and read-only recheck action",
+    (await appears(chat.getByText(/auth_expired/).first())) && (await chat.getByRole("button", { name: "다시 시도", exact: true }).count()) > 0);
+  check("N20. credential error offers no button", (await chat.getByRole("button", { name: /^(준비하기|다시 켜기)$/ }).count()) === 0);
   await shot("auth-expired-polling");
   let r0 = await statusReads();
   await sleep(10000);
@@ -403,7 +403,7 @@ await step("N20", async () => {
   // 간격을 짧게 바꿔 다시 조회·늘림·숨김/닫힘 중단을 확인한다.
   await setMock("hint=3");
   await chat.getByRole("button", { name: "← 대화 목록" }).click();
-  await chat.getByText(/서버 인증이 만료되어/).first().waitFor();
+  await chat.getByText(/auth_expired/).first().waitFor();
   r0 = await statusReads();
   await sleep(10000);
   let n = (await statusReads()) - r0;
@@ -424,13 +424,13 @@ await step("N20", async () => {
   await chat.waitFor();
   check("N20. polling sends no prepare POST", (await prepares()).length === prep0);
   await setMock("runnerAll=ready");
-  check("N20. operator repair reflected by polling", await appears(chat.getByText(/^연결되어 있습니다/).or(chat.getByText(/테스트용 모의 응답/)), 70000));
+  check("N20. operator repair reflected by polling", await appears(chat.getByText(/^연결됨/).or(chat.getByText(/테스트 연결/)), 70000));
   // 안내 없는 이전 응답: 오류 안내만, 다시 조회 없음
   await setMock("runnerAll=auth_revoked&credHint=0&hint=");
   await page.goto(U(`/research/session/?id=${sid}`));
   await openPanel();
   check("N20. legacy auth_revoked without hint: terminal copy, no recheck note",
-    (await appears(chat.getByText(/더 이상 유효하지 않습니다/).first())) && (await chat.getByText(/상태를 주기적으로 다시 확인합니다/).count()) === 0);
+    (await appears(chat.getByText(/auth_revoked/).first())) && (await chat.getByText(/auth_expired/).count()) === 0);
   r0 = await statusReads();
   await sleep(8000);
   check("N20. legacy without hint: no polling", (await statusReads()) === r0);
@@ -443,7 +443,7 @@ await step("N21", async () => {
   await setMock("runnerAll=auth_expired&credHint=1&hint=");
   await page.goto(U(`/research/session/?id=${sid}`));
   await openPanel();
-  await chat.getByText(/서버 인증이 만료되어/).first().waitFor();
+  await chat.getByText(/auth_expired/).first().waitFor();
   let open = 0;
   let maxOpen = 0;
   let sent = 0;
@@ -479,7 +479,7 @@ await step("N21", async () => {
     await sleep(7000);
     check("N21. delayed status GETs never overlap (max 1 in flight)", maxOpen === 1, `max=${maxOpen} sent=${sent}`);
     check("N21. repeated requests coalesced into one trailing read", sent >= 2 && sent <= 3, String(sent));
-    check("N21. trailing read reflects the newer state", await appears(chat.getByText(/테스트용 모의 응답/).or(chat.getByText(/^연결되어 있습니다/)), 8000));
+    check("N21. trailing read reflects the newer state", await appears(chat.getByText(/테스트 연결/).or(chat.getByText(/^연결됨/)), 8000));
   } finally {
     await page.unroute("**/api/research/codex/status");
     page.off("request", onReq);
@@ -509,7 +509,7 @@ await step("N8", async () => {
   await setMock("codexRunner=&runner=&prepare=ok&runnerAll=");
   await page.reload();
   await openPanel();
-  check("N8. old API: legacy status shown", await appears(chat.getByText("테스트용 모의 응답에 연결되어 있습니다")));
+  check("N8. old API: legacy status shown", await appears(chat.getByText("테스트 연결")));
 });
 
 // N8b. 403 진입 응답: me를 다시 확인하지만 같은 자격이면 다시 보내지 않는다(반복 없음)
@@ -533,7 +533,7 @@ await step("N9", async () => {
   await openPanel();
   await sleep(2000);
   check("N9. present false: no POST", (await prepares()).length === p0);
-  check("N9. legacy panel + trial expiry kept", await appears(chat.getByText(/이용 가능 기한/)));
+  check("N9. legacy panel + trial expiry kept", await appears(chat.getByText(/기한:/)));
 });
 
 // N10. 같은 계정 자격 false→true(새로고침 없음): 1회만, 같은 true 재조회는 반복 없음 / true→false: 준비 흐름의 늦은 응답 폐기 + 기존 상태 다시 조회
@@ -546,7 +546,7 @@ await step("N10", async () => {
   await refreshMeInTab();
   await sleep(1500);
   check("N10. repeated true me refresh: no repeat", (await prepares()).length === p0 + 1);
-  check("N10. preparing shown", await appears(chat.getByText("환경 활성화 중").first()));
+  check("N10. preparing shown", await appears(chat.getByText("환경 준비 중").first()));
   // true→false(feature off, 연구 권한 유지): 보류한 준비 응답은 버리고 기존 시험 상태를 다시 보인다
   let release;
   const gate = new Promise((r) => (release = r));
@@ -563,8 +563,8 @@ await step("N10", async () => {
   release();
   await sleep(1500);
   await page.unroute("**/api/research/codex/runner");
-  check("N10. true->false: late preparation result discarded", (await chat.getByText("환경 활성화 중").count()) === 0);
-  check("N10. true->false: legacy trial status queried and shown", await appears(chat.getByText(/이용 가능 기한/)));
+  check("N10. true->false: late preparation result discarded", (await chat.getByText("환경 준비 중").count()) === 0);
+  check("N10. true->false: legacy trial status queried and shown", await appears(chat.getByText(/기한:/)));
   await setMock("window=");
 });
 
@@ -605,10 +605,10 @@ await step("N11", async () => {
   check("N11. B's entry POST once", (await prepares()).length === p0 + 1, String((await prepares()).length - p0));
   check(
     "N11. A's late ready response not applied to B (B preparing)",
-    await appears(chat.getByText("환경 활성화 중").first()),
+    await appears(chat.getByText("환경 준비 중").first()),
     (await chat.innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 160)
   );
-  check("N11. B not shown as ready from A's response", (await chat.getByText("테스트용 모의 응답에 연결되어 있습니다").count()) === 0);
+  check("N11. B not shown as ready from A's response", (await chat.getByText("테스트 연결").count()) === 0);
   await setMock(`as=${A}`);
   await (async () => {
     const t = await context.newPage();
@@ -700,7 +700,7 @@ await step("N18", async () => {
     await chat.getByRole("button", { name: "← 대화 목록" }).click().catch(() => {});
     await chat.getByRole("link", { name: /준비 대화/ }).click();
     await chat.getByLabel("메시지").fill(`${reason} 질문`);
-    check(`N18. ${reason}: generic copy`, await appears(chat.getByText(/지금은 사용할 수 없습니다/)));
+    check(`N18. ${reason}: generic copy`, await appears(chat.getByText(/연결 안 됨/)));
     check(`N18. ${reason}: send locked`, await sendBtn().isDisabled());
     const r0 = await statusReads();
     await sleep(5000);
@@ -782,13 +782,13 @@ await step("N21", async () => {
   // 이용 가능 상태에서도: 네트워크 복귀 때 조회, 대화창이 열린 동안 느린 주기(45초 ±15%)로 조회해 idle 정지를 알아챈다.
   await setMock("runnerAll=idle_stopped");
   await page.evaluate(() => window.dispatchEvent(new Event("online")));
-  check("N21. online event re-reads status", await appears(chat.getByText("환경이 쉬는 중"), 3000));
+  check("N21. online event re-reads status", await appears(chat.getByText("쉬는 중"), 3000));
   await setMock("runnerAll=ready");
   await page.evaluate(() => window.dispatchEvent(new Event("online")));
-  await chat.getByText("환경이 쉬는 중").first().waitFor({ state: "hidden", timeout: 3000 });
+  await chat.getByText("쉬는 중").first().waitFor({ state: "hidden", timeout: 3000 });
   await setMock("runnerAll=idle_stopped");
   const t1 = Date.now();
-  check("N21. idle stop noticed by slow recheck while panel open", await appears(chat.getByText("환경이 쉬는 중"), 60000), `${Math.round((Date.now() - t1) / 1000)}s`);
+  check("N21. idle stop noticed by slow recheck while panel open", await appears(chat.getByText("쉬는 중"), 60000), `${Math.round((Date.now() - t1) / 1000)}s`);
   await setMock("runnerAll=ready&pendingInput=0");
 });
 
@@ -797,7 +797,7 @@ await step("N22", async () => {
   await setMock("runnerAll=ready&codex=fixture&turnMs=1500");
   // N21 끝의 쉬는 중 표시를 지금 상태(ready)로 갱신한다.
   await page.evaluate(() => window.dispatchEvent(new Event("online")));
-  await chat.getByText("환경이 쉬는 중").first().waitFor({ state: "hidden", timeout: 5000 });
+  await chat.getByText("쉬는 중").first().waitFor({ state: "hidden", timeout: 5000 });
   const input = chat.getByLabel("메시지");
   const sentTexts = [];
   await page.route("**/api/research/sessions/*/messages", async (route) => {
@@ -901,7 +901,7 @@ await step("N24", async () => {
   const gap = () => scroller.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
   await page.setViewportSize({ width: 1280, height: 420 });
   await input.and(chat.locator(":enabled")).waitFor({ timeout: 10000 });
-  const toolsBefore = await chat.locator("li", { hasText: "research_list" }).count();
+  const toolsBefore = await chat.locator('li[data-tool-name="research_list"]').count();
   await input.fill("/fixture/long-answer 긴 답변 질문");
   await input.press("Enter");
   await chat.locator("[data-chat-thinking]").waitFor();
@@ -909,7 +909,7 @@ await step("N24", async () => {
   check("N24. waiting at bottom", (await gap()) <= 48, String(await gap()));
   await chat.getByText("긴 답변 문단 80.").waitFor({ timeout: 15000 });
   await page.waitForTimeout(500);
-  check("N24. no tool item in this turn (same entry count)", (await chat.locator("li", { hasText: "research_list" }).count()) === toolsBefore);
+  check("N24. no tool item in this turn (same entry count)", (await chat.locator('li[data-tool-name="research_list"]').count()) === toolsBefore);
   check("N24. long answer followed to the bottom", (await gap()) <= 48, String(await gap()));
   // 도구가 있는 답변 뒤, 바닥에서 도구 상세를 직접 펼치면 위치를 유지한다.
   await input.and(chat.locator(":enabled")).waitFor({ timeout: 10000 });
@@ -917,7 +917,7 @@ await step("N24", async () => {
   await input.press("Enter");
   await chat.getByText("모의 응답: 펼침 위치 질문").waitFor({ timeout: 15000 });
   await page.waitForTimeout(1500);
-  const tool = chat.getByRole("button", { name: /research_list/ }).last();
+  const tool = chat.locator('li[data-tool-name="research_list"]').last().getByRole("button");
   // 머리글 위쪽이 화면 위로 잘린 경우(브라우저 scroll anchoring이 아래 답변을 기준점으로 잡는 반례)도 덮도록 조금 올려 둔다.
   await tool.evaluate((el) => {
     const s = el.closest("[data-chat-scroll]");
@@ -926,7 +926,7 @@ await step("N24", async () => {
   await page.waitForTimeout(300);
   const before = await tool.evaluate((el) => ({ scroll: el.closest("[data-chat-scroll]").scrollTop, head: Math.round(el.getBoundingClientRect().top) }));
   await tool.evaluate((el) => el.click()); // 스크롤 없이 누른다
-  await chat.locator('button[aria-expanded="true"]', { hasText: "research_list" }).last().waitFor();
+  await chat.locator('li[data-tool-name="research_list"] button[aria-expanded="true"]').last().waitFor();
   await page.waitForTimeout(500);
   const after = await tool.evaluate((el) => ({ scroll: el.closest("[data-chat-scroll]").scrollTop, head: Math.round(el.getBoundingClientRect().top) }));
   check("N24. manual expand keeps scrollTop", after.scroll === before.scroll, `${before.scroll} -> ${after.scroll}`);
@@ -1275,7 +1275,7 @@ await step("N27", async () => {
   check("N27. panel title is neutral", await appears(edChat.getByRole("heading", { name: "대화", exact: true })));
   await edChat.getByLabel("새 대화 제목").fill("편집자 정리 대화");
   await ed.waitForTimeout(1000);
-  check("N27. editor: no status panel in the list", (await edChat.getByText(/테스트용 모의 응답|연결되어 있습니다/).count()) === 0);
+  check("N27. editor: no status panel in the list", (await edChat.getByText(/테스트 연결|연결됨/).count()) === 0);
   await edChat.getByRole("button", { name: "새 대화" }).click();
   const input = edChat.getByLabel("메시지");
   await input.waitFor();
@@ -1290,7 +1290,7 @@ await step("N27", async () => {
   check("N27. no raw record entry", (await edChat.getByRole("button", { name: /원본 기록|입력 기록/ }).count()) === 0);
   check("N27. no hint text under the input", !text.includes("이전 대화 내용은 이 대화에 계속 이어집니다"));
   check("N27. no conversation title or times", !text.includes("편집자 정리 대화") && !/시작 \d|최근 \d/.test(text));
-  check("N27. editor: no status panel in the conversation", (await edChat.getByText(/테스트용 모의 응답|연결되어 있습니다/).count()) === 0);
+  check("N27. editor: no status panel in the conversation", (await edChat.getByText(/테스트 연결|연결됨/).count()) === 0);
 
   // 상단 '대화 목록' 버튼: 바닥에서도 보이고, 입력창·'최신으로'와 겹치지 않는다.
   const geometry = () =>
@@ -1338,7 +1338,7 @@ await step("N27", async () => {
   check("N27. admin: 상태 nav shown", await appears(page.locator("header").first().getByRole("link", { name: "상태" })));
   await openPanel();
   await chat.getByRole("button", { name: "← 대화 목록" }).click().catch(() => {});
-  check("N27. admin: connection status panel shown", await appears(chat.getByText(/연결되어 있습니다|환경/).first(), 8000));
+  check("N27. admin: connection status panel shown", await appears(chat.getByText(/연결됨|환경/).first(), 8000));
   check("N27. admin: still no model name", (await chat.getByText(/모델:|서버에서 고정/).count()) === 0);
 });
 

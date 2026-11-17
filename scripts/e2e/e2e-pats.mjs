@@ -14,7 +14,6 @@ page.on("pageerror", (error) => errors.push(error.message));
 await context.addInitScript(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => { window.__patCopyCount = (window.__patCopyCount ?? 0) + 1; } } }));
 const setMock = (query) => fetch(`${ORIGIN}/__mock/set?${query}`);
 let records = [];
-let effective = "write";
 const attempts = new Map();
 const posts = [];
 let deletes = 0;
@@ -25,7 +24,7 @@ async function login(kind) {
   await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().click();
   await page.locator("header").getByText("mock-user").first().waitFor();
 }
-const safe = (record) => ({ ...record, effectiveScope: effective === "public" || effective === "none" ? effective : record.scope, scopeLimitedByRole: effective === "public" || effective === "none" });
+const safe = (record) => ({ ...record });
 await page.route(/\/api\/research\/pats(?:\/[^/?]+)?(?:\?.*)?$/, async (route) => {
   const request = route.request();
   assert.equal(request.headers().authorization, undefined);
@@ -41,6 +40,7 @@ await page.route(/\/api\/research\/pats(?:\/[^/?]+)?(?:\?.*)?$/, async (route) =
   assert.equal(request.method(), "POST");
   const key = request.headers()["idempotency-key"];
   const body = request.postDataJSON();
+  assert.deepEqual(Object.keys(body).sort(), ["expiryDays", "name"]);
   posts.push({ key, body });
   const previous = attempts.get(key);
   if (previous) {
@@ -51,7 +51,7 @@ await page.route(/\/api\/research\/pats(?:\/[^/?]+)?(?:\?.*)?$/, async (route) =
     }
     return route.fulfill({ status: 200, json: { credential: safe(previous.record), token: null, secretAvailable: false, replayed: true } });
   }
-  const record = { id: crypto.randomUUID(), name: body.name, scope: body.scope, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + body.expiryDays * 86400000).toISOString(), revokedAt: null, lastUsedAt: null };
+  const record = { id: crypto.randomUUID(), name: body.name, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + body.expiryDays * 86400000).toISOString(), revokedAt: null, lastUsedAt: null };
   records.unshift(record);
   attempts.set(key, { record, body, retries: 0 });
   lastSecret = `rpat1.${record.id}.${"a".repeat(43)}`;
@@ -69,21 +69,24 @@ try {
   await page.locator("header").getByRole("link", { name: "API 토큰", exact: true }).first().click();
   await page.waitForURL(U("/account/tokens/"));
   await main.getByText("발급한 API 토큰이 없습니다.").waitFor();
-  assert.equal(await main.getByRole("link", { name: "pat-client.py", exact: true }).getAttribute("href"), `${BASE}/api/research/client/pat-client.py`);
-  assert.equal(await main.getByRole("link", { name: "SKILL.md", exact: true }).getAttribute("href"), `${BASE}/api/research/client/SKILL.md`);
+  assert.equal(await main.getByLabel("API 주소", { exact: true }).inputValue(), `${ORIGIN}${BASE}/api/research/agent/v1`);
+  assert.equal(await main.getByLabel("llm.md 주소", { exact: true }).inputValue(), `${ORIGIN}${BASE}/api/research/llm.md`);
+  assert.equal(await main.getByLabel("권한", { exact: true }).count(), 0);
+  await main.getByRole("button", { name: "API 주소 복사", exact: true }).click();
+  await main.getByRole("button", { name: "llm.md 주소 복사", exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__patCopyCount), 2);
   await main.getByLabel("이름", { exact: true }).fill("  Desktop  ");
-  await main.getByLabel("권한", { exact: true }).selectOption("write");
   await main.getByLabel("만료 기간(일)").fill("7");
   await main.getByRole("button", { name: "API 토큰 발급", exact: true }).click();
   const value = main.getByLabel("토큰 값", { exact: true });
   await value.waitFor();
   assert.equal(await value.inputValue(), lastSecret);
   const firstSecret = lastSecret;
-  assert.deepEqual(posts[0].body, { name: "Desktop", scope: "write", expiryDays: 7 });
+  assert.deepEqual(posts[0].body, { name: "Desktop", expiryDays: 7 });
   await assertNoStoredSecret(firstSecret);
   await main.getByRole("button", { name: "토큰 복사", exact: true }).click();
-  await main.getByText("복사했습니다.", { exact: true }).waitFor();
-  assert.equal(await page.evaluate(() => window.__patCopyCount), 1);
+  await main.getByRole("region", { name: "발급한 토큰 값" }).getByText("복사했습니다.", { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__patCopyCount), 3);
   await main.getByRole("button", { name: "확인했고 닫기" }).click();
   assert.equal(await value.count(), 0);
   assert.ok(!(await page.content()).includes(firstSecret));
@@ -128,18 +131,17 @@ try {
   assert.equal(await value.count(), 0);
   assert.ok(!(await page.content()).includes(lastSecret));
   await main.getByRole("button", { name: "값을 잃은 토큰 폐기" }).click();
-  await main.getByText("토큰을 폐기했습니다. 이후 호출에는 사용할 수 없습니다.").waitFor();
+  await main.getByText("토큰을 폐기했습니다.", { exact: true }).waitFor();
   assert.equal(posts.length, lostPosts + 3);
   console.log("PASS F5: ACK loss then 429/503 keeps original unknown attempt and locks fresh issue; same-key replay has no value and revoke creates no replacement");
 
   await page.locator("header").getByRole("button", { name: "로그아웃", exact: true }).first().click();
   await page.locator("header").getByRole("link", { name: "GitHub 로그인", exact: true }).first().waitFor();
-  effective = "public"; records = [];
+  records = [];
   await login("approved-commenter");
   await page.goto(U("/account/tokens/"));
-  await main.getByText("현재 계정 역할에서는 공개 콘텐츠 읽기만 가능합니다.", { exact: false }).first().waitFor();
+  await main.getByText("현재 계정은 공개 콘텐츠만 읽을 수 있습니다.", { exact: true }).waitFor();
   await main.getByLabel("이름", { exact: true }).fill("Commenter");
-  await main.getByLabel("권한", { exact: true }).selectOption("write");
   await main.getByRole("button", { name: "API 토큰 발급", exact: true }).click();
   await value.waitFor();
   // bfcache 보존 경로도 pagehide 순간에 표시 값을 지워야 한다.
@@ -148,15 +150,14 @@ try {
   assert.equal(await value.count(), 0);
   assert.ok(!(await page.content()).includes(commenterSecret));
   await list.getByText("Commenter", { exact: true }).waitFor();
-  assert.ok((await list.innerText()).includes("선택 권한: 쓰기(읽기 포함) · 실효 권한: 공개 콘텐츠 읽기만"));
-  effective = "none";
+  assert.ok(!(await list.innerText()).includes("권한"));
   await page.route(U("/api/auth/me"), async (route) => {
     const response = await route.fetch();
     const body = await response.json();
     await route.fulfill({ json: { ...body, user: { ...body.user, isApproved: false } } });
   });
   await page.reload();
-  await main.getByText("현재 계정은 승인되지 않아", { exact: false }).waitFor();
+  await main.getByText("승인 후 발급할 수 있습니다.", { exact: false }).waitFor();
   assert.equal(await main.getByRole("button", { name: "API 토큰 발급", exact: true }).isDisabled(), true);
   await list.getByText("Commenter", { exact: true }).waitFor();
   await list.getByRole("button", { name: "토큰 폐기", exact: true }).click();

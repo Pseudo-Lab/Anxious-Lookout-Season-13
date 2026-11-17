@@ -2,177 +2,69 @@
 
 import type { FetchResult } from "@/lib/api/client";
 import type { CodexStatus } from "@/lib/research/types";
-import { credentialWait, useCodexRunner, useCodexStatus } from "@/components/research/CodexStatusProvider";
+import { useCodexRunner, useCodexStatus } from "@/components/research/CodexStatusProvider";
 import { isUncertain } from "@/lib/research/idempotency";
 import { own } from "@/lib/research/own";
 import { formatDateTime } from "@/lib/research/format";
-import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
-
-// 사용할 수 없는 사유. 계약에 새 코드가 생기면 여기에 문구를 더하고, 모르는 코드는 일반 문구로 표시한다.
-const UNAVAILABLE_REASONS: Record<string, string> = {
-  not_configured: "서버에 대화 연결이 설정되어 있지 않습니다.",
-  not_enabled_for_account: "이 계정에는 아직 대화 기능이 열려 있지 않습니다. 지정된 시험 계정에서만 사용할 수 있습니다.",
-  auth_expired: "서버 인증이 만료되어 재연결이 필요합니다. 운영자가 다시 연결하면 이 대화에서 이어서 질문할 수 있습니다.",
-  auth_revoked: "서버 인증이 더 이상 유효하지 않습니다. 운영자가 다시 연결해야 합니다.",
-  model_unavailable: "고정된 모델을 확인하지 못해 실행이 중단되었습니다. 운영자가 확인한 뒤 다시 사용할 수 있습니다.",
-  policy_refused: "정책에 따라 사용이 거부되었습니다.",
-  budget_exhausted: "사용 한도에 도달했습니다.",
-  provider_rate_limited: "제공자의 사용 한도에 걸려 지금은 사용할 수 없습니다.",
-  unavailable: "일시적으로 연결할 수 없습니다.",
-};
 
 export { useCodexStatus };
 
-// #10 실행 환경 상태(api-contracts/issue10-user-runners-interface-v1.md, #16 issue16-multi-user-runners-draft.md).
-// 완료 시점은 약속하지 않는다.
-type RunnerAction = "prepare" | "resume";
 interface RunnerState {
   title: string;
-  body: string;
-  action?: RunnerAction;
-  progress?: boolean;
+  action?: "prepare" | "resume";
   warn?: boolean;
 }
 const RUNNER_STATES: Record<string, RunnerState> = {
-  not_prepared: { title: "대화 환경이 아직 준비되지 않았습니다", body: "‘대화 준비’를 누르면 내 환경을 준비합니다.", action: "prepare" },
-  provisioning: { title: "환경 활성화 중", body: "질문할 수 있도록 환경을 준비하고 있습니다.", progress: true },
-  capacity_wait: {
-    title: "사용 대기 중",
-    body: "지금은 이용자가 많아 환경을 켤 자리를 기다리고 있습니다. 자리가 나면 서버가 접수된 준비 요청을 이어서 처리합니다.",
-  },
-  // 연결 문제·생성 결과 확인 중을 함께 뜻한다. 짧게 끝난다거나 새 환경을 만든다고 약속하지 않는다.
-  runner_unreachable: { title: "환경 연결 확인 중", body: "환경 연결과 준비 결과를 확인하고 있습니다.", progress: true },
-  // #16: 종료 확인 중. 이 동안의 준비 요청은 저장되지 않으므로 끝나면 다시 켠다고 약속하지 않는다(버튼 없음).
-  stopping: { title: "환경 정리 중", body: "이전 환경이 꺼졌는지 확인하고 있습니다. 확인이 끝나면 환경을 다시 켤 수 있습니다.", progress: true },
-  // #16: 결과가 불확실한 실패라 운영자 확인(reconciliation)이 필요하다. 준비를 다시 보내는 버튼은 두지 않는다.
-  runner_failed: {
-    title: "확인이 필요합니다",
-    body: "환경 상태를 확정하지 못해 운영자 확인이 필요합니다. 확인이 끝나면 다시 사용할 수 있습니다.",
-    warn: true,
-  },
-  // 유휴 시간은 운영 설정이라 숫자를 적지 않는다.
-  idle_stopped: {
-    title: "환경이 쉬는 중",
-    body: "한동안 사용하지 않아 환경을 잠시 껐습니다. 대화와 자료는 그대로입니다.",
-    action: "resume",
-  },
+  not_prepared: { title: "환경 준비 필요", action: "prepare" },
+  provisioning: { title: "환경 준비 중" },
+  capacity_wait: { title: "사용 대기 중" },
+  runner_unreachable: { title: "연결 확인 중" },
+  stopping: { title: "환경 정리 중" },
+  runner_failed: { title: "운영자 확인 필요", warn: true },
+  idle_stopped: { title: "쉬는 중", action: "resume" },
 };
-const ACTION_LABELS: Record<RunnerAction, string> = { prepare: "대화 준비", resume: "환경 다시 켜기" };
 
-/** 실행 환경 상태(아는 reason)면 그 안내. */
 export function runnerState(result: FetchResult<CodexStatus> | null): RunnerState | null {
   if (!result?.ok || result.data.available || !result.data.reason) return null;
   return own(RUNNER_STATES, result.data.reason) ?? null;
 }
 
-/** 실행 환경 준비 버튼(대화 준비·환경 다시 켜기). 누를 때마다 새 준비 요청이다. 준비 대상 계정에만 보인다. */
+/** 실제 준비 요청은 기존 canPrepare와 명시적 클릭으로만 보낸다. */
 export function RunnerActionButton({ result }: { result: FetchResult<CodexStatus> | null }) {
   const runner = useCodexRunner();
   const action = runnerState(result)?.action;
-  if (!action || !runner.canPrepare) return null;
-  return (
-    <button
-      type="button"
-      onClick={() => void runner.prepare()}
-      disabled={runner.preparing}
-      className="font-medium underline hover:no-underline disabled:opacity-50"
-    >
-      {runner.preparing ? "요청하는 중..." : ACTION_LABELS[action]}
-    </button>
-  );
+  if (!action) return null;
+  return <button type="button" onClick={() => void (runner.canPrepare ? runner.prepare() : runner.reload())}
+    disabled={runner.preparing} className="font-medium underline hover:no-underline disabled:opacity-50">
+    {runner.preparing ? "요청 중" : !runner.canPrepare ? "다시 시도" : action === "resume" ? "다시 켜기" : "준비하기"}
+  </button>;
 }
 
-/**
- * 보내기를 잠글지. 서버가 접수할 수 없다고 확인한 상태(available:false)와 확정 조회 거절(401/403 등, 이전 API의
- * 권한 없음 포함)은 잠근다. 일시적 조회 실패(네트워크·timeout·5xx)만으로는 잠그지 않는다(서버가 선접수에서 다시 거른다).
- */
+/** 일시 조회 실패는 기존 접수 정책대로 보내기를 잠그지 않는다. */
 export function codexBlocked(result: FetchResult<CodexStatus> | null): boolean {
   if (!result) return false;
-  if (!result.ok) return !isUncertain(result.failure);
-  return !result.data.available;
+  return result.ok ? !result.data.available : !isUncertain(result.failure);
 }
 
-/**
- * 보내기가 잠긴 이유(입력창 위 안내용, #94: 상태 패널은 admin만 보므로 안내만으로 이유를 알 수 있게).
- * 실행 환경 상태(runnerState)는 따로 안내하므로 여기서는 그 밖의 경우만 다룬다.
- */
-export function codexBlockedReason(result: FetchResult<CodexStatus> | null): string {
-  if (!result) return "";
-  if (!result.ok) return "상태를 확인할 수 없어 지금은 보낼 수 없습니다.";
-  return own(UNAVAILABLE_REASONS, result.data.reason) ?? "지금은 요청을 받을 수 없습니다.";
-}
-
-// Codex 연결 상태(#94: 대화창에서는 admin에게만 보인다). 서버가 보고한 그대로 표시하고, 확인되지 않은 연결을 정상으로 보이게 하지 않는다.
-// 모델명은 표시하지 않는다(#94). 인증은 서버가 다루며 이 화면에서 로그인·키 입력을 받지 않는다.
+/** 관리자 전용 상태 패널. 모델명·자격 정보는 표시하지 않는다. */
 export function CodexStatusView({ result }: { result: FetchResult<CodexStatus> | null }) {
+  const runner = useCodexRunner();
   if (!result) return null;
-  if (!result.ok) return <ErrorNotice failure={result.failure} prefix="연결 상태를 확인하지 못했습니다." />;
+  if (!result.ok) return <Notice tone="warn">연결 확인 실패 · <button type="button" onClick={() => void runner.reload()} className="underline">다시 시도</button></Notice>;
   const s = result.data;
-  const model = (
-    <>
-      {s.available && s.accessExpiresAt && (
-        <span className="block text-xs">이용 가능 기한: {formatDateTime(s.accessExpiresAt)}까지</span>
-      )}
-      {s.remainingAdmissions !== undefined && <span className="block text-xs">남은 요청 횟수: {s.remainingAdmissions}</span>}
-    </>
-  );
-  const runner = s.available ? undefined : own(RUNNER_STATES, s.reason);
-  if (runner) {
-    return (
-      <Notice tone={runner.warn ? "warn" : "info"}>
-        <span className="flex items-start gap-2">
-          {runner.progress && (
-            <span
-              aria-hidden="true"
-              className="mt-1 inline-block h-3 w-3 shrink-0 rounded-full border-2 border-current border-t-transparent motion-safe:animate-spin"
-            />
-          )}
-          <span>
-            <span className="font-semibold">{runner.title}</span> — {runner.body} 써 둔 입력과 이전 대화는 그대로이며, 질문은 자동으로 보내지
-            않습니다. <RunnerActionButton result={result} />
-            {model}
-          </span>
-        </span>
-      </Notice>
-    );
-  }
-  if (!s.available) {
-    const why = own(UNAVAILABLE_REASONS, s.reason) ?? "지금은 사용할 수 없습니다.";
-    return (
-      <Notice tone="warn">
-        {why} 새 대화를 진행할 수 없지만 이전 대화 기록은 계속 볼 수 있습니다. 다른 모델로 자동 전환하지 않습니다.
-        {credentialWait(s) && " 운영자가 조치하면 반영되도록 이 화면에서 상태를 주기적으로 다시 확인합니다."}
-        {model}
-      </Notice>
-    );
-  }
-  if (s.verification === "fixture") {
-    return (
-      <Notice tone="warn">
-        테스트용 모의 응답에 연결되어 있습니다. 실제 모델 응답이 아닙니다.
-        {model}
-      </Notice>
-    );
-  }
-  if (s.verification === "unverified") {
-    // available은 접수 가능 상태일 뿐 고정 모델의 실제 응답 성공(entitlement)을 뜻하지 않는다.
-    return (
-      <Notice tone="info">
-        연결이 설정되어 있으나 실제 응답은 아직 확인되지 않았습니다.
-        {model}
-      </Notice>
-    );
-  }
-  return (
-    <Notice tone="info">
-      연결되어 있습니다.
-      {model}
-    </Notice>
-  );
+  const state = runnerState(result);
+  if (!s.available) return <Notice tone={state?.warn ? "warn" : "info"}>
+    {state?.title ?? "연결 안 됨"} · {state?.action ? <RunnerActionButton result={result} /> : <button type="button" onClick={() => void runner.reload()} className="underline">다시 시도</button>}
+    {s.reason && <span className="ml-2 text-xs">({s.reason})</span>}
+  </Notice>;
+  return <Notice tone={s.verification === "fixture" ? "warn" : "info"}>
+    {s.verification === "fixture" ? "테스트 연결" : s.verification === "unverified" ? "연결됨 · 응답 미확인" : "연결됨"}
+    {s.accessExpiresAt && <span className="block text-xs">기한: {formatDateTime(s.accessExpiresAt)}까지</span>}
+    {s.remainingAdmissions !== undefined && <span className="block text-xs">남은 요청: {s.remainingAdmissions}</span>}
+  </Notice>;
 }
 
-/** poll: 열린 대화창에서만 true(일시 상태를 다시 조회). 내 연구 화면 등에서는 조회 1회만. */
 export default function CodexStatusBanner({ poll = false }: { poll?: boolean }) {
   const { result } = useCodexStatus(poll);
   return <CodexStatusView result={result} />;

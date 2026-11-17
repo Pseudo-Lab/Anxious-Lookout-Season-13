@@ -441,7 +441,7 @@ check("R9. codex unavailable banner", await appears(chat.getByText("새 대화�
 await setMock("codex=auth_expired");
 await page.reload();
 await openChatPanel();
-check("R9a. auth_expired reason explained (operator reconnect)", await appears(chat.getByText("서버 인증이 만료되어 재연결이 필요합니다")));
+check("R9a. auth_expired reason explained (operator reconnect)", await appears(chat.getByText("auth_expired")));
 check("R9a. no model name shown (#94), no auto switch", (await chat.getByText(/모델:|서버에서 고정/).count()) === 0 && (await appears(chat.getByText("다른 모델로 자동 전환하지 않습니다"))));
 check("R9a. no login/API-key input offered", (await chat.getByLabel(/API|키|ChatGPT/).count()) === 0);
 await setMock("codex=unavailable");
@@ -458,7 +458,7 @@ const chatUi = () =>
     return k ? JSON.parse(sessionStorage.getItem(k)) : null;
   });
 const sessionUrl = U(`/research/session/?id=${(await chatUi()).sessionId}`);
-// 서버가 접수 불가로 보고한 동안은 보내기를 잠그고 입력은 그대로 둔다. 운영자 재연결 뒤 '상태 다시 확인'으로 풀린다(새로고침 불필요).
+// 서버가 접수 불가로 보고한 동안은 보내기를 잠그고 입력은 그대로 둔다. 운영자 재연결 뒤 '다시 시도'으로 풀린다(새로고침 불필요).
 {
   const posts = [];
   await page.route("**/api/research/sessions/*/messages", async (route) => {
@@ -466,7 +466,7 @@ const sessionUrl = U(`/research/session/?id=${(await chatUi()).sessionId}`);
     return route.continue();
   });
   await chat.getByLabel("메시지").fill("질문 하나");
-  check("R9. send locked while codex unavailable", (await appears(chat.getByText("보내기가 잠겨 있습니다"))) && (await chat.getByRole("button", { name: "보내기" }).isDisabled()));
+  check("R9. send locked while codex unavailable", (await appears(chat.getByText("연결 안 됨"))) && (await chat.getByRole("button", { name: "보내기" }).isDisabled()));
   await chat.locator("form").evaluate((f) => f.requestSubmit());
   await page.waitForTimeout(300);
   check("R9. locked composer sends nothing", posts.length === 0, String(posts.length));
@@ -474,8 +474,8 @@ const sessionUrl = U(`/research/session/?id=${(await chatUi()).sessionId}`);
   await page.unroute("**/api/research/sessions/*/messages");
 }
 await setMock("codex=fixture");
-await chat.getByRole("button", { name: "상태 다시 확인" }).click();
-check("R9. recheck unlocks without reload", await appears(chat.getByText("테스트용 모의 응답")));
+await chat.getByRole("button", { name: "다시 시도" }).click();
+check("R9. recheck unlocks without reload", await appears(chat.getByText("테스트 연결")));
 check("R9. input still there after unlock", (await chat.getByLabel("메시지").inputValue()) === "질문 하나");
 await chat.getByRole("button", { name: "보내기" }).click();
 check("R9. running state shown", await appears(chat.getByText("응답하는 중입니다.")));
@@ -483,8 +483,8 @@ await page.reload(); // 진행 중 재접속
 check("R9. reply after reconnect (polling)", await appears(chat.getByText("모의 응답:"), 15000));
 // 홈은 general: #14부터 소유자 도구 전부라 모의 모델의 research_list 호출이 실행된다(거부는 R22 공개 글).
 check("R9. user message shows sent page hint (general)", await appears(chat.locator("li[data-role=user]", { hasText: "질문 하나" }).getByText("보낸 화면: 일반")));
-check("R9. owner tool call completed on general page", await appears(chat.locator("li", { hasText: "research_list" }).last().getByText("완료")));
-await chat.getByRole("button", { name: /research_list/ }).first().click();
+check("R9. owner tool call completed on general page", await appears(chat.locator('li[data-tool-name="research_list"]').last().getByText("도구 실행함", { exact: true })));
+await chat.locator('li[data-tool-name="research_list"]').first().getByRole("button").click();
 check("R9. tool input shown inert", await appears(chat.locator("pre", { hasText: '"query": "질문 하나"' })));
 check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /원본 기록/ }).count()) === 0);
 
@@ -496,7 +496,7 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
   check("R9b. failed codex_rejected shown", await appears(chat.getByText("이 요청은 처리되지 않았습니다")));
   const rejected = chat.locator("li[data-role=user]", { hasText: "거절 질문" });
   check("R9b. platform input labeled 미기록", await appears(rejected.getByText("미기록 입력")));
-  check("R9b. not presented as Codex record", await appears(rejected.getByText("대화 기록에 반영되지 않은 입력입니다")));
+  check("R9b. not presented as Codex record", await appears(rejected.getByText("기록되지 않은 입력입니다")));
   check("R9b. no raw record entry for the preserved input (#94)", (await rejected.getByRole("button", { name: /입력 기록|원본 기록/ }).count()) === 0);
   await setMock("codex=fixture");
   await chat.getByLabel("메시지").fill("거절 후 새 질문");
@@ -509,16 +509,16 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
 {
   // 화면을 연 뒤에 접수 불가가 된 경우(열어 둔 화면에서 만료 등): 서버 선접수 거절 → 안내·입력 유지 → 상태 재확인으로 잠금
   for (const [mode, text] of [
-    ["auth_expired", "서버 인증이 만료되어"],
-    ["not_enabled_for_account", "이 계정에는 아직 대화 기능이 열려 있지 않습니다"],
-    ["model_unavailable", "고정된 모델을 사용할 수 없어"],
-    ["budget_exhausted", "사용 한도에 도달해"],
-    ["rate_limited", "제공자의 사용 한도에 걸려"],
+    ["auth_expired", "서버 인증 만료"],
+    ["not_enabled_for_account", "이 계정은 대화를 사용할 수 없습니다"],
+    ["model_unavailable", "고정된 모델을 사용할 수 없"],
+    ["budget_exhausted", "사용 한도에 도달"],
+    ["rate_limited", "요청 한도에 도달"],
   ]) {
     await setMock("codex=fixture");
     await page.reload();
     await chat.getByLabel("메시지").waitFor();
-    await chat.getByText("테스트용 모의 응답").waitFor();
+    await chat.getByText("테스트 연결").waitFor();
     await setMock(`codex=${mode}`);
     await chat.getByLabel("메시지").fill(`${mode} 질문`);
     await chat.getByRole("button", { name: "보내기" }).click();
@@ -528,9 +528,9 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
       `R9g. ${mode}: definitive (no same-key resend, nothing stored)`,
       (await chat.getByRole("button", { name: "다시 보내기" }).count()) === 0 && !(await pendingSends()).includes(`${mode} 질문`)
     );
-    check(`R9g. ${mode}: status rechecked -> send locked`, await appears(chat.getByText("보내기가 잠겨 있습니다")));
+    check(`R9g. ${mode}: status rechecked -> send locked`, await appears(chat.getByText("연결 안 됨")));
   }
-  check("R9g. rate limit reason shown in status", await appears(chat.getByText("제공자의 사용 한도에 걸려 지금은 사용할 수 없습니다")));
+  check("R9g. rate limit reason shown in status", await appears(chat.getByText("provider_rate_limited")));
   // 계약에 없는 codex_* 503은 결과 불명: 같은 key·본문 보관, "다시 보내기" 제공, 새로고침 뒤 입력 복구(리뷰 F7-1)
   {
     await setMock("codex=unknown_code");
@@ -563,21 +563,21 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
   await chat.getByRole("button", { name: "보내기" }).click();
   check(
     "R9g. model mismatch -> explicit model failure, no auto switch",
-    (await appears(chat.getByText("마지막 요청이 실패했습니다"))) && (await appears(chat.getByText("고정된 모델을 사용할 수 없어")))
+    (await appears(chat.getByText("마지막 요청이 실패했습니다"))) && (await appears(chat.getByText("고정된 모델을 사용할 수 없")))
   );
   check("R9g. raw provider text not shown", !(await chat.innerText()).includes("gpt-other"));
   const mm = chat.locator("li[data-role=user]", { hasText: "모델 불일치 질문" });
   check("R9g. mismatched turn items badged as not a normal response", await appears(mm.getByText("정상 응답 아님")));
-  check("R9g. mismatched tool call badged", await appears(chat.locator("li", { hasText: "research_document_save" }).filter({ hasText: "정상 응답 아님" })));
+  check("R9g. mismatched tool call badged", await appears(chat.locator('li[data-tool-name="research_document_save"]').filter({ hasText: "정상 응답 아님" })));
   check("R9g. no assistant answer shown for mismatched turn", (await chat.getByText("모의 응답:").count()) === answersBefore);
   // 차단은 계정 runner 단위로 지속: turn 실패 뒤 상태를 다시 읽어 보내기 잠금, 입력 유지, 새 대화 안내 없음
   // (서버 선접수 거절 자체는 위 model_unavailable 반복에서 확인)
   await chat.getByLabel("메시지").fill("차단 뒤 질문");
-  check("R9g. follow-up locked while runner blocked (status rechecked after failed turn)", (await appears(chat.getByText("보내기가 잠겨 있습니다"))) && (await chat.getByRole("button", { name: "보내기" }).isDisabled()));
+  check("R9g. follow-up locked while runner blocked (status rechecked after failed turn)", (await appears(chat.getByText("연결 안 됨"))) && (await chat.getByRole("button", { name: "보내기" }).isDisabled()));
   check("R9g. follow-up input kept", (await chat.getByLabel("메시지").inputValue()) === "차단 뒤 질문");
   check("R9g. no 'start a new conversation' workaround suggested", !(await chat.innerText()).includes("새 대화를 시작"));
   await page.reload();
-  check("R9g. status explains operator confirmation", await appears(chat.getByText("운영자가 확인한 뒤 다시 사용할 수 있습니다")));
+  check("R9g. status explains operator confirmation", await appears(chat.getByText("model_unavailable")));
   // 이전 정상 이력은 그대로(일괄 실패 처리하지 않음)
   check("R9g. earlier normal answers kept", (await chat.getByText("모의 응답:").count()) === answersBefore);
   await setMock("codex=fixture");
@@ -590,8 +590,8 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
 //      provider 원문 비노출, 입력은 기록 여부대로 표시, 자동 재실행 없음, 상태 재확인으로 잠금, 운영자 재공급 뒤 같은 대화에서 이어짐
 {
   for (const [mode, text, recorded] of [
-    ["midturn_expired", "서버 인증이 만료되어", false],
-    ["midturn_revoked", "서버 인증이 더 이상 유효하지 않아", true],
+    ["midturn_expired", "서버 인증 만료", false],
+    ["midturn_revoked", "서버 인증 해제", true],
   ]) {
     await setMock("codex=fixture");
     await page.reload();
@@ -612,14 +612,14 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
       `R9h. ${mode}: input shown as ${recorded ? "Codex record" : "unrecorded platform input"}`,
       (await item.count()) === 1 && (await item.getByText("미기록 입력").count()) === (recorded ? 0 : 1)
     );
-    check(`R9h. ${mode}: status rechecked -> send locked`, await appears(chat.getByText("보내기가 잠겨 있습니다")));
+    check(`R9h. ${mode}: status rechecked -> send locked`, await appears(chat.getByText("연결 안 됨")));
     await page.waitForTimeout(500);
     check(`R9h. ${mode}: no automatic resend`, posts.length === 1, String(posts.length));
     await page.unroute("**/api/research/sessions/*/messages");
     // 운영자 재공급(같은 계정) 뒤: 상태 재확인 → 같은 대화에 새 메시지
     await setMock("codex=fixture");
-    await chat.getByRole("button", { name: "상태 다시 확인" }).click();
-    await chat.getByText("테스트용 모의 응답").waitFor();
+    await chat.getByRole("button", { name: "다시 시도" }).click();
+    await chat.getByText("테스트 연결").waitFor();
     await chat.getByLabel("메시지").fill(`${mode} 재개 질문`);
     await chat.getByRole("button", { name: "보내기" }).click();
     check(`R9h. ${mode}: same conversation continues after resupply`, await appears(chat.getByText(`모의 응답: ${mode} 재개 질문`), 15000));
@@ -633,19 +633,19 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
   await setMock("codex=fixture&window=10&remaining=2");
   await page.reload();
   await chat.getByLabel("메시지").waitFor();
-  check("R9w. access window end shown", await appears(chat.getByText(/이용 가능 기한: .+까지/)));
-  check("R9w. remaining admissions shown", await appears(chat.getByText("남은 요청 횟수: 2")));
+  check("R9w. access window end shown", await appears(chat.getByText(/기한: .+까지/)));
+  check("R9w. remaining admissions shown", await appears(chat.getByText("남은 요청: 2")));
   await chat.getByLabel("메시지").fill("창 안 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
   await chat.getByText("모의 응답: 창 안 질문").waitFor({ timeout: 15000 });
-  check("R9w. remaining admissions refreshed after turn", await appears(chat.getByText("남은 요청 횟수: 1")));
+  check("R9w. remaining admissions refreshed after turn", await appears(chat.getByText("남은 요청: 1")));
   await chat.getByLabel("메시지").fill("창 끝난 뒤 질문");
-  check("R9w. window end -> locked without reload", await appears(chat.getByText("보내기가 잠겨 있습니다"), 15000));
-  check("R9w. expired reason shown", await appears(chat.getByText("서버 인증이 만료되어 재연결이 필요합니다")));
+  check("R9w. window end -> locked without reload", await appears(chat.getByText("연결 안 됨"), 15000));
+  check("R9w. expired reason shown", await appears(chat.getByText("auth_expired")));
   check("R9w. input kept after window end", (await chat.getByLabel("메시지").inputValue()) === "창 끝난 뒤 질문");
   await setMock("codex=fixture&window=&remaining=");
-  await chat.getByRole("button", { name: "상태 다시 확인" }).click();
-  await chat.getByText("테스트용 모의 응답").waitFor();
+  await chat.getByRole("button", { name: "다시 시도" }).click();
+  await chat.getByText("테스트 연결").waitFor();
   await chat.getByLabel("메시지").fill("");
 }
 
@@ -694,7 +694,7 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
   armed = true;
   const readsBefore = reads.length;
   await sm.getByLabel("메시지").fill("시계 차이 질문");
-  check("R9x. clock ahead: locked once server reports expiry", await appears(sm.getByText("보내기가 잠겨 있습니다"), 40000), trace());
+  check("R9x. clock ahead: locked once server reports expiry", await appears(sm.getByText("연결 안 됨"), 40000), trace());
   check("R9x. clock ahead: early recheck answered available (setup)", forced === 1, trace());
   check("R9x. clock ahead: rechecked again after early answer", reads.length - readsBefore >= 2 && reads.at(-1)?.available === false, trace());
   check("R9x. clock ahead: no send, draft kept", posts.length === 0 && (await sm.getByLabel("메시지").inputValue()) === "시계 차이 질문");
@@ -721,12 +721,12 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
   await page.waitForTimeout(8000);
   failing = false;
   check("R9y. recheck retried after failure", aborted >= 2, String(aborted));
-  check("R9y. locked after reads recover", await appears(chat.getByText("보내기가 잠겨 있습니다"), 40000));
+  check("R9y. locked after reads recover", await appears(chat.getByText("연결 안 됨"), 40000));
   check("R9y. draft kept", (await chat.getByLabel("메시지").inputValue()) === "조회 실패 질문");
   await page.unroute("**/api/research/codex/status");
   await setMock("codex=fixture&window=&remaining=");
-  await chat.getByRole("button", { name: "상태 다시 확인" }).click();
-  await chat.getByText("테스트용 모의 응답").waitFor();
+  await chat.getByRole("button", { name: "다시 시도" }).click();
+  await chat.getByText("테스트 연결").waitFor();
   await chat.getByLabel("메시지").fill("");
 }
 
@@ -883,7 +883,7 @@ async function confirmSingleTurn(label, text) {
     bodies.push(route.request().postDataJSON());
     return route.continue();
   });
-  const lastTool = () => chat.locator("li", { hasText: "research_list" }).last();
+  const lastTool = () => chat.locator('li[data-tool-name="research_list"]').last();
   // #94: 범위 설명은 입력창 위 본문에서 없앴고, 입력창 옆 범위 이름(다음 질문 범위)의 도움말(title)로만 남는다.
   // 그 설명이 도움말에 있고 본문에는 없는지 함께 본다.
   const scopeHelp = async (text) => {
@@ -894,8 +894,8 @@ async function confirmSingleTurn(label, text) {
 
   // general 페이지: #14부터 소유자 도구 전부(화면은 참고일 뿐)
   check("R22. general page hint shown", await appears(chat.getByText("보고 있는 화면: 일반")));
-  check("R22. owner wording: no per-page tool limits (scope help, not body)", await scopeHelp("연결 관계와 보관도 처리합니다"));
-  check("R22. web search saving wording (scope help, not body)", await scopeHelp("출처 주소와 수집 시각을 붙여 자료로 저장합니다"));
+  check("R22. owner wording: no per-page tool limits (scope help, not body)", await scopeHelp("내 자료·문서·글 조회·저장"));
+  check("R22. web search saving wording (scope help, not body)", await scopeHelp("웹 검색·명령 실행"));
   // #68 native shell: 실행기의 한 번에 하나·시간 상한 문구는 없어지고, 파일을 직접 고칠 수 있다고 적는다.
   check(
     "R22. shell wording: files edited directly, no executor limits (#68)",
@@ -908,7 +908,7 @@ async function confirmSingleTurn(label, text) {
   await chat.getByText("모의 응답: 일반 페이지 질문").waitFor({ timeout: 15000 });
   check("R22. general page sends kind general", JSON.stringify(bodies.at(-1)?.page) === '{"kind":"general"}', JSON.stringify(bodies.at(-1)));
   check("R22. general: draft cleared after success", (await chat.getByLabel("메시지").inputValue()) === "");
-  check("R22. general: owner tool completed", await appears(lastTool().getByText("완료")));
+  check("R22. general: owner tool completed", await appears(lastTool().getByText("도구 실행함", { exact: true })));
 
   // 자료 목록(작업 공간): research_list 허용
   await page.goto(U("/research/?tab=materials"));
@@ -918,7 +918,7 @@ async function confirmSingleTurn(label, text) {
   await chat.getByRole("button", { name: "보내기" }).click();
   await chat.getByText("모의 응답: 자료 목록 질문").waitFor({ timeout: 15000 });
   check("R22. workspace sends material_workspace", JSON.stringify(bodies.at(-1)?.page) === '{"kind":"material_workspace"}', JSON.stringify(bodies.at(-1)?.page));
-  check("R22. workspace: allowed tool completed", await appears(lastTool().getByText("완료")));
+  check("R22. workspace: allowed tool completed", await appears(lastTool().getByText("도구 실행함", { exact: true })));
 
   // 자료 상세: 보낸 뒤 바로 다른 페이지로 이동해도 접수 범위는 그대로
   const materialId = new URL(materialAUrl).searchParams.get("id");
@@ -934,7 +934,7 @@ async function confirmSingleTurn(label, text) {
   check("R22. material page sends material + id", bodies.at(-1)?.page?.kind === "material" && bodies.at(-1)?.page?.resourceId === materialId, JSON.stringify(bodies.at(-1)?.page));
   check("R22. navigation during run: sent page stays material", await appears(chat.locator("li[data-role=user]", { hasText: "자료 페이지 질문" }).getByText(/보낸 화면: 이 자료/)));
   check("R22. next hint follows current page", await appears(chat.getByText("보고 있는 화면: 일반")));
-  check("R22. material page: list tool not limited by page", await appears(lastTool().getByText("완료")));
+  check("R22. material page: list tool not limited by page", await appears(lastTool().getByText("도구 실행함", { exact: true })));
 
   // 공개 글: 유일한 도구 경계. 소유자 도구 호출은 서버가 거부한다.
   const pub22 = await api.send("POST", "/research/documents", { title: "범위 공개 글", content: "공개 본문" });
@@ -954,83 +954,61 @@ async function confirmSingleTurn(label, text) {
   await chat.getByText("모의 응답: 공개 글 질문").waitFor({ timeout: 15000 });
   check("R22. public: sent scope badge", await appears(chat.locator("li[data-role=user]", { hasText: "공개 글 질문" }).getByText(/보낸 범위: 이 공개 글/)));
   check("R22. public: owner tool rejected", await appears(lastTool().getByText("거부됨")));
+  await lastTool().getByRole("button").click();
   check("R22. public: rejection wording", await appears(lastTool().getByText("허용되지 않는 도구라 서버가 실행하지 않았습니다", { exact: false })));
 
-  // R22s. #23 shell 표시(api-contracts/issue23-shell-display.md): 공개 글에서는 거부, 소유자 화면에서는 결과별 안내
-  const shellItem = (kind) => chat.locator("li", { hasText: `fixture-${kind} --run` }).last();
+  // #104: 접힌 도구는 상태만, 펼친 뒤에만 명령/출력/시간/경로를 표시한다.
+  const shellItem = () => chat.locator('li[data-tool-name="shell"]').last();
+  const patchItem = () => chat.locator('li[data-tool-name="apply_patch"]').last();
   const ask = async (text) => {
     await chat.getByLabel("메시지").fill(text);
     await chat.getByRole("button", { name: "보내기" }).click();
     await chat.getByText(`모의 응답: ${text}`).waitFor({ timeout: 15000 });
   };
   await ask("/fixture/shell-ok 공개");
-  check("R22s. public: shell shown as command run", await appears(shellItem("ok").getByText("명령 실행")));
-  check("R22s. public: shell rejected with scope wording", (await appears(shellItem("ok").getByText("거부됨"))) && (await appears(shellItem("ok").getByText("명령을 실행할 수 없어 서버가 실행하지 않았습니다", { exact: false }))));
+  check("R22s. public command visibly refused while details stay hidden", await appears(shellItem().getByRole("button", { name: "명령 거부됨", exact: true })) && (await shellItem().locator("pre").count()) === 0);
+  await shellItem().getByRole("button").click();
+  check("R22s. expanded refusal explains scope", await appears(shellItem().getByText("명령을 실행할 수 없어 서버가 실행하지 않았습니다", { exact: false })));
   await page.goto(U("/"));
   await chat.getByLabel("메시지").waitFor();
   await ask("/fixture/shell-ok 홈");
-  check("R22s. ok: completed label, no warning", (await appears(shellItem("ok").getByText("완료", { exact: true }))) && (await shellItem("ok").locator("p.text-amber-800").count()) === 0);
-  await shellItem("ok").getByRole("button", { name: /명령 실행/ }).click();
-  check(
-    "R22s. ok: command, cwd, exit code and stdout shown inert",
-    (await appears(shellItem("ok").locator("pre", { hasText: "fixture-ok --run" }))) &&
-      (await appears(shellItem("ok").getByText("작업 공간 notes"))) &&
-      (await appears(shellItem("ok").getByText("종료 코드 0"))) &&
-      (await appears(shellItem("ok").locator("pre", { hasText: "shell fixture output" })))
-  );
+  check("R22s. completed summary hides command and output", await appears(shellItem().getByRole("button", { name: "명령 실행함", exact: true })) && (await shellItem().locator("pre").count()) === 0 && !(await shellItem().innerText()).includes("fixture-ok"));
+  await shellItem().getByRole("button").click();
+  check("R22s. expanded command/cwd/exit/stdout retained", await appears(shellItem().locator("pre", { hasText: "fixture-ok --run" })) && await appears(shellItem().getByText("작업 공간 notes", { exact: false })) && await appears(shellItem().getByText("종료 코드 0")) && await appears(shellItem().locator("pre", { hasText: "shell fixture output" })));
   await ask("/fixture/shell-fail");
-  check("R22s. fail: exit code explained", (await appears(shellItem("fail").getByText("실패", { exact: true }))) && (await appears(shellItem("fail").getByText("종료 코드 2로 끝났습니다", { exact: false }))));
-  await shellItem("fail").getByRole("button", { name: /명령 실행/ }).click();
-  check("R22s. fail: stderr shown", await appears(shellItem("fail").locator("pre", { hasText: "No such file or directory" })));
+  check("R22s. command failure is visible while collapsed", await appears(shellItem().getByRole("button", { name: "명령 실패", exact: true })));
+  await shellItem().getByRole("button").click();
+  check("R22s. expanded failure retains exit/stderr", await appears(shellItem().getByText("종료 코드 2로 끝났습니다", { exact: false })) && await appears(shellItem().locator("pre", { hasText: "No such file or directory" })));
   await ask("/fixture/shell-timeout");
-  check(
-    "R22s. timeout: label, limit from result, truncation",
-    (await appears(shellItem("timeout").getByText("시간 초과", { exact: true }))) &&
-      (await appears(shellItem("timeout").getByText("시간 상한(30초)을 넘어 명령을 멈췄습니다", { exact: false }))) &&
-      (await appears(shellItem("timeout").getByText("저장 상한까지만", { exact: false })))
-  );
+  check("R22s. timeout remains visible while collapsed", await appears(shellItem().getByRole("button", { name: "명령 시간 초과", exact: true })));
+  await shellItem().getByRole("button").click();
+  check("R22s. expanded timeout retains limit and truncation", await appears(shellItem().getByText("시간 상한(30초)을 넘어 명령을 멈췄습니다", { exact: false })) && await appears(shellItem().getByText("출력 일부만 저장됐습니다.")));
   await ask("/fixture/shell-busy");
-  check("R22s. busy: rejected, one at a time", (await appears(shellItem("busy").getByText("거부됨"))) && (await appears(shellItem("busy").getByText("한 번에 하나씩", { exact: false }))));
+  check("R22s. busy is visibly rejected", await appears(shellItem().getByRole("button", { name: "명령 거부됨", exact: true })));
+  await shellItem().getByRole("button").click();
+  check("R22s. expanded busy reason retained", await appears(shellItem().getByText("한 번에 하나씩", { exact: false })));
   await ask("/fixture/shell-cancel");
-  check("R22s. cancel: no resource-limit guess", (await appears(shellItem("cancel").getByText("중간에 취소되었습니다", { exact: false }))) && !/메모리|CPU|자원/.test(await shellItem("cancel").innerText()));
-
-  // R22n. #68 native shell·apply_patch(api-contracts/issue68-native-shell-history.md)
-  const nativeItem = (text) => chat.locator("li", { hasText: text }).last();
+  await shellItem().getByRole("button").click();
+  check("R22s. cancel makes no resource guess", await appears(shellItem().getByText("중간에 취소되었습니다", { exact: false })) && !/메모리|CPU|자원/.test(await shellItem().innerText()));
   await ask("/fixture/native-ok");
-  check("R22n. ok: completed, no warning", (await appears(nativeItem("native-ok --run").getByText("완료", { exact: true }))) && (await nativeItem("native-ok --run").locator("p.text-amber-800").count()) === 0);
-  await nativeItem("native-ok --run").getByRole("button", { name: /명령 실행/ }).click();
-  check(
-    "R22n. ok: combined output label, duration, no stderr box",
-    (await appears(nativeItem("native-ok --run").getByText("출력 (표준 출력·오류 합침)"))) &&
-      (await appears(nativeItem("native-ok --run").locator("pre", { hasText: "native stderr line" }))) &&
-      (await appears(nativeItem("native-ok --run").getByText("실행 시간 1.5초"))) &&
-      (await nativeItem("native-ok --run").getByText("오류 출력").count()) === 0
-  );
+  check("R22n. native command hidden while collapsed", await appears(shellItem().getByRole("button", { name: "명령 실행함", exact: true })) && !(await shellItem().innerText()).includes("native-ok"));
+  await shellItem().getByRole("button").click();
+  check("R22n. expanded combined output/duration retained", await appears(shellItem().getByText("출력 (표준 출력·오류 합침)")) && await appears(shellItem().locator("pre", { hasText: "native stderr line" })) && await appears(shellItem().getByText("실행 시간 1.5초")) && (await shellItem().getByText("오류 출력").count()) === 0);
   await ask("/fixture/native-empty");
-  await nativeItem("native-empty --run").getByRole("button", { name: /명령 실행/ }).click();
-  check("R22n. empty: no-output note instead of raw JSON", (await appears(nativeItem("native-empty --run").getByText("출력이 없습니다."))) && !/combinedOutput/.test(await nativeItem("native-empty --run").innerText()));
+  await shellItem().getByRole("button").click();
+  check("R22n. expanded empty output is readable", await appears(shellItem().getByText("출력이 없습니다.")) && !/combinedOutput/.test(await shellItem().innerText()));
   await ask("/fixture/native-declined");
-  check(
-    "R22n. declined: rejected with authorization wording",
-    (await appears(nativeItem("native-declined --run").getByText("거부됨"))) &&
-      (await appears(nativeItem("native-declined --run").getByText("권한 확인에서 거부되어 서버가 이 명령을 실행하지 않았습니다", { exact: false })))
-  );
+  check("R22n. native refusal remains visible", await appears(shellItem().getByRole("button", { name: "명령 거부됨", exact: true })));
+  await shellItem().getByRole("button").click();
+  check("R22n. expanded native authorization reason retained", await appears(shellItem().getByText("권한 확인에서 거부되어 서버가 이 명령을 실행하지 않았습니다", { exact: false })));
   await ask("/fixture/native-patch");
-  const patchItem = nativeItem("notes/native-a.md 외 2개");
-  check("R22n. patch: shown as file change with summary and Korean status", (await appears(patchItem.getByText("파일 변경"))) && (await appears(patchItem.getByText("완료", { exact: true }))));
-  await patchItem.getByRole("button", { name: /파일 변경/ }).click();
-  check(
-    "R22n. patch: per-change kind, rename and diff shown inert",
-    (await appears(patchItem.getByText("이름 바꿈", { exact: false }))) &&
-      (await appears(patchItem.getByText("notes/new-name.md", { exact: false }))) &&
-      (await appears(patchItem.locator("pre", { hasText: "+native patch line" })))
-  );
+  check("R22n. patch summary hides paths/diff", await appears(patchItem().getByRole("button", { name: "파일 변경함", exact: true })) && !(await patchItem().innerText()).includes("notes/") && (await patchItem().locator("pre").count()) === 0);
+  await patchItem().getByRole("button").click();
+  check("R22n. expanded patch retains kind/rename/diff", await appears(patchItem().getByText("이름 바꿈", { exact: false })) && await appears(patchItem().getByText("notes/new-name.md", { exact: false })) && await appears(patchItem().locator("pre", { hasText: "+native patch line" })));
   await ask("/fixture/native-patchfail");
-  check(
-    "R22n. patch failed: Korean label and warning",
-    (await appears(nativeItem("notes/native-a.md 외 2개").getByText("실패", { exact: true }))) &&
-      (await appears(nativeItem("notes/native-a.md 외 2개").getByText("파일 변경을 적용하지 못했습니다")))
-  );
+  check("R22n. patch failure visible while collapsed", await appears(patchItem().getByRole("button", { name: "파일 변경 실패", exact: true })));
+  await patchItem().getByRole("button").click();
+  check("R22n. expanded patch failure reason retained", await appears(patchItem().getByText("파일 변경을 적용하지 못했습니다", { exact: false })));
   await page.unroute("**/api/research/sessions/*/messages");
 
   // 기존 대화 링크: 대화창에서 열고 입력창·polling은 하나

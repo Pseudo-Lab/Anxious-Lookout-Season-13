@@ -1,6 +1,5 @@
 import { apiUrl, fetchJson, type FetchFailure, type FetchResult } from "@/lib/api/client";
 import { own } from "@/lib/research/own";
-import { parseVersionAuthor } from "@/lib/research/versionAuthor";
 import {
   CONTENT_KINDS,
   type ArchiveResult,
@@ -52,7 +51,7 @@ const isItemType = (v: unknown): v is ItemType => v === "material" || v === "doc
 
 function parseVersionRef(v: unknown): VersionRef | null {
   if (!isObj(v) || !isId(v.id) || !isInt(v.number) || !isStr(v.createdAt)) return null;
-  return { id: v.id, number: v.number, createdAt: v.createdAt, author: parseVersionAuthor(v.author) };
+  return { id: v.id, number: v.number, createdAt: v.createdAt };
 }
 
 function parseItemBase(v: Obj) {
@@ -135,7 +134,7 @@ function parseVersionSummary(v: unknown): VersionSummary | null {
   if (!isObj(v) || !isId(v.id) || !isId(v.itemId) || !isInt(v.number) || !isStr(v.title) || !isStr(v.createdAt)) {
     return null;
   }
-  const out: VersionSummary = { id: v.id, itemId: v.itemId, number: v.number, title: v.title, createdAt: v.createdAt, author: parseVersionAuthor(v.author) };
+  const out: VersionSummary = { id: v.id, itemId: v.itemId, number: v.number, title: v.title, createdAt: v.createdAt };
   if (isStr(v.sourceUrl)) out.sourceUrl = v.sourceUrl;
   if (isStr(v.collectedAt)) out.collectedAt = v.collectedAt;
   if (isKind(v.contentKind)) out.contentKind = v.contentKind;
@@ -852,43 +851,43 @@ export function researchErrorMessage(failure: FetchFailure): string | null {
     case "policy_pending":
       return "이용 정책이 확정되기 전이라 아직 사용할 수 없습니다.";
     case "codex_unavailable":
-      return "지금은 연결할 수 없어 대화를 진행할 수 없습니다. 이전 기록은 보존됩니다.";
+      return "연결 안 됨";
     case "codex_rejected":
-      return "이 요청은 처리되지 않았습니다. 입력은 대화에 보존되어 있으며 새 메시지로 다시 보낼 수 있습니다.";
+      return "이 요청은 처리되지 않았습니다.";
     case "codex_not_enabled_for_account":
-      return "이 계정에는 아직 대화 기능이 열려 있지 않습니다. 입력과 이전 대화는 그대로 있습니다.";
+      return "이 계정은 대화를 사용할 수 없습니다.";
     // 아래 codex_* 문구는 선접수 거절(503)과 접수 뒤 실행 실패(failed) 모두에 쓰인다.
     case "codex_auth_expired":
-      return "서버 인증이 만료되어 요청을 처리하지 못했습니다. 운영자가 다시 연결하면 이 대화에서 이어서 질문할 수 있습니다. 입력과 이전 대화는 그대로 있습니다.";
+      return "서버 인증 만료 · 운영자 확인 필요";
     case "codex_auth_revoked":
-      return "서버 인증이 더 이상 유효하지 않아 요청을 처리하지 못했습니다. 운영자가 다시 연결해야 합니다. 입력과 이전 대화는 그대로 있습니다.";
+      return "서버 인증 해제 · 운영자 확인 필요";
     case "codex_model_unavailable":
-      return "고정된 모델을 사용할 수 없어 요청을 처리하지 못했습니다. 다른 모델로 자동 전환하지 않습니다. 입력과 이전 대화는 그대로 있습니다.";
+      return "고정된 모델을 사용할 수 없습니다.";
     case "codex_policy_refused":
-      return "정책에 따라 이 요청이 거부되었습니다. 입력과 이전 대화는 그대로 있습니다.";
+      return "정책에 따라 거부됐습니다.";
     case "codex_budget_exhausted":
-      return "사용 한도에 도달해 요청을 처리하지 못했습니다. 입력과 이전 대화는 그대로 있습니다.";
+      return "사용 한도에 도달했습니다.";
     case "codex_rate_limited":
-      return "제공자의 사용 한도에 걸려 요청을 처리하지 못했습니다. 자동으로 다시 보내지 않습니다. 입력과 이전 대화는 그대로 있습니다.";
+      return "요청 한도에 도달했습니다.";
     case "codex_failed":
-      return "요청이 실패했습니다. 자동으로 다시 실행하거나 다른 모델로 바꾸지 않습니다. 이전 대화는 그대로 있습니다.";
+      return "요청이 실패했습니다.";
     // #10 실행 환경 상태로 접수 전에 거절된 질문(초안은 남는다). 자동으로 다시 보내지 않는다.
     case "codex_runner_not_prepared":
-      return "대화 환경이 아직 준비되지 않아 보내지 않았습니다. ‘대화 준비’를 누른 뒤 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+      return "환경 준비 필요";
     case "codex_provisioning":
-      return "환경 활성화 중이라 보내지 않았습니다. 준비가 끝나면 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+      return "환경 준비 중";
     case "codex_capacity_wait":
-      return "사용 대기 중이라 보내지 않았습니다. 환경이 켜지면 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+      return "사용 대기 중";
     case "codex_runner_unreachable":
-      return "환경 연결을 확인하는 중이라 보내지 않았습니다. 연결이 확인되면 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+      return "연결 확인 중";
     case "codex_runner_failed":
-      return "환경 확인이 필요해 보내지 않았습니다. 운영자 확인이 끝나면 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+      return "운영자 확인 필요";
     // #16: 쉬는 중과 정리 중(stopping) 모두 이 코드다. 정리 중에는 다시 켜기 버튼이 없으므로 상태 안내를 따르게 한다.
     case "codex_runner_stopped":
-      return "환경이 꺼져 있거나 정리 중이라 보내지 않았습니다. 위 상태 안내에 따라 환경을 다시 켠 뒤 직접 다시 보내세요. 입력한 내용은 그대로 있습니다.";
+      return "환경이 꺼져 있거나 정리 중입니다.";
     // 접수 뒤 실행 중 환경이 중단된 것이 확인된 실패(접수 전 거절 아님).
     case "codex_runner_lost":
-      return "실행 중 환경이 중단되어 이 요청을 마치지 못했습니다. 자동으로 다시 실행하지 않습니다. 이전 대화는 그대로 있습니다.";
+      return "실행 환경이 중단됐습니다.";
     case "not_ready":
       return "서비스가 준비되지 않았습니다. 잠시 후 다시 시도해 주세요.";
     default:
