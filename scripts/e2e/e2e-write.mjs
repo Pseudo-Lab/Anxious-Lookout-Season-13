@@ -880,7 +880,7 @@ check("WP12. public post scope: bounded", await appears(chat.getByText("다음 �
   await openChat("글 대화");
   await chat.getByLabel("메시지").fill("느린 공개 글 질문");
   const sendBtn = chat.getByRole("button", { name: "보내기" });
-  check("WP12. F2: send locked while public post loads", (await appears(chat.getByText("이 공개 글을 확인한 뒤에 질문할 수 있습니다", { exact: false }))) && (await sendBtn.isDisabled()));
+  check("WP12. F2: send locked while public post loads", (await appears(chat.getByText("공개 글을 확인한 뒤 질문하세요.", { exact: true }))) && (await sendBtn.isDisabled()));
   await chat.getByLabel("메시지").press("Enter").catch(() => {});
   await chat.locator("form").evaluate((f) => f.requestSubmit()).catch(() => {});
   await page.waitForTimeout(500);
@@ -901,7 +901,7 @@ check("WP12. public post scope: bounded", await appears(chat.getByText("다음 �
   await openChat("글 대화");
   await page.getByText("글을 찾을 수 없습니다").waitFor();
   await chat.getByLabel("메시지").fill("없는 글 질문");
-  check("WP12. F2: not-found post keeps send locked", (await sendBtn.isDisabled()) && (await appears(chat.getByText("이 공개 글을 확인한 뒤에 질문할 수 있습니다", { exact: false }))));
+  check("WP12. F2: not-found post keeps send locked", (await sendBtn.isDisabled()) && (await appears(chat.getByText("공개 글을 확인한 뒤 질문하세요.", { exact: true }))));
   // 공개 글 간 이동: 이전 글의 postId를 다음 글에 쓰지 않는다
   let release2;
   const held2 = new Promise((r) => (release2 = r));
