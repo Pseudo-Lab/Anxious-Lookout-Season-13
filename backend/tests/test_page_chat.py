@@ -314,12 +314,12 @@ def test_owner_workflow_on_any_page_preserves_versions_ownership_and_archive(cli
     assert draft['latestVersion']['number'] == 1
     assert client.get('/api/research/document-proposals').json()['items'] == []
     relation = call('research_relation_save', {'source': {'type': 'document', 'id': draft['id']},
-        'target': {'type': 'material', 'id': saved['id']}, 'kind': 'references', 'directed': True,
+        'target': {'type': 'material', 'id': saved['id']}, 'kind': 'supports', 'description': 'Cited', 'directed': True,
         'mutationId': str(uuid.uuid4())})
     call('research_relation_save', {'source': {'type': 'document', 'id': draft['id']},
-        'target': {'type': 'material', 'id': foreign['id']}, 'kind': 'references', 'directed': True,
+        'target': {'type': 'material', 'id': foreign['id']}, 'kind': 'supports', 'description': 'Cited', 'directed': True,
         'mutationId': str(uuid.uuid4())}, 404)
-    revised_relation = call('research_relation_update', {'id': relation['id'], 'kind': 'references',
+    revised_relation = call('research_relation_update', {'id': relation['id'], 'kind': 'supports',
         'description': 'Supports the draft', 'expectedVersion': 1, 'mutationId': str(uuid.uuid4())})
     assert revised_relation['version'] == 2
     assert call('research_get', {'type': 'relation', 'id': relation['id']})['id'] == relation['id']

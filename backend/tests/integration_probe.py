@@ -64,7 +64,7 @@ def run(mode, origin, filename):
             assert len(client.get(root + "/versions").json()["items"]) == 2
             document = write("POST", "/api/research/documents", {"title": "Fixture draft", "content": "Markdown"}).json()
             relation = write("POST", "/api/research/relations", {"source": {"type": "document", "id": document["id"]},
-                             "target": {"type": "material", "id": material["id"]}, "kind": "references", "directed": True})
+                             "target": {"type": "material", "id": material["id"]}, "kind": "supports", "description": "Fixture evidence", "directed": True})
             assert relation.status_code == 201
             assert client.get("/api/research/documents/" + document["id"] + "/relations").json()["items"][0]["direction"] == "outgoing"
             document_root = "/api/research/documents/" + document["id"]

@@ -25,7 +25,7 @@ def require_schema(connection):
         revision = validate_research(connection)
     except RuntimeError:
         fail('not_ready', 'Research schema is not ready', 503)
-    if revision != '0009_research_pats':
+    if revision != '0010_research_wiki':
         fail('not_ready', 'Research schema is not ready', 503)
 
 

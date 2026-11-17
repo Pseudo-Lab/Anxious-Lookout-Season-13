@@ -30,7 +30,7 @@ services:
       service: test
     image: ${M3_FIXTURE_IMAGE:-anxious-hosting-api-m3-test}
     profiles: [ops]
-    command: [python, -m, app.migrate, --revision, 0009_research_pats]
+    command: [python, -m, app.migrate, --revision, 0010_research_wiki]
   admin:
     extends:
       file: compose.m3-test.yml

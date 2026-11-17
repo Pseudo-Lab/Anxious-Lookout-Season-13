@@ -38,6 +38,8 @@ class ContentVersion(Base):
     author_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
     author_credential_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
     author_name: Mapped[str | None] = mapped_column(String(80))
+    summary: Mapped[str | None] = mapped_column(String(300))
+    bibliography: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
 
@@ -53,6 +55,7 @@ class Relation(Base):
     kind: Mapped[str] = mapped_column(String(80))
     description: Mapped[str] = mapped_column(Text)
     directed: Mapped[bool] = mapped_column(Boolean)
+    evidence: Mapped[list] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
     archived: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     version: Mapped[int] = mapped_column(Integer, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))

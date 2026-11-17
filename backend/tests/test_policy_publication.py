@@ -22,7 +22,7 @@ def publication_schema(schema):
 
 def connect(client, auth, source, target):
     result = client.post("/api/research/relations", json={"source": {"type": source["type"], "id": source["id"]},
-                        "target": {"type": target["type"], "id": target["id"]}, "kind": "references", "directed": True}, headers=headers(auth))
+                        "target": {"type": target["type"], "id": target["id"]}, "kind": "supports", "description": "Reference", "directed": True}, headers=headers(auth))
     assert result.status_code == 201, result.text
     return result.json()
 

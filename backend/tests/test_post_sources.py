@@ -20,7 +20,7 @@ def source_schema(schema):
 def relate(client, auth, document, source):
     response = client.post('/api/research/relations', json={
         'source': {'type':'document', 'id':document['id']},
-        'target': {'type':'material', 'id':source['id']}, 'kind':'source', 'directed':True}, headers=headers(auth))
+        'target': {'type':'material', 'id':source['id']}, 'kind':'supports', 'description':'source', 'directed':True}, headers=headers(auth))
     assert response.status_code == 201, response.text
     return response.json()
 

@@ -38,6 +38,19 @@ retain their public owner byline. Schema stays009; #104 has no migration.
 Startup never migrates. Migrate only through the reviewed operator job after
 backup/writer drain. Never downgrade the schema or delete provenance for rollback.
 
+`0010_research_wiki` (#105, `db/research_0010_wiki.sql`) adds per-version
+`summary` and material `bibliography` (CSL-JSON subset) and relation `evidence`
+(≤20 entries). It is additive; existing rows read as null/[] with no backfill.
+Current API/ORM requires0010 exactly, so an0009-only image cannot serve it:
+back up → migrate `--revision 0010_research_wiki` → deploy the0010 image.
+Rollback is forward-fix with a0010-compatible image, never a downgrade.
+The relation vocabulary lives only in `app/relation_kinds.py` (no DB CHECK; kinds
+stay varchar(80)), served at `GET {BASE}/api/research/relation-kinds`. Agent
+wiki rules (`app/wiki_rules.py`) render into llm.md and must appear verbatim in
+both SKILL.md files (`config_tests/test_research_wiki.py`). `research_lint` is a
+read-only operation (PAT READS, runner CLI, owner page scopes). Contract:
+`agent-worktree-comm/api-contracts/issue105-research-wiki-v1.1.md`.
+
 An008-only image cannot serve009. A deployment requires an exact reviewed
 **009-compatible recovery API+runner image**, immutable manifest digests, and a
 real development recovery read/human-save result. Historical MCP candidates and

@@ -5,7 +5,7 @@ from pydantic import Field, model_validator
 from sqlalchemy import select, text
 from fastapi import Request
 
-from .research import Input, DocumentInput, DocumentChange, fail, parse_id, stamp, page_query, encode_cursor
+from .research import Input, DocumentInput, DocumentChange, Summarized, fail, parse_id, stamp, page_query, encode_cursor
 from .research_models import DocumentDraft, DocumentProposal, ContentVersion
 
 
@@ -37,7 +37,8 @@ class DraftChange(DraftText, DraftExpected):
     pass
 
 
-class DraftCommit(DraftExpected):
+class DraftCommit(DraftExpected, Summarized):
+    # summary (#105): omitted = carry the document's latest value; drafts themselves hold none.
     expectedVersion: int | None = Field(default=None, ge=1)
     resolvedBaseVersionId: str | None = None
 
@@ -55,11 +56,13 @@ class ProposalAccept(DocumentChange, ProposalExpected):
     def paired(self):
         if (self.draftId is None) != (self.expectedDraftRevision is None):
             raise ValueError('Draft identity and revision are paired')
+        if 'summary' in self.model_fields_set:
+            raise ValueError('Accepting a proposal keeps the latest summary')
         return self
 
 
 def ready(store):
-    if store.db.execute(text('SELECT version_num FROM research.alembic_version')).scalar_one() not in {'0005_writing', '0006_posts', '0007_post_blocks', '0008_version_authors', '0009_research_pats'}:
+    if store.db.execute(text('SELECT version_num FROM research.alembic_version')).scalar_one() not in {'0005_writing', '0006_posts', '0007_post_blocks', '0008_version_authors', '0009_research_pats', '0010_research_wiki'}:
         fail('not_ready', 'Writing schema is not ready', 503)
 
 
@@ -159,7 +162,8 @@ def commit_draft(store, identity, body):
     ready(store); store.graph_lock()
     row = draft(store, identity)
     check_draft(row, body.expectedDraftRevision)
-    content = DocumentInput(title=row.title, content=row.content)
+    content = DocumentInput(title=row.title, content=row.content,
+                            **({'summary': body.summary} if 'summary' in body.model_fields_set else {}))
     if row.document_id:
         item = active_document(store, row.document_id)
         expect_document(item, body.expectedVersion)
@@ -168,7 +172,7 @@ def commit_draft(store, identity, body):
             if body.resolvedBaseVersionId is None or parse_id(body.resolvedBaseVersionId) != latest.id: conflict('base_changed')
         elif body.resolvedBaseVersionId is not None and parse_id(body.resolvedBaseVersionId) != latest.id:
             conflict('base_changed')
-        result = store.change_item(item.id, 'document', DocumentChange(**content.model_dump(), expectedVersion=item.version))
+        result = store.change_item(item.id, 'document', DocumentChange(**content.model_dump(exclude_unset=True), expectedVersion=item.version))
     else:
         if body.expectedVersion is not None or body.resolvedBaseVersionId is not None:
             fail('validation_error', 'New drafts have no document base', 422)

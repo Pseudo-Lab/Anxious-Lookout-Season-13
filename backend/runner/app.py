@@ -83,7 +83,7 @@ class Drain(BaseModel):
 # app/research_tools.py TOOLS plus the shell authorization (config_tests/test_runner_tool_reply_log.py keeps them equal).
 TOOL_NAMES = frozenset({
     "research_archive", "research_document_save", "research_document_update", "research_get", "research_list",
-    "research_material_save", "research_material_update", "research_page_context", "research_post_draft_get",
+    "research_lint", "research_material_save", "research_material_update", "research_page_context", "research_post_draft_get",
     "research_post_save", "research_relation_save", "research_relation_update", "research_relations",
     "research_version_get", "research_versions", "runner_shell_authorize"})
 REPLY_CODES = frozenset({
