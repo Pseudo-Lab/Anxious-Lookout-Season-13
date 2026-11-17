@@ -39,7 +39,8 @@ class ContentVersion(Base):
     author_credential_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
     author_name: Mapped[str | None] = mapped_column(String(80))
     summary: Mapped[str | None] = mapped_column(String(300))
-    bibliography: Mapped[dict | None] = mapped_column(JSONB)
+    # none_as_null: Python None must bind as SQL NULL; JSON null violates versions_wiki_check.
+    bibliography: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
 

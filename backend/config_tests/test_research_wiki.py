@@ -109,6 +109,18 @@ def test_omitted_summary_and_bibliography_carry_the_latest_version(sent, expecte
     assert (version.summary, version.bibliography) == expected
 
 
+def test_missing_bibliography_binds_as_sql_null_not_json_null():
+    # review r1 blocker: JSON null violated versions_wiki_check on every save without a bibliography.
+    from sqlalchemy.dialects.postgresql import JSONB, psycopg
+    from app.research_models import ContentVersion
+    dialect = psycopg.dialect()  # The app's driver (postgresql+psycopg).
+    bind = lambda kind: kind.dialect_impl(dialect).bind_processor(dialect)
+    mapped = bind(ContentVersion.__table__.c.bibliography.type)
+    assert mapped(None) is None
+    assert mapped({'type': 'book'}).obj == {'type': 'book'}
+    assert bind(JSONB())(None).obj is None  # The default mapping binds Jsonb(None): JSON null.
+
+
 def test_new_items_start_without_summary_or_bibliography():
     store = Store(Versions(), uuid4())
     store.add_snapshot(SimpleNamespace(id=uuid4(), kind='document', content_number=1), DocumentInput(title='t', content='c'))
