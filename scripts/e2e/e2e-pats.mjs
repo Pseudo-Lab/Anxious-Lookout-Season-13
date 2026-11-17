@@ -45,11 +45,15 @@ await page.route(/\/api\/research\/pats(?:\/[^/?]+)?(?:\?.*)?$/, async (route) =
   const previous = attempts.get(key);
   if (previous) {
     assert.deepEqual(body, previous.body);
+    if (body.name === "Lost response" && previous.retries < 2) {
+      const status = previous.retries++ === 0 ? 429 : 503;
+      return route.fulfill({ status, json: { error: { code: status === 429 ? "rate_limited" : "not_ready" } } });
+    }
     return route.fulfill({ status: 200, json: { credential: safe(previous.record), token: null, secretAvailable: false, replayed: true } });
   }
   const record = { id: crypto.randomUUID(), name: body.name, scope: body.scope, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + body.expiryDays * 86400000).toISOString(), revokedAt: null, lastUsedAt: null };
   records.unshift(record);
-  attempts.set(key, { record, body });
+  attempts.set(key, { record, body, retries: 0 });
   lastSecret = `rpat1.${record.id}.${"a".repeat(43)}`;
   if (body.name === "Lost response") return route.abort(); // 서버에 해당하는 모의 상태만 적용, 응답 유실.
   return route.fulfill({ status: 201, json: { credential: safe(record), token: lastSecret, secretAvailable: true, replayed: false } });
@@ -104,17 +108,29 @@ try {
   const lostPosts = posts.length;
   await page.waitForTimeout(300);
   assert.equal(posts.length, lostPosts);
+  for (const status of [429, 503]) {
+    await main.getByRole("button", { name: "같은 요청 다시 확인" }).click();
+    if (status === 429) await main.getByText("요청이 많습니다.", { exact: false }).waitFor();
+    else await main.getByText("요청 결과를 확인하지 못했습니다.", { exact: false }).waitFor();
+    await main.getByRole("button", { name: "같은 요청 다시 확인" }).waitFor();
+    assert.equal(await main.getByRole("button", { name: "API 토큰 발급", exact: true }).isDisabled(), true);
+    assert.equal(posts.at(-1).key, posts[lostPosts - 1].key);
+    assert.deepEqual(posts.at(-1).body, posts[lostPosts - 1].body);
+    const count = posts.length;
+    await page.waitForTimeout(300);
+    assert.equal(posts.length, count);
+  }
   await main.getByRole("button", { name: "같은 요청 다시 확인" }).click();
   await main.getByRole("button", { name: "값을 잃은 토큰 폐기" }).waitFor();
-  assert.equal(posts.length, lostPosts + 1);
+  assert.equal(posts.length, lostPosts + 3);
   assert.equal(posts.at(-1).key, posts.at(-2).key);
   assert.deepEqual(posts.at(-1).body, posts.at(-2).body);
   assert.equal(await value.count(), 0);
   assert.ok(!(await page.content()).includes(lastSecret));
   await main.getByRole("button", { name: "값을 잃은 토큰 폐기" }).click();
   await main.getByText("토큰을 폐기했습니다. 이후 호출에는 사용할 수 없습니다.").waitFor();
-  assert.equal(posts.length, lostPosts + 1);
-  console.log("PASS F5: lost response has no auto retry; explicit same-key replay reveals no value; revoke creates no replacement");
+  assert.equal(posts.length, lostPosts + 3);
+  console.log("PASS F5: ACK loss then 429/503 keeps original unknown attempt and locks fresh issue; same-key replay has no value and revoke creates no replacement");
 
   await page.locator("header").getByRole("button", { name: "로그아웃", exact: true }).first().click();
   await page.locator("header").getByRole("link", { name: "GitHub 로그인", exact: true }).first().waitFor();
