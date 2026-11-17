@@ -201,9 +201,22 @@ await main.getByLabel("내용").fill("UI 쪽 수정");
   });
   check("setup. external PATCH 200", r.status === 200, String(r.status));
 }
-await main.getByRole("button", { name: "새 버전으로 저장" }).click();
-check("L6. real 409 conflict shown", await appears(main.getByText("다른 곳에서 먼저 변경되었습니다")));
+{
+  const conflictResponse = page.waitForResponse((response) =>
+    response.url() === U(`/api/research/materials/${materialAId}`) && response.request().method() === "PATCH"
+  );
+  await main.getByRole("button", { name: "새 버전으로 저장" }).click();
+  const response = await conflictResponse;
+  const body = await response.json();
+  check(
+    "L6. real PATCH rejects stale version with 409 resource_version",
+    response.status() === 409 && body.error?.code === "conflict" && body.error?.details?.reason === "resource_version",
+    `status ${response.status()}, code ${body.error?.code}, reason ${body.error?.details?.reason}`
+  );
+}
+check("L6. resource_version guidance shown", await appears(main.getByText("다른 곳에서 새 버전을 저장했습니다. 최신 내용을 불러와 비교한 뒤 다시 저장하세요.", { exact: false })));
 check("L6. draft preserved", (await main.getByLabel("내용").inputValue()) === "UI 쪽 수정");
+check("L6. rejected write preserves the newer server content", (await api.get(`/research/materials/${materialAId}`)).body?.content === "다른 곳의 수정");
 await main.getByRole("button", { name: /최신 내용 다시 불러오기/ }).click();
 await page.waitForTimeout(1000);
 await main.getByRole("button", { name: "새 버전으로 저장" }).click();

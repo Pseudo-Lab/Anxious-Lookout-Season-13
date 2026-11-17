@@ -7,6 +7,7 @@ from app.migrate import migrate
 from tests.test_research import identity, headers, create
 from tests.test_conversations import create_session
 from tests.test_page_chat import HeldRunner, callback
+from tests.retained_proposals import seed_proposal
 from tests.test_posts import proposal_content, content, make_draft, commit, ROOT
 
 
@@ -33,9 +34,9 @@ def test_new_post_proposal_reads_sources_and_draft_but_creates_no_version(client
     assert result.json()['draft']['textProjection'] == 'Human original'
     assert callback(client, session, runner, 'research_get', {'type': 'document', 'id': doc['id']}).json()['content'] == doc['content']
     args = {**proposal_content(documentIds=[doc['id']]), 'mutationId': str(uuid.uuid4()), 'draftId': draft['id'], 'expectedDraftRevision': 1}
-    proposal = callback(client, session, runner, 'research_post_propose', args)
+    proposal = seed_proposal(client, session, runner, 'research_post_propose', args)
     assert proposal.status_code == 200, proposal.text
-    assert callback(client, session, runner, 'research_post_propose', args).json() == proposal.json()
+    assert seed_proposal(client, session, runner, 'research_post_propose', args).json() == proposal.json()
     proposal = proposal.json()
     assert proposal['postId'] is None and proposal['status'] == 'pending'
     assert client.get('/api/research/posts').json()['items'] == []
@@ -51,7 +52,7 @@ def test_new_post_proposal_reads_sources_and_draft_but_creates_no_version(client
     assert result.json()['post']['latestVersion']['number'] == 1
     assert result.json()['proposal']['acceptedPostId'] == result.json()['post']['id']
     assert result.json()['draft']['textProjection'] == 'Human original'
-    assert callback(client, session, runner, 'research_post_propose', {**args, 'mutationId': str(uuid.uuid4())}).status_code == 409
+    assert seed_proposal(client, session, runner, 'research_post_propose', {**args, 'mutationId': str(uuid.uuid4())}).status_code == 409
     assert client.post(path, json=body, headers=headers(auth)).status_code == 409
 
 
@@ -61,7 +62,7 @@ def test_existing_post_proposal_atomic_cas_and_concurrent_accept(client, admin):
     draft = make_draft(client, auth, post, content='Human changes')
     session, runner = turn(client, auth, owner, {'kind': 'post', 'resourceId': post['id']})
     args = {**proposal_content(content='Codex changes'), 'postId': post['id'], 'expectedVersion': 1, 'mutationId': str(uuid.uuid4())}
-    proposal = callback(client, session, runner, 'research_post_propose', args).json()
+    proposal = seed_proposal(client, session, runner, 'research_post_propose', args).json()
     assert proposal['status'] == 'pending'
     assert callback(client, session, runner, 'research_get', {'type': 'post', 'id': post['id']}).json()['latestVersion']['textProjection'] == 'Text'
     assert client.put(ROOT+'/'+draft['id'], json={**content(content='New human changes'), 'expectedDraftRevision': 1}, headers=headers(auth)).status_code == 200
@@ -84,7 +85,7 @@ def test_new_document_save_requires_human_accept_and_owner(client, admin):
     owner, auth = identity(client, admin)
     session, runner = turn(client, auth, owner)
     args = {'title': 'Suggested document', 'content': 'Suggested original', 'mutationId': str(uuid.uuid4())}
-    result = callback(client, session, runner, 'research_document_save', args)
+    result = seed_proposal(client, session, runner, 'research_document_save', args)
     assert result.status_code == 200, result.text
     proposal = result.json()
     assert proposal['documentId'] is None and proposal['baseVersionId'] is None
@@ -110,10 +111,10 @@ def test_foreign_draft_and_discard_do_not_mutate_head(client, admin):
     owner_cookie = client.cookies.get('anxious_session')
     session, runner = turn(client, auth, owner)
     args = {**proposal_content(), 'mutationId': str(uuid.uuid4())}
-    proposal = callback(client, session, runner, 'research_post_propose', args).json()
+    proposal = seed_proposal(client, session, runner, 'research_post_propose', args).json()
     other, other_auth = identity(client, admin, '222222')
     other_session, other_runner = turn(client, other_auth, other)
-    refused = callback(client, other_session, other_runner, 'research_post_propose',
+    refused = callback(client, other_session, other_runner, 'research_post_save',
         {**args, 'mutationId': str(uuid.uuid4()), 'draftId': draft['id'], 'expectedDraftRevision': 1})
     assert refused.status_code == 404
     assert client.get('/api/research/post-proposals/'+proposal['id']).status_code == 404

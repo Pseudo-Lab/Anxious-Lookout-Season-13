@@ -182,15 +182,17 @@ def create_app(settings=None):
     @app.get("/readyz")
     @app.get(prefix + "/health")
     def ready():
+        from .research import ResearchError
         try:
             check_ready(engine)
-            if app.state.user_runners_enabled:
-                from .runner_schema import validate
-                from .research_schema_contract import validate_research
+            if app.state.user_runners_enabled or app.state.research_agent_api_enabled:
+                from .research_api import require_schema
                 with engine.connect() as connection:
-                    validate_research(connection)
-                    validate(connection)
-        except (SQLAlchemyError, RuntimeError):
+                    require_schema(connection)
+                    if app.state.user_runners_enabled:
+                        from .runner_schema import validate
+                        validate(connection)
+        except (SQLAlchemyError, RuntimeError, ResearchError):
             return error("not_ready", "Service is not ready", 503)
         return JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})
 
@@ -306,6 +308,8 @@ def create_app(settings=None):
                     # Keep the session if cleanup fails so the user can retry.
                     # The runtime fences dispatch before attempting deletion.
                     stop_runtime(app, owner)
+                from .research_credentials import revoke_sessions
+                revoke_sessions(db, owner=owner, login_hash=session.token_hash)
                 db.delete(session)
         response = Response(status_code=204, headers={"Cache-Control": "no-store"})
         clear_cookie(response, SESSION_COOKIE, settings.cookie_path)

@@ -11,7 +11,7 @@ import type { ResearchDocument } from "@/lib/research/types";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import SafeMarkdown from "@/components/research/SafeMarkdown";
 
-// #28 D1: Codex의 새 문서(research_document_save)는 바로 저장되지 않고 제안으로 남는다. 수락하면 문서와 첫 버전이 만들어진다.
+// #97: 바로 저장 전환 전에 남은 새 문서 제안. 수락하면 문서와 첫 버전이 만들어진다.
 
 export const newDocumentProposalHref = (id: string) => `/research/document/new/?proposal=${encodeURIComponent(id)}`;
 

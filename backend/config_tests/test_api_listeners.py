@@ -31,6 +31,7 @@ async def echo(scope, receive, send):
     (8081, CALLBACK, False, True, True),  # policy limits 8081 to runner Pods; headers do not matter
     (8081, CALLBACK + '/', False, False, False),
     (8081, '/api/research/sessions', False, False, False),
+    (8081, '/api/research/agent/v1/research_list', False, False, False),
     (8081, '/healthz', False, False, False),
     (8081, '/api/internal/other', False, False, False),
     (8081, '/api/auth/github/start', True, False, False),
@@ -47,6 +48,7 @@ async def echo(scope, receive, send):
     (8080, '/api/interna', False, False, True),
     (8080, '/api/INTERNAL/research/tools', False, True, True),  # no such route; the app answers 404
     (8080, '/api/research/sessions', False, True, True),
+    (8080, '/api/research/agent/v1/research_list', False, True, True),
     (8080, '/healthz', False, False, True),
     (8080, '/readyz', False, False, True),
     (None, '/healthz', False, False, False),

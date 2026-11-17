@@ -34,8 +34,10 @@ export function useLoad<T>(key: string, loader: () => Promise<FetchResult<T>>) {
 
   useEffect(() => {
     let active = true;
+    const mine = ++seq.current;
     void loaderRef.current().then((result) => {
-      if (active) setState({ key, result, refreshFailure: null });
+      // 초기 조회도 reload/setResult와 같은 순서 규칙을 따른다. 늦은 초기 응답이 최신 기록을 지우지 않는다.
+      if (active && mine === seq.current) setState({ key, result, refreshFailure: null });
     });
     return () => {
       active = false;

@@ -1,0 +1,22 @@
+{
+  "versions": {
+    "columns": {
+      "author_kind": ["VARCHAR(16)", false, "'human'::character varying"],
+      "author_conversation_id": ["UUID", true, null],
+      "author_credential_id": ["UUID", true, null]
+    },
+    "checks": {
+      "versions_author_check": "((author_kind = 'human' OR author_kind = 'unknown' OR author_kind = 'codex') AND ((author_kind = 'codex') = (author_conversation_id IS NOT NULL)) AND author_credential_id IS NULL)"
+    }
+  },
+  "post_versions": {
+    "columns": {
+      "author_kind": ["VARCHAR(16)", false, "'human'::character varying"],
+      "author_conversation_id": ["UUID", true, null],
+      "author_credential_id": ["UUID", true, null]
+    },
+    "checks": {
+      "post_versions_author_check": "((author_kind = 'human' OR author_kind = 'unknown' OR author_kind = 'codex') AND ((author_kind = 'codex') = (author_conversation_id IS NOT NULL)) AND author_credential_id IS NULL)"
+    }
+  }
+}

@@ -30,7 +30,7 @@ def native(monkeypatch):
 @pytest.fixture
 def turn():
     return {'thread': 'thread', 'turnId': 'turn', 'session': 's', 'request': 'req-1', 'token': 't' * 40,
-            'scope': {'page': {'kind': 'document_workspace'}}, 'timing': {'toolCalls': 0, 'toolMs': 0.0}}
+            'scope': {'page': {'kind': 'public_document'}}, 'timing': {'toolCalls': 0, 'toolMs': 0.0}}
 
 
 @pytest.fixture
@@ -43,7 +43,7 @@ def lines(caplog):
     return read
 
 
-def call(tool='research_list', **changes):
+def call(tool='research_page_context', **changes):
     params = {'threadId': 'thread', 'turnId': 'turn', 'callId': 'call-1', 'tool': tool,
               'arguments': {'query': SECRET}}
     params.update(changes)
@@ -74,7 +74,7 @@ def test_a_successful_call_logs_success_and_status(native, turn, lines, monkeypa
     native.reply_tool(call(), turn)
     line, = lines()
     assert {k: line[k] for k in ('requestId', 'tool', 'stage', 'success', 'status', 'code', 'exception')} == {
-        'requestId': 'req-1', 'tool': 'research_list', 'stage': 'callback_done', 'success': True, 'status': 200,
+        'requestId': 'req-1', 'tool': 'research_page_context', 'stage': 'callback_done', 'success': True, 'status': 200,
         'code': None, 'exception': None}
     assert type(line['ms']) is float and turn['timing']['toolCalls'] == 1
     assert SECRET not in caplog.text and 't' * 40 not in caplog.text
@@ -143,11 +143,20 @@ def test_a_turn_mismatch_and_a_scope_refusal(native, turn, lines, monkeypatch):
     ('sk_live_0123456789abcdef', 'token_9f8e7d6c5b4a'),
 ])
 def test_names_and_codes_outside_the_fixed_lists_are_other(native, turn, lines, monkeypatch, caplog, tool, code):
-    callback(monkeypatch, 400, {'error': {'code': code, 'message': 'x'}})
-    native.reply_tool(call(tool=tool), turn)
+    log_tool_reply(call(tool=tool), turn, {'code': code, 'success': False, 'stage': 'callback_done'}, 1.0)
     line, = lines()
     assert line['tool'] == 'other' and line['code'] == 'other'
     assert tool not in caplog.text and code not in caplog.text
+
+
+def test_owner_dynamic_call_cannot_reach_callback(native, turn, lines, monkeypatch):
+    def unexpected(*args, **kwargs):
+        raise AssertionError('Owner dynamic tools must never reach HTTP')
+    monkeypatch.setattr(runner_app.httpx, 'Client', unexpected)
+    native.reply_tool(call(tool='research_document_save'), turn)
+    assert native.sent[0]['result']['success'] is False
+    line, = lines()
+    assert line['stage'] == 'scope' and line['code'] == 'tool_not_allowed'
 
 
 def test_scope_refused_names_are_other_too(native, turn, lines, monkeypatch, caplog):

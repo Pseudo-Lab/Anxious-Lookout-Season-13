@@ -111,7 +111,7 @@ class Sanitizer:
         for _ in range(3):  # `secrets` can change size while another thread installs a credential
             try:
                 if getattr(self.auth, "service", False) and stream_retired.enabled():
-                    return self.auth.stream_generation()  # #99: coherent ledger/current snapshot, install mutex
+                    return self.research_guard(self.auth.stream_generation())
                 self.auth.refresh_projection_secrets()  # current secrets enter the journal (and fingerprints) first
                 journal = self.auth.journal
                 count, _ = journal.generation()
@@ -122,18 +122,31 @@ class Sanitizer:
                 # an over-report of "current" (never of "retired", which would favour the §6 B case)
                 latest = [value for value in list(latest or ()) if isinstance(value, str)] or None
                 control = getattr(self.auth, "control", None)
-                return (id(journal), count, hold_policy(journal, control, current, latest))
+                return self.research_guard((id(journal), count, hold_policy(journal, control, current, latest)))
             except RuntimeError:
                 continue
             except Exception:
                 break
         raise SanitizeUnavailable()
 
+    def research_guard(self, generation):
+        if getattr(self.auth, 'research_api_redaction', False):
+            # rturn1 tokens have a fixed124-char wire format. This separate
+            # syntax guard also covers retired tokens missing a prefix entry;
+            # #95/#99 provider-retirement flags and policy are unchanged.
+            generation[2].short = max(generation[2].short, 124)
+        return generation
+
     def spans(self, value):
         if self.auth is None or not value:
             return []
         try:
-            return self.auth.journal.spans(value)
+            spans = self.auth.journal.spans(value)
+            if getattr(self.auth, 'research_api_redaction', False):
+                from app.research_credentials import CREDENTIAL_TOKEN as TOKEN
+                from .projection import merge_spans
+                spans = merge_spans(spans + [(match.start(), match.end()) for match in TOKEN.finditer(value)])
+            return spans
         except Exception:
             raise SanitizeUnavailable() from None
 
@@ -142,7 +155,11 @@ class Sanitizer:
         if self.auth is None:
             return value
         try:
-            return self.auth.sanitize(value)
+            result = self.auth.sanitize(value)
+            if getattr(self.auth, 'research_api_redaction', False):
+                from app.research_credentials import redact
+                result = redact(result)
+            return result
         except Exception:
             raise SanitizeUnavailable() from None
 
@@ -169,6 +186,11 @@ class Holdback:
             c0 = hold.start(window)
         else:
             c0 = max(0, len(window) - (max(hold, 1) - 1))
+        if not final:
+            # Hold only a suffix that could become a PAT, without changing
+            # #95/#99's provider-prefix policy or delaying unrelated text.
+            from app.research_credentials import pat_partial_start
+            c0 = min(c0, pat_partial_start(window))
         cut = c0
         for start, end in spans:
             if start < c0 < end:

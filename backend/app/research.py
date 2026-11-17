@@ -32,6 +32,16 @@ def fail(code, message, status, details=None):
     raise ResearchError(code, message, status, details)
 
 
+def mutation_fingerprint(operation, payload):
+    return hashlib.sha256(json.dumps([operation, payload], sort_keys=True,
+        separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+
+
+def mutation_lock(owner, identity):
+    return int.from_bytes(hashlib.sha256((str(owner) + str(identity)).encode()).digest()[:8],
+                          'big', signed=True)
+
+
 class Input(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -146,13 +156,14 @@ def stamp(value):
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def encode_cursor(row):
-    return base64.urlsafe_b64encode(json.dumps([stamp(row.updated_at), str(row.id)]).encode()).decode().rstrip("=")
+def encode_cursor(row, *, time_field="updated_at"):
+    return base64.urlsafe_b64encode(json.dumps([stamp(getattr(row, time_field)), str(row.id)]).encode()).decode().rstrip("=")
 
 
-def page_query(statement, model, limit, cursor):
+def page_query(statement, model, limit, cursor, *, time_field="updated_at"):
     if not 1 <= limit <= 100:
         fail("validation_error", "Limit must be between 1 and 100", 422)
+    time_column = getattr(model, time_field)
     if cursor:
         try:
             if len(cursor) > 512:
@@ -168,13 +179,15 @@ def page_query(statement, model, limit, cursor):
             identity = uuid.UUID(identity)
         except (ValueError, TypeError, UnicodeError, OverflowError):
             fail("validation_error", "Invalid cursor", 422)
-        statement = statement.where(or_(model.updated_at < time, and_(model.updated_at == time, model.id < identity)))
-    return statement.order_by(model.updated_at.desc(), model.id.desc()).limit(limit + 1)
+        statement = statement.where(or_(time_column < time, and_(time_column == time, model.id < identity)))
+    return statement.order_by(time_column.desc(), model.id.desc()).limit(limit + 1)
 
 
 class Store:
-    def __init__(self, db, owner):
+    def __init__(self, db, owner, *, author=None):
+        from .version_authors import VersionAuthor
         self.db, self.owner = db, owner
+        self.author = author or VersionAuthor()
 
     def owned_item(self, identity, kind=None, active=False, lock=False):
         query = select(Item).where(Item.id == parse_id(identity), Item.owner_id == self.owner)
@@ -196,8 +209,9 @@ class Store:
         return row
 
     def serialize_version(self, row, content=True):
+        from .version_authors import value as author_value
         result = {"id": str(row.id), "itemId": str(row.item_id), "number": row.number,
-                  "title": row.title, "createdAt": stamp(row.created_at)}
+                  "title": row.title, "createdAt": stamp(row.created_at), "author": author_value(row)}
         if content:
             result["content"] = row.content
         if row.kind == "material":
@@ -205,12 +219,14 @@ class Store:
         return result
 
     def serialize_item(self, row, content=True):
+        from .version_authors import value as author_value
         latest = self.db.scalar(select(ContentVersion).where(ContentVersion.item_id == row.id,
                                  ContentVersion.owner_id == self.owner, ContentVersion.number == row.content_number))
         result = {"id": str(row.id), "type": row.kind, "title": latest.title,
                   "createdAt": stamp(row.created_at), "updatedAt": stamp(row.updated_at),
                   "version": row.version, "archived": row.archived,
-                  "latestVersion": {"id": str(latest.id), "number": latest.number, "createdAt": stamp(latest.created_at)}}
+                  "latestVersion": {"id": str(latest.id), "number": latest.number, "createdAt": stamp(latest.created_at),
+                                    "author": author_value(latest)}}
         if content:
             result["content"] = latest.content
         if row.kind == "material":
@@ -222,6 +238,7 @@ class Store:
 
     def add_snapshot(self, row, body):
         self.db.add(ContentVersion(item_id=row.id, owner_id=self.owner, kind=row.kind,
+                                  **self.author.columns(),
                                   number=row.content_number, title=body.title, content=body.content,
                                   source_url=getattr(body, "sourceUrl", None),
                                   collected_at=datetime.fromisoformat(body.collectedAt) if row.kind == "material" else None,
@@ -239,7 +256,9 @@ class Store:
     def change_item(self, identity, kind, body):
         self.graph_lock()
         row = self.owned_item(identity, kind, active=True, lock=True)
-        self.expect(row, body.expectedVersion)
+        if row.version != body.expectedVersion:
+            fail('conflict', 'The resource changed; reload before retrying', 409,
+                 {'reason': 'resource_version', 'current': self.serialize_item(row)})
         row.version += 1
         row.content_number += 1
         row.updated_at = datetime.now(timezone.utc)
@@ -349,8 +368,8 @@ class Store:
 
     def mutate(self, key, operation, payload, action, status=200):
         identity = parse_id(key)
-        fingerprint = hashlib.sha256(json.dumps([operation, payload], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-        lock = int.from_bytes(hashlib.sha256((str(self.owner) + str(identity)).encode()).digest()[:8], "big", signed=True)
+        fingerprint = mutation_fingerprint(operation, payload)
+        lock = mutation_lock(self.owner, identity)
         self.db.execute(text("SELECT pg_advisory_xact_lock(:lock)"), {"lock": lock})
         stored = self.db.get(Idempotency, (self.owner, identity))
         if stored:
@@ -364,6 +383,12 @@ class Store:
 
 
 def register_research(app, sessions, settings, current_session, error):
+    from .research_credentials import enabled, redact
+    app.state.research_agent_api_enabled = enabled()
+    if app.state.research_agent_api_enabled:
+        origin = urlsplit(settings.origin)
+        if origin.scheme != 'https' or origin.port not in {None, 443}:
+            raise ValueError('Research agent API requires public HTTPS443')
     policy = os.getenv("RESEARCH_ACCESS_POLICY", "editors")
     if policy not in {"pending", "approved", "editors"}:
         raise ValueError("Invalid research access policy")
@@ -373,9 +398,12 @@ def register_research(app, sessions, settings, current_session, error):
     @app.exception_handler(ResearchError)
     async def domain_error(request, exc):
         if exc.details is not None:
-            return JSONResponse({'error': {'code': exc.code, 'message': exc.message, 'details': exc.details}},
+            return JSONResponse(redact({'error': {'code': exc.code, 'message': exc.message, 'details': exc.details}}),
                                 status_code=exc.status, headers={'Cache-Control': 'no-store'})
-        return error(exc.code, exc.message, exc.status)
+        result = error(exc.code, exc.message, exc.status)
+        if exc.status == 429:
+            result.headers['Retry-After'] = '60'
+        return result
 
     @app.exception_handler(ValidationError)
     async def validation_error(request, exc):
@@ -417,7 +445,8 @@ def register_research(app, sessions, settings, current_session, error):
                     fail("csrf_invalid", "Invalid CSRF token", 403)
             from .research_schema_contract import validate_research
             try:
-                validate_research(db.connection())
+                if validate_research(db.connection()) != '0009_research_pats':
+                    raise RuntimeError('Version provenance schema is required')
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
             yield Store(db, account.id)
@@ -429,15 +458,18 @@ def register_research(app, sessions, settings, current_session, error):
         from .research_schema_contract import validate_research
         with sessions() as db:
             try:
-                validate_research(db.connection())
+                if validate_research(db.connection()) != '0009_research_pats':
+                    raise RuntimeError('Version provenance schema is required')
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
         return JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})
 
     def response(result, status=200):
-        return JSONResponse(result, status_code=status, headers={"Cache-Control": "no-store"})
+        return JSONResponse(redact(result), status_code=status, headers={"Cache-Control": "no-store"})
 
     def write(store, request, model, body, action, status=200):
+        from .research_credentials import reject_token_input
+        reject_token_input(body)
         post_route = any(segment in request.url.path for segment in ("/post-drafts", "/post-proposals", "/posts/"))
         if post_route:
             from .posts import validate_retry_encoding
@@ -548,3 +580,9 @@ def register_research(app, sessions, settings, current_session, error):
     register_membership(app, authorized, settings, response, write)
     from .conversations import register_conversations
     register_conversations(app, authorized, sessions, settings, response, write, current_session)
+    from .pat_management import register as register_pats
+    register_pats(app, sessions, settings, current_session, response)
+    from .research_rate import install as install_research_rate
+    install_research_rate(app, sessions, settings)
+    from .pat_distribution import register as register_pat_distribution
+    register_pat_distribution(app, settings, response)

@@ -1,7 +1,8 @@
-"""Native dynamic tools. Authority is supplied by the broker, never tool input."""
+"""Research tool operations. Authority is supplied by the broker, never tool input."""
 from pydantic import Field
 from sqlalchemy import select
-from .post_proposals import Propose as ProposePost, DraftLookup
+from .post_proposals import DraftLookup
+from .agent_saves import SavePost
 
 from .research import (DocumentInput, MaterialInput, DocumentChange, MaterialChange,
                        Expected, Input, RelationInput, RelationChange, parse_id, fail)
@@ -71,11 +72,11 @@ TOOLS = {
     "research_version_get": (VersionLookup, "Read a complete immutable material/document/post snapshot."),
     "research_relations": (Versions, "List both endpoints and directions of your own item's relations."),
     "research_material_save": (SaveMaterial, "Save web research with original sourceUrl, collectedAt and contentKind (full/excerpt/summary). Keep source citations; distinguish summaries from full text. mutationId is a UUID reused only for an identical retry."),
-    "research_document_save": (SaveDocument, "Propose a new private Markdown document. No document or version exists until the user accepts in the editor. Preserve citations. mutationId is a UUID reused for identical retries."),
-    "research_post_propose": (ProposePost, "Propose a new post or a complete post revision using contentInput {format: markdown, text: ...}; content block JSON is not accepted by this tool. Read source documents/materials and the human draft first. Slug is optional and server-generated for new posts. materialIds is the explicit source selection; omission expands document sources once. Never commits or publishes: the user must review the diff and accept."),
+    "research_document_save": (SaveDocument, "Save a new private Markdown document as an immutable version immediately. Preserve citations. mutationId is a UUID reused for identical retries. The human can compare/restore from version history; publishing is human-only."),
+    "research_post_save": (SavePost, "Save a new post or complete revision as an immutable version immediately, using contentInput {format: markdown, text: ...}. Read source documents/materials and the human draft first. Existing posts require postId and expectedVersion. Optional draftId and expectedDraftRevision are paired; human drafts remain unchanged. Preserve citations and materialIds. Never publishes or withdraws. mutationId is reused only for identical retries."),
     "research_post_draft_get": (DraftLookup, "Read your own current post draft using postId, or a specific draftId. Supply exactly one."),
     "research_material_update": (EditMaterial, "Append a material snapshot using expectedVersion; preserve previous content."),
-    "research_document_update": (EditDocument, "Create a pending document proposal using expectedVersion. Returns proposal status/baseVersionId; does not change the document head. Only the user can accept it in the editor. Preserve previous content."),
+    "research_document_update": (EditDocument, "Append a private document version immediately using expectedVersion. On conflict, reread and reconcile before retrying with a new mutationId. Preserve citations, human drafts and previous versions. Never publishes or withdraws."),
     "research_relation_save": (SaveRelation, "Connect your active material/material, document/material or document/document. Undirected relations use directed=false."),
     "research_relation_update": (EditRelation, "Change an owned relation kind/description with expectedVersion."),
     "research_archive": (Archive, "Non-destructively archive your material/document/relation; preserve history."),
@@ -87,18 +88,27 @@ def definitions():
             for name, (model, description) in TOOLS.items()]
 
 
+def public_context_definitions():
+    """Fixed public-only name, retained on a thread across page mode changes.
+
+    Codex0.160.1 has no dynamicTools override on thread/resume. Registration is
+    not authority: both callback boundaries still reject this name in owner mode.
+    """
+    return [tool for tool in definitions() if tool['name'] == 'research_page_context']
+
+
 def dispatch(store, name, arguments, context=None):
     if name not in TOOLS:
         fail("validation_error", "Unknown storage tool", 422)
-    if name == 'research_post_propose':
+    if name == 'research_post_save':
         from .posts import ready, replay_response, validate_retry_encoding
-        from .post_proposals import create
+        from .agent_saves import save_post
         ready(store)
         validate_retry_encoding(arguments, TOOLS[name][0])
         key = arguments.get('mutationId') if isinstance(arguments, dict) else None
         parse_id(key)
         result, _ = store.mutate(key, 'tool:' + name, arguments,
-                                lambda: create(store, TOOLS[name][0].model_validate(arguments)))
+                                lambda: save_post(store, TOOLS[name][0].model_validate(arguments)))
         return replay_response(result)
     body = TOOLS[name][0].model_validate(arguments)
     if name == "research_page_context":
@@ -136,7 +146,7 @@ def dispatch(store, name, arguments, context=None):
             version = store.db.scalar(select(PostVersion).where(PostVersion.post_id == row.id, PostVersion.id == parse_id(body.versionId)))
             if version is None: fail('not_found', 'Not found', 404)
             return posts.version_value(version)
-        fail('validation_error', 'Posts support read tools and explicit proposals only', 422)
+        fail('validation_error', 'Posts support read tools and explicit saves only', 422)
     if name == "research_list":
         if kind == "relation":
             fail("validation_error", "Use research_relations for an item", 422)
@@ -154,16 +164,15 @@ def dispatch(store, name, arguments, context=None):
 
     parse_id(body.mutationId)
     def action():
+        from .version_authors import saved
         if name == "research_material_save":
-            return store.create_item("material", body)
+            return saved(store.create_item("material", body), 'material')
         if name == "research_document_save":
-            from .document_proposals import create
-            return create(store, body)
+            return saved(store.create_item("document", body), 'document')
         if name == "research_material_update":
-            return store.change_item(body.id, "material", body)
+            return saved(store.change_item(body.id, "material", body), 'material')
         if name == "research_document_update":
-            from .writing import create_proposal
-            return create_proposal(store, body)
+            return saved(store.change_item(body.id, "document", body), 'document')
         if name == "research_relation_save":
             return store.create_relation(body)
         if name == "research_relation_update":

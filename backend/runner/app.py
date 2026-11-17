@@ -34,6 +34,7 @@ from . import native_policy as policy
 from . import stream as streams
 from .native_policy import Decision
 from app.page_scope import Scope, POLICIES, tool_allowed, turn_prompt, shell_allowed
+from app.research_tools import public_context_definitions
 
 
 class Turn(BaseModel):
@@ -45,6 +46,7 @@ class Turn(BaseModel):
     context: dict | None = None
     scope: dict | None = None
     expectedThreadId: str | None = Field(default=None, min_length=1, max_length=200)
+    researchGrant: dict | None = Field(default=None, repr=False)
 
     @field_validator("scope")
     @classmethod
@@ -82,7 +84,7 @@ class Drain(BaseModel):
 TOOL_NAMES = frozenset({
     "research_archive", "research_document_save", "research_document_update", "research_get", "research_list",
     "research_material_save", "research_material_update", "research_page_context", "research_post_draft_get",
-    "research_post_propose", "research_relation_save", "research_relation_update", "research_relations",
+    "research_post_save", "research_relation_save", "research_relation_update", "research_relations",
     "research_version_get", "research_versions", "runner_shell_authorize"})
 REPLY_CODES = frozenset({
     # runner/app.py _reply_tool
@@ -289,6 +291,10 @@ class Native:
             # The image's Codex policy files, pinned in code next to the binary digests (#68).
             policy.check_files(str(root))
         self.root, self.model, self.callback_url = root, model, callback_url
+        # A discarded candidate must not silently ignore an old write intent.
+        # No reconciliation/deletion is performed by the replacement runtime.
+        if os.path.lexists(Path(getattr(auth, 'control', '/control')) / 'research-fence.json'):
+            raise CodexFailure('policy_refused')
         self.lock, self.messages, self.next_id = threading.Lock(), queue.Queue(), 1
         self.state_lock = threading.RLock()
         self.completed = {}
@@ -328,6 +334,10 @@ class Native:
         self.command, self.environment = command, environment
         self.thread_policy = {"approvalPolicy": "untrusted", "approvalsReviewer": "user", "permissions": policy.PROFILE}
         self.thread_web_modes = {}
+        from .research_api import GrantFile, REDACTION_MARKER
+        self.research_api = GrantFile(root, auth) if not self.fixture else None
+        if auth and os.path.lexists(Path(auth.control) / REDACTION_MARKER):
+            auth.research_api_redaction = True
         try:
             self.launch_process()
         except Exception:
@@ -385,6 +395,8 @@ class Native:
             except CodexFailure:
                 policy.refuse("rpc." + method)
             check(result)
+            if method == 'config/read':
+                policy.require(not result.get('config', {}).get('mcp_servers'), 'config.mcp_disabled')
 
     def reply_server(self, message, turn):
         if message.get("method") == "item/tool/call":
@@ -767,13 +779,48 @@ class Native:
     def reader(self):
         try:
             for line in self.process.stdout:
-                message = json.loads(line)
+                from .research_api import strict_json
+                message = strict_json(line)
+                grant = getattr(self, 'research_api', None)
+                if grant is not None:
+                    if not isinstance(message, dict):
+                        raise ValueError()
+                    reason = grant.note(message)
+                    if reason:
+                        if self.blocked_reason != 'model_unavailable':
+                            self.blocked_reason = reason
+                        self.real_verified = False
+                        if reason == 'model_unavailable':
+                            self.reader_model_refused = True
                 if isinstance(message, dict) and message.get("method") in APPROVAL_KINDS and "id" in message:
                     self.approval_arrived(message)  # #68 P-A: stamped as read from Codex's stdout, before the queue
                 self.messages.put(message)
         except Exception:
             pass
+        if getattr(self, 'research_api', None) is not None:
+            self.research_api.revoke()
         self.messages.put({"fatal": True})
+
+    def research_authorize(self, session, request):
+        """Nonblocking active state + fresh local service auth; no Native RPC."""
+        grant = getattr(self, 'research_api', None)
+        if grant is None or not self.state_lock.acquire(blocking=False):
+            return None
+        try:
+            current = grant.active(session, request)
+            entry = self.mapping.get(session) or {}
+            if (current is None or self.closing or self.closed or self.blocked_reason
+                    or self.process.poll() is not None or self.active_session != session
+                    or entry.get('request') != request or entry.get('state') != 'running'
+                    or entry.get('thread') != current[2] or entry.get('turn_id') != current[3]
+                    or getattr(self, 'interrupt_request', None) == (session, request)):
+                return None
+        finally:
+            self.state_lock.release()
+        check = getattr(self.auth, 'research_authorized', None)
+        if check is None or not check() or grant.active(session, request) != current:
+            return None
+        return {'authorized': True, 'sessionId': session, 'requestId': request, 'nativeTurnId': current[3]}
 
     def write_lock(self):
         """#90: an interrupt is sent from a request thread while the turn thread writes; one line at a time."""
@@ -937,7 +984,8 @@ class Native:
                 if self.auth:
                     outcome["stage"] = "permission"
                     self.auth.permitted_tool(params["arguments"])
-                if not tool_allowed(turn.get("scope"), params.get("tool"), params.get("arguments")):
+                if (params.get("tool") != 'research_page_context'
+                        or not tool_allowed(turn.get("scope"), params.get("tool"), params.get("arguments"))):
                     outcome["stage"] = "scope"
                     success, result = False, {"error": {"code": "tool_not_allowed", "message": "Tool is unavailable in this request's research mode"}}
                 else:
@@ -990,6 +1038,9 @@ class Native:
             fingerprint_body["scope"] = body.scope
         if body.expectedThreadId is not None:
             fingerprint_body["expectedThreadId"] = body.expectedThreadId
+        if body.researchGrant is not None:
+            fingerprint_body['researchGrantHash'] = hashlib.sha256(
+                json.dumps(body.researchGrant, sort_keys=True).encode()).hexdigest()
         fingerprint = hashlib.sha256(json.dumps(fingerprint_body, sort_keys=True).encode()).hexdigest()
         # Admission depends on a reserved turn, not a history RPC holding the
         # protocol mutex. The worker waits for that RPC without resubmission.
@@ -1050,6 +1101,8 @@ class Native:
                     or entry.get("state") != "running"):
                 return "not_running"
             self.interrupt_request = (session, request)
+        if getattr(self, 'research_api', None) is not None:
+            self.research_api.revoke()
         self.send_interrupt(session, entry)
         return "interrupting"
 
@@ -1072,6 +1125,7 @@ class Native:
         acquired_at = time.monotonic()
         timing["queueMs"] = (acquired_at - started_at) * 1000
         entry = self.mapping[session]
+        safe_record = deepcopy(entry.get('record', {'turns': []}))
         hub, stream_turn = self.stream_hub(), None
         if hub is not None:
             stream_turn = hub.begin(session, entry["request"])
@@ -1081,6 +1135,10 @@ class Native:
             web_mode = "live" if kind in POLICIES and kind not in {"public_document", "public_post"} else "disabled"
             if entry["thread"] in self.thread_web_modes and self.thread_web_modes[entry["thread"]] != web_mode:
                 self.reset_thread_tools()
+            if getattr(self, 'research_api', None) is not None:
+                self.research_api.prepare(session, body)
+            elif body.researchGrant is not None:
+                raise CodexFailure('policy_refused')
             config = {"web_search": web_mode}
             self.check_policy("turn_pre")  # Again per turn: nothing the last turn wrote may change the policy.
             turn = {"thread": entry["thread"], "turnId": None, "pendingTools": [], "approvalItems": set(),
@@ -1092,7 +1150,8 @@ class Native:
                     raise CodexFailure("policy_refused")
             else:
                 result = self.rpc("thread/start", {"model": self.model, "cwd": str(self.work),
-                                  **self.thread_policy, "config": config, "dynamicTools": body.tools,
+                                  **self.thread_policy, "config": config,
+                                  "dynamicTools": public_context_definitions(),
                                   "historyMode": "legacy", "ephemeral": False})
             self.ensure_model(result, required=True)
             policy.check_thread(result, self.work)  # Applied to this thread, start and resume alike.
@@ -1119,6 +1178,8 @@ class Native:
                 self.blocked_reason = "policy_refused"
                 raise CodexFailure("policy_refused")
             turn["turnId"] = turn_id
+            if getattr(self, 'research_api', None) is not None:
+                self.research_api.bind(turn)
             if hub is not None:
                 hub.bind(turn_id=turn_id, turn=stream_turn)
                 hub.verified(stream_turn)  # the pinned model answered turn/start: structural events may leave
@@ -1177,6 +1238,30 @@ class Native:
                 except Exception:
                     pass
         finally:
+            if getattr(self, 'reader_model_refused', False):
+                # Worker owns durable quarantine, even if reader EOF/another
+                # failure preempted receive()'s queued model refusal.
+                try:
+                    self.block_model()
+                    entry.update(state='failed', turnStatus='failed', error=ERRORS['model_unavailable'])
+                    self.publish_record(session, entry, safe_record)
+                    self.quarantine_history(session, entry)
+                except Exception:
+                    self.closing = True
+                    self.blocked_reason = 'model_unavailable'
+                    entry.update(state='failed', turnStatus='failed', error=ERRORS['model_unavailable'])
+                if hub is not None:
+                    hub.discard('model_unavailable')
+            grant = getattr(self, 'research_api', None)
+            if grant is not None:
+                grant.revoke()
+                try:
+                    grant.clear()
+                except Exception:
+                    # A stale raw file cannot authenticate after the memory
+                    # barrier. Keep admission closed if cleanup failed.
+                    self.blocked_reason = 'policy_refused'
+                    entry['state'], entry['error'] = 'failed', ERRORS['policy_refused']
             try:
                 with self.state_lock:
                     try:
@@ -1237,6 +1322,8 @@ class Native:
         if self.closed:
             return getattr(self, 'clean_shutdown', False)
         self.closing = True
+        if getattr(self, 'research_api', None) is not None:
+            self.research_api.revoke()
         hub = self.stream_hub()
         if hub is not None:
             hub.close()  # #90: open streams end now, not at their next heartbeat
@@ -1269,7 +1356,13 @@ class Native:
             if worker:
                 worker.join(timeout=20)
         finally:
-            clean = (binding_ok and alive_at_start and not forced and not active_at_start
+            grant_clean = True
+            if getattr(self, 'research_api', None) is not None:
+                try:
+                    self.research_api.clear()
+                except Exception:
+                    grant_clean = False
+            clean = (grant_clean and binding_ok and alive_at_start and not forced and not active_at_start
                      and self.active_session is None and self.process.poll() == 0
                      and not (worker and worker.is_alive()))
             self.clean_shutdown = clean
@@ -1321,6 +1414,8 @@ def end_streams_on_signal(app):
 
 
 def create_app():
+    from app.research_credentials import enabled
+    enabled('RUNNER_RESEARCH_API_ENABLE')  # Invalid operator flag refuses startup.
     owner = str(uuid.UUID(os.environ["RUNNER_ACCOUNT_ID"]))
     state_id = os.getenv("RUNNER_STATE_ID")
     if state_id is not None:
@@ -1598,6 +1693,16 @@ def create_app():
         result = native.interrupt(str(identity), str(body.requestId))
         return {"ownerId": owner, "stateId": state_id, "podUid": pod_uid, "sessionId": str(identity),
                 "requestId": str(body.requestId), "state": result}
+
+    @app.post('/sessions/{identity}/research-authorize')
+    def research_authorize(identity: uuid.UUID, body: Interrupt):
+        # The existing service middleware authenticates this route. Avoid the
+        # lifecycle/native protocol mutex: admission/refresh must not recurse.
+        native = app.state.native
+        result = None if app.state.stopping or native is None else native.research_authorize(str(identity), str(body.requestId))
+        if result is None:
+            return JSONResponse({'ownerId': owner, 'error': 'research_turn_inactive'}, status_code=401)
+        return {'ownerId': owner, 'stateId': state_id, 'podUid': pod_uid, **result}
 
     @app.get("/sessions/{identity}/events")
     async def events(identity: uuid.UUID, request: Request, after: str | None = None):

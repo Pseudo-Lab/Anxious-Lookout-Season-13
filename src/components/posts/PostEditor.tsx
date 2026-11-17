@@ -320,7 +320,7 @@ export default function PostEditor({
       }
     }
     setFailure(res.failure);
-    if (isReason(res.failure, "base_changed", "post_version")) {
+    if (isReason(res.failure, "base_changed", "post_version", "resource_version")) {
       await onReloadPost?.();
       setComparing(true);
     }
@@ -370,7 +370,7 @@ export default function PostEditor({
   return (
     <div className="space-y-4">
       <p className="text-xs text-stone-500">
-        입력은 초안으로 자동 저장되어 새로고침하거나 다른 기기에서 열어도 이어 쓸 수 있습니다. 버전은 ‘{post ? "새 버전으로 저장" : "글 저장"}’을 누를 때만
+        입력은 초안으로 자동 저장되어 새로고침하거나 다른 기기에서 열어도 이어 쓸 수 있습니다. 직접 편집한 내용은 ‘{post ? "새 버전으로 저장" : "글 저장"}’을 누르면 새 버전으로
         만들어지고, 발행한 글은 다시 발행하기 전까지 바뀌지 않습니다.
       </p>
       <Field label="제목">
@@ -457,7 +457,7 @@ export default function PostEditor({
       {stopped && (
         <Notice tone="warn">
           자동 저장을 멈췄습니다. {postErrorMessage(stopped) ?? "초안을 저장하지 못했습니다."} 입력은 이 화면에 그대로 있습니다.{" "}
-          {isReason(stopped, "base_changed", "post_version") && onReloadPost && (
+          {isReason(stopped, "base_changed", "post_version", "resource_version") && onReloadPost && (
             <button
               type="button"
               onClick={() => {
@@ -479,7 +479,7 @@ export default function PostEditor({
               새로고침
             </button>
           ) : (
-            !isReason(stopped, "base_changed", "post_version", "draft_closed", "archived") && (
+            !isReason(stopped, "base_changed", "post_version", "resource_version", "draft_closed", "archived") && (
               <button type="button" onClick={() => editor.resume()} className="font-medium underline hover:no-underline">
                 다시 시도
               </button>

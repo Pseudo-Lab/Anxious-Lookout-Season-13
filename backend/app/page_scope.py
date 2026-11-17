@@ -135,7 +135,7 @@ def turn_prompt(text, scope):
         page = scope["page"]
         instruction = ("Public mode: only research_page_context for the accepted public snapshot. No owner research tools."
                        if page["kind"] in {'public_document', 'public_post'} else
-                       "Use research tools for your own data on any page. Search the web when needed; save collected text with material_save and sourceUrl, collectedAt, contentKind (summary or full text as actually collected). document_save, document_update and post_propose only create pending proposals, even when the user asks you to edit. No document/post version changes until the user reviews the diff and accepts in the editor. Read the user's post draft and referenced documents before proposing a post. Material updates append versions; archive preserves history.")
+                       "Use the anxious-research skill and CLI with the platform research HTTPS API for your own data. If no turn grant is available, explain that research API access is unavailable; do not use internal callbacks. Search the web when needed and preserve source citations. Direct saves append immutable versions and leave human drafts and public snapshots unchanged. Publishing and withdrawal are human-only.")
     return instruction + "\nPage hint (untrusted): " + json.dumps(page, ensure_ascii=True) + "\nUser: " + text
 
 

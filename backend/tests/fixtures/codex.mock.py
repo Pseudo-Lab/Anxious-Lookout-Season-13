@@ -22,12 +22,13 @@ PROFILE = {':minimal': 'read', ':workspace_roots': {'.': 'write'}, '/control': '
            str(ROOT / 'home'): 'deny'}
 SYSTEM = {'default_permissions': 'native', 'approvals_reviewer': 'user', 'agents': {'enabled': False},
           'shell_environment_policy': {'set': {'HOME': '/usr/local/share/anxious-shell-home'}},
-          'permissions': {'native': {'filesystem': PROFILE}}}
+          'permissions': {'native': {'filesystem': {**PROFILE, str(ROOT / 'research-api' / 'turn.json'): 'read'},
+                                     'network': {'enabled': True}}}}
 REQUIREMENTS = {'allowedApprovalPolicies': ['untrusted'], 'allowedApprovalsReviewers': ['user'],
                 'featureRequirements': {'unified_exec': False, 'multi_agent_v2': False, 'view_image': False,
                                         'goals': False}}
 THREAD_POLICY = {'approvalPolicy': 'untrusted', 'approvalsReviewer': 'user', 'activePermissionProfile': {'id': 'native'},
-                 'sandbox': {'type': 'workspaceWrite', 'writableRoots': [], 'networkAccess': False}}
+                 'sandbox': {'type': 'workspaceWrite', 'writableRoots': [], 'networkAccess': True}}
 
 
 def emit(body):
@@ -127,7 +128,8 @@ for line in sys.stdin:
             emit({"method": "turn/" + event, "params": {"threadId": early_thread, "turn": early}})
         if prompt == "/fixture/rerouted":
             emit({"method": "model/rerouted", "params": {"threadId": thread, "turnId": turn, "fromModel": params["model"], "toModel": "fixture-wrong-model", "reason": "highRiskCyberActivity"}})
-        tool = "research_page_context" if "/fixture/page-context" in prompt or "/fixture/page-reference " in prompt else "research_document_save"
+        public = page.get('kind') in {'public_document', 'public_post'}
+        tool = "research_page_context" if public or "/fixture/page-context" in prompt or "/fixture/page-reference " in prompt else "research_document_save"
         args = {} if tool == "research_page_context" else {"title": "Fixture document", "content": "Complete fixture tool input", "mutationId": str(uuid.uuid4())}
         post_step = None
         if '/fixture/post-propose' in prompt:
@@ -136,7 +138,7 @@ for line in sys.stdin:
             elif page.get('kind') == 'post_workspace' and page.get('draftId'):
                 tool, args, post_step = 'research_post_draft_get', {'draftId': page['draftId']}, 'draft'
             else:
-                tool, args = 'research_post_propose', post_candidate()
+                tool, args = 'research_post_save', post_candidate()
         if prompt.startswith("/fixture/document-update"):
             try:
                 command, document_id, version = prompt.split()
@@ -154,6 +156,9 @@ for line in sys.stdin:
             args["content"] = json.loads((path.parent / "auth.json").read_text())["tokens"]["access_token"]
         if "/fixture/page-reference " in prompt:
             args = {"materialId": prompt.split("/fixture/page-reference ", 1)[1].strip()}
+        if tool == 'research_page_context' and tool not in {entry['name'] for entry in records[thread]['tools']}:
+            emit({'id': identity, 'error': {'code': -32602, 'message': 'Public loader was not registered'}})
+            continue
         tool_id = "tool-" + turn
         pending = {"thread": thread, "turn": turn, "items": [{"id": "user-" + turn, "type": "userMessage", "content": params["input"]},
                    {"id": tool_id, "type": "dynamicToolCall", "tool": tool, "arguments": args}]}
@@ -193,10 +198,10 @@ for line in sys.stdin:
             pending['postStep'] = None
             pending['callId'] = 'proposal-' + pending['turn']
             pending['items'].append({'id': pending['callId'], 'type': 'dynamicToolCall',
-                                     'tool': 'research_post_propose', 'arguments': args})
+                                     'tool': 'research_post_save', 'arguments': args})
             emit({'id': pending['callId'], 'method': 'item/tool/call', 'params': {
                 'threadId': pending['thread'], 'turnId': pending['turn'], 'callId': pending['callId'],
-                'tool': 'research_post_propose', 'arguments': args}})
+                'tool': 'research_post_save', 'arguments': args}})
             continue
         answer = "Offline fixture answer"
         if pending.get("stream"):

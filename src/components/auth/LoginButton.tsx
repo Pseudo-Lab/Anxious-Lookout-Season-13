@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useAuth } from "@/hooks/useAuth";
 import { describeFailure } from "@/lib/api/client";
 import { GITHUB_LOGIN_URL } from "@/lib/auth/api";
@@ -47,7 +48,10 @@ export default function LoginButton() {
 
   return (
     <div className="flex flex-wrap items-center gap-3">
-      <span className="text-sm font-medium text-stone-900">{user.login}</span>
+      <div className="flex flex-col items-start gap-0.5">
+        <span className="text-sm font-medium text-stone-900">{user.login}</span>
+        <Link href="/account/tokens/" className="text-xs text-indigo-600 hover:underline">API 토큰</Link>
+      </div>
       {!user.isApproved && (
         <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
           승인 대기

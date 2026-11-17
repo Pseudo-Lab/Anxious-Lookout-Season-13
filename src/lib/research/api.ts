@@ -1,5 +1,6 @@
 import { apiUrl, fetchJson, type FetchFailure, type FetchResult } from "@/lib/api/client";
 import { own } from "@/lib/research/own";
+import { parseVersionAuthor } from "@/lib/research/versionAuthor";
 import {
   CONTENT_KINDS,
   type ArchiveResult,
@@ -51,7 +52,7 @@ const isItemType = (v: unknown): v is ItemType => v === "material" || v === "doc
 
 function parseVersionRef(v: unknown): VersionRef | null {
   if (!isObj(v) || !isId(v.id) || !isInt(v.number) || !isStr(v.createdAt)) return null;
-  return { id: v.id, number: v.number, createdAt: v.createdAt };
+  return { id: v.id, number: v.number, createdAt: v.createdAt, author: parseVersionAuthor(v.author) };
 }
 
 function parseItemBase(v: Obj) {
@@ -134,7 +135,7 @@ function parseVersionSummary(v: unknown): VersionSummary | null {
   if (!isObj(v) || !isId(v.id) || !isId(v.itemId) || !isInt(v.number) || !isStr(v.title) || !isStr(v.createdAt)) {
     return null;
   }
-  const out: VersionSummary = { id: v.id, itemId: v.itemId, number: v.number, title: v.title, createdAt: v.createdAt };
+  const out: VersionSummary = { id: v.id, itemId: v.itemId, number: v.number, title: v.title, createdAt: v.createdAt, author: parseVersionAuthor(v.author) };
   if (isStr(v.sourceUrl)) out.sourceUrl = v.sourceUrl;
   if (isStr(v.collectedAt)) out.collectedAt = v.collectedAt;
   if (isKind(v.contentKind)) out.contentKind = v.contentKind;
@@ -818,6 +819,7 @@ const CONFLICT_REASONS: Record<string, string> = {
   draft_revision: "다른 탭이나 기기에서 이 초안이 먼저 바뀌었습니다. 서버의 초안과 지금 입력 중 하나를 고르세요.",
   draft_closed: "이 초안은 이미 저장되었거나 버려져 더 이상 고칠 수 없습니다. 지금 입력은 화면에 남아 있습니다.",
   document_version: "문서가 그사이 바뀌었습니다. 현재 버전과 비교한 뒤 다시 저장하세요.",
+  resource_version: "다른 곳에서 새 버전을 저장했습니다. 최신 내용을 불러와 비교한 뒤 다시 저장하세요.",
   base_changed: "초안을 시작한 뒤 문서가 바뀌었습니다. 현재 버전과 비교한 뒤 다시 저장하세요.",
   archived: "보관한 문서라 저장하거나 수락할 수 없습니다. 입력은 그대로 있습니다.",
   proposal_closed: "이 제안은 이미 수락되었거나 버려졌습니다. 목록을 새로 불러오세요.",

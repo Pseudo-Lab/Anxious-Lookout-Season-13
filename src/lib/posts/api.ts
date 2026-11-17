@@ -4,6 +4,7 @@ import { listQuery, mutate, parsePage, type MutationContext } from "@/lib/resear
 import { parseBlockDocument } from "@/lib/blocks/document";
 import type { FormatChange } from "@/lib/blocks/projection";
 import { CONTRACT_REVISION, type BlockDocument } from "@/lib/blocks/types";
+import { parseVersionAuthor } from "@/lib/research/versionAuthor";
 import type {
   Post,
   PostDocumentOption,
@@ -172,7 +173,7 @@ function parseVersion(v: unknown): PostVersion | null {
   if (!meta) return null;
   const content = parseContent(v.content);
   if (content === null) return null;
-  const out: PostVersion = { id: v.id, postId: v.postId, number: v.number, createdAt: v.createdAt, ...meta };
+  const out: PostVersion = { id: v.id, postId: v.postId, number: v.number, createdAt: v.createdAt, author: parseVersionAuthor(v.author), ...meta };
   if (content) out.content = content;
   if (isStr(v.textProjection)) out.textProjection = v.textProjection;
   return out;

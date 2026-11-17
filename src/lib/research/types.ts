@@ -1,4 +1,5 @@
 // api-contracts/m3-research-data.md 기준 응답 형태.
+import type { VersionAuthor } from "@/lib/research/versionAuthor";
 
 export type ItemType = "material" | "document";
 export type ContentKind = "full" | "excerpt" | "summary";
@@ -20,6 +21,7 @@ export interface VersionRef {
   id: string;
   number: number;
   createdAt: string;
+  author?: VersionAuthor;
 }
 
 export interface Publication {
@@ -70,6 +72,7 @@ export interface VersionSummary {
   number: number;
   title: string;
   createdAt: string;
+  author?: VersionAuthor;
   // 자료 스냅샷에만 있음
   sourceUrl?: string;
   collectedAt?: string;

@@ -43,8 +43,8 @@ trap cleanup EXIT
 # 2) 이 project만 새로 시작(이전 실행의 일회용 볼륨 제거)
 $COMPOSE down --volumes >/dev/null 2>&1 || true
 $COMPOSE up -d db mock-github
-# #22 서버 초안·제안(0005_writing), #28 글·발행·이미지(0006_posts)까지 적용한다(compose 기본 migrate는 0004).
-$COMPOSE run --rm migrate python -m app.migrate --revision 0006_posts
+# #97 PAT·버전 작성자(0009_research_pats)까지 적용한다. 현재 runtime의 스키마 계약에 맞춘다.
+$COMPOSE run --rm migrate python -m app.migrate --revision 0009_research_pats
 $COMPOSE up -d api web gateway
 i=0
 until [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$M3_GATEWAY_PORT/api/research/health" || true)" = 200 ]; do

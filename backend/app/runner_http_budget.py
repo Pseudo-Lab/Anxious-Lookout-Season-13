@@ -14,6 +14,9 @@ _budget = ContextVar('runner_http_budget')
 
 
 def begin(end, clock):
+    outer = _budget.get(None)
+    if outer is not None:
+        end = min(end, clock() + max(0, outer[0] - outer[1]()))
     return _budget.set((end, clock))
 
 

@@ -88,7 +88,7 @@ class ChangeDraft(PostText, DraftExpected):
 
 
 def ready(store):
-    if store.db.execute(text('SELECT version_num FROM research.alembic_version')).scalar_one() != '0007_post_blocks':
+    if store.db.execute(text('SELECT version_num FROM research.alembic_version')).scalar_one() != '0009_research_pats':
         fail('not_ready', 'Posts schema is not ready', 503)
 
 
@@ -110,9 +110,11 @@ def expect(row, expected):
 
 
 def version_value(row, content=True):
+    from .version_authors import value as author_value
     payload = stored_payload(row.payload)
     if not content: payload.pop('content', None)
-    return {**payload, 'id': str(row.id), 'postId': str(row.post_id), 'number': row.number, 'createdAt': stamp(row.created_at)}
+    return {**payload, 'id': str(row.id), 'postId': str(row.post_id), 'number': row.number,
+            'createdAt': stamp(row.created_at), 'author': author_value(row)}
 
 
 def post_value(store, row, content=True):
@@ -233,7 +235,8 @@ def save_version(store, value, post=None):
         post.version += 1
         post.content_number += 1
         post.updated_at = now
-    snapshot = PostVersion(post_id=post.id, number=post.content_number, payload=value, image_ids=image_ids, created_at=now, updated_at=now)
+    snapshot = PostVersion(post_id=post.id, number=post.content_number, payload=value, image_ids=image_ids,
+                           created_at=now, updated_at=now, **store.author.columns())
     store.db.add(snapshot); store.db.flush()
     return post
 

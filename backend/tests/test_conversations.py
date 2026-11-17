@@ -30,13 +30,14 @@ class FixtureRunner:
     def submit(self, identity, body):
         self.dispatches += 1
         self.last = body
+        self.session_id, self.state = identity, 'running'
         record_file = self.root / (str(identity) + ".json")
         previous = json.loads(record_file.read_text()) if record_file.exists() else {"record": {"turns": []}}
         arguments = {"mutationId": str(uuid.uuid4()), "title": "Saved by tool", "content": "Complete [link](https://example.com)"}
         with TestClient(self.app, base_url=self.app.state.settings.origin, raise_server_exceptions=False) as tool_client:
-            result = tool_client.post("/api/internal/research/tools", json={"sessionId": str(identity), "requestId": body["requestId"],
-                         "name": "research_document_save", "arguments": arguments}, headers={"Authorization": "Bearer " + body["toolToken"]})
-            allowed = body.get("scope", {}).get("page", {}).get("kind") not in {None, "public_document"}
+            from tests.test_page_chat import callback
+            result = callback(tool_client, {'id': str(identity)}, self, 'research_document_save', arguments)
+            allowed = body.get("scope", {}).get("page", {}).get("kind") not in {None, "public_document", "public_post"}
             assert result.status_code == (200 if allowed else 403), result.text
         turn = {"id": str(uuid.uuid4()), "items": [{"id": "user-" + body["requestId"], "type": "userMessage", "content": [{"type": "text", "text": body["text"]}]},
                 {"id": "tool-" + body["requestId"], "type": "dynamicToolCall", "tool": "research_document_save", "arguments": arguments,
@@ -45,6 +46,7 @@ class FixtureRunner:
         record = {"ownerId": str(self.owner), "requestId": body["requestId"], "turnId": turn["id"], "state": "idle",
                   "record": {"turns": previous["record"]["turns"] + [turn]}}
         record_file.write_text(json.dumps(record))
+        self.state = 'idle'
         return record
 
     def read(self, identity):
@@ -142,7 +144,7 @@ def test_fixture_tools_full_history_resume_reconnect_and_retry_without_dispatch(
     assert (tmp_path / (row["id"] + ".json")).exists()
 
 
-def test_tool_token_binds_owner_session_turn_live_login_and_current_authority(client, admin, tmp_path):
+def test_internal_shell_token_binds_owner_session_turn_live_login_and_current_authority(client, admin, tmp_path):
     owner, auth = identity(client, admin)
     first = create_session(client, auth)
     second = create_session(client, auth)
@@ -154,7 +156,7 @@ def test_tool_token_binds_owner_session_turn_live_login_and_current_authority(cl
         metadata = {"platformRequests": [{"requestId": str(request_id), "text": "fixture", "scope": {"page": {"kind": "material_workspace"}}}]}
         db.execute(text("UPDATE research.conversations SET state='running',request_id=:request,tool_token_hash=:token,tool_expires_at=now()+interval '1 minute',login_hash=:login,native_record=CAST(:record AS jsonb) WHERE id=:id"),
                     {"id": first["id"], "request": request_id, "token": hashlib.sha256(secret.encode()).hexdigest(), "login": login_hash, "record": json.dumps(metadata)})
-    body = {"sessionId": first["id"], "requestId": str(request_id), "name": "research_list", "arguments": {"type": "material"}}
+    body = {"sessionId": first["id"], "requestId": str(request_id), "name": "runner_shell_authorize", "arguments": {}}
     bearer = {"Authorization": "Bearer " + secret}
     assert client.post("/api/internal/research/tools", json=body).status_code == 401
     assert client.post("/api/internal/research/tools", json=body, headers=bearer).status_code == 200
@@ -163,7 +165,9 @@ def test_tool_token_binds_owner_session_turn_live_login_and_current_authority(cl
     _, other_auth = identity(client, admin, "222222")
     other = create_session(client, other_auth)
     assert client.post("/api/internal/research/tools", json={**body, "sessionId": other["id"]}, headers=bearer).status_code == 404
-    assert client.post("/api/internal/research/tools", json={**body, "arguments": {"type": "material", "ownerId": str(owner)}}, headers=bearer).status_code == 422
+    assert client.post("/api/internal/research/tools", json={**body, "arguments": {"ownerId": str(owner)}}, headers=bearer).status_code == 403
+    assert client.post('/api/internal/research/tools', json={**body, 'name': 'research_list',
+        'arguments': {'type': 'material'}}, headers=bearer).status_code == 403
     with admin.begin() as db:
         db.execute(text("UPDATE auth.accounts SET is_approved=false WHERE id=:owner"), {"owner": owner})
     assert client.post("/api/internal/research/tools", json=body, headers=bearer).status_code == 403

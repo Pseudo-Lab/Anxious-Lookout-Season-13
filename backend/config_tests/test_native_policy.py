@@ -22,6 +22,22 @@ ETC = Path(__file__).resolve().parents[1] / 'runner' / 'codex-etc'
 RUNNER = Path(__file__).resolve().parents[1] / 'runner'
 
 
+def test_discarded_write_intent_stops_replacement_before_native_start(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from app.codex_policy import MODEL
+    monkeypatch.setenv('APP_ENV', 'test')
+    control = tmp_path / 'control'
+    control.mkdir()
+    old = control / 'research-fence.json'
+    old.write_text('{"phase":"execute_intent"}')
+    root = tmp_path / 'state'
+    with pytest.raises(CodexFailure) as caught:
+        Native(root, MODEL, '/usr/local/bin/codex-fixture', 'http://unused.invalid',
+               auth=SimpleNamespace(control=control))
+    assert caught.value.reason == 'policy_refused'
+    assert old.read_text() == '{"phase":"execute_intent"}' and not root.exists()
+
+
 # --- the image's policy files ---------------------------------------------------------------
 
 def test_image_files_are_exactly_the_checked_policy():
@@ -80,7 +96,7 @@ def test_codex_home_is_outside_every_read_and_write_root():
     # CODEX_HOME's only protection is that the profile never reads it: the read and write entries are exactly these.
     table = policy.filesystem(ROOT)
     assert {path: access for path, access in table.items() if access != 'deny'} == \
-        {':minimal': 'read', ':workspace_roots': {'.': 'write'}}
+        {':minimal': 'read', ':workspace_roots': {'.': 'write'}, '/state/research-api/turn.json': 'read'}
 
 
 @pytest.fixture
@@ -161,7 +177,7 @@ def effective(system):
     # The form 0.160.1 really returns (diagnostic image of 5d006aa): unset fields as null, approval_policy null.
     value = deepcopy(system)
     native = value['permissions']['native']
-    native.update(description=None, extends=None, network=None, workspace_roots=None)
+    native.update(description=None, extends=None, workspace_roots=None)
     native['filesystem']['glob_scan_max_depth'] = None
     value.update(approval_policy=None, sandbox_mode=None, sandbox_workspace_write=None)
     # The 68-8548f13 form with these two set: every other field null.
@@ -217,7 +233,7 @@ def test_config_not_applied_refuses(damage):
     if damage == 'not-dict': value = []
     if damage == 'approval-in-disabled-layer': layers[2]['config'] = {'approval_policy': 'untrusted'}
     if damage == 'approval-in-system-layer': layers[0]['config']['approval_policy'] = 'untrusted'
-    if damage == 'effective-network-set': profile_parent = config['permissions']['native']; profile_parent['network'] = {'enabled': True}
+    if damage == 'effective-network-set': profile_parent = config['permissions']['native']; profile_parent['network'] = {'enabled': False}
     if damage == 'effective-approval-set': config['approval_policy'] = 'untrusted'
     if damage == 'codex-home-read': profile['/state/codex'] = 'read'
     if damage == 'state-read': profile['/state'] = 'read'
@@ -236,7 +252,7 @@ def good_thread():
     return {'thread': {'id': 't'}, 'model': 'gpt-6.1-sol', 'cwd': WORK, 'approvalPolicy': 'untrusted',
             'approvalsReviewer': 'user', 'activePermissionProfile': {'id': 'native', 'extends': None},
             'runtimeWorkspaceRoots': [WORK],
-            'sandbox': {'type': 'workspaceWrite', 'writableRoots': [], 'networkAccess': False,
+            'sandbox': {'type': 'workspaceWrite', 'writableRoots': [], 'networkAccess': True,
                         'excludeTmpdirEnvVar': True, 'excludeSlashTmp': True}}
 
 
@@ -246,7 +262,7 @@ def test_thread_applied():
 
 @pytest.mark.parametrize('damage', ['policy', 'reviewer', 'profile', 'profile-missing', 'cwd', 'missing-field', 'error',
                                     'workspace-root-added', 'workspace-roots-missing', 'writable-root-added',
-                                    'network-on', 'sandbox-full-access', 'sandbox-missing'])
+                                    'network-off', 'sandbox-full-access', 'sandbox-missing'])
 def test_thread_start_or_resume_mismatch_refuses(damage):
     value = good_thread()
     if damage == 'policy': value['approvalPolicy'] = 'never'
@@ -259,7 +275,7 @@ def test_thread_start_or_resume_mismatch_refuses(damage):
     if damage == 'workspace-root-added': value['runtimeWorkspaceRoots'] = [WORK, '/state']
     if damage == 'workspace-roots-missing': del value['runtimeWorkspaceRoots']
     if damage == 'writable-root-added': value['sandbox']['writableRoots'] = ['/state/codex']
-    if damage == 'network-on': value['sandbox']['networkAccess'] = True
+    if damage == 'network-off': value['sandbox']['networkAccess'] = False
     if damage == 'sandbox-full-access': value['sandbox'] = {'type': 'dangerFullAccess'}
     if damage == 'sandbox-missing': del value['sandbox']
     with pytest.raises(CodexFailure):

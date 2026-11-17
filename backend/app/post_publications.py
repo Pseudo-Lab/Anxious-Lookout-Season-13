@@ -20,7 +20,7 @@ from .writing import conflict
 def ready(db):
     from .research_schema_contract import validate_research
     try:
-        if validate_research(db.connection()) != '0007_post_blocks': raise RuntimeError()
+        if validate_research(db.connection()) != '0009_research_pats': raise RuntimeError()
     except RuntimeError:
         fail('not_ready', 'Post publication schema is not ready', 503)
 

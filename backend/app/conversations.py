@@ -19,9 +19,11 @@ from sqlalchemy import select, text
 from .models import Account, LoginSession
 from .research import Expected, Input, Store, ResearchError, fail, page_query, encode_cursor, parse_id, stamp
 from .research_models import Conversation
-from .research_tools import definitions, dispatch
+from .research_tools import public_context_definitions, dispatch
 from .codex_policy import MODEL, REASONS, ERRORS, RUNNER_PREFLIGHT_ERRORS, personal_origin_enabled
 from .page_scope import Page, resolve_scope, scope_summary, request_metadata, tool_allowed
+from . import research_credentials as credentials
+from . import research_receipts as receipts
 
 
 class NewConversation(Input):
@@ -51,7 +53,21 @@ class Runner:
         self.url, self.token, self.owner, self.state_id = url, token, owner, state_id
 
     def call(self, method, path, body=None):
-        with httpx.Client(timeout=5, trust_env=False, follow_redirects=False) as client:
+        from . import runner_http_budget
+        import time
+        research = path.endswith('/research-authorize')
+        marker = runner_http_budget.begin(time.monotonic() + 2, time.monotonic) if research else None
+        try:
+            return self._call(method, path, body, research)
+        finally:
+            if marker is not None:
+                runner_http_budget.finish(marker)
+
+    def _call(self, method, path, body, research):
+        from . import runner_http_budget
+        import ssl
+        with httpx.Client(timeout=2 if research else 5, trust_env=False, follow_redirects=False,
+                          **({'transport': runner_http_budget.Transport(ssl.create_default_context())} if research else {})) as client:
             headers = {"Authorization": "Bearer " + self.token}
             if self.state_id:
                 headers["X-Runner-State-Id"] = self.state_id
@@ -317,7 +333,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
             return {**result, "reason": "unavailable"}
 
     def require_schema(store):
-        if store.db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() not in {"0003_sessions", "0004_publication", "0005_writing", "0006_posts", "0007_post_blocks"}:
+        if store.db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() not in {"0003_sessions", "0004_publication", "0005_writing", "0006_posts", "0007_post_blocks", "0008_version_authors", "0009_research_pats"}:
             fail("not_ready", "Conversation schema is not ready", 503)
 
     def runner_for(owner, store=None):
@@ -342,6 +358,10 @@ def register_conversations(app, authorized, sessions, settings, response, write,
 
     def refresh(store, row):
         if row.state != "running":
+            return
+        # Serialize API-owned grant/receipt metadata with native snapshot refresh.
+        store.db.refresh(row, with_for_update=True)
+        if row.state != 'running':
             return
         if app.state.user_runners_enabled and not selected(app, store.owner):
             return
@@ -377,7 +397,10 @@ def register_conversations(app, authorized, sessions, settings, response, write,
         turn_id = result.get("turnId")
         if isinstance(turn_id, str) and any(turn.get("id") == turn_id for turn in record.get("turns", [])):
             scopes = [{**entry, "turnId": turn_id} if entry["requestId"] == str(row.request_id) and not entry.get("turnId") else entry for entry in scopes]
-        row.native_record = {**record, "unrecordedInputs": row.native_record.get("unrecordedInputs", []), "platformRequests": scopes}
+        row.native_record = {**credentials.redact(record),
+                             "unrecordedInputs": row.native_record.get("unrecordedInputs", []),
+                             "platformRequests": scopes,
+                             'researchCalls': row.native_record.get('researchCalls', [])}
         if thread_id is not None:
             row.native_record["nativeThreadId"] = thread_id  # Server-only mapping, excluded from browser summaries/items.
         if result["state"] != row.state:
@@ -387,6 +410,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
             row.version += 1
             row.updated_at = datetime.now(timezone.utc)
             row.tool_token_hash = None
+            credentials.revoke(row)
             # A failed later turn can repeat earlier text. Only its own native
             # turn, not an older matching message, proves the input was recorded.
             if result.get("turnId") and any(item.get("type") == "userMessage"
@@ -398,7 +422,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
             logging.getLogger("uvicorn.error").info("conversation_refresh_write %s", json.dumps({"state": row.state}))
         store.db.flush()
 
-    def launch(owner, identity, request_id, token):
+    def launch(owner, identity, request_id, token, research_grant=None):
         # A post-response background dispatch. A crash never auto-replays a turn.
         submitting = False
         try:
@@ -408,8 +432,13 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                     return
                 metadata = request_metadata(row, request_id)
                 payload = {"requestId": str(request_id), "text": row.pending_text,
-                           "tools": definitions(), "toolToken": token,
+                           "tools": public_context_definitions(), "toolToken": token,
                            "scope": metadata["scope"] if metadata else {"page": {"kind": "general"}, "context": None}}
+                if research_grant is not None:
+                    if not app.state.research_agent_api_enabled:
+                        fail('not_ready', 'Research API is unavailable', 503)
+                    credentials.resolve(row, research_grant['token'], metadata)
+                    payload['researchGrant'] = research_grant
                 if row.native_record.get("nativeThreadId") is not None:
                     payload["expectedThreadId"] = row.native_record["nativeThreadId"]
             runner = runner_for(owner)
@@ -429,12 +458,14 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                         row.version += 1
                         row.updated_at = datetime.now(timezone.utc)
                         row.tool_token_hash, row.tool_expires_at = None, None
+                        credentials.revoke(row)
                     elif definite:
                         # Explicit rejection means this turn was not accepted.
                         row.state, row.error_code = "failed", "codex_rejected"
                         row.version += 1
                         row.updated_at = datetime.now(timezone.utc)
                         row.tool_token_hash, row.tool_expires_at = None, None
+                        credentials.revoke(row)
                     elif isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 503:
                         try:
                             code = exc.response.json().get("error")
@@ -444,6 +475,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                             row.state, row.error_code = "failed", code
                             row.version += 1
                             row.tool_token_hash, row.tool_expires_at = None, None
+                            credentials.revoke(row)
                         else:
                             row.error_code = "codex_unavailable"
                     else:
@@ -517,6 +549,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
 
     @app.post(prefix + "/sessions/{identity}/messages")
     def message(identity: uuid.UUID, body: dict, request: Request, background: BackgroundTasks):
+        credentials.reject_token_input(body)
         with authorized(request, True) as store:
             require_schema(store)
             def action(parsed):
@@ -540,12 +573,26 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                 row.tool_token_hash = hashlib.sha256(token.encode()).hexdigest()
                 row.tool_expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
                 row.pending_text, row.request_id, row.state = parsed.text, uuid.uuid4(), "running"
+                credentials.revoke(row)
+                grant = research_grant = None
+                from .page_scope import shell_allowed
+                if app.state.research_agent_api_enabled and shell_allowed(scope):
+                    if not app.state.user_runners_enabled or not selected(app, store.owner):
+                        fail('not_ready', 'Research runner transport is unavailable', 503)
+                    login = store.db.scalar(select(LoginSession).where(LoginSession.token_hash == row.login_hash))
+                    if login is None:
+                        fail('unauthenticated', 'Research authentication required', 401)
+                    raw_token, grant = credentials.issue(row.id, row.request_id, scope, login.expires_at, owner=row.owner_id)
+                    research_grant = {'token': raw_token, 'sessionId': str(row.id), 'requestId': str(row.request_id),
+                                      'apiOrigin': settings.origin, 'basePath': settings.base_path,
+                                      'expiresAt': grant['expiresAt']}
                 row.native_record = {**row.native_record, "platformRequests": row.native_record.get("platformRequests", []) +
-                                     [{"requestId": str(row.request_id), "text": parsed.text, "scope": scope}]}
+                                     [{"requestId": str(row.request_id), "text": parsed.text, "scope": scope,
+                                       **({'researchGrant': grant} if grant else {})}]}
                 row.version += 1
                 row.updated_at, row.error_code = datetime.now(timezone.utc), None
                 store.db.flush()
-                background.add_task(launch, store.owner, row.id, row.request_id, token)
+                background.add_task(launch, store.owner, row.id, row.request_id, token, research_grant)
                 # #90: the Stop target, known from the 202 on (additive field; an idempotent replay returns the same)
                 return {**summary(row), "requestId": str(row.request_id)}
             return write(store, request, Message, body, action, 202)
@@ -621,12 +668,13 @@ def register_conversations(app, authorized, sessions, settings, response, write,
         with authorized(request, True) as store:
             require_schema(store)
             parsed = Interrupt.model_validate(body)
-            row = owned(store, identity, lock=True)  # read and lock only: a stop writes nothing
+            row = owned(store, identity, lock=True)
             request_id = parse_id(parsed.requestId)
             if str(request_id) != parsed.requestId:
                 fail("validation_error", "A canonical UUID is required", 422)
             if row.state != "running" or row.request_id != request_id:
                 fail("conflict", "This turn is not running", 409)
+            credentials.revoke(row)  # r2 grant only; native state/version stay unchanged.
             owner = store.owner
         try:
             result = runner_for(owner).interrupt(identity, request_id)
@@ -649,6 +697,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                 if row.state == "running":
                     fail("conflict", "Wait for the current turn before archiving", 409)
                 row.archived, row.version, row.tool_token_hash = True, row.version + 1, None
+                credentials.revoke(row)
                 row.updated_at = datetime.now(timezone.utc)
                 store.db.flush()
                 return {"id": str(row.id), "archived": True, "version": row.version}
@@ -668,13 +717,20 @@ def register_conversations(app, authorized, sessions, settings, response, write,
             if not row:
                 fail("not_found", "Not found", 404)
             account = db.scalar(select(Account).where(Account.id == row.owner_id).with_for_update(read=True))
+            # Re-read under the same row lock used by public API receipts/refresh.
+            db.refresh(row, with_for_update=True)
+            if (row.tool_token_hash != token_hash or row.request_id != parse_id(body.requestId)
+                    or row.state != 'running' or row.archived or row.tool_expires_at is None
+                    or row.tool_expires_at <= datetime.now(timezone.utc)):
+                fail('unauthenticated', 'Tool authentication required', 401)
             login = db.scalar(select(LoginSession).where(LoginSession.token_hash == row.login_hash,
                         LoginSession.account_id == row.owner_id, LoginSession.expires_at > datetime.now(timezone.utc)))
             if not login or not account.is_approved or app.state.research_policy == "pending" or account.role not in {"editor", "admin"}:
                 fail("forbidden", "Storage tool permission was revoked", 403)
             from .research_schema_contract import validate_research
             try:
-                validate_research(db.connection())
+                if validate_research(db.connection()) != '0009_research_pats':
+                    raise RuntimeError('Version provenance schema is required')
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
             metadata = request_metadata(row)
@@ -684,7 +740,41 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                 if body.arguments != {} or not shell_allowed(scope):
                     fail('tool_not_allowed', 'Shell is unavailable in this request mode', 403)
                 return response({'authorized': True})
-            if not tool_allowed(scope, body.name, body.arguments):
+            if body.name != 'research_page_context' or not tool_allowed(scope, body.name, body.arguments):
                 fail("tool_not_allowed", "Tool is unavailable in this request's research mode", 403)
-            store = Store(db, row.owner_id)
-            return response(dispatch(store, body.name, body.arguments, context=scope.get("context")))
+            from .version_authors import VersionAuthor
+            store = Store(db, row.owner_id, author=VersionAuthor(row.id))
+            credentials.reject_token_input(body.arguments)
+            receipts.ensure_capacity(row, body.requestId)
+            result = dispatch(store, body.name, body.arguments, context=scope.get("context"))
+            value = receipts.receipt(body.name, result, body.arguments, body.requestId)
+            if body.arguments.get('materialId') is not None and isinstance(result.get('versionId'), str):
+                value['target']['versionId'] = credentials.canonical(result['versionId'])
+            elif isinstance(result.get('materials'), list):
+                value['count'] = len(result['materials'])
+            value['snapshot'] = {'type': scope['page']['kind'], 'resourceId': scope['page']['resourceId']}
+            for key in ('id', 'versionId'):
+                candidate = (scope.get('context') or {}).get(key)
+                if isinstance(candidate, str):
+                    try:
+                        value['snapshot']['snapshotId' if key == 'id' else key] = credentials.canonical(candidate)
+                    except ValueError:
+                        pass
+            receipts.append(row, value)
+            return response(result)
+
+    from .research_api import register as register_agent_api
+    def research_runner_for(owner):
+        # No extra health RPC: this request's live research-authorize is the
+        # auth check and uses the verified bound transport directly.
+        if not selected(app, owner) or app.state.user_runner_runtime is None:
+            fail('not_ready', 'Research runner transport is unavailable', 503)
+        return app.state.user_runner_runtime.runner(owner)
+    register_agent_api(app, sessions, settings, response, research_runner_for)
+
+    @app.get(prefix + '/sessions/{identity}/research-calls')
+    def research_calls(identity: uuid.UUID, request: Request):
+        with authorized(request) as store:
+            require_schema(store)
+            row = owned(store, identity)
+            return response({'items': receipts.display(row)})

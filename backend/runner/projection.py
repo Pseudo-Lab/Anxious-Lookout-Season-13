@@ -103,7 +103,11 @@ class ProjectionJournal:
     def spans(self, value):
         """The merged [start, end) ranges of every recorded literal in `value` (#90: the stream holdback needs the
         ranges, not only the redacted text)."""
-        hits = []
+        # PATs can be pasted into a chat even before any turn grant has been
+        # issued. Syntax masking covers current/retired values without storing
+        # plaintext or requiring an observed-token journal entry.
+        from app.research_credentials import PAT_TOKEN
+        hits = [(match.start(), match.end()) for match in PAT_TOKEN.finditer(value)]
         for length, groups in self.values.items():
             if length > len(value):
                 continue

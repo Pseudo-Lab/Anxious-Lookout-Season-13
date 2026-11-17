@@ -266,31 +266,33 @@ def test_missing_publication_grant_or_tampered_membership_authority_fails_closed
 
 
 def test_membership_revocation_waits_for_admitted_tool_then_denies_later_calls(client, admin, monkeypatch):
-    from app import document_proposals
+    from app.research import Store
+    from tests.test_page_chat import HeldRunner
+    from tests.research_api_fixture import grant_token, api_client
     migrate('0007_post_blocks')
     _, auth = identity(client, admin, role="admin")
     manager_cookie = dict(client.cookies)
     target, target_auth = identity(client, admin, "222222")
+    runner = HeldRunner(client, target)
     session = client.post("/api/research/sessions", json={"title": "Concurrent revocation"}, headers=headers(target_auth)).json()
-    secret, request_id = uuid.uuid4().hex + uuid.uuid4().hex, uuid.uuid4()
-    login = session_digest(client.cookies.get("anxious_session"), target_auth["Origin"])
+    accepted = client.post('/api/research/sessions/' + session['id'] + '/messages',
+        json={'text': 'Save before membership change', 'expectedVersion': 1}, headers=headers(target_auth))
+    assert accepted.status_code == 202
+    secret = grant_token(client.app, session['id'], runner)
+    research = api_client(client.app)
     with admin.begin() as db:
         version = db.execute(text("SELECT updated_at FROM auth.accounts WHERE id=:id"), {"id": target}).scalar_one().isoformat()
-        metadata = {"platformRequests": [{"requestId": str(request_id), "text": "fixture", "scope": {"page": {"kind": "document_workspace"}}}]}
-        db.execute(text("UPDATE research.conversations SET state='running',request_id=:req,tool_token_hash=:hash,tool_expires_at=now()+interval '1 minute',login_hash=:login,native_record=CAST(:record AS jsonb) WHERE id=:id"),
-                   {"id": session["id"], "req": request_id, "hash": hashlib.sha256(secret.encode()).hexdigest(), "login": login, "record": json.dumps(metadata)})
     admitted, release = Event(), Event()
-    original = document_proposals.create
-    def hold(store, body):
+    original = Store.create_item
+    def hold(store, kind, body):
         admitted.set()
         assert release.wait(5)
-        return original(store, body)
-    monkeypatch.setattr(document_proposals, 'create', hold)
-    tool_body = {"sessionId": session["id"], "requestId": str(request_id), "name": "research_document_save",
-                 "arguments": {"title": "Admitted before revocation", "content": "Committed once", "mutationId": str(uuid.uuid4())}}
+        return original(store, kind, body)
+    monkeypatch.setattr(Store, 'create_item', hold)
+    tool_body = {'title': 'Admitted before revocation', 'content': 'Committed once', 'mutationId': str(uuid.uuid4())}
     def call_tool():
-        with TestClient(create_app(), base_url=auth["Origin"]) as caller:
-            return caller.post("/api/internal/research/tools", json=tool_body, headers={"Authorization": "Bearer " + secret})
+        return research.post('/api/research/agent/v1/research_document_save', json=tool_body,
+                             headers={'Authorization': 'Bearer ' + secret})
     def revoke():
         with TestClient(create_app(), base_url=auth["Origin"], cookies=manager_cookie) as actor:
             return actor.put("/api/admin/accounts/" + str(target) + "/membership", json={"role": "commenter", "isApproved": False, "reason": "Concurrent fixture revoke", "expectedVersion": version}, headers=headers(auth))
@@ -314,5 +316,5 @@ def test_membership_revocation_waits_for_admitted_tool_then_denies_later_calls(c
         assert change.result(timeout=5).status_code == 200
     assert call_tool().status_code == 403
     with admin.connect() as db:
-        assert db.execute(text("SELECT count(*) FROM research.items WHERE owner_id=:id AND kind='document'"), {"id": target}).scalar_one() == 0
-        assert db.execute(text('SELECT count(*) FROM research.document_proposals WHERE owner_id=:id'), {'id': target}).scalar_one() == 1
+        assert db.execute(text("SELECT count(*) FROM research.items WHERE owner_id=:id AND kind='document'"), {"id": target}).scalar_one() == 1
+        assert db.execute(text('SELECT count(*) FROM research.document_proposals WHERE owner_id=:id'), {'id': target}).scalar_one() == 0

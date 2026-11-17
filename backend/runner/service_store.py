@@ -61,7 +61,7 @@ class ServiceStore:
         self.control = control
 
     @contextmanager
-    def transaction(self, create=False, migration=False):
+    def transaction(self, create=False, migration=False, *, blocking=True, timeout=30):
         """No persistent connection: hot journals are recovered on reopen.
 
         A crash before first atomic rename leaves only an unpublished staging DB;
@@ -72,7 +72,7 @@ class ServiceStore:
         try:
             private_directory(self.control)
             lock = private_file(self.control / 'service-access.lock', create=True)
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
             path = self.control / LEDGER
             fresh = not path.exists() and not path.is_symlink()
             if fresh:
@@ -97,7 +97,7 @@ class ServiceStore:
                     refuse(suffix == '-journal')
                     descriptor = private_file(sidecar)
                     os.close(descriptor)
-            connection = sqlite3.connect(str(path), isolation_level=None, timeout=30)
+            connection = sqlite3.connect(str(path), isolation_level=None, timeout=timeout)
             connection.execute('PRAGMA trusted_schema=OFF')
             refuse(connection.execute('PRAGMA journal_mode').fetchone()[0] == 'delete')
             connection.execute('PRAGMA synchronous=FULL')

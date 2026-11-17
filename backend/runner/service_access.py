@@ -53,7 +53,8 @@ class ServiceJournal(ProjectionJournal):
                        (length, str(filter_hash), digest, self.row_mac(length, filter_hash, digest)))
 
     def spans(self, value):
-        hits = []
+        from app.research_credentials import PAT_TOKEN
+        hits = [(match.start(), match.end()) for match in PAT_TOKEN.finditer(value)]
         with self.auth.store.transaction() as db:
             metadata = self.auth._state(db)
             refuse(metadata['projectionKey'] == self.key.hex() and metadata['trialId'] == self.trial)
@@ -317,6 +318,19 @@ class ServiceAccessAuth(AccessAuth):
                 raise CodexFailure('not_configured')
             with self.store.transaction() as db:
                 self._check(self._state(db))
+
+    def research_authorized(self):
+        """Fresh local auth only; never refresh/RPC or wait behind an install."""
+        if not self.mutex.acquire(blocking=False):
+            return False
+        try:
+            with self.store.transaction(blocking=False, timeout=.1) as db:
+                self._check(self._state(db))
+            return True
+        except Exception:
+            return False
+        finally:
+            self.mutex.release()
 
     def consume(self, request):
         request = canonical_uuid(request)

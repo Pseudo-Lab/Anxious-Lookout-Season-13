@@ -34,7 +34,7 @@ def test_writing_restore_retains_drafts_proposals_and_reapplies_grants(admin, mo
         control.execute(text('CREATE DATABASE ' + database))
     try:
         monkeypatch.setenv('ADMIN_DATABASE_URL', url.render_as_string(hide_password=False))
-        migrate('0005_writing')
+        migrate('0009_research_pats')
         candidate = create_engine(url, hide_parameters=True)
         with Session(candidate) as db, db.begin():
             owner = db.execute(text("INSERT INTO auth.accounts(github_id,login,is_approved,role) VALUES('333333','restore-test',true,'editor') RETURNING id")).scalar_one()
@@ -46,9 +46,9 @@ def test_writing_restore_retains_drafts_proposals_and_reapplies_grants(admin, mo
                 content='Retained proposal', mutationId=str(uuid.uuid4())))
         with candidate.begin() as db:
             db.execute(text('REVOKE UPDATE ON research.document_drafts FROM anxious_api'))
-        assert restore_candidate(url.render_as_string(hide_password=False), os.environ['API_DATABASE_PASSWORD'], database) == '0005_writing'
+        assert restore_candidate(url.render_as_string(hide_password=False), os.environ['API_DATABASE_PASSWORD'], database) == '0009_research_pats'
         with candidate.connect() as db:
-            assert validate_research(db) == '0005_writing'
+            assert validate_research(db) == '0009_research_pats'
             assert db.execute(text('SELECT content,state FROM research.document_drafts WHERE id=:id'), {'id': draft['id']}).one() == ('Retained draft', 'active')
             assert db.execute(text('SELECT content,status FROM research.document_proposals WHERE id=:id'), {'id': proposal['id']}).one() == ('Retained proposal', 'pending')
             assert db.execute(text('SELECT count(*) FROM research.versions')).scalar_one() == 1
@@ -76,7 +76,7 @@ def test_posts_restore_retains_versions_and_drafts(admin, monkeypatch):
         control.execute(text('CREATE DATABASE ' + database))
     try:
         monkeypatch.setenv('ADMIN_DATABASE_URL', url.render_as_string(hide_password=False))
-        migrate('0007_post_blocks')
+        migrate('0009_research_pats')
         candidate = create_engine(url, hide_parameters=True)
         with Session(candidate) as db, db.begin():
             owner = db.execute(text("INSERT INTO auth.accounts(github_id,login,is_approved,role) VALUES('444444','post-restore',true,'editor') RETURNING id")).scalar_one()
@@ -90,9 +90,9 @@ def test_posts_restore_retains_versions_and_drafts(admin, monkeypatch):
             proposal = create_proposal(store, Propose(**{k:v for k,v in body.items() if k!='content'}, contentInput={'format':'markdown','text':'Unsaved words'}, postId=post['id'], expectedVersion=1, mutationId=str(uuid.uuid4())))
         with candidate.begin() as db:
             db.execute(text('REVOKE UPDATE ON research.post_drafts FROM anxious_api'))
-        assert restore_candidate(url.render_as_string(hide_password=False), os.environ['API_DATABASE_PASSWORD'], database) == '0007_post_blocks'
+        assert restore_candidate(url.render_as_string(hide_password=False), os.environ['API_DATABASE_PASSWORD'], database) == '0009_research_pats'
         with candidate.connect() as db:
-            assert validate_research(db) == '0007_post_blocks'
+            assert validate_research(db) == '0009_research_pats'
             assert db.execute(text("SELECT payload->>'textProjection',state FROM research.post_drafts WHERE id=:id"), {'id': active['id']}).one() == ('Unsaved words', 'active')
             assert db.execute(text("SELECT payload->>'textProjection' FROM research.post_versions WHERE post_id=:id"), {'id': post['id']}).scalar_one() == 'Version'
             assert db.execute(text("SELECT payload->>'textProjection',status FROM research.post_proposals WHERE id=:id"), {'id': proposal['id']}).one() == ('Unsaved words', 'pending')

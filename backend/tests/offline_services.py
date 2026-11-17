@@ -19,6 +19,8 @@ def create_api():
     from app.main import create_app
     app = create_app()
     app.state.codex_verification = "fixture"
+    from .offline_research import register
+    register(app)
     return app
 
 

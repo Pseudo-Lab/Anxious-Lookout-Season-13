@@ -1,0 +1,263 @@
+{
+  "credentials": {
+    "columns": {
+      "id": [
+        "UUID",
+        false,
+        null
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "name": [
+        "VARCHAR(80)",
+        false,
+        null
+      ],
+      "scope": [
+        "VARCHAR(8)",
+        false,
+        null
+      ],
+      "purpose": [
+        "VARCHAR(40)",
+        false,
+        null
+      ],
+      "token_hash": [
+        "VARCHAR(64)",
+        false,
+        null
+      ],
+      "expires_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        null
+      ],
+      "issued_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "rate_count": [
+        "INTEGER",
+        false,
+        "0"
+      ],
+      "revoked_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        true,
+        null
+      ],
+      "last_used_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        true,
+        null
+      ],
+      "rate_window": [
+        "TIMESTAMP WITH TIME ZONE",
+        true,
+        null
+      ]
+    },
+    "primary": [
+      "id"
+    ],
+    "checks": {
+      "credentials_name_check": "length(name) >= 1 AND length(name) <= 80",
+      "credentials_scope_check": "scope = 'read' OR scope = 'write'",
+      "credentials_purpose_check": "purpose = 'research-pat-v1'",
+      "credentials_token_hash_check": "token_hash ~ '^[0-9a-f]{64}$'",
+      "credentials_rate_count_check": "rate_count >= 0",
+      "credentials_expiry_check": "expires_at > issued_at"
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts",
+        "referred_columns": [
+          "id"
+        ]
+      }
+    ],
+    "unique": {
+      "credentials_token_hash_key": [
+        "token_hash"
+      ]
+    },
+    "indexes": {
+      "credentials_token_hash_key": {
+        "columns": [
+          "token_hash"
+        ],
+        "unique": true,
+        "where": null
+      },
+      "credentials_owner_issued_idx": {
+        "columns": [
+          "owner_id",
+          "issued_at",
+          "id"
+        ],
+        "unique": false,
+        "where": null
+      }
+    }
+  },
+  "pat_issuances": {
+    "columns": {
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "key": [
+        "UUID",
+        false,
+        null
+      ],
+      "fingerprint": [
+        "VARCHAR(64)",
+        false,
+        null
+      ],
+      "credential_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ]
+    },
+    "primary": [
+      "owner_id",
+      "key"
+    ],
+    "checks": {},
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts",
+        "referred_columns": [
+          "id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "credential_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "credentials",
+        "referred_columns": [
+          "id"
+        ]
+      }
+    ],
+    "unique": {},
+    "indexes": {}
+  },
+  "pat_audit": {
+    "columns": {
+      "id": [
+        "UUID",
+        false,
+        null
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "credential_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "operation": [
+        "VARCHAR(80)",
+        false,
+        null
+      ],
+      "status": [
+        "VARCHAR(16)",
+        false,
+        null
+      ],
+      "summary": [
+        "JSONB",
+        false,
+        null
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ]
+    },
+    "primary": [
+      "id"
+    ],
+    "checks": {
+      "pat_audit_status_check": "status = 'succeeded' OR status = 'failed'"
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "auth",
+        "referred_table": "accounts",
+        "referred_columns": [
+          "id"
+        ]
+      },
+      {
+        "constrained_columns": [
+          "credential_id"
+        ],
+        "referred_schema": "research",
+        "referred_table": "credentials",
+        "referred_columns": [
+          "id"
+        ]
+      }
+    ],
+    "unique": {},
+    "indexes": {}
+  },
+  "versions": {
+    "columns": {
+      "author_name": [
+        "VARCHAR(80)",
+        true,
+        null
+      ]
+    },
+    "checks": {
+      "versions_author_check": "(author_kind = 'human' OR author_kind = 'unknown' OR author_kind = 'codex' OR author_kind = 'pat') AND ((author_kind = 'codex') = (author_conversation_id IS NOT NULL)) AND ((author_kind = 'pat') = (author_credential_id IS NOT NULL)) AND ((author_kind = 'pat') = (author_name IS NOT NULL))"
+    }
+  },
+  "post_versions": {
+    "columns": {
+      "author_name": [
+        "VARCHAR(80)",
+        true,
+        null
+      ]
+    },
+    "checks": {
+      "post_versions_author_check": "(author_kind = 'human' OR author_kind = 'unknown' OR author_kind = 'codex' OR author_kind = 'pat') AND ((author_kind = 'codex') = (author_conversation_id IS NOT NULL)) AND ((author_kind = 'pat') = (author_credential_id IS NOT NULL)) AND ((author_kind = 'pat') = (author_name IS NOT NULL))"
+    }
+  }
+}

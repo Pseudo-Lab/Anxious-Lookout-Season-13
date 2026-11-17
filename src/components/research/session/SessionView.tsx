@@ -73,6 +73,7 @@ import type { CodexStatus } from "@/lib/research/types";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
 import SafeMarkdown, { StreamingMarkdown } from "@/components/research/SafeMarkdown";
+import ResearchActivity from "@/components/research/session/ResearchActivity";
 
 const POLL_MS = 2000;
 // 접수된 전송을 확인하는 대화 조회가 일시 실패했을 때의 재조회 간격(늘려 가며 최대값까지).
@@ -276,11 +277,11 @@ function ToolCall({ item }: { item: ToolCallItem }) {
             <>
               <div className="space-y-1">
                 <p className="text-xs font-medium text-stone-900">입력</p>
-                <Inert value={item.input} />
+                {item.input == null ? <p className="text-stone-500">기록된 입력이 없습니다.</p> : <Inert value={item.input} />}
               </div>
               <div className="space-y-1">
                 <p className="text-xs font-medium text-stone-900">출력</p>
-                <Inert value={item.output} />
+                {item.output == null ? <p className="text-stone-500">{item.status === "inProgress" || item.status === "approval" ? "결과를 확인하는 중입니다." : "기록된 출력이 없습니다."}</p> : <Inert value={item.output} />}
               </div>
             </>
           )}
@@ -1002,8 +1003,9 @@ export default function SessionView({ id, onArchived, onBack }: { id: string; on
 
   // 자동 스크롤: 바닥에 있을 때만 따라간다. 위로 올려 읽는 중이면 "최신으로" 버튼을 보인다.
   const contentRef = useRef<HTMLDivElement>(null);
+  const [receiptSignal, setReceiptSignal] = useState("");
   // 완료 때 "생각 중" 하나가 답변 하나로 바뀌면 항목 수는 같으므로, 마지막 항목과 대기 여부도 함께 본다(#89 review).
-  const scrollSignal = `${entries.length}|${entries.at(-1)?.key ?? ""}|${awaiting ? 1 : 0}|${liveItems.length}|${lastLive?.itemId ?? ""}`;
+  const scrollSignal = `${entries.length}|${entries.at(-1)?.key ?? ""}|${awaiting ? 1 : 0}|${liveItems.length}|${lastLive?.itemId ?? ""}|${receiptSignal}`;
   const { atBottom, stick } = useStickToBottom(contentRef, { enabled: loaded, live: awaiting, signal: scrollSignal });
 
   // 접수(202)된 전송은 대화 조회가 그 버전 이상을 보여 줄 때까지 보내는 중으로 둔다. 조회가 일시 실패(네트워크·5xx)하면
@@ -1097,6 +1099,8 @@ export default function SessionView({ id, onArchived, onBack }: { id: string; on
           ]}
         </ol>
       )}
+
+      <ResearchActivity key={s.id} id={s.id} record={s} active={chat.open && visible} poll={streamLive && awaiting} onChange={setReceiptSignal} />
 
       {refreshFailure && (
         <ErrorNotice failure={refreshFailure} prefix="최신 대화 상태를 불러오지 못했습니다. 마지막으로 받은 기록을 표시합니다." />
