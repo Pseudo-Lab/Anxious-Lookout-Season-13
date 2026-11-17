@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type SetStateAction } from "react";
 import Link from "next/link";
 import type { FetchFailure } from "@/lib/api/client";
 import {
@@ -12,16 +12,16 @@ import {
   listMaterials,
   listVersions,
   updateRelation,
-  type EvidenceInput,
   type RelationInput,
 } from "@/lib/research/api";
-import { cpLength } from "@/lib/research/bibliography";
+import { checkEvidence, evidencePayload, nextDraftKey, savedPayload, toDraft, type EvidenceDraft } from "@/lib/research/wikiInput";
 import { useLoad, useMutation } from "@/lib/research/hooks";
 import { usePagedList } from "@/lib/research/usePagedList";
 import { groupRelations, kindChoices, kindOf, readsAsSource, relationLabel, type RelationKind, type RelationKinds } from "@/lib/research/relationKinds";
 import { formatDateTime } from "@/lib/research/format";
-import { ITEM_TYPE_LABELS, LIMITS, type Endpoint, type Evidence, type ItemType, type Relation } from "@/lib/research/types";
+import { ITEM_TYPE_LABELS, LIMITS, type Endpoint, type ItemType, type Relation } from "@/lib/research/types";
 import ErrorNotice from "@/components/research/ErrorNotice";
+import { CharCount } from "@/components/research/ItemForms";
 
 export function itemHref(type: ItemType, id: string): string {
   return `/research/${type}/?id=${encodeURIComponent(id)}`;
@@ -40,51 +40,7 @@ function directionLabel(rel: Relation, self: Endpoint): { symbol: string; text: 
 const fieldClass = "rounded-lg border border-stone-300 px-3 py-1.5 text-sm";
 
 // ---- 근거 위치 ----
-
-interface EvidenceDraft {
-  key: number;
-  itemId: string;
-  versionId: string;
-  // 이미 저장된 근거의 버전 번호(첫 페이지 밖의 옛 버전도 선택지에 보이게)
-  versionNumber?: number;
-  locator: string;
-  quote: string;
-}
-
-let draftSeq = 0;
-const toDraft = (e: Evidence): EvidenceDraft => ({
-  key: ++draftSeq,
-  itemId: e.itemId,
-  versionId: e.versionId,
-  versionNumber: e.versionNumber,
-  locator: e.locator ?? "",
-  quote: e.quote ?? "",
-});
-
-const evidencePayload = (rows: EvidenceDraft[]): EvidenceInput[] =>
-  rows.map((r) => {
-    const locator = r.locator.trim();
-    const quote = r.quote.trim();
-    return { itemId: r.itemId, versionId: r.versionId, locator: locator || null, quote: quote || null };
-  });
-
-const savedPayload = (list: Evidence[]): EvidenceInput[] =>
-  list.map((e) => ({ itemId: e.itemId, versionId: e.versionId, locator: e.locator, quote: e.quote }));
-
-/** 저장 전 확인. 문제가 없으면 null. */
-function checkEvidence(rows: EvidenceDraft[]): string | null {
-  if (rows.length > LIMITS.evidence) return `근거 위치는 ${LIMITS.evidence}개까지 넣을 수 있습니다.`;
-  for (const [i, r] of rows.entries()) {
-    const n = i + 1;
-    if (!r.itemId || !r.versionId) return `근거 위치 ${n}: 항목과 버전을 골라 주세요.`;
-    if (!r.locator.trim() && !r.quote.trim()) return `근거 위치 ${n}: 위치(쪽·절)나 인용문 중 하나는 입력해 주세요.`;
-    if (cpLength(r.locator.trim()) > LIMITS.locator) return `근거 위치 ${n}: 위치는 ${LIMITS.locator}자 이하로 입력해 주세요.`;
-    if (cpLength(r.quote.trim()) > LIMITS.quote) return `근거 위치 ${n}: 인용문은 ${LIMITS.quote}자 이하로 입력해 주세요.`;
-  }
-  const seen = new Set(evidencePayload(rows).map((e) => JSON.stringify(e)));
-  if (seen.size !== rows.length) return "같은 근거 위치가 두 번 들어 있습니다. 하나를 지워 주세요.";
-  return null;
-}
+// 행 상태·확인은 lib/research/wikiInput(단위 테스트). 길이는 code point 기준이라 입력 칸에 maxLength를 두지 않는다.
 
 /** 항목의 버전 선택. 값이 비어 있으면 최신 버전을 고른다. */
 function VersionSelect({
@@ -132,19 +88,22 @@ function VersionSelect({
   );
 }
 
-/** 관계의 근거 위치 목록 편집. endpoints: 근거로 고를 수 있는 항목(관계의 두 끝). */
+/**
+ * 관계의 근거 위치 목록 편집. endpoints: 근거로 고를 수 있는 항목(관계의 두 끝).
+ * 여러 행의 버전 초기화가 같은 렌더에서 끝나도 서로 덮어쓰지 않도록 상태는 함수형으로 갱신한다.
+ */
 function EvidenceEditor({
   endpoints,
   rows,
-  onChange,
+  setRows,
   disabled,
 }: {
   endpoints: { item: Endpoint; role: string }[];
   rows: EvidenceDraft[];
-  onChange: (rows: EvidenceDraft[]) => void;
+  setRows: Dispatch<SetStateAction<EvidenceDraft[]>>;
   disabled?: boolean;
 }) {
-  const set = (key: number, patch: Partial<EvidenceDraft>) => onChange(rows.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+  const set = (key: number, patch: Partial<EvidenceDraft>) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
   return (
     <fieldset className="space-y-2">
       <legend className="text-xs font-medium text-stone-900">
@@ -179,37 +138,41 @@ function EvidenceEditor({
               )}
               <button
                 type="button"
-                onClick={() => onChange(rows.filter((x) => x.key !== r.key))}
+                onClick={() => setRows((rs) => rs.filter((x) => x.key !== r.key))}
                 aria-label={`근거 ${i + 1} 빼기`}
                 className="ml-auto text-xs text-stone-500 hover:text-red-700"
               >
                 빼기
               </button>
             </div>
-            <input
-              value={r.locator}
-              onChange={(e) => set(r.key, { locator: e.target.value })}
-              maxLength={LIMITS.locator}
-              placeholder="위치 (예: p.12, §3.2)"
-              aria-label={`근거 ${i + 1} 위치`}
-              className={`${fieldClass} w-full`}
-            />
-            <textarea
-              value={r.quote}
-              onChange={(e) => set(r.key, { quote: e.target.value })}
-              maxLength={LIMITS.quote}
-              rows={2}
-              placeholder="인용문 (원문 그대로)"
-              aria-label={`근거 ${i + 1} 인용문`}
-              className={`${fieldClass} w-full`}
-            />
+            <div className="flex items-center gap-2">
+              <input
+                value={r.locator}
+                onChange={(e) => set(r.key, { locator: e.target.value })}
+                placeholder="위치 (예: p.12, §3.2)"
+                aria-label={`근거 ${i + 1} 위치`}
+                className={`${fieldClass} min-w-0 flex-1`}
+              />
+              <CharCount value={r.locator} limit={LIMITS.locator} />
+            </div>
+            <div className="flex items-end gap-2">
+              <textarea
+                value={r.quote}
+                onChange={(e) => set(r.key, { quote: e.target.value })}
+                rows={2}
+                placeholder="인용문 (원문 그대로)"
+                aria-label={`근거 ${i + 1} 인용문`}
+                className={`${fieldClass} min-w-0 flex-1`}
+              />
+              <CharCount value={r.quote} limit={LIMITS.quote} />
+            </div>
           </div>
         );
       })}
       <button
         type="button"
         disabled={disabled || rows.length >= LIMITS.evidence || endpoints.length === 0}
-        onClick={() => onChange([...rows, { key: ++draftSeq, itemId: endpoints[0].item.id, versionId: "", locator: "", quote: "" }])}
+        onClick={() => setRows((rs) => [...rs, { key: nextDraftKey(), itemId: endpoints[0].item.id, versionId: "", locator: "", quote: "" }])}
         className="text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50"
       >
         + 근거 위치 추가
@@ -404,7 +367,7 @@ function RelationRow({
               { item: other, role: "대상" },
             ]}
             rows={rows}
-            onChange={setRows}
+            setRows={setRows}
           />
           {localError && <p role="alert" className="text-sm text-red-700">{localError}</p>}
           <div className="flex gap-2 text-sm">
@@ -569,7 +532,7 @@ function AddRelationForm({ self, kinds, onAdded }: { self: Endpoint; kinds: Rela
         aria-label="연결한 이유"
         className={`${fieldClass} w-full`}
       />
-      <EvidenceEditor endpoints={endpoints} rows={rows} onChange={setRows} />
+      <EvidenceEditor endpoints={endpoints} rows={rows} setRows={setRows} />
       {localError && <p role="alert" className="text-sm text-red-700">{localError}</p>}
       {failure && <ErrorNotice failure={failure} prefix="관계를 추가하지 못했습니다." />}
       <button

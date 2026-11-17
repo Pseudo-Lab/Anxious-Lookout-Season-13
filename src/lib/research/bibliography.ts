@@ -116,8 +116,14 @@ export function formatIssued(parts: number[]): string {
   return [String(y), ...(m !== undefined ? [pad(m)] : []), ...(d !== undefined ? [pad(d)] : [])].join("-");
 }
 
-// family만 있는 이름은 끝에 쉼표를 붙여 다시 읽을 때 기관 이름(literal)으로 바뀌지 않게 한다.
-const nameLine = (n: CslName) => ("literal" in n ? n.literal : n.given ? `${n.family}, ${n.given}` : `${n.family},`);
+// 저자 한 줄 표현. ‘성, 이름’은 개인, 쉼표 없는 줄은 기관·전체 이름(literal).
+// 쉼표가 들어간 기관 이름(예: Research, Inc.)은 앞에 ‘=’를 붙여 개인 이름으로 잘못 나뉘지 않게 한다.
+// family만 있는 이름은 끝에 쉼표를 붙여 다시 읽을 때 literal로 바뀌지 않게 한다.
+export const LITERAL_PREFIX = "=";
+export function nameLine(n: CslName): string {
+  if ("literal" in n) return n.literal.includes(",") || n.literal.startsWith(LITERAL_PREFIX) ? `${LITERAL_PREFIX}${n.literal}` : n.literal;
+  return n.given ? `${n.family}, ${n.given}` : `${n.family},`;
+}
 
 export function toBibliographyForm(b: Bibliography | null): BibliographyForm {
   return {
@@ -153,6 +159,11 @@ const FIELD_NAMES: Record<TextField, string> = {
 };
 
 function parseAuthorLine(line: string): CslName | string {
+  if (line.startsWith(LITERAL_PREFIX)) {
+    const literal = line.slice(LITERAL_PREFIX.length).trim();
+    if (!literal) return "‘=’ 뒤에 기관·전체 이름을 입력해 주세요.";
+    return cpLength(literal) > 300 ? "저자 이름은 300자 이하로 입력해 주세요." : { literal };
+  }
   const comma = line.indexOf(",");
   if (comma < 0) return cpLength(line) > 300 ? "저자 이름은 300자 이하로 입력해 주세요." : { literal: line };
   const family = line.slice(0, comma).trim();
@@ -170,7 +181,9 @@ function parseIssued(text: string): number[] | string {
   const [y, mo, d] = parts;
   if (y < 1 || (mo !== undefined && (mo < 1 || mo > 12))) return err;
   if (d !== undefined) {
-    const date = new Date(Date.UTC(y, mo - 1, d));
+    // Date.UTC는 0–99년을 1900년대로 바꾸므로 setUTCFullYear로 연도를 그대로 둔다.
+    const date = new Date(0);
+    date.setUTCFullYear(y, mo - 1, d);
     if (date.getUTCFullYear() !== y || date.getUTCMonth() !== mo - 1 || date.getUTCDate() !== d) return "발행일이 실제 날짜가 아닙니다.";
   }
   return parts;
@@ -181,8 +194,13 @@ export function normalizeDoi(text: string): string {
   return text.replace(/^(?:https?:\/\/(?:dx\.)?doi\.org\/|doi:\s*)/i, "");
 }
 
-/** 폼 값을 저장값으로. 종류를 고르지 않고 다른 칸도 비었으면 null(서지정보 없음). */
-export function fromBibliographyForm(f: BibliographyForm): FormResult {
+/**
+ * 폼 값을 저장값으로. 종류를 고르지 않고 다른 칸도 비었으면 null(서지정보 없음).
+ * original: 수정 전 저장값. 저자 줄이 원래 표현 그대로면 원래 이름 객체를 그대로 쓴다
+ * (쉼표가 든 성처럼 한 줄 표현으로 되돌릴 수 없는 이름도 다른 칸만 고칠 때 바뀌지 않는다).
+ */
+export function fromBibliographyForm(f: BibliographyForm, original: Bibliography | null = null): FormResult {
+  const kept = new Map((original?.author ?? []).map((n) => [nameLine(n), n] as const));
   const trimmed = {
     title: f.title.trim(),
     "container-title": f["container-title"].trim(),
@@ -212,7 +230,7 @@ export function fromBibliographyForm(f: BibliographyForm): FormResult {
   if (authorLines.length) {
     const names: CslName[] = [];
     for (const line of authorLines) {
-      const name = parseAuthorLine(line);
+      const name = kept.get(line) ?? parseAuthorLine(line);
       if (typeof name === "string") return { ok: false, error: name };
       names.push(name);
     }

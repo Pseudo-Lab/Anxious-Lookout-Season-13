@@ -9,7 +9,8 @@ import { LIMITS, type Draft, type ResearchDocument } from "@/lib/research/types"
 import { useDraftEditor } from "@/lib/research/useDraftEditor";
 import type { DraftLike, SaveStatus } from "@/lib/research/useServerDraft";
 import ErrorNotice from "@/components/research/ErrorNotice";
-import { Field, MarkdownEditor, SummaryField, inputClass, readSummary } from "@/components/research/ItemForms";
+import { Field, MarkdownEditor, SummaryField, inputClass } from "@/components/research/ItemForms";
+import { readSummary } from "@/lib/research/wikiInput";
 import Notice from "@/components/research/Notice";
 import TextDiff from "@/components/research/TextDiff";
 

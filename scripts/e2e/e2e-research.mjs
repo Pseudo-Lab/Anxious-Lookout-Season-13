@@ -223,11 +223,46 @@ check("R5. incoming relation on material A reads inverse", await appears(main.ge
   check("R5b. legacy group gone", (await main.getByRole("group", { name: "기타 (유형 미지정)" }).count()) === 0);
 }
 
+// R5e. 근거 위치 여러 개의 버전 목록이 늦게 함께 도착해도 각 행이 최신 버전으로 채워진다(행끼리 덮어쓰지 않음).
+{
+  await page.goto(materialAUrl);
+  await main.getByRole("heading", { name: "버전 기록" }).waitFor();
+  await main.locator("#version-history li").first().waitFor();
+  const held = [];
+  const VERSIONS = "**/api/research/materials/*/versions*";
+  await page.route(VERSIONS, (route) => {
+    held.push(route);
+  });
+  await main.getByRole("button", { name: "+ 근거 위치 추가" }).click();
+  await main.getByRole("button", { name: "+ 근거 위치 추가" }).click();
+  for (let i = 0; i < 50 && held.length < 2; i++) await page.waitForTimeout(100);
+  await page.unroute(VERSIONS);
+  for (const r of held.splice(0)) await r.continue();
+  const filled = await page
+    .waitForFunction(
+      () => {
+        const sel = [...document.querySelectorAll("main select")].filter((s) => /^근거 \d+ 버전$/.test(s.getAttribute("aria-label") ?? ""));
+        return sel.length === 2 && sel.every((s) => s.value !== "");
+      },
+      null,
+      { timeout: 8000 }
+    )
+    .then(() => true, () => false);
+  check("R5e. two delayed evidence rows both get the latest version", filled);
+}
+
 // R5w. #105 한 줄 요약·서지정보: 자료 수정(명시 값), 목록 index(요약·관계 수), 버전 기록, 문서 요약(초안 commit·요약만 수정·복원 시 명시)
 {
   const isPatch = (path) => (r) => r.method() === "PATCH" && new URL(r.url()).pathname.endsWith(`/api${path}`);
   await page.goto(materialAUrl);
   await main.getByRole("button", { name: "내용 수정" }).click();
+  // 길이는 Unicode code point 기준: 이모지 301개는 잘리지 않고 남아 저장 전에 막힌다(브라우저 maxLength 미사용).
+  await main.getByLabel("한 줄 요약 (선택)").pressSequentially("😀".repeat(151));
+  check("R5w. summary input not truncated at UTF-16 length", [...(await main.getByLabel("한 줄 요약 (선택)").inputValue())].length === 151);
+  await main.getByLabel("한 줄 요약 (선택)").fill("😀".repeat(301));
+  await main.getByRole("button", { name: "새 버전으로 저장" }).click();
+  check("R5w. 301 code points blocked locally", await appears(main.getByText("한 줄 요약은 300자 이하로 입력해 주세요.")));
+  check("R5w. counter shows code points", await appears(main.getByText("301/300")));
   await main.getByLabel("한 줄 요약 (선택)").fill("자료 A 요약");
   await main.getByText("서지정보 (선택)").click();
   await main.getByLabel("서지 종류").selectOption("article-journal");
@@ -256,6 +291,42 @@ check("R5. incoming relation on material A reads inverse", await appears(main.ge
   const rowA = main.getByRole("link", { name: /자료 A/ }).first();
   check("R5w. list shows summary", await appears(rowA.getByText("자료 A 요약")));
   check("R5w. list shows relation count", await appears(rowA.getByText("관계 3", { exact: false })));
+
+  // 저장된 CSL 이름(쉼표가 든 기관·성)은 다른 칸만 고쳐도 그대로 다시 보낸다.
+  const storedBib = {
+    type: "report",
+    author: [{ literal: "Research, Inc." }, { family: "Smith, Jr.", given: "John" }, { family: "Lee" }],
+    issued: { "date-parts": [[99, 1, 1]] },
+  };
+  const org = await api.send("POST", "/research/materials", {
+    title: "기관 저자 자료",
+    sourceUrl: "https://example.com/org",
+    collectedAt: new Date().toISOString(),
+    contentKind: "excerpt",
+    content: "기관 저자",
+    bibliography: storedBib,
+  });
+  await page.goto(U(`/research/material/?id=${org.body.id}`));
+  await main.getByRole("button", { name: "내용 수정" }).click();
+  await main.getByLabel("한 줄 요약 (선택)").fill("요약만 고침");
+  const orgPatch = page.waitForRequest(isPatch(`/research/materials/${org.body.id}`));
+  await main.getByRole("button", { name: "새 버전으로 저장" }).click();
+  const orgBody = (await orgPatch).postDataJSON();
+  check("R5w. untouched bibliography sent unchanged (literal with comma, family with comma, year 99)", JSON.stringify(orgBody.bibliography) === JSON.stringify(storedBib), JSON.stringify(orgBody.bibliography));
+  // 저자 칸에서 다른 줄만 고쳐도 원래 줄의 이름은 그대로 남는다.
+  await main.getByRole("button", { name: "내용 수정" }).click();
+  await main.getByText("서지정보 (선택)").click();
+  const authors = main.getByLabel("저자");
+  check("R5w. comma literal shown with = prefix", (await authors.inputValue()).split("\n")[0] === "=Research, Inc.");
+  await authors.fill((await authors.inputValue()).replace("Lee,", "Lee, Ana"));
+  const orgPatch2 = page.waitForRequest(isPatch(`/research/materials/${org.body.id}`));
+  await main.getByRole("button", { name: "새 버전으로 저장" }).click();
+  const orgBody2 = (await orgPatch2).postDataJSON();
+  check(
+    "R5w. edited author list keeps untouched names exactly",
+    JSON.stringify(orgBody2.bibliography?.author) === JSON.stringify([{ literal: "Research, Inc." }, { family: "Smith, Jr.", given: "John" }, { family: "Lee", given: "Ana" }]),
+    JSON.stringify(orgBody2.bibliography)
+  );
 
   const w = await api.send("POST", "/research/documents", { title: "위키 문서 W", content: "W 본문" });
   const wUrl = U(`/research/document/?id=${w.body.id}`);
@@ -298,6 +369,7 @@ check("R5. incoming relation on material A reads inverse", await appears(main.ge
 }
 
 // R6. 동시 수정 충돌 → 409 conflict 안내, 입력 유지
+await page.goto(materialAUrl); // R5w가 다른 화면에서 끝나므로 자료 A 화면으로 돌아온다
 await main.getByRole("button", { name: "내용 수정" }).click();
 await main.getByLabel("내용").fill("UI 쪽 수정");
 const current = await api.get(`/research/materials/${materialAId}`);

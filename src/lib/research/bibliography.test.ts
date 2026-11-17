@@ -66,6 +66,35 @@ describe("fromBibliographyForm", () => {
     expect(fromBibliographyForm(form({ type: "book", volume: "😀".repeat(50) })).ok).toBe(true);
     expect(fromBibliographyForm(form({ type: "book", volume: "😀".repeat(51) })).ok).toBe(false);
   });
+  it("accepts years 1–99 and checks leap days without the Date.UTC 1900 shift", () => {
+    expect(fromBibliographyForm(form({ type: "book", issued: "0099-01-01" }))).toEqual({ ok: true, value: { type: "book", issued: { "date-parts": [[99, 1, 1]] } } });
+    expect(fromBibliographyForm(form({ type: "book", issued: "100-01-01" })).ok).toBe(true);
+    expect(fromBibliographyForm(form({ type: "book", issued: "0004-02-29" })).ok).toBe(true);
+    expect(fromBibliographyForm(form({ type: "book", issued: "0100-02-29" })).ok).toBe(false);
+    expect(fromBibliographyForm(form({ type: "book", issued: "2000-02-29" })).ok).toBe(true);
+    expect(fromBibliographyForm(form({ type: "book", issued: "1900-02-29" })).ok).toBe(false);
+    expect(fromBibliographyForm(form({ type: "book", issued: "9999-12-31" })).ok).toBe(true);
+  });
+  it("reads =prefixed lines as literal names (commas allowed)", () => {
+    expect(fromBibliographyForm(form({ type: "report", authors: "=Research, Inc." }))).toEqual({
+      ok: true,
+      value: { type: "report", author: [{ literal: "Research, Inc." }] },
+    });
+    expect(toBibliographyForm({ type: "report", author: [{ literal: "Research, Inc." }, { literal: "OECD" }] }).authors).toBe("=Research, Inc.\nOECD");
+  });
+  it("keeps stored names that a line cannot express when the line is untouched", () => {
+    const stored = { type: "book", author: [{ family: "Smith, Jr.", given: "John" }, { literal: "Research, Inc." }, { family: "Lee" }] };
+    const f = toBibliographyForm(stored);
+    expect(fromBibliographyForm(f, stored)).toEqual({ ok: true, value: stored });
+    // 다른 칸만 고쳐도 이름은 그대로
+    expect(fromBibliographyForm({ ...f, publisher: "P" }, stored)).toEqual({ ok: true, value: { type: "book", publisher: "P", author: stored.author } });
+    // 한 줄만 고치면 그 줄만 새로 읽는다
+    const edited = { ...f, authors: f.authors.replace("Lee,", "Lee, Ana") };
+    expect(fromBibliographyForm(edited, stored)).toEqual({
+      ok: true,
+      value: { type: "book", author: [{ family: "Smith, Jr.", given: "John" }, { literal: "Research, Inc." }, { family: "Lee", given: "Ana" }] },
+    });
+  });
   it("round-trips through the form", () => {
     const b = {
       type: "chapter",
