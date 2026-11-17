@@ -5,6 +5,7 @@ import uuid
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from app.conversations import Runner, runners_from_file
 from app.migrate import migrate
@@ -292,7 +293,14 @@ def test_cli_post_save_reads_current_source_through_r2_router(client, admin, tmp
         'text': source.get('markdownProjection', source['textProjection']).rstrip() + '\n\nExplicit API revision'}
     saved = invoke('research_post_save', args)
     assert calls[-1] == ('research_post_save', args)
-    assert saved['latestVersion']['author'] == {'kind': 'codex', 'conversationId': session['id']}
+    assert 'author' not in saved['latestVersion']
+    with admin.connect() as db:
+        author = db.execute(text('SELECT p.owner_id,v.post_id,v.author_kind,v.author_conversation_id,v.author_credential_id,v.author_name '
+                                 'FROM research.post_versions v JOIN research.posts p ON p.id=v.post_id WHERE v.id=:id'),
+                            {'id': saved['latestVersion']['id']}).one()
+        assert str(author.owner_id) == str(owner) and str(author.post_id) == saved['id']
+        assert author.author_kind == 'codex' and str(author.author_conversation_id) == session['id']
+        assert author.author_credential_id is None and author.author_name is None
     assert saved['latestVersion']['tags'] == ['kept']
     persisted = client.get('/api/research/posts/' + saved['id']).json()
     assert persisted['latestVersion'] == saved['latestVersion']
