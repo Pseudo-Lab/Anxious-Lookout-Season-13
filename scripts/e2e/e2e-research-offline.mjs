@@ -1,6 +1,19 @@
 // 실제 API + 실제 adapter + offline protocol fixture(backend/compose.m3-offline.yml)에서 세션 UI를 브라우저로 확인한다.
 // 모델/Codex provider/credential 없음(verification=fixture, 응답 "Offline fixture answer"). UI 모의 제어(__mock) 미사용.
-// #97의 이 fixture는 테스트용 dynamicToolCall 경로다. 실제 MCP/C2/F2 envelope 증거가 아니다.
+// #97 r2: 이 fixture의 owner dynamicToolCall은 거부돼야 한다. 실제 CLI/HTTPS/모델 증거가 아니다.
+// PM 결정: messages/front/2026-11-17-pm-issue97-offline-scope-detail.md.
+// 퇴역 목록은 성공 수에 넣지 않는다. 메시지/권한/공개 loader 검증은 아래에 별도로 유지한다.
+const retired = [
+  ["O2", "callback 직접 저장·불변 snapshot·codex author", "back test_agent_research_saves / test_agent_research_regressions + review PG; F1 versionAuthor unit"],
+  ["O5/O6/O8", "callback 문서 수로 재전송·재접속·재시작의 중복 저장 판정", "back agent mutation replay PG; 메시지 key/body·이력 보존은 아래 유지"],
+  ["O9", "B가 callback으로 만든 문서1건", "back owner isolation PG; 세션404·목록 격리는 아래 유지"],
+  ["I1/I2/I3/I4", "화면 문맥별 callback 저장·4개 codex v1", "back test_agent_research_saves / regressions + review PG; page/key/body 고정은 아래 유지"],
+  ["IW", "callback 문서 v2·사람 초안 보존·충돌 diff·human v3", "back test_agent_research_regressions + review PG; 일반 live conflict + research mock + F1 unit"],
+  ["IP6/IP7", "초안 문맥 callback 문서 생성·열기·작성자", "back agent saves PG; F1 unit / research mock; 초안 page/입력은 아래 유지"],
+  ["IP9", "callback 글 저장·공개본 불변·snapshot/diff", "back test_agent_research_saves / regressions + review PG; write mock + F1 unit"],
+  ["IP10", "callback 새 글·codex v1·사람 active draft 보존", "back test_agent_research_saves / regressions + review PG; write mock + F1 unit"],
+];
+for (const [id, intent, replacement] of retired) console.log(`RETIRED ${id}: ${intent} — ${replacement}`);
 // 조율(live-offline.sh): <name>.id → 승인 → <name>.ok, 승인 후 <name>.account(accountId) → runner 구성 → offline.ready,
 // 재시작 요청 restart.request → restart.done.
 import { chromium } from "playwright";
@@ -88,7 +101,7 @@ function apiClient(page) {
   };
 }
 // #9 공통 대화창. 대화는 모든 페이지의 대화창에서 하고, 질문 범위는 보낼 때 보고 있는 페이지로 정해진다.
-// fixture native의 기본 도구는 research_document_save라 성공 왕복은 문서 작업 공간(내 연구 문서 탭)에서 보낸다.
+// fixture native의 기본 owner callback research_document_save는 현 r2에서 거부된다.
 const DOCS = U("/research/?tab=documents");
 const chatOf = (p) => p.locator("#chat-panel");
 const chatUi = (p) =>
@@ -149,8 +162,6 @@ async function allItems(path, p = api) {
 const fixtureDocItems = async (p = api) => (await allItems("/research/documents", p)).filter((d) => d.title === "Fixture document");
 const fixtureDocs = async (p = api) =>
   (await fixtureDocItems(p)).length;
-const sessionIdOf = (url) => new URL(url).searchParams.get("id");
-const codexAuthor = (author, sessionUrl) => author?.kind === "codex" && author.conversationId === sessionIdOf(sessionUrl);
 const versionState = async (p = api) => (await fixtureDocItems(p)).map((d) => [d.id, d.version, d.latestVersion.id, d.latestVersion.number]).sort((a, b) => a[0].localeCompare(b[0]));
 // 1×1 PNG(서버가 실제로 decode·재인코딩한다)
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
@@ -230,7 +241,7 @@ await page.goto(U("/research/"));
   check("O1. no model name shown", (await c.getByText(/모델:|서버에서 고정/).count()) === 0);
 }
 
-// O2. 일반 메시지: 실제 adapter → 실제 storage tool callback → 전체 도구 입력·출력과 원본
+// O2 저장 성공 기대 퇴역(상단 매핑). 현재 owner callback 거부·입력 표시·무변경 경계를 검증한다.
 const s1 = await newSession(page, "오프라인 세션 1");
 const docs0 = await fixtureDocs();
 const proposals0 = (await allItems("/research/document-proposals")).length;
@@ -243,14 +254,9 @@ check("O2. tool call listed", await appears(toolBtn));
 await toolBtn.first().click();
 check("O2. full tool input shown inert", await appears(chat.locator("pre", { hasText: "Complete fixture tool input" })));
 check("O2. no raw record entry (#94)", (await chat.getByRole("button", { name: /원본 기록/ }).count()) === 0);
-check("O2. tool saved one document directly via real API", (await fixtureDocs()) === docs0 + 1, `${docs0} -> ${await fixtureDocs()}`);
-{
-  const saved = (await fixtureDocItems()).find((d) => codexAuthor(d.latestVersion.author, s1));
-  const versions = saved ? await allItems(`/research/documents/${saved.id}/versions`) : [];
-  const snapshot = saved ? (await api.get(`/research/documents/${saved.id}/versions/${saved.latestVersion.id}`)).body : null;
-  check("O2. exactly one immutable snapshot with conversation author", versions.length === 1 && saved?.latestVersion.number === 1 && codexAuthor(snapshot?.author, s1) && snapshot?.content.includes("Complete fixture tool input"));
-}
-check("O2. direct save created no proposal", (await allItems("/research/document-proposals")).length === proposals0);
+check("R2. retired owner callback is rejected", await appears(chat.getByText("허용되지 않는 도구라 서버가 실행하지 않았습니다", { exact: false })));
+check("R2. rejected callback writes no document", (await fixtureDocs()) === docs0, `${docs0} -> ${await fixtureDocs()}`);
+check("R2. rejected callback creates no proposal", (await allItems("/research/document-proposals")).length === proposals0);
 
 // O3. 미기록 실패 입력: failed + platform 표시, 후속 명시 입력 성공 후에도 보존
 await send(chat, "/fixture/unrecorded");
@@ -270,7 +276,7 @@ await send(chat, "거절 뒤 질문");
 check("O4. new explicit message after rejection succeeds", await appears(chat.getByText("Offline fixture answer").nth(2)));
 await settled(chat);
 
-// O5. 응답 유실 → turn 완료 → 같은 key·본문 재전송: 실제 202 replay, 도구 문서 1건
+// O5 callback 중복 저장 판정 퇴역. 응답 유실 후 명시적 재전송의 key·메시지 보존은 유지.
 const postTimings = [];
 async function dropFirstSend(p) {
   let dropped = false;
@@ -304,8 +310,8 @@ async function dropFirstSend(p) {
   await chat.getByLabel("메시지").waitFor();
   check("O5. replay kept same key", keys.length === 2 && keys[0] === keys[1], JSON.stringify(keys));
   check("O5. one user message", (await userMsgs(chat, "재전송 질문").count()) === 1);
-  check("O5. one tool document (no second dispatch)", (await fixtureDocs()) === before + 1, `${before} -> ${await fixtureDocs()}`);
-  check("O5. replay preserved snapshot ids and version counts", JSON.stringify(await versionState()) === JSON.stringify(savedState));
+  check("O5. denied callback stays write-free across replay", (await fixtureDocs()) === before, `${before} -> ${await fixtureDocs()}`);
+  check("O5. rejected callback leaves snapshot state unchanged", JSON.stringify(await versionState()) === JSON.stringify(savedState));
 }
 
 // O6. 응답 유실 → 새로고침(재접속) → 입력·key 복구 → 재전송: 중복 없음
@@ -328,9 +334,9 @@ async function dropFirstSend(p) {
   await page.reload();
   await chat.getByLabel("메시지").waitFor();
   check("O6. one user message after reconnect replay", (await userMsgs(chat, "새로고침 질문").count()) === 1);
-  check("O6. one tool document", (await fixtureDocs()) === before + 1, `${before} -> ${await fixtureDocs()}`);
+  check("O6. denied callback stays write-free across reconnect", (await fixtureDocs()) === before, `${before} -> ${await fixtureDocs()}`);
   check("O6. reconnect reused the original key", keys.length === 2 && keys[0] === keys[1], JSON.stringify(keys));
-  check("O6. reconnect replay preserved snapshots", JSON.stringify(await versionState()) === JSON.stringify(savedState));
+  check("O6. reconnect cannot add callback snapshots", JSON.stringify(await versionState()) === JSON.stringify(savedState));
 }
 
 // O7. 같은 계정 다른 세션 busy(hold 중) / B runner 독립
@@ -372,8 +378,8 @@ async function dropFirstSend(p) {
   check("O8. pending tuple restored", (await chat.getByLabel("메시지").inputValue()) === "재시작 전 질문", await chat.getByLabel("메시지").inputValue());
   await chat.getByRole("button", { name: "다시 보내기" }).click();
   await chat.getByRole("button", { name: "보내기", exact: true }).waitFor();
-  check("O8. old tuple replay creates no new document", (await fixtureDocs()) === before + 1, `${before} -> ${await fixtureDocs()}`);
-  check("O8. restart and replay preserved snapshot ids and versions", JSON.stringify(await versionState()) === JSON.stringify(savedState));
+  check("O8. denied callback stays write-free across restart replay", (await fixtureDocs()) === before, `${before} -> ${await fixtureDocs()}`);
+  check("O8. restart and replay cannot add callback snapshots", JSON.stringify(await versionState()) === JSON.stringify(savedState));
   await send(chat, "재시작 후 이어하기");
   const continued = await appears(chat.getByText("Offline fixture answer").nth(7), 30000);
   check(
@@ -382,11 +388,11 @@ async function dropFirstSend(p) {
     continued ? "" : (await chat.innerText()).slice(-300).replace(/\n+/g, " / ")
   );
   await settled(chat);
-  check("O8. continue created exactly one more document", (await fixtureDocs()) === before + 2);
+  check("O8. explicit continue cannot revive owner callback writes", (await fixtureDocs()) === before);
 }
 
 // I. #9/#14 통합(실제 API + 실제 runner + offline fixture): 요청별 화면 문맥을 서버가 고정하고 화면이 그대로 표시한다.
-//    #14: 소유자 화면은 모두 owner_research(화면은 힌트), 공개 글만 research_page_context 읽기 범위.
+//    r2: owner callback 저장 기대는 퇴역. 화면은 힌트이며 공개 글만 research_page_context 읽기 범위.
 //    fixture native는 매 turn research_document_save(또는 /fixture/page-context에서 research_page_context)를 호출한다.
 {
   const s3 = await newSession(page, "범위 세션", U("/"));
@@ -401,15 +407,15 @@ async function dropFirstSend(p) {
   const lastTool = (name = "research_document_save") => chat.locator("li", { hasText: name }).last();
   let docs = await fixtureDocs();
 
-  // I1. general(홈): #14부터 소유자 도구 전부. 실제 callback이 저장을 실행하고 문서가 하나 생긴다.
+  // I1 저장 성공 기대 퇴역. general 화면 힌트와 서버 접수 문맥은 유지.
   check("I1. home shows general page hint", await appears(chat.getByText("보고 있는 화면: 일반")));
   await send(chat, "일반 페이지 질문");
   check("I1. general: answer shown", await appears(answers().nth(0)));
   await settled(chat);
   check("I1. general: body page {kind:general}", JSON.stringify(bodies.at(-1)?.body.page) === '{"kind":"general"}', JSON.stringify(bodies.at(-1)?.body));
   check("I1. general: accepted page badge from server", await appears(userMsgs(chat, "일반 페이지 질문").getByText("보낸 화면: 일반")));
-  check("I1. general: owner tool completed", await appears(lastTool().getByText("완료")));
-  check("I1. general: exactly one document written", (await fixtureDocs()) === docs + 1, `${docs} -> ${await fixtureDocs()}`);
+  check("I1. general: owner callback rejected", await appears(lastTool().getByText("거부됨")));
+  check("I1. general: rejected callback writes nothing", (await fixtureDocs()) === docs, `${docs} -> ${await fixtureDocs()}`);
   docs = await fixtureDocs();
 
   // I2. 문서 작업 공간: 같은 대화에서 화면 힌트만 바뀐다
@@ -421,8 +427,8 @@ async function dropFirstSend(p) {
   await settled(chat);
   check("I2. workspace: body page", JSON.stringify(bodies.at(-1)?.body.page) === '{"kind":"document_workspace"}', JSON.stringify(bodies.at(-1)?.body.page));
   check("I2. workspace: page badge", await appears(userMsgs(chat, "문서 목록 질문").getByText("보낸 화면: 내 문서")));
-  check("I2. workspace: tool completed", await appears(lastTool().getByText("완료")));
-  check("I2. workspace: exactly one document written", (await fixtureDocs()) === docs + 1, `${docs} -> ${await fixtureDocs()}`);
+  check("I2. workspace: owner callback rejected", await appears(lastTool().getByText("거부됨")));
+  check("I2. workspace: rejected callback writes nothing", (await fixtureDocs()) === docs, `${docs} -> ${await fixtureDocs()}`);
   check("I2. earlier general turn kept in same conversation", (await userMsgs(chat, "일반 페이지 질문").count()) === 1);
   docs = await fixtureDocs();
 
@@ -433,8 +439,8 @@ async function dropFirstSend(p) {
   await page.waitForURL(U("/"));
   check("I3. held answer arrives after navigation", await appears(answers().nth(2), 30000));
   await settled(chat);
-  check("I3. navigation during run: tool still completed", await appears(lastTool().getByText("완료")));
-  check("I3. navigation during run: document written once", (await fixtureDocs()) === docs + 1, `${docs} -> ${await fixtureDocs()}`);
+  check("I3. navigation during run: owner callback still rejected", await appears(lastTool().getByText("거부됨")));
+  check("I3. navigation cannot enable callback writes", (await fixtureDocs()) === docs, `${docs} -> ${await fixtureDocs()}`);
   check("I3. sent page stays 내 문서", await appears(userMsgs(chat, "/fixture/hold").getByText("보낸 화면: 내 문서")));
   check("I3. next hint follows current page", await appears(chat.getByText("보고 있는 화면: 일반")));
   docs = await fixtureDocs();
@@ -471,11 +477,7 @@ async function dropFirstSend(p) {
   );
   check("I4. replay accepted (no conflict error)", (await chat.getByText("메시지를 보내지 못했습니다").count()) === 0);
   check("I4. one user message", (await userMsgs(chat, "범위 고정 재전송").count()) === 1);
-  check("I4. no second dispatch (one document)", (await fixtureDocs()) === docs + 1, `${docs} -> ${await fixtureDocs()}`);
-  {
-    const saved = (await fixtureDocItems()).filter((d) => codexAuthor(d.latestVersion.author, s3));
-    check("I1-I4. four direct saves attributed to this conversation, each v1", saved.length === 4 && saved.every((d) => d.latestVersion.number === 1));
-  }
+  check("I4. replay cannot revive retired callback writes", (await fixtureDocs()) === docs, `${docs} -> ${await fixtureDocs()}`);
   await page.unroute("**/api/research/sessions/*/messages");
   await page.route("**/api/research/sessions/*/messages", record);
   docs = await fixtureDocs();
@@ -546,46 +548,10 @@ async function dropFirstSend(p) {
   await chat.getByLabel("메시지").waitFor();
 }
 
-// IW. #97 offline native → 직접 문서 v2 저장. 사람의 active 초안은 그대로 두고 commit 충돌/diff로 보호한다.
-{
-  const d = await api.send("POST", "/research/documents", { title: "직접 저장 대상 문서", content: "직접 저장 전 본문\n" });
-  check("IW. setup: document", d.status === 201, String(d.status));
-  const id = d.body.id;
-  await openAt(page, s1, U(`/research/document/?id=${id}`));
-  await main.getByRole("button", { name: "내용 수정" }).click();
-  await main.getByLabel("본문").fill("보존할 사람 문서 초안");
-  await main.getByText("초안 자동 저장됨").waitFor();
-  const draftBefore = (await api.get(`/research/documents/${id}/draft`)).body?.draft;
-  await send(chat, `/fixture/document-update ${id} ${d.body.version}`);
-  await settled(chat);
-  const head = (await api.get(`/research/documents/${id}`)).body;
-  const props = await allItems(`/research/documents/${id}/proposals`);
-  check(
-    "IW. direct update appends Codex v2 without a proposal",
-    head.content === "Complete fixture proposal content" && head.latestVersion.number === 2 && head.title === "Fixture proposal" && codexAuthor(head.latestVersion.author, s1) && props.length === 0
-  );
-  const versions = await allItems(`/research/documents/${id}/versions`);
-  const saved = (await api.get(`/research/documents/${id}/versions/${head.latestVersion.id}`)).body;
-  const old = (await api.get(`/research/documents/${id}/versions/${d.body.latestVersion.id}`)).body;
-  check("IW. exactly two immutable snapshots with separate authors", versions.length === 2 && saved.content === "Complete fixture proposal content" && codexAuthor(saved.author, s1) && old.content === "직접 저장 전 본문\n" && old.author?.kind === "human");
-  const draftAfter = (await api.get(`/research/documents/${id}/draft`)).body?.draft;
-  check("IW. agent save leaves active human draft unchanged", !!draftBefore && draftAfter?.state === "active" && JSON.stringify(draftAfter) === JSON.stringify(draftBefore));
-  check("IW. editor input kept during agent save", (await main.getByLabel("본문").inputValue()) === "보존할 사람 문서 초안");
-  await main.getByRole("button", { name: "새 버전으로 저장" }).click();
-  await main.getByRole("button", { name: "비교했고 이 내용으로 저장" }).waitFor();
-  check("IW. conflict diff shows the saved agent text", await appears(main.locator('[data-diff="del"]', { hasText: "Complete fixture proposal content" })));
-  check("IW. conflict preserves the dirty input", (await main.getByLabel("본문").inputValue()) === "보존할 사람 문서 초안");
-  check("IW. conflicting save does not append another snapshot", (await allItems(`/research/documents/${id}/versions`)).length === 2);
-  check("IW. Codex version has a platform conversation link", await appears(main.getByRole("link", { name: "작성 대화로 이동" })) && (await main.getByRole("link", { name: "작성 대화로 이동" }).first().getAttribute("href")) === new URL(s1).pathname + new URL(s1).search);
-  await main.getByRole("button", { name: "비교했고 이 내용으로 저장" }).click();
-  await main.getByRole("button", { name: "내용 수정" }).waitFor();
-  const after = (await api.get(`/research/documents/${id}`)).body;
-  check("IW. explicit conflict resolution saves human v3", after.latestVersion.number === 3 && after.content === "보존할 사람 문서 초안" && after.latestVersion.author?.kind === "human");
-  check("IW. no legacy proposal panel for direct writes", (await main.locator("#proposals").count()) === 0);
-}
+// IW 퇴역: owner callback 문서 update/Codex v2는 실행 권한이 없다. 상단 대체 증거 매핑 참조.
 
 // IP. #28 글(실제 API + 실제 runner): 이관 글 공개 → /write 초안 자동 저장·복구 → 저장 → 발행·익명 공개 → 재발행 diff → 발행 취소.
-//     #97: fixture 문서/글 저장은 즉시 버전 생성, 사람 초안은 유지. 공개 글 대화 범위는 public_post(postId).
+//     일반 편집·발행·이미지·철회는 유지. callback 직접 저장은 퇴역(상단 매핑).
 {
   const anonCtx = await browser.newContext();
   const anon = await anonCtx.newPage();
@@ -732,25 +698,7 @@ async function dropFirstSend(p) {
     `${media.status()} ${media.headers()["cache-control"]}`
   );
 
-  // #97: 제어 문구는 그대로지만 fixture의 실제 호출은 research_post_save다. 즉시 새 버전, 발행본 불변.
-  await openAt(page, s1, U(`/write/?id=${postId}`));
-  const beforeProp = (await api.get(`/research/posts/${postId}`)).body;
-  const postProposalsBefore = (await allItems("/research/post-proposals")).length;
-  await send(chat, "/fixture/post-propose 다듬어줘");
-  await settled(chat);
-  const afterProp = (await api.get(`/research/posts/${postId}`)).body;
-  check("IP9. direct save appends exactly one Codex version, publication unchanged", afterProp.latestVersion.number === beforeProp.latestVersion.number + 1 && afterProp.version === beforeProp.version + 1 && codexAuthor(afterProp.latestVersion.author, s1) && JSON.stringify(afterProp.publication) === JSON.stringify(beforeProp.publication));
-  const savedPostVersion = (await api.get(`/research/posts/${postId}/versions/${afterProp.latestVersion.id}`)).body;
-  const oldPostVersion = (await api.get(`/research/posts/${postId}/versions/${beforeProp.latestVersion.id}`)).body;
-  check("IP9. immutable new snapshot contains saved text and author", savedPostVersion.textProjection.includes("Complete fixture post proposal") && codexAuthor(savedPostVersion.author, s1));
-  check("IP9. older snapshot content is preserved", JSON.stringify(oldPostVersion.content) === JSON.stringify(beforeProp.latestVersion.content));
-  check("IP9. no new post proposal created", (await allItems("/research/post-proposals")).length === postProposalsBefore);
-  await page.reload();
-  check("IP9. saved post is visible without acceptance", await appears(main.locator(".prose").getByText("Complete fixture post proposal", { exact: false })));
-  check("IP9. no legacy proposal panel for the direct save", (await main.locator("#proposals").count()) === 0);
-  await main.getByRole("button", { name: "버전 비교" }).click();
-  check("IP9. version history diff shows the direct update", await appears(main.getByRole("region", { name: "버전 비교" }).locator('[data-diff="add"]', { hasText: "Complete fixture post proposal" })));
-  await main.getByRole("region", { name: "버전 비교" }).getByRole("button", { name: "비교 닫기" }).click();
+  // IP9 퇴역: callback post_save 성공·공개본 불변·Codex snapshot/diff. 상단 대체 증거 매핑 참조.
 
   // 공개 글 대화 범위: public_post + PublicPost.postId, 소유자 도구 없음
   const bodies = [];
@@ -794,35 +742,9 @@ async function dropFirstSend(p) {
   check("IP6. server accepted the draft context", (await appears(userMsgs(chat, "초안 문맥 질문"))), `${ip6Responses.join(" | ")} || ${(await chat.innerText()).slice(-300)}`);
   await page.unroute("**/api/research/sessions/*/messages", record);
   const contextDocs = (await fixtureDocItems()).filter((d) => !docsBeforeContext.has(d.id));
-  check("IP6. document save in draft context creates exactly one Codex v1", contextDocs.length === 1 && contextDocs[0].latestVersion.number === 1 && codexAuthor(contextDocs[0].latestVersion.author, s1));
-
-  // 새 글 저장은 별도 post를 만든다. 명시한 사람 draft는 active·내용·revision·post 연결 그대로 유지한다.
-  const humanDraftBefore = (await api.get(`/research/post-drafts/${ctxDraft}`)).body;
-  const postsBeforeSave = new Set((await allItems("/research/posts")).map((p) => p.id));
-  await send(chat, "/fixture/post-propose 이어서 써줘");
-  await settled(chat);
-  const createdPosts = (await allItems("/research/posts")).filter((p) => !postsBeforeSave.has(p.id));
-  check("IP10. direct save creates exactly one post with Codex v1", createdPosts.length === 1 && createdPosts[0].latestVersion.number === 1 && codexAuthor(createdPosts[0].latestVersion.author, s1));
-  check("IP10. no post proposal created", (await allItems("/research/post-proposals")).length === postProposalsBefore);
-  const humanDraftAfter = (await api.get(`/research/post-drafts/${ctxDraft}`)).body;
-  check("IP10. human draft stays active and unchanged, including post association", humanDraftBefore?.state === "active" && humanDraftAfter?.state === "active" && JSON.stringify(humanDraftAfter) === JSON.stringify(humanDraftBefore));
-  check("IP10. active editor and input stay on the human draft", new URL(page.url()).searchParams.get("draft") === ctxDraft && (await main.getByLabel("제목").inputValue()) === "문맥 초안");
-  check("IP10. W1: no slug requested", (await main.getByLabel(/주소\(slug\)/).count()) === 0);
-  if (createdPosts.length !== 1) throw new Error("IP10: expected exactly one directly saved post");
-  const newPost = (await api.get(`/research/posts/${createdPosts[0].id}`)).body;
-  check("IP10. server-generated slug, unpublished snapshot with fixture text", /^post-[0-9a-f]{32}$/.test(newPost.latestVersion.slug) && newPost.publication === null && newPost.latestVersion.textProjection.includes("Complete fixture post proposal"));
-  check("IP10. exactly one immutable Codex snapshot", (await allItems(`/research/posts/${newPost.id}/versions`)).length === 1 && codexAuthor((await api.get(`/research/posts/${newPost.id}/versions/${newPost.latestVersion.id}`)).body?.author, s1));
-  await page.goto(U(`/write/?id=${newPost.id}`));
-  check("IP10. directly saved post can be opened without acceptance", await appears(main.getByRole("heading", { name: newPost.latestVersion.title, exact: true })));
-
-  // IP6에서 직접 만든 문서를 owner 경로로 열어 저장 내용·snapshot·작성자를 확인한다. F2 링크 계약을 가정하지 않는다.
-  if (contextDocs.length !== 1) throw new Error("IP7: expected exactly one directly saved document");
-  const savedDocument = contextDocs[0];
-  await page.goto(U(`/research/document/?id=${savedDocument.id}`));
-  check("IP7. directly saved document opens without acceptance", await appears(main.getByRole("heading", { name: "Fixture document", exact: true })));
-  check("IP7. saved body shown", await appears(main.locator(".prose").getByText("Complete fixture tool input")));
-  check("IP7. exactly one immutable Codex snapshot", (await allItems(`/research/documents/${savedDocument.id}/versions`)).length === 1 && codexAuthor((await api.get(`/research/documents/${savedDocument.id}/versions/${savedDocument.latestVersion.id}`)).body?.author, s1));
-  check("IP7. no new-document proposals from owner turns", (await allItems("/research/document-proposals")).length === proposals0);
+  // IP6 문서 생성/IP7 열기/IP10 새 글 저장·초안 보존은 퇴역. page/입력 검증은 유지한다.
+  check("IP6. rejected callback creates no document in draft context", contextDocs.length === 0);
+  check("IP6. human draft and editor input remain selected", new URL(page.url()).searchParams.get("draft") === ctxDraft && (await main.getByLabel("제목").inputValue()) === "문맥 초안");
 
   // 발행 취소: 익명 404, 목록에서 빠짐
   await page.goto(U(`/write/?id=${postId}`));
@@ -867,7 +789,8 @@ async function dropFirstSend(p) {
   await B.page.goto(s1);
   check("O9. B cannot open A session (panel 404)", await appears(chatOf(B.page).getByText("항목을 찾을 수 없습니다")));
   const bDocs = await fixtureDocs(apiClient(B.page));
-  check("O9. B has exactly its own tool document", bDocs === 1, String(bDocs));
+  // O9 callback 문서1건 기대 퇴역. 권한·세션 격리와 owner callback 무변경 경계는 유지.
+  check("O9. B has no documents from retired callbacks", bDocs === 0, String(bDocs));
   await B.page.goto(U("/research/"));
   const bm = await chatList(B.page);
   check("O9. B list lacks A sessions", (await appears(bm.getByText("B 세션"))) && (await bm.getByText("오프라인 세션 1").count()) === 0);
@@ -943,5 +866,5 @@ check("feature-off: no runner preparation POST from any tab", runnerPosts.length
 check("console has no errors", consoleErrors.length === 0, consoleErrors.join(" | "));
 await browser.close();
 const failed = results.filter((r) => !r.ok);
-console.log(`\nRESULT ${results.length - failed.length}/${results.length} passed`);
+console.log(`\nRESULT ${results.length - failed.length}/${results.length} passed; ${retired.length} retired groups excluded (see RETIRED mapping)`);
 process.exit(failed.length ? 1 : 0);
