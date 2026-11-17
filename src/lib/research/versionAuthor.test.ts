@@ -36,6 +36,13 @@ describe("#97 version authors", () => {
   it("drops non-Codex conversation ids and extra provider fields", () => {
     expect(parseVersionAuthor({ ...CODEX, kind: "human", nativeThreadId: "private" })).toEqual(HUMAN);
   });
+  it("renders immutable PAT attribution as an external agent with no conversation link", () => {
+    const author = parseVersionAuthor({ kind: "pat", credentialId: ID(5), name: "외부 도우미", conversationId: ID(97), token: "not-copied", hash: "not-copied" });
+    expect(author).toEqual({ kind: "pat", credentialId: ID(5), name: "외부 도우미", conversationId: null });
+    expect(versionAuthorLabel(author)).toBe("외부 에이전트(외부 도우미)");
+    expect(versionConversationHref(author)).toBeNull();
+    expect(parseVersionAuthor({ kind: "pat", credentialId: "invalid", name: "외부 도우미" }).kind).toBe("unknown");
+  });
 });
 
 describe.each(["document", "material"] as const)("#97 %s author API ingestion", (type) => {

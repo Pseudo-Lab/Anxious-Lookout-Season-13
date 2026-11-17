@@ -2,8 +2,10 @@ import { BASE_PATH } from "@/lib/constants";
 
 // api-contracts/issue97-agent-research-v1.md: 버전의 작성 주체. 글 상위 author.login(소유자)과 별개다.
 export interface VersionAuthor {
-  kind: "human" | "codex" | "unknown";
+  kind: "human" | "codex" | "pat" | "unknown";
   conversationId: string | null;
+  credentialId?: string;
+  name?: string;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -14,6 +16,7 @@ export function parseVersionAuthor(value: unknown): VersionAuthor {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return { kind: "unknown", conversationId: null };
   const v = value as Record<string, unknown>;
   if (v.kind === "human") return { kind: "human", conversationId: null };
+  if (v.kind === "pat" && typeof v.credentialId === "string" && UUID.test(v.credentialId) && typeof v.name === "string" && v.name.trim() && v.name.length <= 80 && !/[\u0000-\u001f\u007f]/.test(v.name)) return { kind: "pat", conversationId: null, credentialId: v.credentialId.toLowerCase(), name: v.name };
   if (v.kind === "codex") return {
     kind: "codex",
     conversationId: typeof v.conversationId === "string" && UUID.test(v.conversationId) ? v.conversationId.toLowerCase() : null,
@@ -22,6 +25,7 @@ export function parseVersionAuthor(value: unknown): VersionAuthor {
 }
 
 export function versionAuthorLabel(author?: VersionAuthor): string {
+  if (author?.kind === "pat") return author.name ? `외부 에이전트(${author.name})` : "외부 에이전트";
   return author?.kind === "codex" ? "Codex" : !author || author.kind === "human" ? "사람" : "작성자 미상";
 }
 
