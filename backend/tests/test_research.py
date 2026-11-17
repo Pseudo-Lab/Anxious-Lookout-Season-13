@@ -10,6 +10,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 
 from app.main import create_app, session_digest
 from app.migrate import migrate
+from app.research_schema_contract import REVISIONS
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -231,7 +232,7 @@ def test_m2_marker_and_data_preserved_by_followup(client, admin):
     with admin.connect() as db:
         assert db.execute(text("SELECT * FROM auth.accounts WHERE id=:id"), {"id": owner}).one() == before
         assert db.execute(text("SELECT version_num FROM auth.alembic_version")).scalar_one() == "0001_auth"
-        assert db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() in {"0002_research", "0003_sessions", "0004_publication", "0005_writing", "0006_posts", "0007_post_blocks", "0008_version_authors", "0009_research_pats"}
+        assert db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() in REVISIONS
     assert client.get("/readyz").status_code == 200
     assert client.get("/api/research/materials/" + row["id"]).status_code == 200
 
