@@ -37,6 +37,7 @@ class ContentVersion(Base):
     author_kind: Mapped[str] = mapped_column(String(16), server_default='human')
     author_conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
     author_credential_id: Mapped[uuid.UUID | None] = mapped_column(UUID)
+    author_name: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
 

@@ -333,7 +333,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
             return {**result, "reason": "unavailable"}
 
     def require_schema(store):
-        if store.db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() not in {"0003_sessions", "0004_publication", "0005_writing", "0006_posts", "0007_post_blocks", "0008_version_authors"}:
+        if store.db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() not in {"0003_sessions", "0004_publication", "0005_writing", "0006_posts", "0007_post_blocks", "0008_version_authors", "0009_research_pats"}:
             fail("not_ready", "Conversation schema is not ready", 503)
 
     def runner_for(owner, store=None):
@@ -729,7 +729,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                 fail("forbidden", "Storage tool permission was revoked", 403)
             from .research_schema_contract import validate_research
             try:
-                if validate_research(db.connection()) != '0008_version_authors':
+                if validate_research(db.connection()) != '0009_research_pats':
                     raise RuntimeError('Version provenance schema is required')
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)

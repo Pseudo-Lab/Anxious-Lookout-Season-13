@@ -7,6 +7,7 @@ COPY backend/app /app/app
 COPY backend/runner /app/runner
 COPY backend/broker /app/broker
 COPY backend/ops /app/ops
+COPY backend/client /app/client
 COPY backend/db /app/db
 COPY backend/alembic /app/alembic
 COPY backend/research_alembic /app/research_alembic

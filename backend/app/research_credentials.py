@@ -14,6 +14,26 @@ from .page_scope import shell_allowed
 
 PURPOSE = 'research-public-v1'
 TOKEN = re.compile(r'rturn1\.[0-9a-f-]{36}\.[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}')
+PAT_TOKEN = re.compile(r'rpat1\.[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}')
+CREDENTIAL_TOKEN = re.compile('(?:' + TOKEN.pattern + '|' + PAT_TOKEN.pattern + ')')
+
+
+def pat_partial_start(value):
+    """Earliest incomplete PAT suffix, at most85 chars; no secret state."""
+    literal = 'rpat1.'
+    for start in range(max(0, len(value) - 85), len(value)):
+        suffix = value[start:]
+        if len(suffix) <= 6:
+            if literal.startswith(suffix):
+                return start
+            continue
+        if not suffix.startswith(literal):
+            continue
+        rest = suffix[6:]
+        if (re.fullmatch(r'[0-9a-f-]{0,36}', rest)
+                or (len(rest) >= 37 and re.fullmatch(r'[0-9a-f-]{36}\.[A-Za-z0-9_-]{0,42}', rest))):
+            return start
+    return len(value)
 
 
 def enabled(name='RESEARCH_AGENT_API_ENABLE'):
@@ -26,7 +46,7 @@ def enabled(name='RESEARCH_AGENT_API_ENABLE'):
 def redact(value):
     """Also mask retired well-formed tokens when only their hashes remain."""
     if isinstance(value, str):
-        return TOKEN.sub('[REDACTED]', value)
+        return CREDENTIAL_TOKEN.sub('[REDACTED]', value)
     if isinstance(value, dict):
         return {redact(key): redact(item) for key, item in value.items()}
     if isinstance(value, list):

@@ -33,18 +33,20 @@ def restore_candidate(url, password, expected_database):
                 connection.connection.driver_connection.execute(sql.SQL("CREATE ROLE anxious_api LOGIN PASSWORD {}").format(sql.Literal(password)))
             frozen = Path(__file__).resolve().parent.parent / "db"
             inputs = ["001_auth.sql", "002_research.sql"]
-            if marker in {"0003_sessions", "0004_publication", "0005_writing", "0006_posts", "0007_post_blocks", "0008_version_authors"}:
+            if marker in {"0003_sessions", "0004_publication", "0005_writing", "0006_posts", "0007_post_blocks", "0008_version_authors", "0009_research_pats"}:
                 inputs.append("003_sessions.sql")
-            if marker in {"0004_publication", "0005_writing", "0006_posts", "0007_post_blocks", "0008_version_authors"}:
+            if marker in {"0004_publication", "0005_writing", "0006_posts", "0007_post_blocks", "0008_version_authors", "0009_research_pats"}:
                 inputs.append("004_publication.sql")
-            if marker in {'0005_writing', '0006_posts', '0007_post_blocks', '0008_version_authors'}:
+            if marker in {'0005_writing', '0006_posts', '0007_post_blocks', '0008_version_authors', '0009_research_pats'}:
                 inputs.append('005_writing.sql')
-            if marker in {'0006_posts', '0007_post_blocks', '0008_version_authors'}:
+            if marker in {'0006_posts', '0007_post_blocks', '0008_version_authors', '0009_research_pats'}:
                 inputs.append('006_posts.sql')
-            if marker in {'0007_post_blocks', '0008_version_authors'}:
+            if marker in {'0007_post_blocks', '0008_version_authors', '0009_research_pats'}:
                 inputs.append('007_post_blocks.sql')
-            if marker == '0008_version_authors':
+            if marker in {'0008_version_authors', '0009_research_pats'}:
                 inputs.append('008_version_authors.sql')
+            if marker == '0009_research_pats':
+                inputs.append('009_research_pats.sql')
             for filename in inputs:
                 for statement in (frozen / filename).read_text().split(";"):
                     statement = statement.strip()
@@ -54,7 +56,7 @@ def restore_candidate(url, password, expected_database):
                 connection.execute(text(f"REVOKE ALL ON {schema}.alembic_version FROM PUBLIC"))
                 connection.execute(text(f"GRANT SELECT ON {schema}.alembic_version TO anxious_api"))
             validate_research(connection)
-            if marker in {'0007_post_blocks', '0008_version_authors'}:
+            if marker in {'0007_post_blocks', '0008_version_authors', '0009_research_pats'}:
                 from research_alembic.post_blocks_migration import verify_backups
                 verify_backups(connection)
             # Restore revokes browser and tool grants without deleting any
@@ -63,7 +65,9 @@ def restore_candidate(url, password, expected_database):
             connection.execute(text("DELETE FROM auth.oauth_transactions"))
             from .research_credentials import revoke_sessions
             revoke_sessions(connection)
-            if marker in {"0003_sessions", "0004_publication", "0005_writing", "0006_posts", "0007_post_blocks", "0008_version_authors"}:
+            if marker == '0009_research_pats':
+                connection.execute(text('UPDATE research.credentials SET revoked_at=COALESCE(revoked_at,clock_timestamp())'))
+            if marker in {"0003_sessions", "0004_publication", "0005_writing", "0006_posts", "0007_post_blocks", "0008_version_authors", "0009_research_pats"}:
                 connection.execute(text("""
                     UPDATE research.conversations
                     SET tool_token_hash=NULL, tool_expires_at=NULL, login_hash=NULL,

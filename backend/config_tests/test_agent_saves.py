@@ -21,7 +21,7 @@ def resource(kind='document'):
 def test_authorship_is_server_context_and_not_a_tool_argument():
     conversation = uuid4()
     assert VersionAuthor().columns() == {
-        'author_kind': 'human', 'author_conversation_id': None, 'author_credential_id': None}
+        'author_kind': 'human', 'author_conversation_id': None, 'author_credential_id': None, 'author_name': None}
     assert VersionAuthor(conversation).columns()['author_conversation_id'] == conversation
     row = SimpleNamespace(author_kind='codex', author_conversation_id=conversation)
     assert value(row) == {'kind': 'codex', 'conversationId': str(conversation)}

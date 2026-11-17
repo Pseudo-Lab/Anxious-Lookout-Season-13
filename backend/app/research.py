@@ -399,7 +399,10 @@ def register_research(app, sessions, settings, current_session, error):
         if exc.details is not None:
             return JSONResponse(redact({'error': {'code': exc.code, 'message': exc.message, 'details': exc.details}}),
                                 status_code=exc.status, headers={'Cache-Control': 'no-store'})
-        return error(exc.code, exc.message, exc.status)
+        result = error(exc.code, exc.message, exc.status)
+        if exc.status == 429:
+            result.headers['Retry-After'] = '60'
+        return result
 
     @app.exception_handler(ValidationError)
     async def validation_error(request, exc):
@@ -441,7 +444,7 @@ def register_research(app, sessions, settings, current_session, error):
                     fail("csrf_invalid", "Invalid CSRF token", 403)
             from .research_schema_contract import validate_research
             try:
-                if validate_research(db.connection()) != '0008_version_authors':
+                if validate_research(db.connection()) != '0009_research_pats':
                     raise RuntimeError('Version provenance schema is required')
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
@@ -454,7 +457,7 @@ def register_research(app, sessions, settings, current_session, error):
         from .research_schema_contract import validate_research
         with sessions() as db:
             try:
-                if validate_research(db.connection()) != '0008_version_authors':
+                if validate_research(db.connection()) != '0009_research_pats':
                     raise RuntimeError('Version provenance schema is required')
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
@@ -464,6 +467,8 @@ def register_research(app, sessions, settings, current_session, error):
         return JSONResponse(redact(result), status_code=status, headers={"Cache-Control": "no-store"})
 
     def write(store, request, model, body, action, status=200):
+        from .research_credentials import reject_token_input
+        reject_token_input(body)
         post_route = any(segment in request.url.path for segment in ("/post-drafts", "/post-proposals", "/posts/"))
         if post_route:
             from .posts import validate_retry_encoding
@@ -574,3 +579,9 @@ def register_research(app, sessions, settings, current_session, error):
     register_membership(app, authorized, settings, response, write)
     from .conversations import register_conversations
     register_conversations(app, authorized, sessions, settings, response, write, current_session)
+    from .pat_management import register as register_pats
+    register_pats(app, sessions, settings, current_session, response)
+    from .research_rate import install as install_research_rate
+    install_research_rate(app, sessions, settings)
+    from .pat_distribution import register as register_pat_distribution
+    register_pat_distribution(app, settings, response)

@@ -39,7 +39,7 @@ def save_result(kind='document', arguments=None, conversation=None):
             entity = query.column_descriptions[0].get('entity')
             return latest if entity in {ContentVersion, PostVersion} else None
         def execute(self, *_):
-            return SimpleNamespace(scalar_one=lambda: '0008_version_authors')
+            return SimpleNamespace(scalar_one=lambda: '0009_research_pats')
         def get(self, *_):
             return SimpleNamespace(login='fixture-owner')
     store = Store(Database(), owner)

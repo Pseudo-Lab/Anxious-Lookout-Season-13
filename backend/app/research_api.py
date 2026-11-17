@@ -25,7 +25,7 @@ def require_schema(connection):
         revision = validate_research(connection)
     except RuntimeError:
         fail('not_ready', 'Research schema is not ready', 503)
-    if revision != '0008_version_authors':
+    if revision != '0009_research_pats':
         fail('not_ready', 'Research schema is not ready', 503)
 
 
@@ -61,7 +61,6 @@ def bearer(request):
     if len(values) != 1 or not values[0].startswith('Bearer '):
         fail('unauthenticated', 'Research authentication required', 401)
     value = values[0][7:]
-    locate(value)
     return value
 
 
@@ -75,6 +74,9 @@ def register(app, sessions, settings, response, runner_for):
         if operation not in OPERATIONS:
             fail('tool_not_allowed', 'Research operation is unavailable', 403)
         token = bearer(request)
+        if token.startswith('rpat1.'):
+            from .pat_calls import call as pat_call
+            return pat_call(app, sessions, operation, body, token, response)
         reject_token_input(body)
         conversation, request_id = locate(token)
         with budget.authorization() as deadline:

@@ -29,7 +29,7 @@ reviewed task SHA's compatible API runtime and ordinary runner. An old image's
 presence/config metadata or earlier baseline health check is insufficient.
 
 1. Record source SHA, architecture, manifest digests/build arguments and exact
-   compatible schema. PAT's proposed0009 needs a0009-compatible recovery image;
+   compatible schema. PAT's0009 needs a0009-compatible recovery image;
    an008-only image must not be used after migration. Submit the exact image/
    config/migration/restoration plan to review/PM before execution.
 2. Confirm the enrolled dev guest/context and occupancy, idle/drain and private

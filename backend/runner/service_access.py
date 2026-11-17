@@ -53,7 +53,8 @@ class ServiceJournal(ProjectionJournal):
                        (length, str(filter_hash), digest, self.row_mac(length, filter_hash, digest)))
 
     def spans(self, value):
-        hits = []
+        from app.research_credentials import PAT_TOKEN
+        hits = [(match.start(), match.end()) for match in PAT_TOKEN.finditer(value)]
         with self.auth.store.transaction() as db:
             metadata = self.auth._state(db)
             refuse(metadata['projectionKey'] == self.key.hex() and metadata['trialId'] == self.trial)

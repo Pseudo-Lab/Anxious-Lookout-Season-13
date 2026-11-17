@@ -26,7 +26,7 @@ CRD 부재/권한 부족이면 사용 중인 provider를 식별하고 미확인�
 
 실제 `codex-runner/runner-callback-draft.spec`를 [D1 최종형](../user-runner-e2e/40-runner-network.json)과 구조적으로 비교한다. broker8080·DNS53·hosting-api8081·world443와 기존 ingress/runner/trial/6443 deny를 유지한다. `toEntities: all` egress allow, 직접 API8080, host/remote-node, 추가 포트는 불가하다. egressDeny all TCP6443은 정상이다. 추가 적용 CNP/CCNP/KNP와 namespace/Pod selector, endpoint policy revision까지 확인한다. named 정책 하나만 비교하지 않는다. 불일치하면 #62 전환을 이 절차에 끼워 넣지 않고 중단한다.
 
-최종 소스 SHA·arm64 API/runner manifest digest·빌드 인자·설정 diff·기존 상태를 기록한다. DB는 최종 reviewed schema와 호환해야 한다. PAT migration이0009로 확정되면008-only fallback은 복구 후보가 아니다. [B3](DEV-VM.md#b3--recovery-certification-before-final-pr-approval)의 최종 호환 이미지 무모델 boot/owner read/human-save 인증이 선행되어야 한다. migration/backup은 별도 승인 순서로 수행하며 startup migration·downgrade·기록 삭제를 하지 않는다.
+최종 소스 SHA·arm64 API/runner manifest digest·빌드 인자·설정 diff·기존 상태를 기록한다. DB는 최종 reviewed schema와 호환해야 한다. PAT0009 배포 후008-only fallback은 복구 후보가 아니다. [B3](DEV-VM.md#b3--recovery-certification-before-final-pr-approval)의 최종 호환 이미지 무모델 boot/owner read/human-save 인증이 선행되어야 한다. migration/backup은 별도 승인 순서로 수행하며 startup migration·downgrade·기록 삭제를 하지 않는다.
 
 ## 2. 한 규칙 렌더·검토·적용
 

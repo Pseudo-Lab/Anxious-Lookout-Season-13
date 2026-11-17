@@ -143,7 +143,7 @@ class Sanitizer:
         try:
             spans = self.auth.journal.spans(value)
             if getattr(self.auth, 'research_api_redaction', False):
-                from app.research_credentials import TOKEN
+                from app.research_credentials import CREDENTIAL_TOKEN as TOKEN
                 from .projection import merge_spans
                 spans = merge_spans(spans + [(match.start(), match.end()) for match in TOKEN.finditer(value)])
             return spans
@@ -186,6 +186,11 @@ class Holdback:
             c0 = hold.start(window)
         else:
             c0 = max(0, len(window) - (max(hold, 1) - 1))
+        if not final:
+            # Hold only a suffix that could become a PAT, without changing
+            # #95/#99's provider-prefix policy or delaying unrelated text.
+            from app.research_credentials import pat_partial_start
+            c0 = min(c0, pat_partial_start(window))
         cut = c0
         for start, end in spans:
             if start < c0 < end:

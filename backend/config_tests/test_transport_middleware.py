@@ -272,7 +272,7 @@ def test_no_base_http_middleware_remains(api, runner):
     client, headers, ids = runner
     for app in (api, client.app):
         classes = [entry.cls for entry in app.user_middleware]
-        assert len(classes) == 1 and not issubclass(classes[0], BaseHTTPMiddleware)
+        assert classes and all(not issubclass(cls, BaseHTTPMiddleware) for cls in classes)
 
 
 def test_research_status_keeps_service_state_auth_and_never_accepts_turn_bearer(runner):
@@ -291,6 +291,9 @@ def test_research_status_keeps_service_state_auth_and_never_accepts_turn_bearer(
     path = '/sessions/' + str(session) + '/research-authorize'
     assert client.post(path, json={'requestId': str(request_id)},
                        headers={'Authorization': 'Bearer ' + token}).status_code == 401
+    from app.research_pats import issue_value
+    assert client.post(path, json={'requestId': str(request_id)},
+                       headers={'Authorization': 'Bearer ' + issue_value(uuid4())}).status_code == 401
     assert seen == []
     reply = client.post(path, json={'requestId': str(request_id)}, headers=headers)
     assert reply.status_code == 200 and reply.json()['podUid'] == ids['pod']

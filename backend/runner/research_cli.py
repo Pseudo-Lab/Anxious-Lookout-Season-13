@@ -19,6 +19,7 @@ OPERATIONS = frozenset({'research_list', 'research_get', 'research_versions', 'r
     'research_document_update', 'research_relation_save', 'research_relation_update', 'research_archive',
     'research_post_save', 'research_post_draft_get'})
 TOKEN = re.compile(r'rturn1\.[0-9a-f-]{36}\.[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}')
+CREDENTIAL_TOKEN = re.compile('(?:' + TOKEN.pattern + r'|rpat1\.[0-9a-f-]{36}\.[A-Za-z0-9_-]{43})')
 CONNECT_HOST = 'traefik.kube-system.svc.cluster.local'
 
 
@@ -50,7 +51,7 @@ def timeout_signal(*args):
 
 def safe(value):
     if isinstance(value, str):
-        return TOKEN.sub('[REDACTED]', value)
+        return CREDENTIAL_TOKEN.sub('[REDACTED]', value)
     if isinstance(value, list):
         return [safe(item) for item in value]
     if isinstance(value, dict):

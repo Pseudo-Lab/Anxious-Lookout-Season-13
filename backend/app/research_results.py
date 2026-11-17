@@ -45,8 +45,14 @@ def common(value):
 
 def provenance(version):
     author = version['author']
-    require(isinstance(author, dict) and set(author) == {'kind', 'conversationId'} and author['kind'] == 'codex')
-    identity(author['conversationId'])
+    require(isinstance(author, dict))
+    if author.get('kind') == 'pat':
+        require(set(author) == {'kind', 'conversationId', 'credentialId', 'name'} and author['conversationId'] is None)
+        identity(author['credentialId'])
+        text(author['name'], 80, nonempty=True)
+    else:
+        require(set(author) == {'kind', 'conversationId'} and author['kind'] == 'codex')
+        identity(author['conversationId'])
     # An identical idempotent replay may belong to an earlier conversation.
     # Preserve its original version author rather than relabeling it now.
 

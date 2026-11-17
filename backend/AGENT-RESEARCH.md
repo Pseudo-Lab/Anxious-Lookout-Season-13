@@ -1,4 +1,4 @@
-# Agent research API (#97, r2)
+# Agent research API (#97, r3)
 
 Branch: `task/agent-research-api-97`. The approved direction is owner native shell
 calling the public research HTTPS API using the `anxious-research` skill/CLI.
@@ -27,15 +27,17 @@ is not evidence of a save. It does not prove a database commit by itself.
 
 ## Schema and recovery
 
-`0008_version_authors` is additive and remains required. Existing versions default
-to human; direct agent saves use the original authenticated conversation. Reserved
-credential IDs remain null until a later credential feature. No PAT endpoint is
-implemented. Existing proposals/drafts/publications/content remain unchanged.
+`0009_research_pats` adds independent hashed PAT principals/issuance receipts/
+safe audit and immutable PAT author names on top of `0008_version_authors`.
+Current API/ORM requires009. Existing human/Codex provenance and all proposals,
+drafts, publications and content remain unchanged. Direct internal agent saves
+use the authenticated conversation; external PAT saves use credential ID/name
+snapshots. Public snapshots retain their public owner projection.
 Startup never migrates. Migrate only through the reviewed operator job after
 backup/writer drain. Never downgrade the schema or delete provenance for rollback.
 
-An old main image rejects008. A deployment requires an exact reviewed
-**008-compatible recovery API+runner image**, immutable manifest digests, and a
+An008-only image cannot serve009. A deployment requires an exact reviewed
+**009-compatible recovery API+runner image**, immutable manifest digests, and a
 real development recovery read/human-save result. Historical MCP candidates and
 old benchmark artifacts are superseded and cannot establish r2 recovery safety.
 If a private control volume contains `research-fence.json`, startup refuses and
@@ -46,9 +48,9 @@ to review's VM record; verify actual state rather than assuming it is absent.
 ## Activation and validation
 
 `POST <basePath>/api/research/agent/v1/{operation}` accepts the existing owner
-operation JSON with a purpose-separated turn Bearer. It does not accept cookies,
-PATs or internal callback tokens as research authority. Human APIs retain their
-cookie+CSRF checks. Owner admission issues a token only with
+operation JSON with either a purpose-separated turn Bearer or independent PAT.
+Cookies/internal callback tokens do not supply agent research authority. Human
+APIs retain cookie+CSRF checks. Internal owner admission issues a token only with
 `RESEARCH_AGENT_API_ENABLE=true` and the dynamic user-runner transport selected.
 Runner/controller/API Pod-rendering configuration must separately set
 `CODEX_RUNNER_RESEARCH_API_ENABLE=true`, which renders
@@ -114,3 +116,36 @@ See [development gates](../infra/hosting/m3/agent-research/DEV-VM.md) and
 Back runs Docker pure unit tests only. Review owns PostgreSQL/API concurrency,
 full regressions, kernel/TLS/network/secret isolation, F2/e2e and recovery compatible
 with the final migrated schema. Earlier MCP unit/latency evidence is not r2 evidence.
+
+## External PATs (B8/F5)
+
+Cookie-only `/api/research/pats` supports issue/list and `DELETE /{id}` revoke.
+Issue requires approval, exact Origin/CSRF and UUID Idempotency-Key, with owner
+Account UPDATE serialization. Same normalized key/payload returns the existing
+ID and token:null before the active10 cap. Only the first committed201 exposes
+plaintext; the DB stores a purpose-separated hash. Default expiry30days,1–90,
+immutable name1–80. Revoked rows/authors remain. Valid-cookie list/revoke survives
+approval loss; new issue/use requires the feature flag. Browser logout does not
+revoke independent PATs. Restore marks all imported PATs revoked, retaining rows,
+version attribution, audit and content.
+
+Fresh current role intersects selected read/write: approved commenter public
+only, editor/admin selected scope, unapproved none. Private read/write operations
+never trust caller owner/author. PAT calls do not fabricate Conversation/F2 rows
+or use runner RPC. Account SHARE→mutation advisory→Credential UPDATE locks and
+fresh checks precede every action/replay. The separate bounded admission commit
+persists per-PAT60/min quota and lastUsed before action; action failure cannot
+refund quota. Sanitized audit and mutation commit atomically. Anonymous public/
+agent attempts are limited120/IP/min and600/process/min (single-process scope),
+using bounded XFF only from configured trusted peers. PAT syntax is masked even
+when retired/unobserved and streamed across chunk boundaries; provider-retirement
+flags remain unchanged.
+
+Public distribution at `/api/research/client/{pat-client.py,SKILL.md,operations.json}`
+provides the POSIX Python3 client and external skill from `backend/client/`.
+External clients use the public HTTPS origin/platform CA and a private0700 parent/
+0600 single-link owned file, with no token argv/env, proxy, TLS bypass, redirect or
+retry. Internal root CLI remains turn-only with its compiled Traefik Service pin.
+Use existing public REST without PAT for public content; commenter PAT may also
+read it under PAT quota. Full F5 DTO/response-loss and operation contract lives in
+`agent-worktree-comm/api-contracts/issue97-pat-r3-v1.md`.
