@@ -482,7 +482,13 @@ const publishButton = () => main.getByRole("button", { name: /글과 참고 자�
   await api.send("PATCH", `/research/documents/${docD.body.id}`, { title: "문서 D", content: "# 문서 D 두 번째 공개", expectedVersion: before.version });
   await page.goto(docUrl);
   await main.getByRole("button", { name: "새 내용으로 다시 공개" }).click();
+  // ‘공개 중’은 다시 공개 전부터 보이므로, 새 공개 POST 응답이 온 뒤에 방문자 화면을 새로 고친다.
+  const republished = page.waitForResponse(
+    (res) => res.request().method() === "POST" && /\/api\/research\/documents\/[^/]+\/publications$/.test(new URL(res.url()).pathname)
+  );
   await publishButton().click();
+  const republishRes = await republished;
+  check("R8. republish accepted", republishRes.ok(), String(republishRes.status()));
   await main.getByText("공개 중", { exact: true }).waitFor();
   await visitor.page.reload();
   check("R8. readers see latest release", await appears(vm.getByText("문서 D 두 번째 공개")));

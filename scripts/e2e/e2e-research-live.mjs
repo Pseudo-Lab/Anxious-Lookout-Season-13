@@ -291,7 +291,13 @@ const publicUrl = U(`/public/document/?id=${docD.body.id}`);
   check("setup. document edited", r.status === 200, String(r.status));
   await page.goto(docUrl);
   await main.getByRole("button", { name: "새 내용으로 다시 공개" }).click();
+  // ‘공개 중’은 다시 공개 전부터 보이므로, 새 공개 POST 응답이 온 뒤에 방문자 화면을 새로 고친다.
+  const republished = page.waitForResponse(
+    (res) => res.request().method() === "POST" && /\/api\/research\/documents\/[^/]+\/publications$/.test(new URL(res.url()).pathname)
+  );
   await publishButton().click();
+  const republishRes = await republished;
+  check("L8. republish accepted by real API", republishRes.ok(), String(republishRes.status()));
   await main.getByText("공개 중", { exact: true }).waitFor();
   await V.page.reload();
   check("L8. readers see latest release only", await appears(vm.getByText("D 두 번째 공개본")));
