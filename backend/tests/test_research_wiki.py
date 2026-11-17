@@ -160,6 +160,36 @@ def test_public_snapshot_carries_no_wiki_fields(client, admin):
         assert secret not in public
 
 
+def test_lint_reads_one_graph_snapshot_while_archive_waits(client, admin):
+    """review r1 major: an archive fired between lint's reads must wait for lint's graph lock."""
+    import threading
+    from app.research import Store
+    from app.research_lint import lint
+    owner, auth = identity(client, admin)
+    item = create(client, auth, bibliography={"type": "webpage"})
+    replies = []
+    archive = threading.Thread(target=lambda: replies.append(client.request(
+        "DELETE", "/api/research/materials/" + item["id"], json={"expectedVersion": 1}, headers=headers(auth))))
+    with client.app.state.sessions.begin() as db:
+        class Interleaving:
+            fired = False
+            def __getattr__(self, name):
+                return getattr(db, name)
+            def execute(self, statement, *args):
+                result = db.execute(statement, *args)
+                if "pg_advisory_xact_lock" not in str(statement) and not self.fired:
+                    self.fired = True  # After lint's first read, as in review's probe.
+                    archive.start()
+                    archive.join(1.0)
+                return result
+        result = lint(Store(Interleaving(), owner))
+        assert archive.is_alive() and not replies  # Blocked on the graph lock lint holds.
+        orphans = [finding["item"]["id"] for finding in result["items"] if finding["code"] == "orphan_material"]
+        assert orphans == [item["id"]]
+    archive.join(10)
+    assert not archive.is_alive() and replies[0].status_code == 200, replies
+
+
 def test_lint_and_relation_kinds_endpoint(client, admin):
     _, auth = identity(client, admin)
     old, new, lone = create(client, auth), create(client, auth), create(client, auth, bibliography=BIBLIOGRAPHY)

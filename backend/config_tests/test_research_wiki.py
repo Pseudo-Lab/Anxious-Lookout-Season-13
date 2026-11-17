@@ -326,6 +326,30 @@ def test_lint_truncates_but_counts_everything():
     assert len(result['items']) == 2 and result['truncated'] is True and sum(result['counts'].values()) == 7
 
 
+def test_lint_takes_the_graph_lock_before_reading():
+    # review r1 major: separate reads raced a concurrent archive (KeyError).
+    from app.research_lint import lint
+    calls = []
+    class Session:
+        def execute(self, statement, params=None):
+            calls.append('lock' if 'pg_advisory_xact_lock' in str(statement) else 'read')
+            return SimpleNamespace(all=lambda: [])
+        def scalars(self, statement):
+            calls.append('read')
+            return SimpleNamespace(all=lambda: [])
+    result = lint(Store(Session(), uuid4()))
+    assert calls == ['lock', 'read', 'read'] and result['items'] == []
+
+
+def test_lint_check_ignores_rows_outside_its_snapshot():
+    ids, items, latest, relations = graph()
+    gone = ids['old']
+    partial = {identity: version for identity, version in latest.items() if identity != gone}
+    result = check(items, partial, relations, 200)
+    assert all(str(gone) not in json.dumps(finding) for finding in result['items'])
+    assert result['counts']['cites_superseded'] == 0  # Its relations left the snapshot with it.
+
+
 def test_identifier_expected_only_for_identifier_kinds():
     complete = {'title': 't', 'author': [{'literal': 'x'}], 'issued': {'date-parts': [[2020]]}}
     for kind in ('article-journal', 'paper-conference', 'article', 'book', 'chapter', 'report', 'dataset'):

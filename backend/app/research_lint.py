@@ -17,23 +17,32 @@ CODES = ("orphan_material", "missing_bibliography", "relation_without_reason",
 
 
 def lint(store, limit=200):
-    items = store.db.scalars(select(Item).where(Item.owner_id == store.owner, Item.archived.is_(False))).all()
-    latest = {version.item_id: version for version in store.db.scalars(
-        select(ContentVersion).join(Item, and_(Item.id == ContentVersion.item_id, Item.content_number == ContentVersion.number))
-        .where(Item.owner_id == store.owner, Item.archived.is_(False), ContentVersion.owner_id == store.owner))}
+    # One consistent owner-graph snapshot (review r1 major): every graph write
+    # (item create/change/archive, relation create/change/archive) takes this
+    # transaction lock, so none can commit between the reads below.
+    store.graph_lock()
+    rows = store.db.execute(select(Item, ContentVersion).join(
+        ContentVersion, and_(ContentVersion.item_id == Item.id, ContentVersion.number == Item.content_number,
+                             ContentVersion.owner_id == Item.owner_id))
+        .where(Item.owner_id == store.owner, Item.archived.is_(False))).all()
+    items = [item for item, _ in rows]
+    latest = {item.id: version for item, version in rows}
     relations = store.db.scalars(select(Relation).where(*store.active_relations())).all()
     return check(items, latest, relations, limit)
 
 
 def check(items, latest, relations, limit):
     """Pure over loaded rows: active items, their latest versions, visible relations."""
-    ref = {item.id: {"type": item.kind, "id": str(item.id), "title": latest[item.id].title} for item in items}
-    relations = sorted(relations, key=lambda row: str(row.id))
+    ref = {item.id: {"type": item.kind, "id": str(item.id), "title": latest[item.id].title}
+           for item in items if item.id in latest}
+    # Defensive: only relations whose endpoints are both in this snapshot.
+    relations = sorted((row for row in relations if row.source_id in ref and row.target_id in ref),
+                       key=lambda row: str(row.id))
     found = {code: [] for code in CODES}
 
     linked = {end for row in relations for end in (row.source_id, row.target_id)}
     for item in sorted(items, key=lambda row: str(row.id)):
-        if item.kind != "material":
+        if item.kind != "material" or item.id not in ref:
             continue
         if item.id not in linked:
             found["orphan_material"].append({"code": "orphan_material", "item": ref[item.id]})
