@@ -1,5 +1,6 @@
 // 실제 API + 실제 adapter + offline protocol fixture(backend/compose.m3-offline.yml)에서 세션 UI를 브라우저로 확인한다.
-// 모델/Codex provider/credential 없음(verification=fixture, 응답 "Offline fixture answer"). UI 모의 제어(__mock) 미사용.
+// 실제 모델/Codex provider/운영 credential 없음(verification=fixture, 응답 "Offline fixture answer").
+// r2 대체1개만 test-image 전용 __mock trigger가 서버 내부 mock turn grant로 구동한다. UI/API 응답 주입 없음.
 // #97 r2: 이 fixture의 owner dynamicToolCall은 거부돼야 한다. 실제 CLI/HTTPS/모델 증거가 아니다.
 // PM 결정: messages/front/2026-11-17-pm-issue97-offline-scope-detail.md.
 // 퇴역 목록은 성공 수에 넣지 않는다. 메시지/권한/공개 loader 검증은 아래에 별도로 유지한다.
@@ -756,6 +757,69 @@ async function dropFirstSend(p) {
   check("IP8. public API 404", (await anon.request.get(U(`/api/public/posts/${slug}`))).status() === 404);
   check("IP8. image no longer public after unpublish", (await anon.request.get(U(uploaded?.url ?? "/x"))).status() === 404);
   await anonCtx.close();
+}
+
+// R2 대체1개: test-image-only held-status/mock grant → 실제 agent router/DB 저장 → receipt/F2/author.
+// 확정 계약: messages/front/2026-11-17-back-issue97-offline-trigger-contract.md.
+// 실제 fixed CLI/runner binding/TLS/커널/native resume를 검증하지 않는다. 토큰은 브라우저에 오지 않는다.
+{
+  const endpoint = U("/api/research/__mock/offline/research-save");
+  const me = await (await page.request.get(U("/api/auth/me"))).json();
+  const key = crypto.randomUUID();
+  const trigger = () => page.request.post(endpoint, {
+    data: {}, headers: { Origin: ORIGIN, "X-CSRF-Token": me.csrfToken, "Idempotency-Key": key },
+  });
+  const response = await trigger(); // 실패/불확실 결과는 자동 재시도하지 않는다.
+  check("R2. test-only save trigger returns 200", response.status() === 200, String(response.status()));
+  if (response.status() !== 200) throw new Error("R2 fixture trigger failed; no automatic retry");
+  const evidence = await response.json();
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const ids = ["sessionId", "requestId", "resourceId", "versionId", "receiptId"];
+  const safe = ids.every((field) => typeof evidence[field] === "string" && uuid.test(evidence[field])) &&
+    evidence.callbackRejected === true && Object.keys(evidence).sort().join(",") === [...ids, "callbackRejected"].sort().join(",");
+  check("R2. trigger returns only safe IDs and callback rejection evidence", safe);
+  if (!safe) throw new Error("R2 fixture returned an unexpected evidence shape");
+  const { sessionId, requestId, resourceId, versionId, receiptId } = evidence;
+  const session = await api.get(`/research/sessions/${sessionId}`);
+  const document = await api.get(`/research/documents/${resourceId}`);
+  const snapshot = await api.get(`/research/documents/${resourceId}/versions/${versionId}`);
+  const versions = await allItems(`/research/documents/${resourceId}/versions`);
+  const calls = await api.get(`/research/sessions/${sessionId}/research-calls`);
+  const matching = calls.body?.items?.filter((call) => call.id === receiptId) ?? [];
+  const saved = matching[0]?.saved;
+  const authorMatches = (author) => author?.kind === "codex" && author.conversationId === sessionId;
+  check("R2. dedicated admitted session is terminal idle", session.status === 200 && session.body.id === sessionId && session.body.state === "idle");
+  check("R2. exactly one saved document snapshot has Codex conversation author", document.status === 200 && snapshot.status === 200 &&
+    document.body.latestVersion.id === versionId && document.body.latestVersion.number === 1 && versions.length === 1 && versions[0].id === versionId &&
+    authorMatches(document.body.latestVersion.author) && authorMatches(snapshot.body.author));
+  check("R2. server receipt matches request and committed snapshot", calls.status === 200 && matching.length === 1 &&
+    matching[0].requestId === requestId && matching[0].operation === "research_document_save" && matching[0].status === "succeeded" &&
+    saved?.resourceType === "document" && saved.id === resourceId && saved.versionId === versionId && saved.versionNumber === 1 &&
+    saved.destination?.path === "/research/document/" && saved.destination.resourceId === resourceId && saved.destination.versionId === versionId);
+
+  await page.goto(U(`/research/session/?id=${sessionId}`));
+  await chat.getByLabel("메시지").waitFor();
+  const row = chat.getByRole("region", { name: "연구 작업 기록" }).locator(`[data-research-call="${receiptId}"]`);
+  check("R2. F2 renders the server-owned save receipt", await appears(row.getByText("문서 저장", { exact: true })) && await appears(row.getByText("저장 확인", { exact: true })));
+  const href = `/research/document/?id=${resourceId}#version-history`;
+  const link = row.getByRole("link", { name: "저장한 버전 기록", exact: true });
+  check("R2. F2 destination uses the committed document", await link.getAttribute("href") === href);
+  await link.click();
+  await page.waitForURL(U(href));
+  check("R2. saved document opens with server title", await appears(main.getByRole("heading", { name: document.body.title, exact: true })));
+  check("R2. version author links to its platform conversation", await appears(main.getByText("작성: Codex", { exact: true }).first()) &&
+    await main.getByRole("link", { name: "작성 대화로 이동", exact: true }).first().getAttribute("href") === `/research/session/?id=${sessionId}`);
+
+  // 성공을 관찰한 뒤의 명시적 동일 key 확인. 실패 시 자동 재시도가 아니다.
+  const replay = await trigger();
+  const replayEvidence = replay.status() === 200 ? await replay.json() : null;
+  check("R2. explicit same-key fixture confirmation returns identical evidence", !!replayEvidence &&
+    Object.keys(replayEvidence).sort().join(",") === Object.keys(evidence).sort().join(",") &&
+    Object.keys(evidence).every((field) => replayEvidence[field] === evidence[field]));
+  const after = await allItems(`/research/documents/${resourceId}/versions`);
+  const afterCalls = await api.get(`/research/sessions/${sessionId}/research-calls`);
+  check("R2. fixture confirmation appends no snapshot or receipt", after.length === 1 && after[0].id === versionId &&
+    afterCalls.status === 200 && JSON.stringify(afterCalls.body.items) === JSON.stringify(calls.body.items));
 }
 
 // O10. #7 모델 우회/불일치(model/rerouted): codex_model_unavailable, 해당 turn의 assistant 결과는 projection에서 제외되고
