@@ -3,7 +3,6 @@
 
 import type { BlockDocument } from "@/lib/blocks/types";
 import type { FormatChange } from "@/lib/blocks/projection";
-import type { VersionAuthor } from "@/lib/research/versionAuthor";
 
 export interface PublicPostDocument {
   id: string;
@@ -81,7 +80,6 @@ export interface PostVersion extends PostMeta {
   content?: BlockDocument;
   textProjection?: string;
   createdAt: string;
-  author?: VersionAuthor;
 }
 
 export interface PostPublicationRef {

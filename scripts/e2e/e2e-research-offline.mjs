@@ -115,7 +115,7 @@ const chatUi = (p) =>
 async function blockedFollowUp(p, client, sessionUrl, text) {
   const m = chatOf(p);
   await m.getByLabel("메시지").fill(text);
-  const locked = (await appears(m.getByText("보내기가 잠겨 있습니다"))) && (await m.getByRole("button", { name: "보내기" }).isDisabled());
+  const locked = (await appears(m.getByText("연결 안 됨"))) && (await m.getByRole("button", { name: "보내기" }).isDisabled());
   const sid = new URL(sessionUrl).searchParams.get("id");
   const detail = await client.get(`/research/sessions/${sid}`);
   const post = await client.send("POST", `/research/sessions/${sid}/messages`, { text, expectedVersion: detail.body.version });
@@ -238,7 +238,7 @@ await page.goto(U("/research/"));
 {
   const c = await chatList(page);
   await page.waitForTimeout(800);
-  check("O1. editor: no connection status panel", (await c.getByText(/테스트용 모의 응답|연결되어 있습니다/).count()) === 0);
+  check("O1. editor: no connection status panel", (await c.getByText(/테스트 연결|연결됨/).count()) === 0);
   check("O1. no model name shown", (await c.getByText(/모델:|서버에서 고정/).count()) === 0);
 }
 
@@ -250,7 +250,7 @@ await send(chat, "자료를 정리해줘");
 check("O2. running shown", await appears(chat.getByText("응답하는 중입니다."), 10000));
 check("O2. offline answer shown", await appears(chat.getByText("Offline fixture answer")));
 await settled(chat);
-const toolBtn = chat.getByRole("button", { name: /research_document_save/ });
+const toolBtn = chat.locator('li[data-tool-name="research_document_save"]').first().getByRole("button");
 check("O2. tool call listed", await appears(toolBtn));
 await toolBtn.first().click();
 check("O2. full tool input shown inert", await appears(chat.locator("pre", { hasText: "Complete fixture tool input" })));
@@ -405,7 +405,7 @@ async function dropFirstSend(p) {
   };
   await page.route("**/api/research/sessions/*/messages", record);
   const answers = () => chat.getByText("Offline fixture answer");
-  const lastTool = (name = "research_document_save") => chat.locator("li", { hasText: name }).last();
+  const lastTool = (name = "research_document_save") => chat.locator(`li[data-tool-name="${name}"]`).last();
   let docs = await fixtureDocs();
 
   // I1 저장 성공 기대 퇴역. general 화면 힌트와 서버 접수 문맥은 유지.
@@ -516,13 +516,14 @@ async function dropFirstSend(p) {
       bodies.at(-1)?.body.page?.kind === "public_document" && bodies.at(-1)?.body.page?.resourceId === pubDoc.body.id,
       JSON.stringify(bodies.at(-1)?.body.page)
     );
-    check("I6. public: page context tool completed", await appears(lastTool("research_page_context").getByText("완료")));
+    check("I6. public: page context tool completed", await appears(lastTool("research_page_context").getByText("도구 실행함", { exact: true })));
     check("I6. public: badge carries server title", await appears(userMsgs(chat, "/fixture/page-context").first().getByText(/보낸 범위: 이 공개 글 · 범위 공개 글/)));
     // #14: 공개 글은 유일한 도구 경계. 소유자 저장 호출은 실제 callback이 거부하고 문서는 생기지 않는다.
     docs = await fixtureDocs();
     await send(chat, "공개 글 저장 시도");
     check("I6. public: answer shown for owner-tool turn", await appears(answers().nth(5)));
     await settled(chat);
+    await lastTool().getByRole("button").click();
     check(
       "I6. public: owner save refused -> rejected shown",
       (await appears(lastTool().getByText("거부됨"))) && (await appears(lastTool().getByText("허용되지 않는 도구라 서버가 실행하지 않았습니다", { exact: false })))
@@ -787,11 +788,10 @@ async function dropFirstSend(p) {
   const calls = await api.get(`/research/sessions/${sessionId}/research-calls`);
   const matching = calls.body?.items?.filter((call) => call.id === receiptId) ?? [];
   const saved = matching[0]?.saved;
-  const authorMatches = (author) => author?.kind === "codex" && author.conversationId === sessionId;
   check("R2. dedicated admitted session is terminal idle", session.status === 200 && session.body.id === sessionId && session.body.state === "idle");
-  check("R2. exactly one saved document snapshot has Codex conversation author", document.status === 200 && snapshot.status === 200 &&
+  check("R2. exactly one saved document snapshot omits author metadata", document.status === 200 && snapshot.status === 200 &&
     document.body.latestVersion.id === versionId && document.body.latestVersion.number === 1 && versions.length === 1 && versions[0].id === versionId &&
-    authorMatches(document.body.latestVersion.author) && authorMatches(snapshot.body.author));
+    !("author" in document.body.latestVersion) && !("author" in snapshot.body) && versions.every((version) => !("author" in version)));
   check("R2. server receipt matches request and committed snapshot", calls.status === 200 && matching.length === 1 &&
     matching[0].requestId === requestId && matching[0].operation === "research_document_save" && matching[0].status === "succeeded" &&
     saved?.resourceType === "document" && saved.id === resourceId && saved.versionId === versionId && saved.versionNumber === 1 &&
@@ -799,19 +799,16 @@ async function dropFirstSend(p) {
 
   await page.goto(U(`/research/session/?id=${sessionId}`));
   await chat.getByLabel("메시지").waitFor();
-  const row = chat.getByRole("region", { name: "연구 작업 기록" }).locator(`[data-research-call="${receiptId}"]`);
-  check("R2. F2 renders the server-owned save receipt", await appears(row.getByText("문서 저장", { exact: true })) && await appears(row.getByText("저장 확인", { exact: true })));
+  const row = chat.getByRole("list", { name: "저장한 문서·글" }).locator(`[data-research-call="${receiptId}"]`);
+  check("R2. server-owned save appears as a short link", await appears(row.getByText(/^저장됨:/)) && (await chat.getByRole("region", { name: "연구 작업 기록" }).count()) === 0);
   const href = `/research/document/?id=${resourceId}#version-history`;
-  const link = row.getByRole("link", { name: "저장한 버전 기록", exact: true });
+  const link = row.getByRole("link", { name: "보기", exact: true });
   check("R2. F2 destination uses the committed document", await link.getAttribute("href") === href);
   await link.click();
   await page.waitForURL(U(href));
   check("R2. saved document opens with server title", await appears(main.getByRole("heading", { name: document.body.title, exact: true })));
-  const authorLink = main.getByRole("link", { name: "작성 대화로 이동", exact: true }).first();
-  const authorArea = main.locator("p").filter({ has: page.getByRole("link", { name: "작성 대화로 이동", exact: true }) }).first();
-  check("R2. linked author area identifies Codex", await appears(authorArea.filter({ hasText: /^작성:\s*Codex\s*·/ })));
-  // 작성자 텍스트 검사가 실패해도 href 검사를 생략하지 않는다.
-  check("R2. version author links to its platform conversation", await authorLink.getAttribute("href") === `/research/session/?id=${sessionId}`);
+  check("R2. version history shows no author text", (await main.getByText(/^작성:/).count()) === 0);
+  check("R2. version history shows no originating conversation link", (await main.getByRole("link", { name: "작성 대화로 이동", exact: true }).count()) === 0);
 
   // 성공을 관찰한 뒤의 명시적 동일 key 확인. 실패 시 자동 재시도가 아니다.
   const replay = await trigger();
@@ -832,7 +829,7 @@ async function dropFirstSend(p) {
   await openAt(page, s1);
   const answersBefore = await chat.getByText("Offline fixture answer").count();
   await send(chat, "/fixture/rerouted");
-  check("O10. rerouted -> fixed-model failure shown", await appears(chat.getByText("고정된 모델을 사용할 수 없어")));
+  check("O10. rerouted -> fixed-model failure shown", await appears(chat.getByText("고정된 모델을 사용할 수 없")));
   await settled(chat);
   const t = await chat.innerText();
   check("O10. wrong model / provider reason not shown", !t.includes("fixture-wrong-model") && !t.includes("highRiskCyberActivity"));
@@ -882,7 +879,7 @@ console.log(`INFO dropped message POST timings: ${JSON.stringify(postTimings)}`)
   await bm.getByLabel("메시지").waitFor();
   const bAnswersBefore = await bm.getByText("Offline fixture answer").count();
   await send(bm, "/fixture/early-started-missing-mismatch");
-  check("O11. early mismatch -> fixed-model failure shown", await appears(bm.getByText("고정된 모델을 사용할 수 없어")));
+  check("O11. early mismatch -> fixed-model failure shown", await appears(bm.getByText("고정된 모델을 사용할 수 없")));
   await settled(bm);
   const early = bm.locator("li[data-role=user]", { hasText: "/fixture/early-started-missing-mismatch" });
   const labels = await early.allInnerTexts();

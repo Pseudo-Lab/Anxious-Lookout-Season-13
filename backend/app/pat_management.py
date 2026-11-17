@@ -20,7 +20,7 @@ from . import research_api_budget as budget
 
 class Create(Input):
     name: str = Field(min_length=1, max_length=80)
-    scope: Literal['read', 'write']
+    scope: Literal['read', 'write'] | None = None  # Legacy wire input, no authority.
     expiryDays: int = Field(default=30, ge=1, le=90)
 
     @field_validator('name')
@@ -76,10 +76,15 @@ def register(app, sessions, settings, current_session, response):
             if str(key) != keys[0]:
                 fail('validation_error', 'Canonical Idempotency-Key UUID required', 422)
             parsed = Create.model_validate(body)
-            fingerprint = mutation_fingerprint('pat:create', parsed.model_dump())
+            payload = parsed.model_dump(exclude={'scope'})
+            # Keep the historical hash format for image rollback. Scope is
+            # ignored as authority and when matching an identical retry.
+            fingerprints = {scope: mutation_fingerprint('pat:create', {**payload, 'scope': scope})
+                            for scope in ('read', 'write')}
+            fingerprint = fingerprints[parsed.scope or 'write']
             previous = db.get(Issuance, (account.id, key))
             if previous is not None:
-                if previous.fingerprint != fingerprint:
+                if previous.fingerprint not in fingerprints.values():
                     fail('idempotency_conflict', 'Idempotency key already used', 409)
                 row = db.get(Credential, previous.credential_id)
                 return response({'credential': pats.value(row, account), 'token': None,
@@ -88,10 +93,10 @@ def register(app, sessions, settings, current_session, response):
             active = db.scalar(select(func.count()).select_from(Credential).where(
                 Credential.owner_id == account.id, Credential.revoked_at.is_(None), Credential.expires_at > at))
             if active >= 10:
-                fail('pat_limit', 'Revoke an active PAT before issuing another', 409)
+                fail('pat_limit', 'Active PAT limit reached', 409)
             identity = uuid4()
             token = pats.issue_value(identity)
-            row = Credential(id=identity, owner_id=account.id, name=parsed.name, scope=parsed.scope,
+            row = Credential(id=identity, owner_id=account.id, name=parsed.name, scope='write',
                 purpose=pats.PURPOSE, token_hash=pats.token_hash(token), created_at=at,
                 expires_at=at + timedelta(days=parsed.expiryDays), rate_count=0)
             db.add(row)

@@ -789,6 +789,7 @@ await openChat("글 대화");
 check("WP8. chat scope: this post", await appears(chat.getByText("보고 있는 화면: 이 글")));
 const before8 = await api.get(`/research/posts/${postId}`);
 await send("/fixture/post-propose 다듬어줘");
+await chat.locator("li[data-tool-id]").last().getByRole("button").click();
 check("WP8. chat explains post unchanged", await appears(chat.getByText("글 수정 제안이 만들어졌습니다", { exact: false })));
 check("WP8. post unchanged by proposal", (await api.get(`/research/posts/${postId}`)).latestVersion.number === before8.latestVersion.number);
 await chat.getByRole("link", { name: "제안 검토" }).last().click();
@@ -817,6 +818,7 @@ check("WP9. proposal bound to the open draft (page.draftId sent)", !!prop9 && pr
 await page.reload();
 check("WP9. editor lists proposal for this draft", await appears(main.getByRole("region", { name: "대화 새 글 제안" }).getByRole("link", { name: /초안 글 \(제안\) — 검토/ })));
 await openChat("글 대화");
+await chat.locator("li[data-tool-id]").last().getByRole("button").click();
 await chat.getByRole("link", { name: "제안 검토" }).last().click();
 await page.waitForURL(/\/write\/new\/\?proposal=/);
 check("WP9. review diffs from the draft", await appears(main.locator('[data-diff="add"]', { hasText: "Codex가 덧붙인 문단" })));
@@ -844,6 +846,7 @@ await page.goto(U("/research/?tab=documents"));
 await openChat("글 대화");
 const docsBefore = (await api.get("/research/documents")).items.length;
 await send("/fixture/doc-save 정리해줘");
+await chat.locator("li[data-tool-id]").last().getByRole("button").click();
 check("WP11. chat: new document proposal", await appears(chat.getByText("새 문서 제안이 만들어졌습니다", { exact: false })));
 check("WP11. no document created yet", (await api.get("/research/documents")).items.length === docsBefore);
 await chat.getByRole("link", { name: "제안 검토" }).last().click();
@@ -877,7 +880,7 @@ check("WP12. public post scope: bounded", await appears(chat.getByText("다음 �
   await openChat("글 대화");
   await chat.getByLabel("메시지").fill("느린 공개 글 질문");
   const sendBtn = chat.getByRole("button", { name: "보내기" });
-  check("WP12. F2: send locked while public post loads", (await appears(chat.getByText("이 공개 글을 확인한 뒤에 질문할 수 있습니다", { exact: false }))) && (await sendBtn.isDisabled()));
+  check("WP12. F2: send locked while public post loads", (await appears(chat.getByText("공개 글을 확인한 뒤 질문하세요.", { exact: true }))) && (await sendBtn.isDisabled()));
   await chat.getByLabel("메시지").press("Enter").catch(() => {});
   await chat.locator("form").evaluate((f) => f.requestSubmit()).catch(() => {});
   await page.waitForTimeout(500);
@@ -898,7 +901,7 @@ check("WP12. public post scope: bounded", await appears(chat.getByText("다음 �
   await openChat("글 대화");
   await page.getByText("글을 찾을 수 없습니다").waitFor();
   await chat.getByLabel("메시지").fill("없는 글 질문");
-  check("WP12. F2: not-found post keeps send locked", (await sendBtn.isDisabled()) && (await appears(chat.getByText("이 공개 글을 확인한 뒤에 질문할 수 있습니다", { exact: false }))));
+  check("WP12. F2: not-found post keeps send locked", (await sendBtn.isDisabled()) && (await appears(chat.getByText("공개 글을 확인한 뒤 질문하세요.", { exact: true }))));
   // 공개 글 간 이동: 이전 글의 postId를 다음 글에 쓰지 않는다
   let release2;
   const held2 = new Promise((r) => (release2 = r));

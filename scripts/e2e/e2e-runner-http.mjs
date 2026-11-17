@@ -146,7 +146,7 @@ async function shot(u, name) {
   await u.page.screenshot({ path: `${SHOTS}/runner-http-${name}.png` }).catch(() => {});
 }
 const sendBtnOf = (u) => u.chat.getByRole("button", { name: /^(보내기|다시 보내기)$/ });
-const actionBtnOf = (u) => u.chat.getByRole("button", { name: /^(대화 준비|다시 시도|환경 다시 켜기)$/ });
+const actionBtnOf = (u) => u.chat.getByRole("button", { name: /^(준비하기|다시 켜기)$/ });
 const lastResponse = (u) => u.net.responses.at(-1);
 async function waitResponses(u, n, timeout = 10000) {
   const deadline = Date.now() + timeout;
@@ -197,7 +197,7 @@ await step("E1", async () => {
   await A.chat.getByLabel("메시지").waitFor();
   await settle(A.page);
   check("E1 [real]. full document load = one new entry POST", A.net.posts.length === 2, String(A.net.posts.length));
-  check("E1 [real]. 환경 활성화 중 shown", await appears(A.chat.getByText("환경 활성화 중")));
+  check("E1 [real]. 환경 준비 중 shown", await appears(A.chat.getByText("환경 준비 중")));
   await A.chat.getByLabel("메시지").fill("A 준비 중 초안");
   check("E1 [real]. draft editable, only send locked", (await A.chat.getByLabel("메시지").isEnabled()) && (await sendBtnOf(A).isDisabled()));
   const g0 = A.net.gets;
@@ -265,11 +265,11 @@ await step("T1", async () => {
 
   // runner_unreachable(합성 UID/불확실)
   await toPhase("unreachable");
-  check("T1 [real]. unreachable → 환경 연결 확인 중", await appears(A.chat.getByText("환경 연결 확인 중")));
+  check("T1 [real]. unreachable → 연결 확인 중", await appears(A.chat.getByText("연결 확인 중")));
   const text = (await A.chat.innerText()).replace(/\s+/g, " ");
   // #94: 상태 패널(본문 설명)은 관리자만 본다. 편집자는 입력창 위 안내의 상태 이름(위 검사)만 보며, 회복 약속 문구가 없어야 한다.
   check("T1 [real]. unreachable copy: no recovery claim (editor sees the composer notice only)",
-    text.includes("환경 연결 확인 중") && !/잠시|켜지면|새 환경|복구/.test(text), text.slice(0, 160));
+    text.includes("연결 확인 중") && !/잠시|켜지면|새 환경|복구/.test(text), text.slice(0, 160));
   check("T1 [real]. unreachable: no action button, send locked", (await actionBtnOf(A).count()) === 0 && (await sendBtnOf(A).isDisabled()));
   await shot(A, "unreachable");
 
@@ -284,7 +284,7 @@ await step("T1", async () => {
   const r = lastResponse(A);
   check("T1 [real]. ready: entry POST 200 reuse, still runner_unreachable", r?.status === 200 && r.body?.reason === "runner_unreachable", JSON.stringify(r));
   check("T1 [real]. ready: never shown as connected/available",
-    (await appears(A.chat.getByText("환경 연결 확인 중"))) && (await A.chat.getByText(/연결되어 있습니다/).count()) === 0 && (await sendBtnOf(A).isDisabled()));
+    (await appears(A.chat.getByText("연결 확인 중"))) && (await A.chat.getByText(/연결되어 있습니다/).count()) === 0 && (await sendBtnOf(A).isDisabled()));
 
   // stopping(합성 UID, #16): 종료 근거 전에는 idle_stopped가 아니라 stopping(hint 5). 진입 POST는 저장되지 않는 거절이다.
   await toPhase("stopping");
@@ -309,8 +309,8 @@ await step("T1", async () => {
 
   // runner_failed(#16): 확인 필요. 버튼·자동 조회 없음, 진입 POST는 409 runner_reconciliation_required이며 근거를 바꾸지 않는다.
   await toPhase("failed");
-  check("T1 [real]. failed → 확인이 필요합니다, no action button",
-    (await appears(A.chat.getByText("확인이 필요합니다"))) && (await actionBtnOf(A).count()) === 0);
+  check("T1 [real]. failed → 운영자 확인 필요, no action button",
+    (await appears(A.chat.getByText("운영자 확인 필요"))) && (await actionBtnOf(A).count()) === 0);
   g0 = A.net.gets;
   p0 = A.net.posts.length;
   await sleep(7000);
@@ -323,20 +323,20 @@ await step("T1", async () => {
   await waitResponses(A, n1 + 1);
   check("T1 [real]. failed: entry POST → 409 runner_reconciliation_required",
     lastResponse(A)?.status === 409 && lastResponse(A)?.body?.error?.code === "runner_reconciliation_required", JSON.stringify(lastResponse(A)));
-  check("T1 [real]. failed: GET result shown (확인이 필요합니다), no button", (await appears(A.chat.getByText("확인이 필요합니다"))) && (await actionBtnOf(A).count()) === 0);
+  check("T1 [real]. failed: GET result shown (운영자 확인 필요), no button", (await appears(A.chat.getByText("운영자 확인 필요"))) && (await actionBtnOf(A).count()) === 0);
   await sleep(5000);
   const sf2 = await inspect(userA.accountId);
   check("T1 [real]. failed: one POST, phase/generation/receipts unchanged",
     A.net.posts.length === p0 + 1 && sf2.phase === sf.phase && sf2.generation === sf.generation && sf2.entryReceipts === sf.entryReceipts, JSON.stringify(sf2));
 
-  // idle_stopped: "환경 다시 켜기" → POST 1회 → provisioning
+  // idle_stopped: "다시 켜기" → POST 1회 → provisioning
   await toPhase("stopped");
-  check("T1 [real]. stopped → 환경이 쉬는 중 + 환경 다시 켜기", (await appears(A.chat.getByText("환경이 쉬는 중"))) && (await appears(A.chat.getByRole("button", { name: "환경 다시 켜기" }))));
+  check("T1 [real]. stopped → 쉬는 중 + 다시 켜기", (await appears(A.chat.getByText("쉬는 중"))) && (await appears(A.chat.getByRole("button", { name: "다시 켜기" }))));
   check("T1 [real]. stopped: draft kept, send locked", (await A.chat.getByLabel("메시지").inputValue()) === "A 준비 중 초안" && (await sendBtnOf(A).isDisabled()));
   await shot(A, "stopped");
   p0 = A.net.posts.length;
   n1 = A.net.responses.length;
-  await A.chat.getByRole("button", { name: "환경 다시 켜기" }).first().click();
+  await A.chat.getByRole("button", { name: "다시 켜기" }).first().click();
   await waitResponses(A, n1 + 1);
   check("T1 [real]. resume: one POST → 202 provisioning", A.net.posts.length === p0 + 1 && lastResponse(A)?.status === 202 && lastResponse(A)?.body?.reason === "provisioning", JSON.stringify(lastResponse(A)));
 });
@@ -388,7 +388,7 @@ await step("E3", async () => {
 await step("E4", async () => {
   await B.page.goto(U("/research/"));
   if (!(await B.chat.isVisible())) await B.page.getByRole("button", { name: "대화창 열기" }).click();
-  await appears(B.chat.getByText("환경 활성화 중"));
+  await appears(B.chat.getByText("환경 준비 중"));
   const p0 = B.net.posts.length;
   await B.context.clearCookies();
   const g = await apiB.get("/research/codex/status");
@@ -426,7 +426,7 @@ await step("A1", async () => {
   await C.page.goto(U("/research/"));
   await sleep(6000);
   const text = await C.page.locator("body").innerText();
-  check("A1 [hybrid]. after re-entry, no C runner state shown to the new account", !/환경 활성화 중|환경 연결 확인 중/.test(text), `${text.replace(/\s+/g, " ").slice(0, 120)} (delayed delivered=${delayed.delivered} dropped=${delayed.dropped})`);
+  check("A1 [hybrid]. after re-entry, no C runner state shown to the new account", !/환경 준비 중|연결 확인 중/.test(text), `${text.replace(/\s+/g, " ").slice(0, 120)} (delayed delivered=${delayed.delivered} dropped=${delayed.dropped})`);
   check("A1 [hybrid]. new (ineligible) account sends no POST", C.net.posts.length === p0 + 1, String(C.net.posts.length - p0));
   await C.context.close();
 });
@@ -449,7 +449,7 @@ await step("U1", async () => {
   const panel = (await D.chat.innerText()).replace(/\s+/g, " ");
   check("U1 [real]. whole panel (status + composer) makes no recovery/turn-on claim", !/잠시|켜지면|새 환경|복구/.test(panel), panel.slice(0, 200));
   check("U1 [real]. UI 확인 중 copy, no action button, send locked, draft kept",
-    (await appears(D.chat.getByText("환경 연결 확인 중"))) && (await actionBtnOf(D).count()) === 0 && // #94: 편집자는 입력창 위 안내의 상태 이름만 본다
+    (await appears(D.chat.getByText("연결 확인 중"))) && (await actionBtnOf(D).count()) === 0 && // #94: 편집자는 입력창 위 안내의 상태 이름만 본다
       (await sendBtnOf(D).isDisabled()) && (await D.chat.getByLabel("메시지").inputValue()) === "D 초안");
   await shot(D, "reserved");
   const n0 = D.net.responses.length;
@@ -466,7 +466,7 @@ await step("U1", async () => {
   await D.context.close();
 });
 
-// ---------- P1. 진입 POST network 실패 → GET not_prepared → "대화 준비" 명시 요청 1회 [hybrid: 첫 POST만 abort] ----------
+// ---------- P1. 진입 POST network 실패 → GET not_prepared → "준비하기" 명시 요청 1회 [hybrid: 첫 POST만 abort] ----------
 await step("P1", async () => {
   const E = await newUser();
   await signIn(E.page);
@@ -484,7 +484,7 @@ await step("P1", async () => {
   const g = await apiClient(E.page).get("/research/codex/status");
   check("P1 [real]. GET not_prepared (no registry row)", g.status === 200 && statusShape(g.body) && g.body.reason === "not_prepared" && !("retryAfterSeconds" in g.body), JSON.stringify(g.body));
   if (!(await E.chat.isVisible())) await E.page.getByRole("button", { name: "대화창 열기" }).click();
-  // #94: 연결·실행 환경 상태 패널(목록의 준비 버튼 포함)은 관리자만 본다. 편집자는 대화의 입력창 위 안내에서 "대화 준비"를 누른다.
+  // #94: 연결·실행 환경 상태 패널(목록의 준비 버튼 포함)은 관리자만 본다. 편집자는 대화의 입력창 위 안내에서 "준비하기"를 누른다.
   // 새 대화를 화면에서 만들어 입력창으로 들어간다(페이지 이동·재로그인 없음 → 새 진입 준비 POST 없음).
   await E.chat.getByLabel("새 대화 제목").waitFor();
   await E.chat.getByLabel("새 대화 제목").fill("E 준비 대화");
@@ -492,10 +492,10 @@ await step("P1", async () => {
   await E.chat.getByLabel("메시지").waitFor();
   await settle(E.page);
   check("P1 [hybrid]. opening the conversation sends no preparation POST", E.net.posts.length === 1, String(E.net.posts.length));
-  check("P1 [real]. composer notice offers 대화 준비 (editor)", await appears(E.chat.getByRole("button", { name: "대화 준비" })));
+  check("P1 [real]. composer notice offers 준비하기 (editor)", await appears(E.chat.getByRole("button", { name: "준비하기" })));
   check("P1 [real]. still no automatic re-request", E.net.posts.length === 1, String(E.net.posts.length));
   const n0 = E.net.responses.length;
-  await E.chat.getByRole("button", { name: "대화 준비" }).first().click();
+  await E.chat.getByRole("button", { name: "준비하기" }).first().click();
   await waitResponses(E, n0 + 1);
   check("P1 [real]. explicit prepare: one POST, new key → 202 provisioning",
     E.net.posts.length === 2 && E.net.posts[0] !== E.net.posts[1] && lastResponse(E)?.status === 202 && lastResponse(E)?.body?.reason === "provisioning", JSON.stringify(lastResponse(E)));
@@ -514,7 +514,7 @@ await step("F0", async () => {
   check("F0 [real]. off: no preparation POST", A.net.posts.length === p0, String(A.net.posts.length - p0));
   check("F0 [real]. off: conversation still opens", (await A.chat.getByLabel("메시지").count()) === 1); // #94: 대화 제목은 표시하지 않는다
   const text = (await A.chat.innerText()).replace(/\s+/g, " ");
-  check("F0 [real]. off: no runner state copy", !/환경 활성화 중|환경 연결 확인 중|사용 대기 중|환경이 쉬는 중|환경 정리 중|확인이 필요합니다/.test(text), text.slice(0, 160));
+  check("F0 [real]. off: no runner state copy", !/환경 준비 중|연결 확인 중|사용 대기 중|쉬는 중|환경 정리 중|운영자 확인 필요/.test(text), text.slice(0, 160));
   const g = await apiA.get("/research/codex/status");
   check("F0 [real]. off: legacy status (not a runner reason)", g.status === 200 && !["provisioning", "capacity_wait", "runner_unreachable", "runner_failed", "idle_stopped", "not_prepared"].includes(g.body?.reason), JSON.stringify(g.body));
   const before = await apiA.get(`/research/sessions/${sid}`);

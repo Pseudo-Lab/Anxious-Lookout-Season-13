@@ -193,8 +193,14 @@ def test_detail_scope_fixed_on_acceptance_reads_updates_conflicts_and_history(cl
     update.update(expectedVersion=2, title="Tool edit", mutationId=str(uuid.uuid4()))
     result = callback(client, session, runner, "research_" + kind + "_update", update).json()
     assert result['version'] == 3
-    assert result['latestVersion']['author'] == {'kind': 'codex', 'conversationId': session['id']}
+    assert 'author' not in result['latestVersion']
     with admin.connect() as db:
+        author = db.execute(text('SELECT owner_id,item_id,author_kind,author_conversation_id,author_credential_id,author_name '
+                                 'FROM research.versions WHERE id=:id'),
+                            {'id': result['latestVersion']['id']}).one()
+        assert str(author.owner_id) == str(owner) and str(author.item_id) == target['id']
+        assert author.author_kind == 'codex' and str(author.author_conversation_id) == session['id']
+        assert author.author_credential_id is None and author.author_name is None
         stored = db.execute(text("SELECT native_record FROM research.conversations WHERE id=:id"), {"id": session["id"]}).scalar_one()
         assert stored["platformRequests"][0]["scope"]["context"]["version"] == 1
     # Native payload cannot replace authority; history displays the accepted question/page.

@@ -43,21 +43,19 @@ def issue_value(identity):
     return 'rpat1.' + str(identity) + '.' + secrets.token_urlsafe(32)
 
 
-def effective(account, scope):
+def effective(account):
     if account is None or not account.is_approved:
         return 'none'
     if account.role == 'commenter':
         return 'public'
-    return scope if account.role in {'editor', 'admin'} else 'none'
+    return 'write' if account.role in {'editor', 'admin'} else 'none'
 
 
 def value(row, account):
-    scope = effective(account, row.scope)
-    return {'id': str(row.id), 'name': row.name, 'scope': row.scope,
+    return {'id': str(row.id), 'name': row.name,
             'issuedAt': stamp(row.created_at), 'expiresAt': stamp(row.expires_at),
             'revokedAt': stamp(row.revoked_at) if row.revoked_at else None,
-            'lastUsedAt': stamp(row.last_used_at) if row.last_used_at else None,
-            'effectiveScope': scope, 'scopeLimitedByRole': scope != row.scope}
+            'lastUsedAt': stamp(row.last_used_at) if row.last_used_at else None}
 
 
 @dataclass(frozen=True)
@@ -76,7 +74,7 @@ def resolve(row, token, account, at=None):
         fail('unauthenticated', 'Research authentication required', 401)
     if account is None or account.id != row.owner_id:
         fail('unauthenticated', 'Research authentication required', 401)
-    return Principal(row.owner_id, row.id, row.name, effective(account, row.scope))
+    return Principal(row.owner_id, row.id, row.name, effective(account))
 
 
 def locked(db, token, owner):
@@ -112,7 +110,7 @@ def observe(sessions, token):
 
 
 def allowed(principal, operation, mutations):
-    if principal.scope not in {'read', 'write'}:
-        fail('forbidden', 'Current account role does not permit private research', 403)
-    if operation not in READS and (principal.scope != 'write' or operation not in mutations):
-        fail('forbidden', 'Selected PAT scope does not permit this operation', 403)
+    if principal.scope != 'write':
+        fail('forbidden', 'Private research is unavailable for this role', 403)
+    if operation not in READS and operation not in mutations:
+        fail('forbidden', 'Operation not permitted', 403)

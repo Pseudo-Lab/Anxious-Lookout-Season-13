@@ -87,7 +87,7 @@ def test_r2_trigger_calls_agent_api_and_refuses_retired_callback_without_exposin
         assert owner not in app.state.research_runners
         document=client.get('/api/research/documents/'+ids['resourceId']).json()
         assert document['latestVersion']['id']==ids['versionId']
-        assert document['latestVersion']['author']=={'kind':'codex','conversationId':ids['sessionId']}
+        assert 'author' not in document['latestVersion']
         calls=client.get('/api/research/sessions/'+ids['sessionId']+'/research-calls').json()['items']
         assert len(calls)==1 and calls[0]['id']==ids['receiptId'] and calls[0]['saved']['versionId']==ids['versionId']
         session=client.get('/api/research/sessions/'+ids['sessionId']).json()

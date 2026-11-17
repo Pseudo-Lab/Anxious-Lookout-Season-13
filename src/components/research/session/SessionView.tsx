@@ -30,15 +30,12 @@ import { describePage, kindText, pageUnresolved, sameDescriptor, scopeLabel, use
 import { own } from "@/lib/research/own";
 import { BASE_PATH } from "@/lib/constants";
 import {
-  PATCH_STATUS_LABELS,
   PATCH_TOOL,
-  SHELL_STATUS_LABELS,
   SHELL_TOOL,
   formatDuration,
   patchChanges,
   patchKindLabel,
   patchNote,
-  patchSummary,
   shellCwdLabel,
   shellEmptyOutput,
   shellNote,
@@ -62,7 +59,6 @@ import {
   CodexStatusView,
   RunnerActionButton,
   codexBlocked,
-  codexBlockedReason,
   runnerState,
   useCodexStatus,
 } from "@/components/research/CodexStatusBanner";
@@ -93,18 +89,6 @@ function Inert({ value }: { value: unknown }) {
     </pre>
   );
 }
-
-// #94: 스트림 도구 항목의 상태 값(completed·failed 등)도 한국어로 보인다(영어 "failed" 그대로 노출되던 문제).
-const TOOL_STATUS_LABELS: Record<string, string> = {
-  rejected: "거부됨",
-  inProgress: "진행 중",
-  approval: "허가 확인 중",
-  completed: "완료",
-  failed: "실패",
-  declined: "거부됨",
-  // 스트림 item 상태 값(runner stream: inProgress | completed | failed | declined | approval | interrupted)
-  interrupted: "중지됨",
-};
 
 // #22 research_document_update는 문서를 바꾸지 않고 제안(Proposal)을 만든다. #28 D1: research_document_save(새 문서)와
 // research_post_propose(글)도 제안이다. 도구 결과는 flat Proposal이며 출력(JSON 또는 text 조각)에서 제안 위치만 읽는다.
@@ -140,12 +124,6 @@ function proposalRef(item: ToolCallItem): { href: string; text: string } | null 
   return null;
 }
 
-// 머리글에는 명령의 첫 줄만 짧게 보인다(전체는 펼쳐서 본다).
-const commandPreview = (command: string | null) => {
-  const line = (command ?? "").split("\n")[0];
-  return line.length > 120 ? `${line.slice(0, 120)}…` : line;
-};
-
 // #90 스트림 항목을 기록 도구 항목 모양으로 옮긴다(완료 뒤 같은 id의 기록 항목으로 바뀐다). 명령 출력은 최근 조각만 있다.
 function liveToolItem(item: LiveItem): ToolCallItem {
   if (item.kind === "commandExecution") {
@@ -166,15 +144,23 @@ function liveToolItem(item: LiveItem): ToolCallItem {
 }
 
 /** 도구 호출 하나(기록 또는 스트림으로 받는 중인 항목). 같은 id의 기록 항목으로 바뀌어도 이어진다. */
-function ToolCall({ item }: { item: ToolCallItem }) {
+export function ToolCall({ item }: { item: ToolCallItem }) {
   const [open, setOpen] = useState(false);
   // #23: shell은 명령 실행으로 읽기 쉽게 보인다. 서버 기록은 그대로이며 모르는 값은 일반 도구처럼 표시한다.
   const shell = item.name === SHELL_TOOL ? shellView(item) : null;
   // #68: apply_patch(native 파일 수정)는 "파일 변경"으로 보인다. changes가 배열이 아니면 일반 도구처럼 표시한다.
   const patch = item.name === PATCH_TOOL ? patchChanges(item) : null;
+  // 완료는 프로세스 종료를 뜻할 수 있다. terminal의 비0 종료/명시 오류는 접힌 상태에도 반영한다.
+  const terminalCodes: Record<string, string> = {
+    shell_timeout: "timed_out", shell_cancelled: "interrupted", shell_declined: "rejected",
+    tool_not_allowed: "rejected", shell_busy: "rejected", shell_invalid_request: "rejected", shell_unavailable: "failed",
+  };
+  const status = shell && ["completed", "failed"].includes(item.status)
+    ? (shell.code ? own(terminalCodes, shell.code) : undefined) ?? (item.status === "completed" && shell.exitCode !== null && shell.exitCode !== 0 ? "failed" : item.status)
+    : item.status;
   const proposal = proposalRef(item);
   const note = shell
-    ? shellNote(item.status, shell)
+    ? shellNote(status, shell)
     : patch
       ? patchNote(item.status, item.error?.code)
       : item.status === "rejected"
@@ -183,48 +169,28 @@ function ToolCall({ item }: { item: ToolCallItem }) {
         : "서버가 이 도구 호출을 실행하지 않았습니다."
       : null;
   const code = shell ? shell.code : item.error?.code;
-  const warn =
-    item.status === "rejected" || ((shell !== null || patch !== null) && (item.status === "failed" || item.status === "timed_out"));
-  const label = shell
-    ? own(SHELL_STATUS_LABELS, item.status)
-    : patch
-      ? own(PATCH_STATUS_LABELS, item.status)
-      : own(TOOL_STATUS_LABELS, item.status);
-  const emptyOutput = shell ? shellEmptyOutput(item.status, shell) : null;
+  const action = shell ? "명령" : patch ? "파일 변경" : "도구";
+  const warn = ["rejected", "declined", "failed", "timed_out", "interrupted"].includes(status);
+  const summary = status === "completed" ? (patch ? "파일 변경함" : `${action} 실행함`)
+    : status === "inProgress" ? (patch ? "파일 변경 중" : `${action} 실행 중`)
+    : status === "approval" ? `${action} 확인 중`
+    : status === "rejected" || status === "declined" ? `${action} 거부됨`
+    : status === "interrupted" ? `${action} 중지됨`
+    : status === "timed_out" ? `${action} 시간 초과`
+    : status === "failed" ? `${action} 실패` : `${action} 상태 확인 중`;
+  const emptyOutput = shell ? shellEmptyOutput(status, shell) : null;
   return (
-    <li className="rounded-md bg-stone-50 text-xs">
+    <li data-tool-id={item.id} data-tool-name={item.name} className="rounded-md bg-stone-50 text-xs">
       <button
         onClick={() => setOpen(!open)}
         aria-expanded={open}
         className="flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left hover:bg-stone-100"
       >
-        <span className="min-w-0 break-words">
-          <span className="mr-2 text-xs text-stone-500">{shell ? "명령 실행" : patch ? "파일 변경" : "도구"}</span>
-          <span className="font-mono text-stone-900">
-            {shell ? commandPreview(shell.command) || item.name : patch ? patchSummary(patch) || item.name : item.name}
-          </span>
-        </span>
-        <span className={`shrink-0 text-xs ${warn ? "font-medium text-amber-700" : "text-stone-500"}`}>
-          {label ?? item.status}
-          {item.turnStatus === "interrupted" && " · 중지됨"}
+        <span className={`min-w-0 break-words ${warn ? "font-medium text-amber-700" : "text-stone-500"}`}>
+          {summary}
+          {item.turnStatus === "interrupted" && status !== "interrupted" && " · 중지됨"}
         </span>
       </button>
-      {note && (
-        <p className="px-3 pb-2 text-xs text-amber-800">
-          {note}
-          {code && ` (${code})`}
-        </p>
-      )}
-      {shell?.truncated && <p className="px-3 pb-2 text-xs text-stone-900">출력이 길어 저장 상한까지만 남았습니다.</p>}
-      {proposal && (
-        <p className="px-3 pb-2 text-xs text-indigo-800">
-          {proposal.text}{" "}
-          {/* 같은 문서·글을 보고 있으면 해당 제안으로 이동만 하고 목록을 새로 불러온다(hashchange). */}
-          <a href={`${BASE_PATH}${proposal.href}`} className="font-medium underline hover:no-underline">
-            제안 검토
-          </a>
-        </p>
-      )}
       {item.modelMismatch && (
         <div className="px-3 pb-2">
           <ModelMismatchNote />
@@ -232,6 +198,9 @@ function ToolCall({ item }: { item: ToolCallItem }) {
       )}
       {open && (
         <div className="space-y-3 px-3 pb-3">
+          {note && <p className="text-amber-800">{note}{code && ` (${code})`}</p>}
+          {shell?.truncated && <p>출력 일부만 저장됐습니다.</p>}
+          {proposal && <p>{proposal.text} <a href={`${BASE_PATH}${proposal.href}`} className="text-indigo-600 underline">제안 검토</a></p>}
           {shell ? (
             <>
               <div className="space-y-1">
@@ -275,6 +244,7 @@ function ToolCall({ item }: { item: ToolCallItem }) {
             </ul>
           ) : (
             <>
+              {item.name && <p className="font-mono">{item.name}</p>}
               <div className="space-y-1">
                 <p className="text-xs font-medium text-stone-900">입력</p>
                 {item.input == null ? <p className="text-stone-500">기록된 입력이 없습니다.</p> : <Inert value={item.input} />}
@@ -298,8 +268,7 @@ const NOT_RECORDED_LABEL = "미기록 입력";
 function ModelMismatchNote() {
   return (
     <p className="mt-1 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
-      <span className="font-semibold">정상 응답 아님</span> — 고정 모델을 확인하지 못해 중단된 실행의 기록입니다. 이 실행의 결과는
-      사용하지 마세요.
+      <span className="font-semibold">정상 응답 아님</span> · 이 결과는 사용하지 마세요.
     </p>
   );
 }
@@ -365,13 +334,13 @@ function Message({
       )}
       {item.displayOnly && (
         <p className="mt-1 text-xs text-stone-500">
-          중지하기 전까지 받은 부분 답변입니다. 대화 기록에는 남지 않아, 이어서 질문해도 이 내용은 참고되지 않습니다.
+          중지된 부분 답변 · 대화 기록에는 남지 않습니다.
         </p>
       )}
       {item.modelMismatch && <ModelMismatchNote />}
       {unrecorded && (
         <p className="mt-1 text-xs text-amber-800">
-          대화 기록에 반영되지 않은 입력입니다. 내 대화에는 보존되며, 필요하면 새 메시지로 다시 보내세요.
+          기록되지 않은 입력입니다. 필요하면 다시 보내세요.
         </p>
       )}
     </li>
@@ -379,7 +348,7 @@ function Message({
 }
 
 // 응답을 기다리는 동안의 "생각 중" 표시(#94: 작성자 이름 없이 "응답하는 중입니다").
-function Thinking({ slow, accepted }: { slow: boolean; accepted: boolean }) {
+function Thinking({ slow }: { slow: boolean }) {
   return (
     <li data-chat-thinking="" className="min-w-0 py-1">
       <div className="flex items-center gap-2 text-sm text-stone-500">
@@ -393,10 +362,9 @@ function Thinking({ slow, accepted }: { slow: boolean; accepted: boolean }) {
           ))}
         </span>
         <span>
-          {slow ? "응답을 기다리거나 실행 결과를 확인 중입니다. 오래 걸려도 자동으로 다시 보내지 않습니다." : "응답하는 중입니다."}
+          {slow ? "결과 확인 중" : "응답하는 중입니다."}
         </span>
       </div>
-      {accepted && <p className="mt-1 text-xs text-stone-500">페이지를 닫았다가 다시 열어도 이어서 확인할 수 있습니다.</p>}
     </li>
   );
 }
@@ -608,43 +576,43 @@ function Composer({
       <div className="mt-auto space-y-2 pt-2">
         {unresolved && !retrying && (
           <Notice tone="info">
-            이 공개 글을 확인한 뒤에 질문할 수 있습니다(글을 불러오는 중이거나 찾을 수 없는 글). 입력은 그대로 있으며 자동으로 보내지 않습니다.
+            공개 글을 확인한 뒤 질문하세요.
           </Notice>
         )}
         {failure && <ErrorNotice failure={failure} prefix="메시지를 보내지 못했습니다." />}
-        {blocked &&
-          (runnerState(codex) ? (
+        {blocked && <div role="group" aria-label="보내기 연결">
+          {runnerState(codex) ? (
             // 실행 환경 상태: 보내기 버튼만 잠그고 입력은 그대로 쓸 수 있다. 준비가 끝나도 자동으로 보내지 않는다.
             <Notice tone="info">
-              {runnerState(codex)?.title} — 환경 준비가 확인되면 보낼 수 있습니다. 입력은 계속 쓰고 고칠 수 있으며, 자동으로 보내지 않습니다.{" "}
-              <RunnerActionButton result={codex} />
+              {runnerState(codex)?.title}{" · "}
+              {runnerState(codex)?.action ? <RunnerActionButton result={codex} /> : <button type="button" onClick={onRecheck} className="underline">다시 시도</button>}
             </Notice>
           ) : (
             // #94: 상태 패널은 admin만 보므로 잠긴 이유를 이 안내에 함께 적는다.
             <Notice tone="warn">
-              {codexBlockedReason(codex)} 보내기가 잠겨 있습니다. 입력한 내용과 이전 대화는 그대로 있습니다.{" "}
+              연결 안 됨 ·{" "}
               <button type="button" onClick={onRecheck} className="font-medium underline hover:no-underline">
-                상태 다시 확인
+                다시 시도
               </button>
             </Notice>
-          ))}
+          )}
+        </div>}
         {/* 결과를 정말 확인하지 못한 경우에만 경고한다. 보내는 동안(결과를 기다리는 중)은 정상 흐름이다(#89). */}
         {pending && !busy && (
           <Notice tone="warn">
-            이전 전송의 결과를 확인하지 못했습니다. 위 대화 기록에 메시지가 이미 있는지 확인하세요.{" "}
+            전송 결과를 확인하세요.{" "}
             {retrying ? (
-              "같은 내용으로 다시 보내면 이미 처리된 요청은 중복 실행되지 않습니다."
+              "같은 요청으로 다시 확인할 수 있습니다."
             ) : (
               <>
-                지금 입력은 새 요청으로 처리됩니다. 결과를 모르는 이전 질문을 같은 요청으로 다시 보내려면{" "}
+                이전 요청 확인: {" "}
                 <button type="button" onClick={() => setText(pending.text)} className="font-medium underline hover:no-underline">
                   이전 질문 불러오기
                 </button>
-                를 누른 뒤 보내세요.
               </>
             )}
             {retrying && !sameDescriptor(pending.page, page) &&
-              ` 다시 보내기는 지금 페이지가 아니라 처음 보낸 화면(${kindText(pending.page?.kind ?? "general").label}) 기준으로 처리됩니다.`}
+              ` 처음 보낸 화면(${kindText(pending.page?.kind ?? "general").label}) 기준으로 처리됩니다.`}
           </Notice>
         )}
       </div>
@@ -1057,7 +1025,7 @@ export default function SessionView({ id, onArchived, onBack }: { id: string; on
       {/* #94: 연결·실행 환경 상태 패널은 admin에게만 보인다. 일반 계정은 보내기가 잠길 때 입력창 위 안내로 이유와 할 일을 본다. */}
       {admin && <CodexStatusView result={codex.result} />}
       {admin && codex.refreshFailure && (
-        <ErrorNotice failure={codex.refreshFailure} prefix="연결 상태를 다시 확인하지 못했습니다. 마지막으로 받은 상태를 표시합니다." />
+        <ErrorNotice failure={codex.refreshFailure} prefix="연결 확인 실패" />
       )}
 
       {entries.length === 0 && !awaiting ? (
@@ -1095,7 +1063,7 @@ export default function SessionView({ id, onArchived, onBack }: { id: string; on
                 실시간 표시를 멈췄습니다. 답변이 끝나면 전체 기록으로 보입니다.
               </li>
             ) : null,
-            awaiting && !answering ? <Thinking key="thinking" slow={slow} accepted={status !== "submitted"} /> : null,
+            awaiting && !answering ? <Thinking key="thinking" slow={slow} /> : null,
           ]}
         </ol>
       )}
@@ -1103,7 +1071,7 @@ export default function SessionView({ id, onArchived, onBack }: { id: string; on
       <ResearchActivity key={s.id} id={s.id} record={s} active={chat.open && visible} poll={streamLive && awaiting} onChange={setReceiptSignal} />
 
       {refreshFailure && (
-        <ErrorNotice failure={refreshFailure} prefix="최신 대화 상태를 불러오지 못했습니다. 마지막으로 받은 기록을 표시합니다." />
+        <ErrorNotice failure={refreshFailure} prefix="대화 확인 실패" />
       )}
       {s.state === "failed" && !awaiting && (
         <Notice tone="error">
@@ -1111,8 +1079,7 @@ export default function SessionView({ id, onArchived, onBack }: { id: string; on
           {/* 서버 오류 문구를 그대로 옮기지 않는다(외부 provider 원문·식별자 노출 방지). 아는 코드만 안내하고 나머지는 코드만 표시. */}
           {s.error &&
             (researchErrorMessage({ kind: "http", status: 0, code: s.error.code }) ??
-              `요청을 처리하지 못했습니다 (${s.error.code}). 다른 모델로 자동 전환하거나 자동으로 다시 실행하지 않습니다.`)}{" "}
-          이전 기록은 보존되어 있으며 새 메시지로 이어서 질문할 수 있습니다. 실패한 요청은 자동으로 다시 실행되지 않습니다.
+              "요청을 처리하지 못했습니다.")}
         </Notice>
       )}
 

@@ -67,7 +67,8 @@ def test_fresh_credential_validation_rejects_invalid_principals(damage):
 
 @pytest.mark.parametrize('role,approved,scope,effective', [
     ('commenter',True,'write','public'),('commenter',True,'read','public'),
-    ('editor',True,'write','write'),('admin',True,'read','read'),('editor',False,'write','none')])
+    ('editor',True,'write','write'),('admin',True,'read','write'),('editor',True,'read','write'),
+    ('editor',False,'write','none')])
 def test_fresh_role_limits_selected_scope_and_cached_results_cannot_bypass(role,approved,scope,effective):
     row, token, account = principal(); account.role, account.is_approved, row.scope = role,approved,scope
     checked = pats.resolve(row, token, account)
@@ -76,9 +77,7 @@ def test_fresh_role_limits_selected_scope_and_cached_results_cannot_bypass(role,
         with pytest.raises(ResearchError): pats.allowed(checked,'research_get',MUTATIONS)
     else:
         pats.allowed(checked,'research_get',MUTATIONS)
-        if effective == 'read':
-            with pytest.raises(ResearchError): pats.allowed(checked,'research_document_save',MUTATIONS)
-        else: pats.allowed(checked,'research_document_save',MUTATIONS)
+        pats.allowed(checked,'research_document_save',MUTATIONS)
     with pytest.raises(ResearchError): pats.allowed(checked,'research_post_publish',MUTATIONS)
 
 
@@ -98,12 +97,13 @@ def test_retired_pat_text_is_redacted_and_rejected_including_nested_keys_and_int
     with pytest.raises((ValidationError,ResearchError)): Create(name=token,scope='read')
 
 
-def test_pat_author_is_preserved_and_validated_as_a_complete_immutable_result():
+def test_pat_author_is_kept_internally_but_excluded_from_results():
     identity = uuid4(); author = VersionAuthor(credential_id=identity,name='External researcher')
     row = SimpleNamespace(**author.columns())
     expected = {'kind':'pat','conversationId':None,'credentialId':str(identity),'name':'External researcher'}
     assert value(row) == expected
-    result=save_result(); result['latestVersion']['author']=expected
+    result=save_result()
+    assert 'author' not in result['latestVersion']
     assert success('research_document_save',result)
     for damage in [{'kind':'pat','conversationId':None}, {**expected,'credentialId':'foreign'},
                    {**expected,'conversationId':str(uuid4())}, {**expected,'name':''}]:
@@ -222,7 +222,8 @@ def test_management_one_time_secret_ack_loss_replay_precedes_cap_and_fresh_role(
     first=client.post('/api/research/pats',json={'name':'External researcher','scope':'write'},headers=headers)
     assert first.status_code==201,first.text
     token=first.json()['token'];assert pats.TOKEN.fullmatch(token) and db.open==0
-    assert first.json()['credential']['effectiveScope']=='public' and first.json()['credential']['scopeLimitedByRole']
+    assert set(first.json()['credential']) == {'id','name','issuedAt','expiresAt','revokedAt','lastUsedAt'}
+    assert next(iter(db.rows.values())).scope == 'write'
     assert token not in repr([vars(row) for row in db.rows.values()])
     db.active=10
     replay=client.post('/api/research/pats',json={'name':'External researcher','scope':'write'},headers=headers)
@@ -304,7 +305,8 @@ def test_pat_list_uses_issued_time_cursor_on_both_pages_after_approval_loss(monk
     db.account.is_approved=False
     second=client.get('/api/research/pats',params={'limit':1,'cursor':page['nextCursor']})
     assert second.status_code==200,second.text
-    assert second.json()['items'][0]['id']==str(ids[1]) and second.json()['items'][0]['effectiveScope']=='none'
+    assert second.json()['items'][0]['id']==str(ids[1])
+    assert set(second.json()['items'][0])=={'id','name','issuedAt','expiresAt','revokedAt','lastUsedAt'}
     assert second.json()['nextCursor'] is None
     for query in queries:
         sql=str(query.compile(dialect=postgresql.dialect()))

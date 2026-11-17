@@ -209,9 +209,8 @@ class Store:
         return row
 
     def serialize_version(self, row, content=True):
-        from .version_authors import value as author_value
         result = {"id": str(row.id), "itemId": str(row.item_id), "number": row.number,
-                  "title": row.title, "createdAt": stamp(row.created_at), "author": author_value(row)}
+                  "title": row.title, "createdAt": stamp(row.created_at)}
         if content:
             result["content"] = row.content
         if row.kind == "material":
@@ -219,14 +218,12 @@ class Store:
         return result
 
     def serialize_item(self, row, content=True):
-        from .version_authors import value as author_value
         latest = self.db.scalar(select(ContentVersion).where(ContentVersion.item_id == row.id,
                                  ContentVersion.owner_id == self.owner, ContentVersion.number == row.content_number))
         result = {"id": str(row.id), "type": row.kind, "title": latest.title,
                   "createdAt": stamp(row.created_at), "updatedAt": stamp(row.updated_at),
                   "version": row.version, "archived": row.archived,
-                  "latestVersion": {"id": str(latest.id), "number": latest.number, "createdAt": stamp(latest.created_at),
-                                    "author": author_value(latest)}}
+                  "latestVersion": {"id": str(latest.id), "number": latest.number, "createdAt": stamp(latest.created_at)}}
         if content:
             result["content"] = latest.content
         if row.kind == "material":
@@ -375,7 +372,8 @@ class Store:
         if stored:
             if not hmac.compare_digest(stored.fingerprint, fingerprint):
                 fail("idempotency_conflict", "This key was used for a different request", 409)
-            return stored.response, stored.status
+            from .version_authors import without_version_authors
+            return without_version_authors(stored.response), stored.status
         result = action()
         self.db.add(Idempotency(owner_id=self.owner, key=identity, fingerprint=fingerprint, status=status, response=result))
         self.db.flush()
@@ -398,7 +396,8 @@ def register_research(app, sessions, settings, current_session, error):
     @app.exception_handler(ResearchError)
     async def domain_error(request, exc):
         if exc.details is not None:
-            return JSONResponse(redact({'error': {'code': exc.code, 'message': exc.message, 'details': exc.details}}),
+            from .version_authors import without_version_authors
+            return JSONResponse(redact(without_version_authors({'error': {'code': exc.code, 'message': exc.message, 'details': exc.details}})),
                                 status_code=exc.status, headers={'Cache-Control': 'no-store'})
         result = error(exc.code, exc.message, exc.status)
         if exc.status == 429:
@@ -465,7 +464,8 @@ def register_research(app, sessions, settings, current_session, error):
         return JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})
 
     def response(result, status=200):
-        return JSONResponse(redact(result), status_code=status, headers={"Cache-Control": "no-store"})
+        from .version_authors import without_version_authors
+        return JSONResponse(redact(without_version_authors(result)), status_code=status, headers={"Cache-Control": "no-store"})
 
     def write(store, request, model, body, action, status=200):
         from .research_credentials import reject_token_input

@@ -3,8 +3,8 @@ import { issuePat, listPats, parseIssuedPat, parsePat, parsePatPage, patFailureM
 
 const ID = "00000000-0000-4000-8000-000000000097";
 const SECRET = `rpat1.${ID}.${"a".repeat(43)}`; // 모의 값. 실제 발급/자격이 아니다.
-const PAT = { id: ID, name: "외부 도우미", scope: "write", issuedAt: "2026-11-17T00:00:00Z", expiresAt: "2026-12-17T00:00:00Z", revokedAt: null, lastUsedAt: null, effectiveScope: "write", scopeLimitedByRole: false };
-const INPUT = { name: "외부 도우미", scope: "write" as const, expiryDays: 30 };
+const PAT = { id: ID, name: "외부 도우미", issuedAt: "2026-11-17T00:00:00Z", expiresAt: "2026-12-17T00:00:00Z", revokedAt: null, lastUsedAt: null };
+const INPUT = { name: "외부 도우미", expiryDays: 30 };
 const FIRST = { credential: PAT, token: SECRET, secretAvailable: true, replayed: false };
 const REPLAY = { credential: PAT, token: null, secretAvailable: false, replayed: true };
 function respond(body: unknown, status = 200) {
@@ -66,17 +66,19 @@ describe("#97 B8 cookie PAT management", () => {
     expect(fetch.mock.calls[0][1]).not.toHaveProperty("body");
     expect(fetch.mock.calls[0][1]?.headers).not.toHaveProperty("Authorization");
   });
-  it("keeps selected scope separate from commenter or approval limits", () => {
-    expect(parsePat({ ...PAT, effectiveScope: "public", scopeLimitedByRole: true })).toMatchObject({ scope: "write", effectiveScope: "public", scopeLimitedByRole: true });
-    expect(parsePat({ ...PAT, effectiveScope: "none", scopeLimitedByRole: true })).toMatchObject({ scope: "write", effectiveScope: "none" });
+  it("drops legacy permission fields and sends no scope even if an older caller supplies one", async () => {
+    expect(parsePat({ ...PAT, scope: "read", effectiveScope: "public", scopeLimitedByRole: true })).toEqual(PAT);
+    const fetch = respond(FIRST, 201);
+    await issuePat({ ...INPUT, ...{ scope: "write" } }, "csrf", ID);
+    expect(JSON.parse(fetch.mock.calls[0][1]?.body as string)).toEqual(INPUT);
   });
-  it.each([{ scope: "admin" }, { effectiveScope: "admin" }, { expiresAt: "bad" }, { lastUsedAt: 1 }, { scopeLimitedByRole: "yes" }, { name: "x\ny" }])("rejects invalid metadata %o", (extra) => expect(parsePat({ ...PAT, ...extra })).toBeNull());
+  it.each([{ expiresAt: "bad" }, { lastUsedAt: 1 }, { name: "x\ny" }])("rejects invalid metadata %o", (extra) => expect(parsePat({ ...PAT, ...extra })).toBeNull());
   it("requires a valid page envelope", () => {
     expect(parsePatPage({ items: [PAT], nextCursor: null })).toEqual({ items: [PAT], nextCursor: null });
     expect(parsePatPage({ items: [PAT, null], nextCursor: null })).toBeNull();
   });
   it("distinguishes expiry and revocation independently from effective role scope", () => {
-    const pat = parsePat({ ...PAT, effectiveScope: "none", scopeLimitedByRole: true })!;
+    const pat = parsePat(PAT)!;
     expect(patStatus(pat, Date.parse("2026-11-20T00:00:00Z"))).toBe("active");
     expect(patStatus(pat, Date.parse(PAT.expiresAt))).toBe("expired");
     expect(patStatus({ ...pat, revokedAt: PAT.issuedAt }, Date.parse(PAT.expiresAt))).toBe("revoked");

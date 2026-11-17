@@ -476,7 +476,7 @@ const sessionUrl = U(`/research/session/?id=${sid}`);
 check("L9. session created via real API", (await appears(chatPanel.getByLabel("메시지"))) && (await api.get(`/research/sessions/${sid}`)).body?.title === "실물 세션");
 await chatPanel.getByLabel("메시지").fill("실물 질문");
 // 실제 status가 접수 불가이면 화면은 보내기를 잠근다. 서버 선접수 거절 자체는 API로 직접 확인한다.
-check("L9. send locked by real status", (await appears(chatPanel.getByText("보내기가 잠겨 있습니다"))) && (await chatPanel.getByRole("button", { name: "보내기" }).isDisabled()));
+check("L9. send locked by real status", (await appears(chatPanel.getByText("연결 안 됨"))) && (await chatPanel.getByRole("button", { name: "보내기" }).isDisabled()));
 check("L9. input preserved", (await chatPanel.getByLabel("메시지").inputValue()) === "실물 질문");
 {
   const detail = await api.get(`/research/sessions/${sid}`);

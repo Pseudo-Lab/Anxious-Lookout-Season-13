@@ -72,8 +72,9 @@ describe("#97 receipt identity, replay and display", () => {
     expect(html).toContain("&lt;img");
     expect(html).not.toContain("<img");
     expect(html).toContain("v2");
-    expect(html).toContain("동일 버전 확인 2회");
-    expect(html).toContain("저장됨 · 되돌리기는 버전 기록에서");
+    expect(html).toContain("저장됨:");
+    expect(html.match(/data-research-call=/g)).toHaveLength(1);
+    expect(html).not.toContain("연구 작업 기록");
     expect(html).toContain(`/test-base/research/document/?id=${id(3)}#version-history`);
     expect(html).not.toContain("null");
   });
@@ -81,10 +82,24 @@ describe("#97 receipt identity, replay and display", () => {
     const calls = parse(receipt({ status: "failed", operation: "private/operation/path", saved: undefined, code: "SECRET-provider-reason" }))!;
     expect(researchCallHref(calls[0])).toBeNull();
     const html = renderToStaticMarkup(createElement(ResearchActivityList, { calls }));
-    expect(html).toContain("연구 작업");
-    expect(html).toContain("작업 실패");
+    expect(html).toBe("");
     expect(html).not.toContain("private/operation/path");
     expect(html).not.toContain("SECRET");
+  });
+  it("shows only confirmed document/post saves and hides reads, material saves and failures", () => {
+    const calls = parseResearchCalls({ items: [
+      receipt(),
+      receipt({ id: id(10), operation: "research_list", saved: undefined, count: 3 }),
+      receipt({ id: id(11), operation: "research_material_save", saved: { ...saved, resourceType: "material", destination: { ...saved.destination, path: "/research/material/" } } }),
+      receipt({ id: id(12), operation: "research_post_save", saved: { ...saved, resourceType: "post", destination: { ...saved.destination, path: "/write/" } } }),
+      receipt({ id: id(13), operation: "research_document_save", status: "failed", saved: undefined, code: "conflict" }),
+    ] })!;
+    const html = renderToStaticMarkup(createElement(ResearchActivityList, { calls }));
+    expect(html.match(/data-research-call=/g)).toHaveLength(2);
+    expect(html).toContain("/write/?id=");
+    expect(html).not.toContain("/research/material/");
+    expect(html).not.toContain("작업 실패");
+    expect(html).not.toContain("3건");
   });
   it.each(["material", "post"])("uses the fixed %s destination and base path", (type) => {
     const path = type === "post" ? "/write/" : "/research/material/";

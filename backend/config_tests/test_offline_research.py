@@ -38,8 +38,8 @@ def test_trigger_requires_explicit_offline_factory_and_disabled_real_flags(monke
 def test_evidence_returns_fixed_ids_only_and_rejects_fabricated_saved_author():
     session,request,resource,version,receipt=[str(uuid4()) for _ in range(5)]
     calls={'items':[{'operation':'research_document_save','status':'succeeded','requestId':request,
-                    'id':receipt,'saved':{'versionId':version}}]}
-    document={'id':resource,'latestVersion':{'author':{'kind':'codex','conversationId':session}}}
+                    'id':receipt,'saved':{'id':resource,'versionId':version}}]}
+    document={'id':resource,'latestVersion':{'id':version}}
     assert result({'id':session},calls,document)=={'sessionId':session,'requestId':request,'resourceId':resource,
              'versionId':version,'receiptId':receipt,'callbackRejected':True}
     document['latestVersion']['author']={'kind':'human','conversationId':None}

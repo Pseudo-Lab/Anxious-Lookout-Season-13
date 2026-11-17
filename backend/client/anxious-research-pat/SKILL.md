@@ -31,8 +31,8 @@ python3 -I scripts/pat-client.py --origin https://platform.example public --path
 ```
 
 Public reads need no token. An approved commenter PAT still permits only public
-content; selected write does not grant editor rights. Private operations require
-current approved editor/admin and PAT read/write scope; write includes read.
+content. All PATs permit private reads and saves for a currently approved
+editor/admin; a token does not grant an account role.
 Read the current resource/history, source documents/materials and human post
 draft before edits. Collect materials with sourceUrl, actual collectedAt and
 contentKind(full/excerpt/summary); preserve citations and distinguish synthesis.
@@ -41,10 +41,31 @@ need their current expectedVersion; draftId/expectedDraftRevision are paired.
 Saves append immutable versions immediately and retain active human drafts and
 public snapshots. Archive only when requested, with history preserved.
 
+## Post Markdown
+
+- H1–H6 are supported; start body headings at `##` because the post title is H1.
+- Use paragraphs, **bold**, *italic*, ~~strike~~, inline code, links, ordered/bullet
+  lists (one paragraph per item, up to3 levels), quotes (paragraphs/lists), fenced
+  or indented code, tables and horizontal rules.
+- Code languages: plain, bash, c, cpp, css, go, html, java, javascript, json, jsx,
+  markdown, python, rust, sql, tsx, typescript, xml, yaml. Other fence languages
+  (including no language) become plain with `code_language_downgraded`.
+- Images must be a standalone paragraph with a root-relative owned upload URL:
+  `![alt]({BASE}/api/media/post-images/<UUID>)`; BASE is the configured path or empty.
+  Inline/external images are rejected.
+- Outside code, HTML, `{...}` expressions and import/export lines are rejected:
+  422 `unsupported_content`. Size limits use `payload_too_large` (413) or
+  `content_limit_exceeded` (422). Unsupported structures are not flattened.
+- Text must contain real newline characters. JSON-encode once: wire `\n`, not `\\n`.
+- Markdown saves cannot represent font size/color, underline, alignment, columns,
+  table-cell backgrounds or embeds. Existing formatting of these kinds is lost
+  in the new version. Tell the user before saving edits to a human-formatted post.
+- Research documents use GFM, skip HTML, show images as links and code without
+  execution/highlighting; they do not use the post-block converter.
+
 Use a fresh UUID mutationId per distinct change. Only an explicitly chosen
 identical retry reuses it. On CAS conflict reread/reconcile and use a fresh ID for
 changed arguments; do not merely change expectedVersion on stale text. On timeout
 or lost response, check versions before deciding whether to repeat. On429 or
 permission failure stop and explain; never automatically retry. Report the actual
-returned resource/version/destination. PAT version authors retain their immutable
-credential name after revoke. A save is not publication.
+returned resource/version/destination. A save is not publication.
