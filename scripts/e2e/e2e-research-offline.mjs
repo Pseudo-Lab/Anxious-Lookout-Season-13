@@ -807,8 +807,11 @@ async function dropFirstSend(p) {
   await link.click();
   await page.waitForURL(U(href));
   check("R2. saved document opens with server title", await appears(main.getByRole("heading", { name: document.body.title, exact: true })));
-  check("R2. version author links to its platform conversation", await appears(main.getByText("작성: Codex", { exact: true }).first()) &&
-    await main.getByRole("link", { name: "작성 대화로 이동", exact: true }).first().getAttribute("href") === `/research/session/?id=${sessionId}`);
+  const authorLink = main.getByRole("link", { name: "작성 대화로 이동", exact: true }).first();
+  const authorArea = main.locator("p").filter({ has: page.getByRole("link", { name: "작성 대화로 이동", exact: true }) }).first();
+  check("R2. linked author area identifies Codex", await appears(authorArea.filter({ hasText: /^작성:\s*Codex\s*·/ })));
+  // 작성자 텍스트 검사가 실패해도 href 검사를 생략하지 않는다.
+  check("R2. version author links to its platform conversation", await authorLink.getAttribute("href") === `/research/session/?id=${sessionId}`);
 
   // 성공을 관찰한 뒤의 명시적 동일 key 확인. 실패 시 자동 재시도가 아니다.
   const replay = await trigger();
