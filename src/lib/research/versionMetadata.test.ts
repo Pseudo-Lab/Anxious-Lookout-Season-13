@@ -11,7 +11,9 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe.each(["document", "material"] as const)("#104 %s version metadata", (type) => {
   it.each([undefined, oldAuthor])("reads versions without retaining author %o", async (author) => {
-    const version = { id: id(2), itemId: id(1), title: "제목", content: "본문", number: 2, createdAt: at, author };
+    // #105: summary는 항상, bibliography는 자료 버전에만 온다.
+    const version = { id: id(2), itemId: id(1), title: "제목", content: "본문", number: 2, createdAt: at, author, summary: null,
+      ...(type === "material" ? { bibliography: null } : {}) };
     respond({ items: [version], nextCursor: null });
     const list = await listVersions(type, id(1));
     expect(list.ok).toBe(true);
@@ -21,7 +23,7 @@ describe.each(["document", "material"] as const)("#104 %s version metadata", (ty
     expect(detail.ok && detail.data.content).toBe("본문");
     if (detail.ok) expect(detail.data).not.toHaveProperty("author");
     respond({ id: id(1), type, title: "제목", content: "본문", createdAt: at, updatedAt: at, version: 2, archived: false,
-      latestVersion: version, publication: null, sourceUrl: "https://example.com", collectedAt: at, contentKind: "excerpt" });
+      latestVersion: version, publication: null, sourceUrl: "https://example.com", collectedAt: at, contentKind: "excerpt", summary: null, bibliography: null });
     const resource = await (type === "document" ? getDocument(id(1)) : getMaterial(id(1)));
     expect(resource.ok).toBe(true);
     if (resource.ok) expect(resource.data.latestVersion).not.toHaveProperty("author");

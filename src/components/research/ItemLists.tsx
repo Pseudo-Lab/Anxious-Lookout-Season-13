@@ -84,9 +84,11 @@ export function MaterialList() {
           <li key={m.id}>
             <Link href={`/research/material/?id=${encodeURIComponent(m.id)}`} className="block px-5 py-4 hover:bg-stone-50">
               <p className="font-medium text-stone-900">{m.title || "(제목 없음)"}</p>
+              {m.summary && <p className="mt-0.5 line-clamp-2 text-sm text-stone-900">{m.summary}</p>}
               <p className="mt-1 text-xs text-stone-500">
                 {hostOf(m.sourceUrl)} · {CONTENT_KIND_LABELS[m.contentKind]} · 수집 {formatDateTime(m.collectedAt)} · v
                 {m.latestVersion.number}
+                {m.relationCount !== undefined && ` · 관계 ${m.relationCount}`}
               </p>
             </Link>
           </li>
@@ -125,8 +127,10 @@ export function DocumentList() {
                   <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">공개</span>
                 )}
               </p>
+              {d.summary && <p className="mt-0.5 line-clamp-2 text-sm text-stone-900">{d.summary}</p>}
               <p className="mt-1 text-xs text-stone-500">
                 수정 {formatDateTime(d.updatedAt)} · v{d.latestVersion.number}
+                {d.relationCount !== undefined && ` · 관계 ${d.relationCount}`}
               </p>
             </Link>
           </li>

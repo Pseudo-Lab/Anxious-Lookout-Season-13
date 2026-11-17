@@ -2,7 +2,7 @@
 // 나머지는 Next standalone 서버로 전달한다. 실제 backend/GitHub/DB를 대체하는 테스트 도구일 뿐이다.
 import http from "node:http";
 import crypto from "node:crypto";
-import { handleResearch, researchCounts, researchMode, runnerMode, setRunnerAll } from "./mock-research.mjs";
+import { handleResearch, researchCounts, researchMode, runnerMode, seedLegacyRelation, setRunnerAll } from "./mock-research.mjs";
 import { kickAll } from "./mock-stream.mjs";
 
 const BASE = process.env.BASE_PATH ?? "";
@@ -215,6 +215,11 @@ http
       if (url.searchParams.has("remaining")) {
         const n = url.searchParams.get("remaining");
         researchMode.remaining = n === "" ? null : Number(n);
+      }
+      // #105 legacyRelation=<sourceId>,<targetId>,<kind>,<directed 0|1>: 예전 자유 텍스트 관계를 만든다(응답의 legacyRelationId).
+      if (url.searchParams.get("legacyRelation")) {
+        const [src, dst, kind, dir] = url.searchParams.get("legacyRelation").split(",");
+        return json(res, 200, { legacyRelationId: seedLegacyRelation(src, dst, kind, dir === "1") });
       }
       return json(res, 200, { ...mode, ...researchMode, runner: { ...runnerMode } });
     }

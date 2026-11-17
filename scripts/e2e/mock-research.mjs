@@ -192,7 +192,10 @@ function summary(item) {
     latestVersion: { id: v.id, number: v.number, createdAt: v.createdAt },
     archived: item.archived,
   };
-  if (item.type === "material") return { ...base, sourceUrl: v.sourceUrl, collectedAt: v.collectedAt, contentKind: v.contentKind };
+  // #105 한 줄 요약(자료·문서)·서지정보(자료). 기존 버전은 null로 읽힌다.
+  base.summary = v.summary ?? null;
+  if (item.type === "material")
+    return { ...base, sourceUrl: v.sourceUrl, collectedAt: v.collectedAt, contentKind: v.contentKind, bibliography: v.bibliography ?? null };
   return {
     ...base,
     publication: item.publication && {
@@ -207,20 +210,27 @@ function summary(item) {
 }
 const detail = (item) => ({ ...summary(item), content: latest(item).content });
 function versionView(item, v, withContent) {
-  const out = { id: v.id, itemId: item.id, number: v.number, title: v.title, createdAt: v.createdAt };
-  if (item.type === "material") Object.assign(out, { sourceUrl: v.sourceUrl, collectedAt: v.collectedAt, contentKind: v.contentKind });
+  const out = { id: v.id, itemId: item.id, number: v.number, title: v.title, createdAt: v.createdAt, summary: v.summary ?? null };
+  if (item.type === "material")
+    Object.assign(out, { sourceUrl: v.sourceUrl, collectedAt: v.collectedAt, contentKind: v.contentKind, bibliography: v.bibliography ?? null });
   if (withContent) out.content = v.content;
   return out;
 }
 const endpoint = (ref) => ({ type: ref.type, id: ref.id, title: latest(items.get(ref.id)).title });
+function evidenceView(e) {
+  const v = items.get(e.itemId)?.versions.find((x) => x.id === e.versionId);
+  return { itemId: e.itemId, versionId: e.versionId, versionNumber: v?.number ?? 0, locator: e.locator ?? null, quote: e.quote ?? null };
+}
 function relationView(rel, selfId) {
   const out = {
     id: rel.id,
     source: endpoint(rel.source),
     target: endpoint(rel.target),
     kind: rel.kind,
+    kindKnown: RELATION_KINDS.items.some((k) => k.key === rel.kind),
     description: rel.description,
     directed: rel.directed,
+    evidence: (rel.evidence ?? []).map(evidenceView),
     version: rel.version,
     createdAt: rel.createdAt,
     updatedAt: rel.updatedAt,
@@ -251,6 +261,72 @@ function snapshot(item) {
   };
 }
 
+// ---- #105 관계 어휘·근거·서지정보(api-contracts/issue105-research-wiki-v1.1.md) ----
+
+const kindRow = (key, label, inverseLabel, polarity, directed, cito) => ({ key, label, inverseLabel, polarity, directed, cito });
+export const RELATION_KINDS = {
+  items: [
+    kindRow("supports", "지지함", "지지받음", "positive", true, ["supports", "citesAsEvidence"]),
+    kindRow("confirms", "재현·확인함", "확인됨", "positive", true, ["confirms"]),
+    kindRow("extends", "확장함", "확장됨", "positive", true, ["extends"]),
+    kindRow("disputes", "이견 있음", "이견 받음", "negative", true, ["disputes", "disagreesWith"]),
+    kindRow("refutes", "반박함", "반박됨", "negative", true, ["refutes"]),
+    kindRow("qualifies", "조건을 닮", "조건이 달림", "neutral", true, ["qualifies"]),
+    kindRow("uses_method", "방법 차용", "방법 제공", "neutral", true, ["usesMethodIn"]),
+    kindRow("uses_data", "데이터 사용", "데이터 제공", "neutral", true, ["usesDataFrom"]),
+    kindRow("updates", "갱신·대체함", "갱신됨", "neutral", true, ["updates"]),
+    kindRow("same_topic", "같은 주제", "같은 주제", "neutral", false, ["citesAsRelated"]),
+  ],
+  polarityGroups: [
+    { key: "positive", label: "지지·확장" },
+    { key: "negative", label: "반박·이견" },
+    { key: "neutral", label: "중립" },
+  ],
+  legacyLabel: "기타",
+};
+const cp = (s) => [...s].length;
+const invalidReason = (reason, message) => fail(422, "validation_error", message, { details: { reason } });
+const structural = (path, message) => fail(422, "validation_error", "Invalid request fields", { fields: [{ path, message }] });
+const blank = (v) => typeof v !== "string" || !v.trim();
+
+// 근거 목록 확인. 문제가 있으면 오류 응답, 없으면 저장할 목록.
+function checkEvidence(list, rel, owner) {
+  if (!Array.isArray(list)) return { error: structural("body.evidence", "array") };
+  if (list.length > 20) return { error: invalidReason("evidence_limit_exceeded", "Too many evidence items") };
+  const out = [];
+  for (const e of list) {
+    if (!e || typeof e !== "object" || typeof e.itemId !== "string" || typeof e.versionId !== "string") return { error: structural("body.evidence", "itemId/versionId") };
+    if (Object.keys(e).some((k) => !["itemId", "versionId", "locator", "quote"].includes(k))) return { error: structural("body.evidence", "unknown key") };
+    const locator = e.locator ?? null;
+    const quote = e.quote ?? null;
+    if ((locator !== null && (blank(locator) || cp(locator) > 100)) || (quote !== null && (blank(quote) || cp(quote) > 500)) || (locator === null && quote === null))
+      return { error: structural("body.evidence", "locator/quote") };
+    if (e.itemId !== rel.source.id && e.itemId !== rel.target.id) return { error: invalidReason("evidence_endpoint_mismatch", "Evidence item is not an endpoint") };
+    const item = items.get(e.itemId);
+    if (!item || item.owner !== owner || !item.versions.some((v) => v.id === e.versionId)) return { error: invalidReason("evidence_version_not_found", "Version not found") };
+    out.push({ itemId: e.itemId, versionId: e.versionId, locator, quote });
+  }
+  if (new Set(out.map((e) => JSON.stringify(e))).size !== out.length) return { error: structural("body.evidence", "duplicate") };
+  return { evidence: out };
+}
+
+const BIB_KEYS = ["type", "title", "author", "issued", "container-title", "publisher", "volume", "issue", "page", "number", "DOI", "ISBN", "ISSN"];
+function bibliographyProblem(b) {
+  if (b === null) return null;
+  if (!b || typeof b !== "object" || Array.isArray(b) || typeof b.type !== "string") return "object with type";
+  if (Object.keys(b).some((k) => !BIB_KEYS.includes(k))) return "unknown key";
+  if (b.DOI !== undefined && !/^10\.\S+\/\S+$/.test(b.DOI)) return "DOI";
+  return null;
+}
+function summaryProblem(v) {
+  if (v === null || v === undefined) return null;
+  if (typeof v !== "string") return "string";
+  const t = v.trim();
+  return !t || cp(t) > 300 || /[\r\n]/.test(t) ? "1-300, single line" : null;
+}
+// 새 버전의 요약·서지정보: 생략하면 이전 버전 값(없으면 null)을 이어 받는다.
+const carry = (b, key, prev) => (key in b ? (typeof b[key] === "string" ? b[key].trim() : b[key]) : (prev?.[key] ?? null));
+
 // ---- 검증 ----
 
 function validateItem(type, b) {
@@ -266,12 +342,18 @@ function validateItem(type, b) {
     if (typeof b.collectedAt !== "string" || Number.isNaN(Date.parse(b.collectedAt)) || !/(Z|[+-]\d\d:\d\d)$/.test(b.collectedAt))
       fields.push({ path: "body.collectedAt", message: "timezone-aware RFC3339" });
     if (!["full", "excerpt", "summary"].includes(b.contentKind)) fields.push({ path: "body.contentKind", message: "invalid" });
-  }
+    const bib = bibliographyProblem(b.bibliography === undefined ? null : b.bibliography);
+    if (bib) fields.push({ path: "body.bibliography", message: bib });
+  } else if (b.bibliography !== undefined) fields.push({ path: "body.bibliography", message: "documents have no bibliography" });
+  const sum = summaryProblem(b.summary);
+  if (sum) fields.push({ path: "body.summary", message: sum });
   return fields;
 }
-function newVersion(type, b, number) {
-  const v = { id: uuid(), number, title: b.title, content: b.content, createdAt: now() };
-  if (type === "material") Object.assign(v, { sourceUrl: b.sourceUrl, collectedAt: b.collectedAt, contentKind: b.contentKind });
+// prev: 수정이면 이전 최신 버전(요약·서지정보 생략 시 이어 받음), 생성이면 없음(null).
+function newVersion(type, b, number, prev) {
+  const v = { id: uuid(), number, title: b.title, content: b.content, createdAt: now(), summary: carry(b, "summary", prev) };
+  if (type === "material")
+    Object.assign(v, { sourceUrl: b.sourceUrl, collectedAt: b.collectedAt, contentKind: b.contentKind, bibliography: carry(b, "bibliography", prev) });
   return v;
 }
 function owned(id, owner, type) {
@@ -328,8 +410,8 @@ function draftFields(b) {
   if (typeof b.content !== "string" || b.content.length > 200000) fields.push({ path: "body.content", message: "string<=200000" });
   return fields;
 }
-function changeDocument(item, title, content) {
-  item.versions.push(newVersion("document", { title, content }, item.versions.length + 1));
+function changeDocument(item, title, content, extra = {}) {
+  item.versions.push(newVersion("document", { title, content, ...extra }, item.versions.length + 1, latest(item)));
   item.version++;
   item.updatedAt = now();
 }
@@ -406,7 +488,7 @@ function handleWriting(owner, method, path, b) {
       return ok(200, draftView(d));
     }
     if (method === "POST" && m[2]) {
-      const fields = validateItem("document", { title: d.title, content: d.content });
+      const fields = validateItem("document", { title: d.title, content: d.content, summary: b.summary });
       if (fields.length) return fail(422, "validation_error", "Invalid request", { fields });
       let item;
       if (doc) {
@@ -415,12 +497,12 @@ function handleWriting(owner, method, path, b) {
         const moved = doc.version !== d.baseDocumentVersion || latest(doc).id !== d.baseVersionId;
         if (moved ? b.resolvedBaseVersionId !== latest(doc).id : b.resolvedBaseVersionId !== undefined && b.resolvedBaseVersionId !== latest(doc).id)
           return conflict("base_changed");
-        changeDocument(doc, d.title, d.content);
+        changeDocument(doc, d.title, d.content, "summary" in b ? { summary: b.summary } : {});
         item = doc;
       } else {
         if (b.expectedVersion !== undefined || b.resolvedBaseVersionId !== undefined) return fail(422, "validation_error", "New drafts have no document base");
         const t = now();
-        item = { id: uuid(), type: "document", owner, versions: [newVersion("document", d, 1)], version: 1, archived: false, createdAt: t, updatedAt: t, publication: null };
+        item = { id: uuid(), type: "document", owner, versions: [newVersion("document", { title: d.title, content: d.content, ...("summary" in b ? { summary: b.summary } : {}) }, 1)], version: 1, archived: false, createdAt: t, updatedAt: t, publication: null };
         items.set(item.id, item);
         Object.assign(d, { documentId: item.id, baseDocumentVersion: item.version, baseVersionId: latest(item).id });
       }
@@ -490,7 +572,7 @@ function handleMutation(owner, method, path, b, user) {
     if (method === "PATCH") {
       const fields = validateItem(type, b);
       if (fields.length) return fail(422, "validation_error", "Invalid request", { fields });
-      item.versions.push(newVersion(type, b, item.versions.length + 1));
+      item.versions.push(newVersion(type, b, item.versions.length + 1, latest(item)));
       item.version++;
       item.updatedAt = now();
       return ok(200, detail(item));
@@ -507,27 +589,39 @@ function handleMutation(owner, method, path, b, user) {
     const t = b.target && owned(b.target.id, owner, b.target.type);
     if (!s || !t || s.archived || t.archived) return fail(404, "not_found", "Not found");
     if (s.id === t.id) return fail(422, "validation_error", "Self link", { fields: [{ path: "body.target", message: "self" }] });
-    if (s.type !== t.type && !(s.type === "document" && t.type === "material" && b.directed === true))
-      return fail(422, "validation_error", "Invalid pair", { fields: [{ path: "body.directed", message: "document->material only" }] });
-    if (typeof b.kind !== "string" || !b.kind.trim() || b.kind.length > 80) return fail(422, "validation_error", "Invalid kind", { fields: [{ path: "body.kind", message: "required" }] });
+    // #105: 고정 어휘, 방향은 kind가 정한다, 근거 문구 필수
+    const kind = RELATION_KINDS.items.find((k) => k.key === b.kind);
+    if (!kind) return invalidReason("relation_kind_unknown", "Unknown relation kind");
+    if (b.directed !== undefined && b.directed !== kind.directed) return invalidReason("relation_direction_mismatch", "Direction does not match kind");
+    if (s.type !== t.type && !(s.type === "document" && t.type === "material"))
+      return fail(422, "validation_error", "Invalid pair", { fields: [{ path: "body.source", message: "document->material only" }] });
+    if (s.type !== t.type && !kind.directed) return invalidReason("relation_direction_mismatch", "Document-material relations are directed");
+    if (blank(b.description) || cp(b.description) > 4000) return invalidReason("relation_reason_required", "Reason required");
+    const directed = kind.directed;
+    // 방향 없는 관계는 id 순으로 저장한다.
+    const [src, dst] = !directed && t.id < s.id ? [t, s] : [s, t];
+    const ends = { source: { type: src.type, id: src.id }, target: { type: dst.type, id: dst.id } };
+    const ev = checkEvidence(b.evidence ?? [], ends, owner);
+    if (ev.error) return ev.error;
     const dup = [...relations.values()].find(
       (r) =>
         !r.archived &&
         r.owner === owner &&
         r.kind === b.kind &&
-        r.directed === b.directed &&
-        ((r.source.id === s.id && r.target.id === t.id) || (!b.directed && r.source.id === t.id && r.target.id === s.id))
+        r.directed === directed &&
+        r.source.id === src.id &&
+        r.target.id === dst.id
     );
     if (dup) return fail(409, "duplicate", "Duplicate relation");
     const at = now();
     const rel = {
       id: uuid(),
       owner,
-      source: { type: s.type, id: s.id },
-      target: { type: t.type, id: t.id },
+      ...ends,
       kind: b.kind,
-      description: b.description ?? "",
-      directed: !!b.directed,
+      description: b.description,
+      directed,
+      evidence: ev.evidence,
       version: 1,
       archived: false,
       createdAt: at,
@@ -540,11 +634,24 @@ function handleMutation(owner, method, path, b, user) {
     const rel = relations.get(m[1]);
     if (!rel || rel.owner !== owner || rel.archived) return fail(404, "not_found", "Not found");
     if (stale(b, rel.version)) return fail(409, "conflict", "Version conflict");
+    let evidence = rel.evidence;
+    if (method === "PATCH") {
+      const kind = RELATION_KINDS.items.find((k) => k.key === b.kind);
+      if (!kind) return invalidReason("relation_kind_unknown", "Unknown relation kind");
+      if (kind.directed !== rel.directed) return invalidReason("relation_direction_mismatch", "Direction does not match kind");
+      if (blank(b.description) || cp(b.description) > 4000) return invalidReason("relation_reason_required", "Reason required");
+      if (b.evidence !== undefined) {
+        const ev = checkEvidence(b.evidence, rel, owner);
+        if (ev.error) return ev.error;
+        evidence = ev.evidence;
+      }
+    }
     rel.version++;
     rel.updatedAt = now();
     if (method === "PATCH") {
       rel.kind = b.kind;
-      rel.description = b.description ?? "";
+      rel.description = b.description;
+      rel.evidence = evidence;
       return ok(200, relationView(rel));
     }
     rel.archived = true;
@@ -1016,7 +1123,13 @@ function handleRead(owner, path, url) {
   if ((m = /^\/research\/(materials|documents)$/.exec(path))) {
     const type = m[1] === "materials" ? "material" : "document";
     const archived = url.searchParams.get("archived") === "true";
-    const list = [...items.values()].filter((i) => i.owner === owner && i.type === type && i.archived === archived).sort(byUpdated).map(summary);
+    // #105 목록(index)에는 활성 관계 수(양 끝이 모두 보관되지 않은 관계)를 싣는다.
+    const activeCount = (id) =>
+      [...relations.values()].filter((r) => !r.archived && (r.source.id === id || r.target.id === id) && !items.get(r.source.id).archived && !items.get(r.target.id).archived).length;
+    const list = [...items.values()]
+      .filter((i) => i.owner === owner && i.type === type && i.archived === archived)
+      .sort(byUpdated)
+      .map((i) => ({ ...summary(i), relationCount: activeCount(i.id) }));
     return ok(200, page(list, url));
   }
   if ((m = /^\/research\/(materials|documents)\/([^/]+)(?:\/(versions|relations)(?:\/([^/]+))?)?$/.exec(path))) {
@@ -1123,6 +1236,11 @@ export async function handleResearch(req, res, path, url, session) {
     return doc ? send(res, 200, snapshot(doc)) : send(res, 404, { error: { code: "not_found", message: "Not found" } });
   }
 
+  // #105 관계 어휘: 인증 없음, 연구 플래그와 무관
+  if (path === "/research/relation-kinds") {
+    if (req.method !== "GET") return send(res, 405, { error: { code: "method_not_allowed", message: "Method not allowed" } });
+    return send(res, 200, RELATION_KINDS);
+  }
   if (path === "/research/health") {
     if (req.method !== "GET") return send(res, 405, { error: { code: "method_not_allowed", message: "Method not allowed" } });
     return send(res, 200, { status: "ok" });
@@ -1238,6 +1356,20 @@ export async function handleResearch(req, res, path, url, session) {
 }
 
 /** #36 revision 선언이 맞지 않아 거절한 본문 쓰기(시험 확인용). */
+/** e2e 전용: #105 이전에 저장된 자유 텍스트 관계(kindKnown:false)를 흉내 낸다. 소유자는 source 항목의 소유자. */
+export function seedLegacyRelation(sourceId, targetId, kind, directed) {
+  const s = items.get(sourceId);
+  const t = items.get(targetId);
+  if (!s || !t) return null;
+  const at = now();
+  const rel = {
+    id: uuid(), owner: s.owner, source: { type: s.type, id: s.id }, target: { type: t.type, id: t.id },
+    kind, description: "", directed, evidence: [], version: 1, archived: false, createdAt: at, updatedAt: at,
+  };
+  relations.set(rel.id, rel);
+  return rel.id;
+}
+
 export const postRevisionRejects = [];
 
 export function researchCounts() {

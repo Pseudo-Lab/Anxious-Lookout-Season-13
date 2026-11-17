@@ -580,7 +580,7 @@ async function dropFirstSend(p) {
   // #31 W3: 문서가 가리키는 자료(문서→자료 관계)와 직접 고를 자료
   const mat = await api.send("POST", "/research/materials", { title: "글 바탕 자료", sourceUrl: "https://example.com/offline-source", collectedAt: "2026-10-18T00:00:00Z", contentKind: "excerpt", content: "자료 비공개 메모" });
   const mat2 = await api.send("POST", "/research/materials", { title: "직접 고른 오프라인 자료", sourceUrl: "https://example.com/offline-direct", collectedAt: "2026-10-18T00:00:00Z", contentKind: "summary", content: "직접 자료 비공개 메모" });
-  const rel = await api.send("POST", "/research/relations", { source: { type: "document", id: doc.body.id }, target: { type: "material", id: mat.body.id }, kind: "근거", directed: true });
+  const rel = await api.send("POST", "/research/relations", { source: { type: "document", id: doc.body.id }, target: { type: "material", id: mat.body.id }, kind: "supports", description: "e2e 근거" });
   check("IP2. setup: materials + document->material relation", mat.status === 201 && mat2.status === 201 && rel.status === 201, `${mat.status} ${mat2.status} ${rel.status}`);
   await page.goto(U("/write/new/"));
   await main.getByLabel("제목").fill("오프라인 첫 글");

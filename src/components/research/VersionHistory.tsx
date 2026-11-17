@@ -10,6 +10,7 @@ import { formatDateTime } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import SafeMarkdown from "@/components/research/SafeMarkdown";
 import TextDiff from "@/components/research/TextDiff";
+import { BibliographyLine, SummaryLine } from "@/components/research/WikiMeta";
 
 /** 버전 목록·본문을 가져오는 곳(자료·문서 #22, 글 #28). 렌더마다 새로 만들어도 key가 같으면 다시 부르지 않는다. */
 export interface VersionSource<V extends VersionLike> {
@@ -108,14 +109,20 @@ export default function VersionHistory({
     key: `${type}:${itemId}`,
     list: (cursor) => listVersions(type, itemId, cursor),
     get: (versionId) => getVersion(type, itemId, versionId),
-    meta: (v) =>
-      v.sourceUrl ? (
-        <p className="break-all text-xs text-stone-500">
-          출처 {v.sourceUrl}
-          {v.collectedAt && ` · 수집 ${formatDateTime(v.collectedAt)}`}
-          {v.contentKind && ` · ${CONTENT_KIND_LABELS[v.contentKind]}`}
-        </p>
-      ) : null,
+    // #105 그 버전의 한 줄 요약·서지정보도 함께 보인다(버전마다 저장된다).
+    meta: (v) => (
+      <>
+        <SummaryLine summary={v.summary} />
+        {v.sourceUrl && (
+          <p className="break-all text-xs text-stone-500">
+            출처 {v.sourceUrl}
+            {v.collectedAt && ` · 수집 ${formatDateTime(v.collectedAt)}`}
+            {v.contentKind && ` · ${CONTENT_KIND_LABELS[v.contentKind]}`}
+          </p>
+        )}
+        <BibliographyLine bibliography={v.bibliography} />
+      </>
+    ),
   };
   return <VersionHistoryView source={source} latestVersionId={latestVersionId} onRestore={onRestore} />;
 }

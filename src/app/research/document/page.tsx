@@ -3,7 +3,7 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { getDocument, getDocumentDraft, type DraftInput } from "@/lib/research/api";
+import { getDocument, getDocumentDraft } from "@/lib/research/api";
 import { useLoad } from "@/lib/research/hooks";
 import type { Draft, ResearchDocument } from "@/lib/research/types";
 import { formatDateTime } from "@/lib/research/format";
@@ -11,18 +11,19 @@ import AuthGate from "@/components/research/AuthGate";
 import ArchiveButton from "@/components/research/ArchiveButton";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
-import DocumentEditor from "@/components/research/DocumentEditor";
+import DocumentEditor, { type EditorSeed } from "@/components/research/DocumentEditor";
 import ProposalPanel from "@/components/research/ProposalPanel";
 import PublicationPanel from "@/components/research/PublicationPanel";
 import RelationPanel from "@/components/research/RelationPanel";
 import SafeMarkdown from "@/components/research/SafeMarkdown";
 import VersionHistory from "@/components/research/VersionHistory";
+import { SummaryLine } from "@/components/research/WikiMeta";
 
 function DocumentDetail({ id }: { id: string }) {
   const { result, refreshFailure, reload, setResult } = useLoad(`document:${id}`, () => getDocument(id));
   // #22 이 문서의 active 서버 초안(없으면 null). 편집을 열 때마다 다시 확인한다.
   const draftLoad = useLoad(`document-draft:${id}`, () => getDocumentDraft(id));
-  const [editing, setEditing] = useState<{ draft: Draft | null; seed?: DraftInput } | null>(null);
+  const [editing, setEditing] = useState<{ draft: Draft | null; seed?: EditorSeed } | null>(null);
   const [opening, setOpening] = useState(false);
 
   if (!result) return <p className="text-sm text-stone-500">불러오는 중...</p>;
@@ -31,7 +32,7 @@ function DocumentDetail({ id }: { id: string }) {
   const activeDraft = draftLoad.result?.ok ? draftLoad.result.data.draft : null;
 
   // 편집 열기: 다른 기기에서 만든 초안이 있을 수 있어 먼저 다시 확인하고, 있으면 그 초안을 이어 쓴다.
-  async function openEditor(seed?: DraftInput) {
+  async function openEditor(seed?: EditorSeed) {
     setOpening(true);
     const r = await getDocumentDraft(d.id);
     setOpening(false);
@@ -49,6 +50,7 @@ function DocumentDetail({ id }: { id: string }) {
       <header className="space-y-2">
         {d.archived && <Notice tone="info">보관한 문서입니다. 내용과 버전 기록을 볼 수 있지만 수정·연결·새로 공개할 수 없습니다. 공개 중이라면 아래에서 철회할 수 있습니다.</Notice>}
         <h1 className="text-2xl font-bold text-stone-900">{d.title || "(제목 없음)"}</h1>
+        <SummaryLine summary={d.summary} />
         <p className="text-xs text-stone-500">
           v{d.latestVersion.number} · 수정 {formatDateTime(d.updatedAt)} · 작성 {formatDateTime(d.createdAt)}
         </p>
@@ -102,7 +104,7 @@ function DocumentDetail({ id }: { id: string }) {
         type="document"
         itemId={d.id}
         latestVersionId={d.latestVersion.id}
-        onRestore={!d.archived && !editing ? (v) => void openEditor({ title: v.title, content: v.content }) : undefined}
+        onRestore={!d.archived && !editing ? (v) => void openEditor({ title: v.title, content: v.content, summary: v.summary }) : undefined}
       />
     </article>
   );

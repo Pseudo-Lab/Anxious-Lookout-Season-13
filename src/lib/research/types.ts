@@ -44,11 +44,39 @@ interface ItemBase {
   archived: boolean;
 }
 
+// #105 서지정보(CSL-JSON 부분집합, api-contracts/issue105-research-wiki-v1.md 4.1). 키는 CSL 변수 이름 그대로다.
+// URL·접근일은 서지정보에 두지 않는다(자료의 sourceUrl·collectedAt이 기준값).
+export type CslName = { family: string; given?: string } | { literal: string };
+export interface CslDate {
+  "date-parts": number[][];
+}
+export interface Bibliography {
+  // 계약의 CslType 중 하나. 새 값이 생길 수 있어 문자열로 받고 모르는 값은 그대로 표시한다.
+  type: string;
+  title?: string;
+  author?: CslName[];
+  issued?: CslDate;
+  "container-title"?: string;
+  publisher?: string;
+  volume?: string;
+  issue?: string;
+  page?: string;
+  number?: string;
+  DOI?: string;
+  ISBN?: string;
+  ISSN?: string;
+}
+
 export interface MaterialSummary extends ItemBase {
   type: "material";
   sourceUrl: string;
   collectedAt: string;
   contentKind: ContentKind;
+  // #105 한 줄 요약·서지정보(최신 버전 값). 없으면 null.
+  summary: string | null;
+  bibliography: Bibliography | null;
+  // #105 목록에만 있음: 활성 관계 수
+  relationCount?: number;
 }
 
 export interface Material extends MaterialSummary {
@@ -58,6 +86,10 @@ export interface Material extends MaterialSummary {
 export interface DocumentSummary extends ItemBase {
   type: "document";
   publication: Publication | null;
+  // #105 한 줄 요약(최신 버전 값). 없으면 null.
+  summary: string | null;
+  // #105 목록에만 있음: 활성 관계 수
+  relationCount?: number;
 }
 
 export interface ResearchDocument extends DocumentSummary {
@@ -74,6 +106,9 @@ export interface VersionSummary {
   sourceUrl?: string;
   collectedAt?: string;
   contentKind?: ContentKind;
+  // #105 그 버전의 한 줄 요약(없으면 null)·서지정보(자료 버전만)
+  summary: string | null;
+  bibliography?: Bibliography | null;
 }
 
 export interface Version extends VersionSummary {
@@ -129,13 +164,29 @@ export interface Endpoint {
 
 export type RelationDirection = "outgoing" | "incoming" | "bidirectional";
 
+// #105 관계 근거 위치. itemId는 그 관계의 source 또는 target이다.
+export interface Evidence {
+  itemId: string;
+  versionId: string;
+  // 표시용 버전 번호
+  versionNumber: number;
+  locator: string | null;
+  quote: string | null;
+}
+
 export interface Relation {
   id: string;
   source: Endpoint;
   target: Endpoint;
+  // 저장된 원래 문자열. 기존 자유 텍스트도 그대로 온다.
   kind: string;
+  // #105 kind가 어휘 key이면 true. false면 기존 자유 텍스트(‘기타’)다.
+  kindKnown: boolean;
+  // 근거 문구
   description: string;
   directed: boolean;
+  // #105 근거 위치 목록(저장 순서)
+  evidence: Evidence[];
   version: number;
   createdAt: string;
   updatedAt: string;
@@ -334,6 +385,11 @@ export const LIMITS = {
   content: 200_000,
   description: 4_000,
   kind: 80,
+  // #105 (모두 Unicode code point 기준)
+  summary: 300,
+  evidence: 20,
+  locator: 100,
+  quote: 500,
 } as const;
 
 // 세션 항목의 저장된 원본 전체(도구 입력·출력 포함). 실행하지 않고 JSON 텍스트로만 표시한다.
