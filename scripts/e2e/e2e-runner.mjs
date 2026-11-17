@@ -686,7 +686,7 @@ await step("N17", async () => {
   );
   await chat.getByRole("button", { name: "← 대화 목록" }).click();
   await chat.getByRole("link", { name: /준비 대화/ }).click();
-  check("N17. status 403: error shown", await appears(chat.getByText(/연결 상태를 확인하지 못했습니다/)));
+  check("N17. status 403: short error shown", await appears(chat.getByText(/연결 확인 실패/)));
   check("N17. status 403: send locked, draft kept", (await sendBtn().isDisabled()) && (await chat.getByLabel("메시지").inputValue()) === "403 상태 질문");
   check("N17. status 403: history still visible", await appears(chat.getByText("모의 응답: 500 불명 질문")));
   await page.unroute("**/api/research/codex/status");

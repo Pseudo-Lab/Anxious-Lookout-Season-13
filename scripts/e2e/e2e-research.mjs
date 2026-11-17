@@ -422,6 +422,20 @@ const publishButton = () => main.getByRole("button", { name: /글과 참고 자�
 // R9. 세션: Codex 미연결 안내 → 전송 실패 시 입력 보존 → 모의 연결 후 이어하기·도구 이력·원본
 // #44: 내 연구에 대화 탭이 없다. 대화는 공통 대화창에서만 시작한다(Codex 안내·새 대화 폼도 대화창에 있다).
 const chat = page.locator("#chat-panel");
+async function recheckConnection() {
+  const mutations = [];
+  const record = (request) => {
+    if (new URL(request.url()).pathname.includes("/api/research/") && !["GET", "HEAD"].includes(request.method())) mutations.push(request.method());
+  };
+  page.on("request", record);
+  try {
+    const read = page.waitForResponse((response) => response.request().method() === "GET" && new URL(response.url()).pathname.endsWith("/research/codex/status"));
+    await chat.getByRole("group", { name: "보내기 연결", exact: true }).getByRole("button", { name: "다시 시도", exact: true }).click();
+    await read;
+    await page.waitForTimeout(150);
+    check("connection retry performs only GET without preparation or message send", mutations.length === 0, mutations.join(","));
+  } finally { page.off("request", record); }
+}
 // 새로고침 뒤 대화창은 기억한 열림 상태로 다시 그려진다: 대화창이나 여는 버튼 중 하나가 정착할 때까지 보고 나서 연다
 async function openChatPanel() {
   const button = page.getByRole("button", { name: "대화창 열기" });
@@ -436,13 +450,13 @@ check("R9. #44: research page has no conversation tab", (await main.getByRole("n
 // 대화는 일반 화면(홈)에서 시작한다: 예전 대화 탭처럼 보낸 화면이 '일반'이고 소유자 도구 범위다
 await page.goto(U("/"));
 await openChatPanel();
-check("R9. codex unavailable banner", await appears(chat.getByText("새 대화를 진행할 수 없지만")));
+check("R9. unavailable has a short status and one explicit recheck", await appears(chat.getByText("연결 안 됨", { exact: false })) && (await chat.getByRole("button", { name: "다시 시도", exact: true }).count()) === 1);
 // R9a. 계약에 아직 없는 사유 코드와 서버 고정 모델: 형식 오류로 막지 않고 일반 안내 + 모델 표시(실제 응답 성공으로 표시하지 않음)
 await setMock("codex=auth_expired");
 await page.reload();
 await openChatPanel();
 check("R9a. auth_expired reason explained (operator reconnect)", await appears(chat.getByText("auth_expired")));
-check("R9a. no model name shown (#94), no auto switch", (await chat.getByText(/모델:|서버에서 고정/).count()) === 0 && (await appears(chat.getByText("다른 모델로 자동 전환하지 않습니다"))));
+check("R9a. short status hides model names and removed explanations", (await chat.getByText(/모델:|서버에서 고정|새 대화를 진행할 수 없지만|다른 모델로 자동 전환하지 않습니다/).count()) === 0 && (await chat.getByRole("button", { name: "다시 시도", exact: true }).count()) === 1);
 check("R9a. no login/API-key input offered", (await chat.getByLabel(/API|키|ChatGPT/).count()) === 0);
 await setMock("codex=unavailable");
 await page.reload();
@@ -474,7 +488,7 @@ const sessionUrl = U(`/research/session/?id=${(await chatUi()).sessionId}`);
   await page.unroute("**/api/research/sessions/*/messages");
 }
 await setMock("codex=fixture");
-await chat.getByRole("button", { name: "다시 시도" }).click();
+await recheckConnection();
 check("R9. recheck unlocks without reload", await appears(chat.getByText("테스트 연결")));
 check("R9. input still there after unlock", (await chat.getByLabel("메시지").inputValue()) === "질문 하나");
 await chat.getByRole("button", { name: "보내기" }).click();
@@ -618,7 +632,7 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
     await page.unroute("**/api/research/sessions/*/messages");
     // 운영자 재공급(같은 계정) 뒤: 상태 재확인 → 같은 대화에 새 메시지
     await setMock("codex=fixture");
-    await chat.getByRole("button", { name: "다시 시도" }).click();
+    await recheckConnection();
     await chat.getByText("테스트 연결").waitFor();
     await chat.getByLabel("메시지").fill(`${mode} 재개 질문`);
     await chat.getByRole("button", { name: "보내기" }).click();
@@ -644,7 +658,7 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
   check("R9w. expired reason shown", await appears(chat.getByText("auth_expired")));
   check("R9w. input kept after window end", (await chat.getByLabel("메시지").inputValue()) === "창 끝난 뒤 질문");
   await setMock("codex=fixture&window=&remaining=");
-  await chat.getByRole("button", { name: "다시 시도" }).click();
+  await recheckConnection();
   await chat.getByText("테스트 연결").waitFor();
   await chat.getByLabel("메시지").fill("");
 }
@@ -725,7 +739,7 @@ check("R9. no raw record entry (#94)", (await chat.getByRole("button", { name: /
   check("R9y. draft kept", (await chat.getByLabel("메시지").inputValue()) === "조회 실패 질문");
   await page.unroute("**/api/research/codex/status");
   await setMock("codex=fixture&window=&remaining=");
-  await chat.getByRole("button", { name: "다시 시도" }).click();
+  await recheckConnection();
   await chat.getByText("테스트 연결").waitFor();
   await chat.getByLabel("메시지").fill("");
 }
@@ -1711,6 +1725,7 @@ let docEUrl;
   await chat.getByLabel("메시지").fill("/fixture/propose 문장 하나 더해줘");
   await chat.getByRole("button", { name: "보내기" }).click();
   await chat.getByText("모의 응답: /fixture/propose 문장 하나 더해줘").waitFor({ timeout: 15000 });
+  await chat.locator("li[data-tool-id]").last().getByRole("button").click();
   check("W2. proposal: chat explains document not changed", await appears(chat.getByText("수락하기 전에는 문서가 바뀌지 않습니다", { exact: false })));
   check("W2. proposal: document unchanged", (await api.get(`/research/documents/${id}`)).version === v2.version);
   await chat.getByRole("link", { name: "제안 검토" }).click();
@@ -1729,6 +1744,7 @@ let docEUrl;
   await chat.getByLabel("메시지").fill("/fixture/propose 또 고쳐줘");
   await chat.getByRole("button", { name: "보내기" }).click();
   await chat.getByText("모의 응답: /fixture/propose 또 고쳐줘").waitFor({ timeout: 15000 });
+  await chat.locator("li[data-tool-id]").last().getByRole("button").click();
   await chat.getByRole("link", { name: "제안 검토" }).last().click();
   await proposalsBox.getByRole("button", { name: "제안 버리기" }).click();
   await proposalsBox.waitFor({ state: "detached" });

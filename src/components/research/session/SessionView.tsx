@@ -150,9 +150,17 @@ export function ToolCall({ item }: { item: ToolCallItem }) {
   const shell = item.name === SHELL_TOOL ? shellView(item) : null;
   // #68: apply_patch(native 파일 수정)는 "파일 변경"으로 보인다. changes가 배열이 아니면 일반 도구처럼 표시한다.
   const patch = item.name === PATCH_TOOL ? patchChanges(item) : null;
+  // 완료는 프로세스 종료를 뜻할 수 있다. terminal의 비0 종료/명시 오류는 접힌 상태에도 반영한다.
+  const terminalCodes: Record<string, string> = {
+    shell_timeout: "timed_out", shell_cancelled: "interrupted", shell_declined: "rejected",
+    tool_not_allowed: "rejected", shell_busy: "rejected", shell_invalid_request: "rejected", shell_unavailable: "failed",
+  };
+  const status = shell && ["completed", "failed"].includes(item.status)
+    ? (shell.code ? own(terminalCodes, shell.code) : undefined) ?? (item.status === "completed" && shell.exitCode !== null && shell.exitCode !== 0 ? "failed" : item.status)
+    : item.status;
   const proposal = proposalRef(item);
   const note = shell
-    ? shellNote(item.status, shell)
+    ? shellNote(status, shell)
     : patch
       ? patchNote(item.status, item.error?.code)
       : item.status === "rejected"
@@ -162,15 +170,15 @@ export function ToolCall({ item }: { item: ToolCallItem }) {
       : null;
   const code = shell ? shell.code : item.error?.code;
   const action = shell ? "명령" : patch ? "파일 변경" : "도구";
-  const warn = ["rejected", "declined", "failed", "timed_out", "interrupted"].includes(item.status);
-  const summary = item.status === "completed" ? (patch ? "파일 변경함" : `${action} 실행함`)
-    : item.status === "inProgress" ? (patch ? "파일 변경 중" : `${action} 실행 중`)
-    : item.status === "approval" ? `${action} 확인 중`
-    : item.status === "rejected" || item.status === "declined" ? `${action} 거부됨`
-    : item.status === "interrupted" ? `${action} 중지됨`
-    : item.status === "timed_out" ? `${action} 시간 초과`
-    : item.status === "failed" ? `${action} 실패` : `${action} 상태 확인 중`;
-  const emptyOutput = shell ? shellEmptyOutput(item.status, shell) : null;
+  const warn = ["rejected", "declined", "failed", "timed_out", "interrupted"].includes(status);
+  const summary = status === "completed" ? (patch ? "파일 변경함" : `${action} 실행함`)
+    : status === "inProgress" ? (patch ? "파일 변경 중" : `${action} 실행 중`)
+    : status === "approval" ? `${action} 확인 중`
+    : status === "rejected" || status === "declined" ? `${action} 거부됨`
+    : status === "interrupted" ? `${action} 중지됨`
+    : status === "timed_out" ? `${action} 시간 초과`
+    : status === "failed" ? `${action} 실패` : `${action} 상태 확인 중`;
+  const emptyOutput = shell ? shellEmptyOutput(status, shell) : null;
   return (
     <li data-tool-id={item.id} data-tool-name={item.name} className="rounded-md bg-stone-50 text-xs">
       <button
@@ -180,7 +188,7 @@ export function ToolCall({ item }: { item: ToolCallItem }) {
       >
         <span className={`min-w-0 break-words ${warn ? "font-medium text-amber-700" : "text-stone-500"}`}>
           {summary}
-          {item.turnStatus === "interrupted" && item.status !== "interrupted" && " · 중지됨"}
+          {item.turnStatus === "interrupted" && status !== "interrupted" && " · 중지됨"}
         </span>
       </button>
       {item.modelMismatch && (
@@ -572,8 +580,8 @@ function Composer({
           </Notice>
         )}
         {failure && <ErrorNotice failure={failure} prefix="메시지를 보내지 못했습니다." />}
-        {blocked &&
-          (runnerState(codex) ? (
+        {blocked && <div role="group" aria-label="보내기 연결">
+          {runnerState(codex) ? (
             // 실행 환경 상태: 보내기 버튼만 잠그고 입력은 그대로 쓸 수 있다. 준비가 끝나도 자동으로 보내지 않는다.
             <Notice tone="info">
               {runnerState(codex)?.title}{" · "}
@@ -587,7 +595,8 @@ function Composer({
                 다시 시도
               </button>
             </Notice>
-          ))}
+          )}
+        </div>}
         {/* 결과를 정말 확인하지 못한 경우에만 경고한다. 보내는 동안(결과를 기다리는 중)은 정상 흐름이다(#89). */}
         {pending && !busy && (
           <Notice tone="warn">
