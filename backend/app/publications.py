@@ -69,7 +69,7 @@ def preview(store, identity, version_id=None):
     targets = {}
     for relation in relations:
         targets.setdefault(relation.target_id, []).append({"id": str(relation.id), "version": relation.version})
-    materials = []
+    materials, fingerprint_materials = [], []
     for target_id in sorted(targets):
         target = store.owned_item(target_id, "material", lock=True)
         content = store.db.scalar(select(ContentVersion).where(ContentVersion.item_id == target.id,
@@ -78,7 +78,11 @@ def preview(store, identity, version_id=None):
         value.update(id=str(target.id), versionId=str(content.id), archived=target.archived, relations=targets[target.id])
         value.pop("itemId")
         materials.append(value)
-    state = {"owner": str(store.owner), "document": str(item.id), "version": str(document.id), "materials": materials}
+        # Keep pre-#104 preview fingerprints stable while omitting provenance
+        # from the returned DTO. This internal value is never published.
+        from .version_authors import value as author_value
+        fingerprint_materials.append({**value, 'author': author_value(content)})
+    state = {"owner": str(store.owner), "document": str(item.id), "version": str(document.id), "materials": fingerprint_materials}
     token = hashlib.sha256(json.dumps(state, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
     return {"documentId": str(item.id), "versionId": str(document.id), "title": document.title, "content": document.content,
             "expectedVersion": item.version, "previewToken": token, "publishable": all(not value["archived"] for value in materials), "materials": materials}

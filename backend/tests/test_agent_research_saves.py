@@ -43,7 +43,7 @@ def test_document_direct_save_authors_conflicts_retry_and_human_draft(client, ad
     saved = result.json()
     assert success('research_document_update', saved, args)
     assert saved['version'] == saved['latestVersion']['number'] == 2
-    assert saved['latestVersion']['author'] == {'kind': 'codex', 'conversationId': session['id']}
+    assert 'author' not in saved['latestVersion']
     assert saved['saved']['versionId'] == saved['latestVersion']['id']
     assert callback(client, session, runner, 'research_document_update', args).json() == saved
     conflict = callback(client, session, runner, 'research_document_update', {**args, 'mutationId': str(uuid.uuid4())})
@@ -51,11 +51,11 @@ def test_document_direct_save_authors_conflicts_retry_and_human_draft(client, ad
     assert conflict.json()['error']['details']['current']['latestVersion']['id'] == saved['latestVersion']['id']
     assert client.get('/api/research/document-drafts/' + draft['id']).json() == draft
     versions = client.get('/api/research/documents/' + doc['id'] + '/versions').json()['items']
-    assert [version['author']['kind'] for version in versions] == ['codex', 'human']
+    assert len(versions) == 2 and all('author' not in version for version in versions)
     human = client.patch('/api/research/documents/' + doc['id'],
                        json={'title': 'Restored', 'content': doc['content'], 'expectedVersion': 2}, headers=headers(auth))
     assert human.status_code == 200, human.text
-    assert human.json()['latestVersion']['author'] == {'kind': 'human', 'conversationId': None}
+    assert 'author' not in human.json()['latestVersion']
     assert client.get('/api/research/document-proposals').json()['items'] == []
 
 
@@ -70,7 +70,7 @@ def test_new_post_save_preserves_draft_and_rejects_old_propose_publish_and_archi
     post = result.json()
     assert success('research_post_save', post, args)
     assert post['latestVersion']['textProjection'] == 'Codex source'
-    assert post['latestVersion']['author'] == {'kind': 'codex', 'conversationId': session['id']}
+    assert 'author' not in post['latestVersion']
     assert post['saved']['destination']['path'] == '/write/' and post['publication'] is None
     assert client.get('/api/research/post-drafts/' + draft['id']).json() == draft
     assert callback(client, session, runner, 'research_post_save', args).json() == post

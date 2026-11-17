@@ -37,6 +37,28 @@ human drafts active and unchanged, and do not create proposals. Existing posts
 require postId and current expectedVersion; draftId and expectedDraftRevision
 are paired when referring to a specific draft.
 
+## Post Markdown
+
+- H1–H6 are supported; start body headings at `##` because the post title is H1.
+- Use paragraphs, **bold**, *italic*, ~~strike~~, inline code, links, ordered/bullet
+  lists (one paragraph per item, up to3 levels), quotes (paragraphs/lists), fenced
+  or indented code, tables and horizontal rules.
+- Code languages: plain, bash, c, cpp, css, go, html, java, javascript, json, jsx,
+  markdown, python, rust, sql, tsx, typescript, xml, yaml. Other fence languages
+  (including no language) become plain with `code_language_downgraded`.
+- Images must be a standalone paragraph with a root-relative owned upload URL:
+  `![alt]({BASE}/api/media/post-images/<UUID>)`; BASE is the configured path or empty.
+  Inline/external images are rejected.
+- Outside code, HTML, `{...}` expressions and import/export lines are rejected:
+  422 `unsupported_content`. Size limits use `payload_too_large` (413) or
+  `content_limit_exceeded` (422). Unsupported structures are not flattened.
+- Text must contain real newline characters. JSON-encode once: wire `\n`, not `\\n`.
+- Markdown saves cannot represent font size/color, underline, alignment, columns,
+  table-cell backgrounds or embeds. Existing formatting of these kinds is lost
+  in the new version. Tell the user before saving edits to a human-formatted post.
+- Research documents use GFM, skip HTML, show images as links and code without
+  execution/highlighting; they do not use the post-block converter.
+
 Use a fresh UUID mutationId for each distinct change. An explicitly chosen
 identical retry reuses that ID. On CAS conflict, reread and reconcile against
 the current resource/draft, then use a new ID for changed arguments. Never just

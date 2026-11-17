@@ -38,7 +38,8 @@ def operation_failure(error):
         code = 503
     result = {'error': {'code': reason, 'message': 'Research operation failed'}}
     if known and error.details is not None:
-        result['error']['details'] = redact(error.details)
+        from .version_authors import without_version_authors
+        result['error']['details'] = redact(without_version_authors(error.details))
     return result, code
 
 

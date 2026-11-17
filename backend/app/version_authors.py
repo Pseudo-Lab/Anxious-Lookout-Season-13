@@ -26,6 +26,22 @@ def value(row):
     return result
 
 
+def without_version_authors(value, *, version=False):
+    """Project old cached DTOs without editing history or public owner bylines.
+
+    Version lists/details have number+itemId/postId; compact latestVersion
+    summaries are recognized by their enclosing field. Content is opaque and
+    may legitimately use an author key. Public releases have no version number.
+    """
+    if isinstance(value, list):
+        return [without_version_authors(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    is_version = version or ('number' in value and ('itemId' in value or 'postId' in value))
+    return {key: item if key == 'content' else without_version_authors(item, version=key == 'latestVersion')
+            for key, item in value.items() if not (is_version and key == 'author')}
+
+
 def saved(resource, kind):
     version = resource['latestVersion']
     return {**resource, 'saved': {

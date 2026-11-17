@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.research import fail, Input
-from app.research_models import Conversation
+from app.research_models import Conversation, ContentVersion
 from .offline_services import require_offline
 
 
@@ -50,7 +50,8 @@ def checked(response, codes):
 def result(session, calls, document):
     saved = next((entry for entry in calls['items'] if entry.get('operation') == 'research_document_save'
                   and entry.get('status') == 'succeeded' and entry.get('saved')), None)
-    if saved is None or document['latestVersion']['author'] != {'kind': 'codex', 'conversationId': session['id']}:
+    if (saved is None or 'author' in document['latestVersion'] or saved['saved']['id'] != document['id']
+            or saved['saved']['versionId'] != document['latestVersion']['id']):
         fail('not_ready', 'Offline r2 fixture evidence mismatch', 503)
     return {'sessionId': session['id'], 'requestId': saved['requestId'],
             'resourceId': document['id'], 'versionId': saved['saved']['versionId'],
@@ -112,6 +113,12 @@ def register(app):
             arguments = {'title': 'Offline r2 saved document', 'content': 'Synthetic source retained by the r2 agent API.',
                          'mutationId': str(uuid5(key, 'save'))}
             document = checked(call(app, session['id'], held, 'research_document_save', arguments), {200})
+            # Provenance remains internal after #104; verify storage, not a DTO.
+            with app.state.sessions() as db:
+                version = db.get(ContentVersion, UUID(document['latestVersion']['id']))
+                if (version is None or version.author_kind != 'codex'
+                        or str(version.author_conversation_id) != session['id'] or version.owner_id != owner):
+                    fail('not_ready', 'Offline storage evidence mismatch', 503)
             # Prove the retired callback refuses the very same admitted owner.
             refused = client.post(prefix + '/api/internal/research/tools', headers={
                 'Authorization': 'Bearer ' + held.last['toolToken']}, json={

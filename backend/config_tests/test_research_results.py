@@ -42,7 +42,7 @@ def test_real_serializer_results_pass_response_and_stored_row_validation(name, a
 @pytest.mark.parametrize('path,value', [
     (('id',), 'not-a-uuid'), (('version',), True), (('archived',), True),
     (('latestVersion', 'id'), str(uuid4())), (('latestVersion', 'number'), True),
-    (('latestVersion', 'author', 'conversationId'), 'unknown'),
+    (('latestVersion', 'author'), {'kind':'codex','conversationId':str(uuid4())}),
     (('saved', 'id'), str(uuid4())), (('saved', 'resourceType'), 'post'),
     (('saved', 'versionId'), str(uuid4())), (('saved', 'versionNumber'), True),
     (('saved', 'destination', 'path'), 'https://other.invalid/'),
@@ -68,11 +68,11 @@ def test_structurally_valid_other_target_or_cas_is_not_this_callback_evidence():
     assert not success('research_document_update', result, {**args, 'content': 'another body'})
 
 
-def test_idempotent_result_retains_original_conversation_author():
+def test_serialized_result_keeps_version_identity_without_exposing_conversation_author():
     original = str(uuid4())
     result = save_result(conversation=original)
     assert success('research_document_save', result)
-    assert result['latestVersion']['author']['conversationId'] == original
+    assert 'author' not in result['latestVersion'] and original not in str(result)
 
 
 def test_relation_endpoint_and_archive_contracts_cannot_accept_health_dicts():

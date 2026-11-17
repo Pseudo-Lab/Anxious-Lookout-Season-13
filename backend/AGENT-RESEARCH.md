@@ -1,6 +1,6 @@
-# Agent research API (#97, r3)
+# Agent research API (#97 / #104)
 
-Branch: `task/agent-research-api-97`. The approved direction is owner native shell
+Current branch: `task/research-ui-cleanup-104`. The approved direction is owner native shell
 calling the public research HTTPS API using the `anxious-research` skill/CLI.
 MCP, per-turn process restarts, persistent peers, mutation fences, settlement/ACK
 and benchmark images are removed. The API/CLI implementation is a review
@@ -22,7 +22,7 @@ owner research operations remain absent from the native catalog.
 
 The shared response validator `app/research_results.py` is preserved for API
 success/receipt validation. It validates actual serializer shapes and resource,
-version, saved destination, CAS and provenance relationships; arbitrary 2xx JSON
+version, saved destination and CAS relationships; arbitrary 2xx JSON
 is not evidence of a save. It does not prove a database commit by itself.
 
 ## Schema and recovery
@@ -32,7 +32,9 @@ safe audit and immutable PAT author names on top of `0008_version_authors`.
 Current API/ORM requires009. Existing human/Codex provenance and all proposals,
 drafts, publications and content remain unchanged. Direct internal agent saves
 use the authenticated conversation; external PAT saves use credential ID/name
-snapshots. Public snapshots retain their public owner projection.
+snapshots internally. #104 omits version provenance from DTOs, including old
+idempotent responses/conflicts, without rewriting stored rows. Public snapshots
+retain their public owner byline. Schema stays009; #104 has no migration.
 Startup never migrates. Migrate only through the reviewed operator job after
 backup/writer drain. Never downgrade the schema or delete provenance for rollback.
 
@@ -78,7 +80,7 @@ Token hard TTL is min(30min, original login expiry), independent of overall turn
 length. Expiry is401 research_token_expired; no renewal/retry/replay. New admission,
 terminal refresh, interrupt, logout, role change and restore revoke hashes under
 conversation locks. Every call rechecks fresh login/role/scope and binding before
-idempotency replay. Schema008 and original authors remain unchanged.
+idempotency replay. Schema009 and internal author records remain unchanged.
 
 API mutations and strict safe receipts share one commit. Failed actions roll back
 their savepoint before a fixed failure receipt; unknown commit is never success.
@@ -129,9 +131,14 @@ approval loss; new issue/use requires the feature flag. Browser logout does not
 revoke independent PATs. Restore marks all imported PATs revoked, retaining rows,
 version attribution, audit and content.
 
-Fresh current role intersects selected read/write: approved commenter public
-only, editor/admin selected scope, unapproved none. Private read/write operations
-never trust caller owner/author. PAT calls do not fabricate Conversation/F2 rows
+All PATs allow private reads and saves for currently approved editors/admins,
+including existing DB scope=read rows. Commenters stay public-only, unapproved
+accounts have no private access. Old scope rows are unchanged; new rows use the
+existing write value. Management DTOs omit scope/effectiveScope/scopeLimitedByRole.
+Issue fingerprints keep the historical hash format (default write) and recognize
+either #97 scope fingerprint for identical name/expiry ACK-loss checks, ignoring
+scope as authority. Private operations never trust caller
+owner/author. PAT calls do not fabricate Conversation/F2 rows
 or use runner RPC. Account SHARE→mutation advisory→Credential UPDATE locks and
 fresh checks precede every action/replay. The separate bounded admission commit
 persists per-PAT60/min quota and lastUsed before action; action failure cannot
@@ -141,6 +148,8 @@ using bounded XFF only from configured trusted peers. PAT syntax is masked even
 when retired/unobserved and streamed across chunk boundaries; provider-retirement
 flags remain unchanged.
 
+Public `/api/research/llm.md` provides configured API addresses, bearer usage,
+operation/schema discovery and CAS/mutation guidance without a DB/auth lookup.
 Public distribution at `/api/research/client/{pat-client.py,SKILL.md,operations.json}`
 provides the POSIX Python3 client and external skill from `backend/client/`.
 External clients use the public HTTPS origin/platform CA and a private0700 parent/
@@ -148,4 +157,5 @@ External clients use the public HTTPS origin/platform CA and a private0700 paren
 retry. Internal root CLI remains turn-only with its compiled Traefik Service pin.
 Use existing public REST without PAT for public content; commenter PAT may also
 read it under PAT quota. Full F5 DTO/response-loss and operation contract lives in
-`agent-worktree-comm/api-contracts/issue97-pat-r3-v1.md`.
+`agent-worktree-comm/api-contracts/issue104-research-cleanup-v1.md` (superseding the
+affected fields in issue97-pat-r3-v1.md).

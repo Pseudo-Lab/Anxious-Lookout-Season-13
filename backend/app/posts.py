@@ -110,11 +110,10 @@ def expect(row, expected):
 
 
 def version_value(row, content=True):
-    from .version_authors import value as author_value
     payload = stored_payload(row.payload)
     if not content: payload.pop('content', None)
     return {**payload, 'id': str(row.id), 'postId': str(row.post_id), 'number': row.number,
-            'createdAt': stamp(row.created_at), 'author': author_value(row)}
+            'createdAt': stamp(row.created_at)}
 
 
 def post_value(store, row, content=True):

@@ -32,7 +32,7 @@ def test_post_update_public_snapshot_and_human_resolution(client,admin):
     result=callback(client,session,runner,'research_post_save',args)
     assert result.status_code==200,result.text
     saved=result.json()
-    assert saved['latestVersion']['author']=={'kind':'codex','conversationId':session['id']}
+    assert 'author' not in saved['latestVersion']
     assert client.get('/api/research/post-drafts/'+active['id']).json()==active
     assert client.get(public_path).json()==before_public
     assert callback(client,session,runner,'research_post_save',args).json()==saved
@@ -45,7 +45,7 @@ def test_post_update_public_snapshot_and_human_resolution(client,admin):
     assert refused.status_code==409,refused.text
     resolved=client.post(route,json={**human,'resolvedBaseVersionId':saved['latestVersion']['id']},headers=headers(auth))
     assert resolved.status_code==200,resolved.text
-    assert resolved.json()['post']['latestVersion']['author']=={'kind':'human','conversationId':None}
+    assert 'author' not in resolved.json()['post']['latestVersion']
     assert client.get(public_path).json()==before_public
 
 def test_concurrent_agent_writes_have_one_winner_and_exactly_one_snapshot(client,admin):
@@ -57,7 +57,7 @@ def test_concurrent_agent_writes_have_one_winner_and_exactly_one_snapshot(client
     with ThreadPoolExecutor(max_workers=2)as pool:assert sorted(pool.map(write,range(2)))==[200,409]
     versions=client.get('/api/research/documents/'+doc['id']+'/versions').json()['items']
     assert len(versions)==2
-    assert versions[0]['author']['kind']=='codex'
+    assert 'author' not in versions[0]
 
 def test_author_and_publish_fields_rejected_and_foreign_draft_does_not_leak(client,admin):
     owner,auth=identity(client,admin)
