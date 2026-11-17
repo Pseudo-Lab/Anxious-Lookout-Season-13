@@ -910,11 +910,12 @@ async function confirmSingleTurn(label, text) {
   check("R22. general page hint shown", await appears(chat.getByText("보고 있는 화면: 일반")));
   check("R22. owner wording: no per-page tool limits (scope help, not body)", await scopeHelp("내 자료·문서·글 조회·저장"));
   check("R22. web search saving wording (scope help, not body)", await scopeHelp("웹 검색·명령 실행"));
-  // #68 native shell: 실행기의 한 번에 하나·시간 상한 문구는 없어지고, 파일을 직접 고칠 수 있다고 적는다.
+  // #104: 도움말은 명령 실행과 사람의 공개·발행 경계만 짧게 표시한다.
+  const ownerHelp = (await chat.locator("form p[title]").getAttribute("title")) ?? "";
   check(
-    "R22. shell wording: files edited directly, no executor limits (#68)",
-    // #94: 입력창 위 설명 문구는 없앴다. 같은 설명은 입력창 옆 범위 이름의 도움말(title)에 남아 있다.
-    (await chat.locator('[title*="파일을 만들거나 고쳐 계산·정리할 수 있습니다"]').count()) >= 1 && !/30\s*초|시간 상한 안에서/.test(await chat.innerText())
+    "R22. concise tooltip keeps command use and human publication boundary without executor claims",
+    await scopeHelp("웹 검색·명령 실행") && await scopeHelp("공개·발행은 직접 해야 합니다.") &&
+      !/파일을 만들거나 고쳐 계산·정리|30\s*초|시간 상한 안에서/.test(`${ownerHelp} ${await chat.innerText()}`)
   );
   check("R22. no hint text under the input (#94)", (await chat.getByText("이전 대화 내용은 이 대화에 계속 이어집니다.").count()) === 0);
   await chat.getByLabel("메시지").fill("일반 페이지 질문");
