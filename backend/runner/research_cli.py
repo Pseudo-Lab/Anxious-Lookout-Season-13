@@ -5,6 +5,7 @@ import json
 import os
 import re
 import signal
+import socket
 import ssl
 import stat
 import sys
@@ -18,6 +19,22 @@ OPERATIONS = frozenset({'research_list', 'research_get', 'research_versions', 'r
     'research_document_update', 'research_relation_save', 'research_relation_update', 'research_archive',
     'research_post_save', 'research_post_draft_get'})
 TOKEN = re.compile(r'rturn1\.[0-9a-f-]{36}\.[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}')
+CONNECT_HOST = 'traefik.kube-system.svc.cluster.local'
+
+
+def pinned_connection(host, *, timeout, context):
+    """D7: pin TCP only; HTTPSConnection retains origin TLS identity and Host.
+
+    This also preserves IP-SAN verification for an IP-literal origin. There is
+    no user/env/grant option for the transport target and no public-IP fallback.
+    """
+    connection = http.client.HTTPSConnection(host, 443, timeout=timeout, context=context)
+    def connect(address, timeout, source_address=None):
+        if address != (host, 443) or source_address is not None:
+            raise ValueError()
+        return socket.create_connection((CONNECT_HOST, 443), timeout=timeout)
+    connection._create_connection = connect
+    return connection
 
 
 def tls_context():
@@ -95,8 +112,7 @@ def main(argv=None):
         if not isinstance(arguments, dict) or safe(arguments) != arguments:
             raise ValueError()
         grant, origin = read_grant()
-        connection = http.client.HTTPSConnection(origin.hostname, 443, timeout=20,
-                                                 context=tls_context())
+        connection = pinned_connection(origin.hostname, timeout=20, context=tls_context())
         try:
             connection.request('POST', grant['basePath'] + '/api/research/agent/v1/' + argv[0],
                 body=json.dumps(arguments).encode(), headers={'Authorization': 'Bearer ' + grant['token'],

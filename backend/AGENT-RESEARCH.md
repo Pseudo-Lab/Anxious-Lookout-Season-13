@@ -97,11 +97,20 @@ https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/97#issuecomment-6
 It authorizes implementation, not live credentials, VM/production execution or
 model calls. Current actual model allowance is zero. File-only read roots and
 old namespace/FD isolation require actual pinned-kernel proof before grants.
-The development TLS fixture requires separate source/work/recovery review.
-OCI hairpin and the exact effective #62 D1 policy require independent evidence.
+Under D7 the CLI pins only TCP to the build-reviewed Traefik Service443 while
+retaining the public origin's TLS reference identity and HTTP Host, including
+IP literals. Namespace/service are trusted image build arguments; the additive
+egress renderer resolves the real selector and single numeric backend targetPort
+from matching Service/Pod/EndpointSlice inputs. No direct API8080 or fallback is
+introduced. The shared listener's complete route/access inventory is finalized
+in production, with a stop on an internet-blocked but runner-accessible route.
+Under D9 the dev HTTPS fixture and actual-model gate are retired. Production
+uses separately approved no-model D1/route, arm64 kernel, TLS and wrong-credential
+checks; the user performs the first real platform Codex use. Final compatible
+recovery-image B3 remains a no-model development gate.
 See [development gates](../infra/hosting/m3/agent-research/DEV-VM.md) and
 [production preflight](../infra/hosting/m3/agent-research/R2-PRODUCTION-PREFLIGHT.md).
 
 Back runs Docker pure unit tests only. Review owns PostgreSQL/API concurrency,
-full regressions, actual pin/kernel/TLS/network/secret isolation, F2/e2e and008
-compatible recovery. Earlier MCP unit/latency evidence is not r2 evidence.
+full regressions, kernel/TLS/network/secret isolation, F2/e2e and recovery compatible
+with the final migrated schema. Earlier MCP unit/latency evidence is not r2 evidence.

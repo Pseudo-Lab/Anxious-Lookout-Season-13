@@ -1,107 +1,54 @@
-# #97 r2 development gates (review-owned execution)
+# #97 r3 development gates (review-owned execution)
 
-This replaces the superseded MCP C1/C2/fence procedure. No old benchmark target,
-marker, audit/settlement command, image or model budget is valid for r2. Current
-actual model allowance is zero. Back prepares code and Docker pure units;
-review/PM own VM execution. This document grants no VM/credential/model permission.
+[D9](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/97#issuecomment-6935053511)
+cancels dev HTTPS fixture B and the actual-model-turn gate/budget. The user will
+first exercise platform Codex in production. Do not request or spend the retired
+eight-turn allowance, issue a fake active grant or resume the synthetic relay.
+Back prepares source and Docker pure units. Review owns DB/full tests and the
+remaining VM gate. This document grants no VM, credential or production permission.
 
-Code/local Docker/DB gate at `cb0159b` is approved (649 pure,398 DB plus3
-subtests,43 listeners,15 reviewer adversarial checks). That approval does not
-cover activation, complete feature/PR gates or VM work. The next source-review
-candidate is [DEV-FIXTURE-PLAN.md](DEV-FIXTURE-PLAN.md): exact temporary objects,
-file-inode probe, world443/TLS passthrough, internal wrong-purpose checks and
-UID/RV-guarded restoration. After source review, PM approves a dev window and
-review executes it. Actual model allowance remains zero until separately granted.
+Code/local Docker/DB approval at `cb0159b` is historical, not final r3 approval.
+The `2442ef3` dev measurement proved the actual amd64 kernel file/inode boundary;
+window2's first outside HTTPS request failed and B/C did not run. The approved
+window restored its baseline and temporary objects. See the historical
+[fixture plan](DEV-FIXTURE-PLAN.md); it is no longer an execution candidate.
+The arm64 kernel and D7 Traefik/TLS checks now belong to the separately approved
+[production no-model procedure](R2-PRODUCTION-PREFLIGHT.md).
 
-## Before execution
-
-Confirm the development guest identity and occupancy and follow
-[production/development parity](../../../k3s/PARITY.md). Use synthetic development
-accounts and private inputs. Never bring production credentials/backups into the
-fixture. Preserve #94 logging, #95 flags, provider/model pin, untrusted approvals,
-Pod UID/caps/namespace/SA boundaries and #62 D1/VAP. Do not relax privilege or
-Pod security to get user namespaces working.
-
-Build ordinary `runtime` and `runner` targets from the exact reviewed SHA with
-matching build metadata. Record manifest digests separately from Docker config
-IDs. The separate B3 final-PR gate below requires an imported,008-compatible
-API+ordinary runner fallback and certified human read/save. The current fixture
-window makes no API image switch: its approved recovery is the already running
-8804a97 API/DB0008 baseline plus temporary-object restoration.
-Its first step is a new synthetic browser session's owner read → human save →
-readback with `human` author, before any fixture setup. See the
-[PM decision](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/97#issuecomment-6924958948).
-The fixture does not switch API images or migrate the DB. Back up/drain before
-any separately reviewed additive migration; never downgrade008, delete provenance
-or apply an obsolete source just to start it.
-If retired `research-fence.json` exists on control storage, stop and report;
-do not delete it, replay a mutation, or try a removed settlement/audit command.
-
-## Gates before enabling a research grant
-
-1. Review the API+CLI/skill code, strict result/receipt contract, purpose-separated
-   token principal, expiry/revoke, actual active-turn status and bounded DB pool/
-   lock handling. Run review-owned PostgreSQL/security/full regressions.
-2. Prove on actual Codex0.160.1 and the unchanged Pod/kernel boundary that the
-   grant readable root binds exactly one regular read-only file inode. Replace it
-   atomically and verify old sandbox/FD cannot see the next token; parent/sibling,
-   symlink/proc/FD/env and provider/control paths remain unavailable. Docker userns
-   EPERM is an unexecuted probe, not a pass. No privileged fallback.
-3. Submit the separate synthetic world443 L4 passthrough → Traefik TLS fixture
-   source, exact temporary objects/origin/certificate/SNI/test-CA differences and
-   restoration plan. Only then request fixture execution approval. The existing
-   dev HTTP route is insufficient. Prove Cilium world443, TLS CA/hostname/SNI and
-   actual API path separately. No new host/internal allow or TLS verification
-   bypass. Restore temporary objects/relay/trust/origin and synthetic sessions.
-4. Check wrong-purpose/missing/retired/expired/other-C/R/owner/public research
-   tokens; broker8080/internal8081/runner service authentication must still reject
-   them. Never put real internal credentials in the sandbox for a positive control.
-5. Get a fresh actual-model budget from PM/user before issuing live grants or
-   turn/start. Record reservations before dispatch and count unknown/failed sends.
-   No retry, fake active grant or old MCP allowance bypass.
-6. Under that separate allowance prove actual CLI/skill owner read→save→versions,
-   original-thread resume/interrupt, protected raw working capture vs always-redacted
-   app records, old token invalidity, safe API-owned receipts and F2/e2e. Human
-   drafts/public snapshots stay unchanged. A failed model is not marked successful
-   because one API write committed.
+Before final approval review verifies current source, strict results/authors,
+turn/PAT purpose separation, fresh role/scope/revoke, rate limits, migration,
+restore behavior, CAS/idempotency, bounded pool/locks and frontend integration in
+Docker. Wrong credentials are tested locally as far as possible. No model calls
+are needed for this gate. If retired `research-fence.json` exists, stop/report;
+do not delete it, replay mutations or run removed settlement commands.
 
 ## B3 — recovery certification before final PR approval
 
-This remains mandatory before final PR approval and production deployment.
-It is a separate reviewed image-switch/recovery exercise, not part of the current
-no-model TLS/inode fixture window. The imported2e4da86 fallback's actual boot /
-owner read / human save certification remains incomplete; import/config metadata
-alone is insufficient. Re-certify the recovery combination against the final
-reviewed task SHA rather than reusing an earlier baseline result.
+This **remains required by D9**, on the dev VM with no model. Certify the final
+reviewed task SHA's compatible API runtime and ordinary runner. An old image's
+presence/config metadata or earlier baseline health check is insufficient.
 
-1. Fix the final reviewed source SHA and the exact008-compatible recovery API
-   runtime + ordinary runner source/image manifest digests/build metadata. Identify
-   the recovery target explicitly, distinguishing config IDs from manifests.
-   Submit the exact image/config changes and restoration commands to review/PM
-   before this separate execution; do not silently start the historical fallback.
-2. Snapshot the current API/runner/binding/origin/routes/flags and DB0008 state,
-   verify idle/drain and private recoverable inputs, and preserve the original
-   account/resource IDs and immutable data. No downgrade, old-backup restore,
-   provenance deletion, retired MCP process or policy/privilege expansion.
-3. Boot the designated recovery runtime/API and ordinary runner as planned, with
-   matching source/digests and readiness/schema checks. Runner bootstrap must not
-   issue a research grant or start a model turn; no actual-model budget is implied.
-4. With a new synthetic browser session, perform **owner read → human save →
-   readback** through the ordinary cookie+CSRF API against an owned synthetic
-   resource. Save using the read version/CAS, verify a new immutable version and
-   `human` author, and retain history/ownership and original content evidence.
-   Health-only, mock/compose success or an agent save cannot substitute for this.
-5. Restore the recorded baseline image/config/bindings/origin through the approved
-   commands, recheck readiness/DB0008 and human reads, and close the test session.
-   Keep synthetic test versions with their owner; do not delete history to claim
-   unchanged data. Report failures before any unapproved retry or correction.
-6. Record exact source/image manifests, guest/Pod UIDs, procedure, status/version/
-   author evidence and restoration result in #97. Missing evidence leaves B3 and
-   the final PR/deployment gate open. Production OCI/network preflight remains
-   separately authorized.
-
-Development fixture success is not OCI production hairpin proof. Production
-execution remains separately approved under
-[R2-PRODUCTION-PREFLIGHT.md](R2-PRODUCTION-PREFLIGHT.md), including the actual D1
-policy recheck immediately before sandbox network activation and008-compatible
-recovery. A missing prerequisite stops activation rather than widening policy.
+1. Record source SHA, architecture, manifest digests/build arguments and exact
+   compatible schema. PAT's proposed0009 needs a0009-compatible recovery image;
+   an008-only image must not be used after migration. Submit the exact image/
+   config/migration/restoration plan to review/PM before execution.
+2. Confirm the enrolled dev guest/context and occupancy, idle/drain and private
+   recoverable inputs under [parity](../../../k3s/PARITY.md). Snapshot baseline
+   image/config/bindings/origin/routes/flags and DB state. Use synthetic accounts;
+   never import production credentials/backups. Preserve all data/author IDs.
+3. Boot the designated compatible runtime and ordinary runner, checking source,
+   digest and readiness/schema. Research flags remain off; bootstrap must issue
+   no grant or model/provider request. Do not relax Pod/kernel/D1/VAP boundaries.
+4. With a fresh synthetic browser session, **owner read → human save → readback**
+   through ordinary cookie+CSRF against an owned synthetic resource. Use CAS;
+   verify a new immutable version with `human` author, prior history/ownership and
+   original content. Health-only, mocks, agent save or image import cannot replace
+   this exercise.
+5. Restore recorded baseline image/config/bindings/origin using the approved
+   commands, provided that image is compatible with the resulting schema. Never
+   downgrade schema, delete provenance or restore an older backup to make it boot.
+   Recheck readiness and human reads, close the session and retain synthetic
+   versions with their owner. Stop/report before an unapproved retry/correction.
+6. Post exact source/image manifests, guest/Pod UIDs, schema, read/save/version/
+   author evidence and restoration result on #97. Missing evidence keeps final PR
+   and deployment approval open. Production execution still needs user approval.

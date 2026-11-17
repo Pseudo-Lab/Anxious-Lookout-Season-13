@@ -9,8 +9,27 @@ import http.client
 import json
 import re
 import signal
+import socket
 import ssl
 from urllib.parse import urlsplit
+
+CONNECT_HOST = 'traefik.kube-system.svc.cluster.local'
+
+
+def service_host(namespace, service):
+    if not all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', value) for value in (namespace, service)):
+        raise ValueError('Invalid approved Service identity')
+    return service + '.' + namespace + '.svc.cluster.local'
+
+
+def pinned_connection(host, *, timeout, context, connect_host=CONNECT_HOST):
+    connection = http.client.HTTPSConnection(host, 443, timeout=timeout, context=context)
+    def connect(address, timeout, source_address=None):
+        if address != (host, 443) or source_address is not None:
+            raise ValueError()
+        return socket.create_connection((connect_host, 443), timeout=timeout)
+    connection._create_connection = connect
+    return connection
 
 
 def destination(origin, base):
@@ -25,11 +44,11 @@ def destination(origin, base):
     return parsed.hostname, base + '/api/health'
 
 
-def probe(origin, base):
+def probe(origin, base, connect_host=CONNECT_HOST):
     host, path = destination(origin, base)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.load_verify_locations(cafile='/etc/ssl/certs/ca-certificates.crt')
-    connection = http.client.HTTPSConnection(host, 443, timeout=10, context=context)
+    connection = pinned_connection(host, timeout=10, context=context, connect_host=connect_host)
     try:
         connection.connect()
         peer = connection.sock.getpeername()
@@ -38,7 +57,7 @@ def probe(origin, base):
         response = connection.getresponse()
         raw = response.read(1025)
         ready = len(raw) <= 1024 and json.loads(raw).get('status') == 'ok'
-        return {'tls_verified': True, 'peer': peer[0], 'port': peer[1],
+        return {'tls_verified': True, 'transport_service': connect_host, 'peer': peer[0], 'port': peer[1],
                 'certificate_sha256': fingerprint, 'http': response.status, 'ready': ready}
     finally:
         connection.close()
@@ -52,11 +71,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--origin', required=True)
     parser.add_argument('--base-path', default='')
+    parser.add_argument('--traefik-namespace', default='kube-system')
+    parser.add_argument('--traefik-service', default='traefik')
     args = parser.parse_args()
     signal.signal(signal.SIGALRM, expired)
     signal.alarm(20)
     try:
-        result = probe(args.origin, args.base_path)
+        result = probe(args.origin, args.base_path, service_host(args.traefik_namespace, args.traefik_service))
         print(json.dumps(result, sort_keys=True))
         return 0 if result['http'] == 200 and result['ready'] else 1
     except Exception as error:

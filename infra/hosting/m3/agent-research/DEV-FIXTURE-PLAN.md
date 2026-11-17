@@ -1,5 +1,13 @@
 # #97 r2 model-free development fixture — source review candidate
 
+**Historical plan, superseded by [D9](https://github.com/Pseudo-Lab/Anxious-Lookout-Season-13/issues/97#issuecomment-6935053511).**
+Do not execute another dev HTTPS B/relay window or request the retired model gate.
+The completed amd64 A result and failed outside HTTPS B attempt remain historical
+evidence. D7 uses the exact Traefik Service path; current production no-model
+checks are in [R2-PRODUCTION-PREFLIGHT.md](R2-PRODUCTION-PREFLIGHT.md), and final
+compatible-image B3 remains in [DEV-VM.md](DEV-VM.md). Text below records the old
+window's scope and restoration rather than current execution permission.
+
 Code/local DB approval is limited to `cb0159b`; this plan adds no execution
 permission. PM requested source preparation in
 `messages/back/2026-11-17-pm-issue97-next-dev-fixture.md`. Review approves this
