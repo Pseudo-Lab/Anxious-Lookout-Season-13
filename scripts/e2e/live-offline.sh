@@ -68,9 +68,9 @@ wait_file() {
 
 $OFF down --volumes >/dev/null 2>&1 || true
 $BASE up -d db mock-github
-# #97 버전 작성자(0008_version_authors)까지 적용한다. 앞선 초안·글·블록 본문 이관도 포함한다.
+# #97 PAT·버전 작성자(0009_research_pats)까지 적용한다. 앞선 초안·글·블록 본문 이관도 포함한다.
 # 현재 runtime의 스키마 계약에 맞춰 fixture DB를 준비한다.
-$BASE run --rm migrate python -m app.migrate --revision 0008_version_authors
+$BASE run --rm migrate python -m app.migrate --revision 0009_research_pats
 $BASE up -d api web gateway
 wait_ready
 echo "== base stack ready"
