@@ -253,6 +253,12 @@ check("R5. incoming relation on material A reads inverse", await appears(main.ge
   check("R5e. two delayed evidence rows both get the latest version", filled);
 }
 
+// 서지정보 칸 펼치기. 서지정보가 이미 있으면 처음부터 펼쳐져 있으므로 닫혀 있을 때만 연다(누르면 닫히는 토글).
+async function openBibliography() {
+  const details = main.locator("details").filter({ has: page.getByText("서지정보 (선택)", { exact: true }) });
+  if (!(await details.evaluate((d) => d.open))) await details.getByText("서지정보 (선택)", { exact: true }).click();
+}
+
 // R5w. #105 한 줄 요약·서지정보: 자료 수정(명시 값), 목록 index(요약·관계 수), 버전 기록, 문서 요약(초안 commit·요약만 수정·복원 시 명시)
 {
   const isPatch = (path) => (r) => r.method() === "PATCH" && new URL(r.url()).pathname.endsWith(`/api${path}`);
@@ -266,7 +272,7 @@ check("R5. incoming relation on material A reads inverse", await appears(main.ge
   check("R5w. 301 code points blocked locally", await appears(main.getByText("한 줄 요약은 300자 이하로 입력해 주세요.")));
   check("R5w. counter shows code points", await appears(main.getByText("301/300")));
   await main.getByLabel("한 줄 요약 (선택)").fill("자료 A 요약");
-  await main.getByText("서지정보 (선택)").click();
+  await openBibliography();
   await main.getByLabel("서지 종류").selectOption("article-journal");
   await main.getByRole("textbox", { name: /^저자/ }).fill("Kim, Minji\nOECD");
   await main.getByLabel("발행일").fill("2023-02-29");
@@ -317,7 +323,7 @@ check("R5. incoming relation on material A reads inverse", await appears(main.ge
   check("R5w. untouched bibliography sent unchanged (literal with comma, family with comma, year 99)", JSON.stringify(orgBody.bibliography) === JSON.stringify(storedBib), JSON.stringify(orgBody.bibliography));
   // 저자 칸에서 다른 줄만 고쳐도 원래 줄의 이름은 그대로 남는다.
   await main.getByRole("button", { name: "내용 수정" }).click();
-  await main.getByText("서지정보 (선택)").click();
+  await openBibliography();
   const authors = main.getByRole("textbox", { name: /^저자/ });
   check("R5w. comma literal shown with = prefix", (await authors.inputValue()).split("\n")[0] === "=Research, Inc.");
   await authors.fill((await authors.inputValue()).replace("Lee,", "Lee, Ana"));
