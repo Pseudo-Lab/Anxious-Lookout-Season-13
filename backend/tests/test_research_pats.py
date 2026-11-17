@@ -150,6 +150,7 @@ def test_final_lock_wait_rechecks_expiry_before_mutation(pat_client,admin,monkey
 def test_populated_008_upgrade_and_restore_revoke_pats_preserve_provenance(admin,monkeypatch):
     from sqlalchemy import create_engine
     from sqlalchemy.engine import make_url
+    from sqlalchemy.orm import Session
     from app.migrate import migrate
     from app.research_schema_contract import validate_research
     from app.restore_research import restore_candidate
