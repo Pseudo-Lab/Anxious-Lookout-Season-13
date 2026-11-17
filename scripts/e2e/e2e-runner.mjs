@@ -1027,7 +1027,8 @@ await step("N25", async () => {
   await stopBtn().click();
   check("N25. one interrupt request", await waitFor(async () => (await counts()).interrupts === i0 + 1, 3000));
   check("N25. stopped partial answer marked", await appears(chat.getByText("중지됨(부분)"), 8000));
-  check("N25. partial answer is display-only", await appears(chat.getByText(/이어서 질문해도 이 내용은 참고되지 않습니다/)));
+  const stoppedPartial = chat.locator("li[data-role=assistant]", { hasText: "중지할" });
+  check("N25. stopped partial answer is explicitly outside the conversation record", await appears(stoppedPartial.getByText("중지된 부분 답변 · 대화 기록에는 남지 않습니다.", { exact: true })));
   check("N25. stop is not a failure", (await chat.getByText("마지막 요청이 실패했습니다").count()) === 0);
   check("N25. input unlocked after stop", await appears(input.and(chat.locator(":enabled")), 5000));
 
