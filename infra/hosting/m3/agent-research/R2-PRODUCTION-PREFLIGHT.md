@@ -32,10 +32,10 @@ CRD 부재/권한 부족이면 사용 중인 provider를 식별하고 미확인�
 
 `values.json`은 정확히 namespace, service, selector(실제 Service selector 전체), targetPort(정수)다. 443이 named `websecure`이면 실제 선택 Pod의 containerPort/Traefik args와 EndpointSlice까지 따라가 숫자를 확정한다. 443/8443을 추측하지 않는다. hostNetwork, 불일치/준비되지 않은 endpoint, 중간 갱신이면 렌더가 거부한다.
 
-검토한 runtime 이미지의 ops 명령을 Docker에서 실행한다. 입력은 read-only, 출력만 개인 새 디렉터리에 쓴다.
+검토한 runtime 이미지의 ops 명령을 Docker에서 실행한다. 입력은 read-only, 출력만 개인 새 디렉터리에 쓴다. 전용 입력/출력은 실행자의 소유 UID/GID와0700/0600을 유지한다. 아래 실행 UID/GID는 그 소유자와 같아야 하며 runtime 기본 UID10001을 그대로 사용하거나 모드를 넓히지 않는다.
 
 ```sh
-docker run --rm --network none --read-only --tmpfs /tmp \
+docker run --rm --user "$(id -u):$(id -g)" --network none --read-only --tmpfs /tmp \
   -v "$R3_INPUTS:/inputs:ro" -v "$R3_OUTPUT:/output" \
   --entrypoint python "$R3_RUNTIME_DIGEST" -B -m ops.research_traefik \
   --values /inputs/values.json --service-snapshot /inputs/service.json \

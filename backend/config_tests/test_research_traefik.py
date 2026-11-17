@@ -42,6 +42,21 @@ def test_one_egress_rule_resolves_named_service_port_to_the_verified_backend_onl
     assert inputs == before
 
 
+@pytest.mark.parametrize('override', [':9443/tcp', ':8443/udp', '127.0.0.1:8443/tcp', ':8443/UDP'])
+@pytest.mark.parametrize('split', [False, True])
+def test_conflicting_listener_declarations_cannot_certify_an_earlier_match(override, split):
+    inputs = snapshots()
+    args = inputs[2]['items'][0]['spec']['containers'][0]['args']
+    args.extend(['--entryPoints.websecure.address', override] if split else ['--entryPoints.websecure.address=' + override])
+    with pytest.raises(ValueError): policy.render(*inputs)
+
+
+def test_equivalent_tcp_listener_duplicates_are_normalized():
+    inputs = snapshots()
+    inputs[2]['items'][0]['spec']['containers'][0]['args'].extend(['--entryPoints.websecure.address', ':8443'])
+    assert policy.render(*inputs)[1]['targetPort'] == 8443
+
+
 @pytest.mark.parametrize('damage', ['frontend-port', 'wrong-target', 'bool-target', 'empty-selector',
     'reserved-label', 'service-namespace', 'external-name', 'host-network', 'pod-label', 'pod-terminating',
     'pod-pending', 'container-port', 'entrypoint', 'slice-port', 'endpoint-uid', 'endpoint-address',

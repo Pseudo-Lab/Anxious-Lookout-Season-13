@@ -35,6 +35,24 @@ def compile_cli(source, namespace, service):
     return source.replace(marker, 'CONNECT_HOST = ' + repr(transport_host(namespace, service)), 1)
 
 
+def websecure_listener(args, target):
+    """Every CLI declaration must agree; an earlier match proves no precedence.
+
+    Accept equivalent duplicates with omitted/explicit TCP. Other bind addresses,
+    protocols, ports or a missing split value are unresolved and fail closed.
+    """
+    flag = '--entrypoints.websecure.address'
+    values = []
+    for position, arg in enumerate(args):
+        require(isinstance(arg, str))
+        if arg.lower().startswith(flag + '='):
+            values.append(arg[len(flag) + 1:])
+        elif arg.lower() == flag:
+            require(position + 1 < len(args))
+            values.append(args[position + 1])
+    require(values and all(re.fullmatch(':' + str(target) + r'(?:/tcp)?', value, re.I) for value in values))
+
+
 def render(values, service, pods, slices):
     require(set(values) == {'namespace', 'service', 'selector', 'targetPort'})
     namespace, service_name = name(values['namespace']), name(values['service'])
@@ -70,8 +88,7 @@ def render(values, service, pods, slices):
                    and port.get('protocol', 'TCP') == 'TCP']
         require(len(matches) == 1 and matches[0][1]['containerPort'] == target)
         container = matches[0][0]
-        require(any(re.fullmatch(r'--entrypoints\.websecure\.address=:' + str(target) + r'(?:/tcp)?', arg, re.I)
-                    for arg in container.get('args', [])))
+        websecure_listener(container.get('args', []), target)
         require(metadata['uid'] not in identities)
         identities[metadata['uid']] = pod['status']['podIP']
     endpoints = []
