@@ -268,7 +268,7 @@ check("R5. incoming relation on material A reads inverse", await appears(main.ge
   await main.getByLabel("한 줄 요약 (선택)").fill("자료 A 요약");
   await main.getByText("서지정보 (선택)").click();
   await main.getByLabel("서지 종류").selectOption("article-journal");
-  await main.getByLabel("저자").fill("Kim, Minji\nOECD");
+  await main.getByRole("textbox", { name: /^저자/ }).fill("Kim, Minji\nOECD");
   await main.getByLabel("발행일").fill("2023-02-29");
   await main.getByRole("button", { name: "새 버전으로 저장" }).click();
   check("R5w. impossible issued date blocked locally", await appears(main.getByText("발행일이 실제 날짜가 아닙니다.")));
@@ -318,7 +318,7 @@ check("R5. incoming relation on material A reads inverse", await appears(main.ge
   // 저자 칸에서 다른 줄만 고쳐도 원래 줄의 이름은 그대로 남는다.
   await main.getByRole("button", { name: "내용 수정" }).click();
   await main.getByText("서지정보 (선택)").click();
-  const authors = main.getByLabel("저자");
+  const authors = main.getByRole("textbox", { name: /^저자/ });
   check("R5w. comma literal shown with = prefix", (await authors.inputValue()).split("\n")[0] === "=Research, Inc.");
   await authors.fill((await authors.inputValue()).replace("Lee,", "Lee, Ana"));
   const orgPatch2 = page.waitForRequest(isPatch(`/research/materials/${org.body.id}`));
