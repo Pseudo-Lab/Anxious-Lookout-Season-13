@@ -178,11 +178,12 @@ await step("N2", async () => {
   await settle();
   await openPanel();
   check("N2. provisioning shown as 환경 준비 중", await appears(chat.getByText("환경 준비 중").first()));
-  check("N2. progress indicator", (await sendBtn().isDisabled()));
+  check("N2. preparing keeps send locked", (await sendBtn().isDisabled()));
   await chat.getByLabel("메시지").fill("준비 중에 쓴 초안");
   check("N2. draft editable while preparing", (await chat.getByLabel("메시지").inputValue()) === "준비 중에 쓴 초안");
   check("N2. only send button locked", (await sendBtn().isDisabled()) && (await chat.getByLabel("메시지").isEnabled()));
-  check("N2. composer notice: no auto send", await appears(chat.getByText(/환경 준비가 확인되면 보낼 수 있습니다/)));
+  const connection = chat.getByRole("group", { name: "보내기 연결", exact: true });
+  check("N2. composer has short preparing status and one read-only retry", await appears(connection.getByText("환경 준비 중", { exact: false })) && (await connection.getByRole("button", { name: "다시 시도", exact: true }).count()) === 1);
   await shot("provisioning-1280");
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForTimeout(300);
@@ -222,12 +223,15 @@ await step("N3", async () => {
   await setMock("runnerAll=capacity_wait");
   await chat.getByRole("button", { name: "← 대화 목록" }).click();
   check("N3. capacity wait shown distinct from preparing", await appears(chat.getByText("사용 대기 중").first()));
-  check("N3. copy says server continues the recorded request", await appears(chat.getByText(/서버가 접수된 준비 요청을 이어서 처리합니다/)));
+  check("N3. waiting has a short status and one explicit recheck", (await chat.getByRole("button", { name: "다시 시도", exact: true }).count()) === 1 && (await chat.getByText(/서버가 접수된 준비 요청을 이어서 처리합니다/).count()) === 0);
   await shot("capacity-wait");
   const r0 = await statusReads();
+  const prepare0 = (await prepares()).length;
+  const messages0 = await messagePosts();
   await sleep(8000);
   const r1 = await statusReads();
   check("N3. capacity polling respects 15s hint", r1 - r0 <= 1, `${r1 - r0}`);
+  check("N3. waiting does not repeat prepare or send a question", (await prepares()).length === prepare0 && (await messagePosts()) === messages0);
 });
 
 // N4. 쉬는 중(유휴 회수): 보내면 접수 전 거절(초안 유지·미확인 보관 없음), "다시 켜기"는 새 key의 준비 요청, 자동 전송 없음
@@ -658,7 +662,7 @@ await step("N16", async () => {
       return route.fulfill({ status, contentType: "application/json", body: JSON.stringify({ error: { code: "codex_provisioning", message: "x" } }) });
     });
     await sendBtn().click();
-    check(`N16. ${status}+codex_provisioning: uncertain notice`, await appears(chat.getByText(/이전 전송의 결과를 확인하지 못했습니다/)));
+    check(`N16. ${status}+codex_provisioning: unknown outcome has explicit same-request confirmation`, await appears(chat.getByText("전송 결과를 확인하세요.", { exact: false })) && await appears(chat.getByText("같은 요청으로 다시 확인할 수 있습니다.", { exact: false })));
     check(`N16. ${status}: no "not sent" confirmation`, (await chat.getByText(/보내지 않았습니다/).count()) === 0);
     check(`N16. ${status}: original request kept`, (await pendingSends()) === 1 && (await chat.getByLabel("메시지").inputValue()) === `${status} 불명 질문`);
     await page.unroute("**/api/research/sessions/*/messages");
@@ -746,7 +750,7 @@ await step("N21", async () => {
   // 서버 실행 중(접수 항목)
   await chat.locator("li[data-role=user][data-sending]").waitFor({ state: "detached", timeout: 8000 });
   check("N21. running: bubble is not a warning", (await bubble.first().getAttribute("class"))?.includes("border-dashed") === false);
-  check("N21. running: no unknown-result notice", (await chat.getByText(/전달 확인 중|이전 전송의 결과를 확인하지 못했습니다/).count()) === 0);
+  check("N21. running: no unknown-result notice", (await chat.getByText(/전달 확인 중|전송 결과를 확인하세요/).count()) === 0);
   check("N21. running: same bubble element as before POST", await page.evaluate(() => window.__bubble.isConnected));
   // 보내자마자 위로 올려 읽는 중이면 완료 내용을 따라가지 않는다.
   await page.setViewportSize({ width: 1280, height: 420 });
@@ -1339,7 +1343,7 @@ await step("N27", async () => {
   check("N27. admin: 상태 nav shown", await appears(page.locator("header").first().getByRole("link", { name: "상태" })));
   await openPanel();
   await chat.getByRole("button", { name: "← 대화 목록" }).click().catch(() => {});
-  check("N27. admin: connection status panel shown", await appears(chat.getByText(/연결됨|환경/).first(), 8000));
+  check("N27. admin: connection status panel shown", await appears(chat.getByText(/테스트 연결|연결됨|환경/).first(), 8000));
   check("N27. admin: still no model name", (await chat.getByText(/모델:|서버에서 고정/).count()) === 0);
 });
 
