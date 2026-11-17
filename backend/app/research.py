@@ -156,13 +156,14 @@ def stamp(value):
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def encode_cursor(row):
-    return base64.urlsafe_b64encode(json.dumps([stamp(row.updated_at), str(row.id)]).encode()).decode().rstrip("=")
+def encode_cursor(row, *, time_field="updated_at"):
+    return base64.urlsafe_b64encode(json.dumps([stamp(getattr(row, time_field)), str(row.id)]).encode()).decode().rstrip("=")
 
 
-def page_query(statement, model, limit, cursor):
+def page_query(statement, model, limit, cursor, *, time_field="updated_at"):
     if not 1 <= limit <= 100:
         fail("validation_error", "Limit must be between 1 and 100", 422)
+    time_column = getattr(model, time_field)
     if cursor:
         try:
             if len(cursor) > 512:
@@ -178,8 +179,8 @@ def page_query(statement, model, limit, cursor):
             identity = uuid.UUID(identity)
         except (ValueError, TypeError, UnicodeError, OverflowError):
             fail("validation_error", "Invalid cursor", 422)
-        statement = statement.where(or_(model.updated_at < time, and_(model.updated_at == time, model.id < identity)))
-    return statement.order_by(model.updated_at.desc(), model.id.desc()).limit(limit + 1)
+        statement = statement.where(or_(time_column < time, and_(time_column == time, model.id < identity)))
+    return statement.order_by(time_column.desc(), model.id.desc()).limit(limit + 1)
 
 
 class Store:

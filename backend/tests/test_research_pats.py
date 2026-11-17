@@ -174,12 +174,21 @@ def test_populated_008_upgrade_and_restore_revoke_pats_preserve_provenance(admin
             db.execute(text("INSERT INTO research.publications(id,document_id,owner_id,version_id,snapshot) VALUES(:release,:item,:owner,:version,CAST(:snapshot AS jsonb))"),{'release':release,'item':item,'owner':owner,'version':version,'snapshot':json.dumps({'content':'Original public snapshot','author':{'login':'synthetic-pat'},'materials':[]})})
             db.execute(text('INSERT INTO research.publication_heads(document_id,owner_id,publication_id) VALUES(:item,:owner,:release)'),{'item':item,'owner':owner,'release':release})
             before=signature(db)
+            version_rows = {table: [dict(row._mapping) for row in db.execute(text(
+                'SELECT * FROM research.'+table+' ORDER BY id'))] for table in ('versions', 'post_versions')}
         migrate('0009_research_pats');migrate('0009_research_pats')
         with candidate.begin() as db:
             assert validate_research(db)=='0009_research_pats'
             after=signature(db)
             for table in before:
-                if table!='research.versions':assert before[table]==after[table]
+                if table not in {'research.versions', 'research.post_versions'}:
+                    assert before[table]==after[table], table
+            # Both tables gain author_name, including migration-seeded legacy
+            # posts. Compare every original field and require only the new NULL.
+            for table, original in version_rows.items():
+                rows = [dict(row._mapping) for row in db.execute(text('SELECT * FROM research.'+table+' ORDER BY id'))]
+                assert all(row['author_name'] is None for row in rows)
+                assert [{key: value for key, value in row.items() if key != 'author_name'} for row in rows] == original
             old=db.execute(text('SELECT title,content,author_kind,author_conversation_id,author_name FROM research.versions WHERE id=:id'),{'id':version}).one()
             assert old.title=='Retained' and old.content=='Original' and old.author_kind=='codex' and old.author_name is None
             credential=uuid4();token=pats.issue_value(credential)
@@ -237,3 +246,22 @@ def test_audit_insert_failure_rolls_back_mutation_receipt_but_not_admission(pat_
     with admin.connect() as db:
         assert db.execute(text('SELECT count(*) FROM research.versions')).scalar_one()==1
         assert db.execute(text('SELECT count(*) FROM research.pat_audit')).scalar_one()==1
+
+
+def test_pat_pages_equal_issued_time_tie_break_and_approval_loss(pat_client,admin):
+    owner,auth=identity(pat_client,admin)
+    created=[issue(pat_client,auth,name='Page '+str(index)) for index in range(4)]
+    ids=sorted([item['credential']['id'] for item in created],reverse=True)
+    with admin.begin() as db:
+        db.execute(text("UPDATE research.credentials SET issued_at='2026-11-17T00:00:00Z',expires_at='2030-01-01T00:00:00Z' WHERE owner_id=:id"),{'id':owner})
+        db.execute(text('UPDATE auth.accounts SET is_approved=false WHERE id=:id'),{'id':owner})
+    collected=[];cursor=None
+    for _ in range(3):
+        params={'limit':2,**({'cursor':cursor} if cursor else {})}
+        response=pat_client.get('/api/research/pats',params=params)
+        assert response.status_code==200,response.text
+        page=response.json();collected.extend(row['id'] for row in page['items'])
+        assert all(row['effectiveScope']=='none' and row['scopeLimitedByRole'] for row in page['items'])
+        cursor=page['nextCursor']
+        if cursor is None:break
+    assert collected==ids and len(set(collected))==4 and cursor is None

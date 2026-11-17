@@ -109,9 +109,9 @@ def register(app, sessions, settings, current_session, response):
     def listing(request: Request, limit: int = 30, cursor: str | None = None):
         with managed(request) as (db, account):
             query = select(Credential).where(Credential.owner_id == account.id)
-            rows = db.scalars(page_query(query, Credential, limit, cursor)).all()
+            rows = db.scalars(page_query(query, Credential, limit, cursor, time_field='created_at')).all()
             return response({'items': [pats.value(row, account) for row in rows[:limit]],
-                             'nextCursor': encode_cursor(rows[limit-1]) if len(rows) > limit else None})
+                             'nextCursor': encode_cursor(rows[limit-1], time_field='created_at') if len(rows) > limit else None})
 
     @app.delete(prefix + '/{identity}')
     def revoke(identity: UUID, request: Request):

@@ -282,3 +282,44 @@ def test_fixed_public_distribution_serves_real_client_skill_and_operation_schema
         assert skill.status_code==200 and skill.text.startswith('---\nname: anxious-research-pat')
         assert schema.status_code==200 and 'research_document_save' in schema.json() and 'research_page_context' not in schema.json()
         assert client.get('/base/api/research/client/private-file').status_code==404
+
+
+def test_pat_list_uses_issued_time_cursor_on_both_pages_after_approval_loss(monkeypatch):
+    from sqlalchemy.dialects import postgresql
+    monkeypatch.setattr('app.research_api.require_schema',lambda connection:None)
+    monkeypatch.setattr(FakeDB,'connection',lambda self:None,raising=False)
+    db,client=management()
+    at=pats.now()
+    ids=sorted([uuid4(),uuid4()],reverse=True)
+    rows=[Credential(id=identity,owner_id=db.account.id,name='Page '+str(i),scope='read',purpose=pats.PURPOSE,
+         token_hash='a'*64,created_at=at,expires_at=at+timedelta(days=30),rate_count=0) for i,identity in enumerate(ids)]
+    queries=[];available=[rows,rows[1:]]
+    def scalars(query):
+        queries.append(query)
+        return SimpleNamespace(all=lambda:available.pop(0))
+    monkeypatch.setattr(db,'scalars',scalars,raising=False)
+    first=client.get('/api/research/pats?limit=1')
+    assert first.status_code==200,first.text
+    page=first.json();assert page['items'][0]['id']==str(ids[0]) and page['nextCursor']
+    db.account.is_approved=False
+    second=client.get('/api/research/pats',params={'limit':1,'cursor':page['nextCursor']})
+    assert second.status_code==200,second.text
+    assert second.json()['items'][0]['id']==str(ids[1]) and second.json()['items'][0]['effectiveScope']=='none'
+    assert second.json()['nextCursor'] is None
+    for query in queries:
+        sql=str(query.compile(dialect=postgresql.dialect()))
+        assert 'ORDER BY research.credentials.issued_at DESC, research.credentials.id DESC' in sql
+        assert 'updated_at' not in sql
+    # Equal issuedAt uses the strictly descending UUID predicate on page2.
+    compiled=queries[1].compile(dialect=postgresql.dialect())
+    assert 'research.credentials.id <' in str(compiled)
+    assert ids[0] in compiled.params.values() and at in compiled.params.values()
+
+
+@pytest.mark.parametrize('cursor',['not-base64','x'*513,'W10','WyJub3QtdGltZSIsIngiXQ'])
+def test_pat_cursor_invalid_inputs_are_fixed_422(cursor):
+    from sqlalchemy import select
+    from app.research import page_query
+    with pytest.raises(ResearchError) as caught:
+        page_query(select(Credential),Credential,1,cursor,time_field='created_at')
+    assert caught.value.code=='validation_error' and caught.value.status==422
