@@ -12,12 +12,16 @@ from urllib.parse import urlsplit
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from sqlalchemy import and_, or_, select, text
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from sqlalchemy import and_, func, or_, select, text, union_all
 from sqlalchemy.exc import IntegrityError
 
+from . import bibliography as csl
+from . import relation_kinds
 from .models import Account
 from .research_models import ContentVersion, Idempotency, Item, Relation
+
+EVIDENCE_LIMIT = 20
 
 RESEARCH_REVISION = "0002_research"
 
@@ -58,7 +62,94 @@ class Input(BaseModel):
         return value
 
 
-class DocumentInput(Input):
+def nonblank(value):
+    if value is not None and not value.strip():
+        raise ValueError("Text must not be blank")
+    return value
+
+
+def clean_summary(value):
+    """One-line summary: trimmed, 1–300 code points, no line breaks; None clears."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value or len(value) > 300 or "\n" in value or "\r" in value:
+        raise ValueError("A one-line summary of at most 300 characters is required")
+    return value
+
+
+class Summarized(Input):
+    # Omitted on a new version = carry the latest version's value (see Store.add_snapshot).
+    summary: str | None = Field(default=None, max_length=4000)
+
+    @field_validator("summary")
+    @classmethod
+    def one_line(cls, value):
+        return clean_summary(value)
+
+
+class CslName(Input):
+    family: str | None = Field(default=None, min_length=1, max_length=200)
+    given: str | None = Field(default=None, min_length=1, max_length=200)
+    literal: str | None = Field(default=None, min_length=1, max_length=300)
+
+    @field_validator("family", "given", "literal")
+    @classmethod
+    def filled(cls, value):
+        return nonblank(value)
+
+    @model_validator(mode="after")
+    def form(self):
+        if self.literal is not None:
+            if self.family is not None or self.given is not None:
+                raise ValueError("literal names cannot have family/given parts")
+        elif self.family is None:
+            raise ValueError("A family or literal name is required")
+        return self
+
+
+class CslDate(Input):
+    date_parts: list[list[int]] = Field(alias="date-parts", min_length=1, max_length=1)
+
+    @field_validator("date_parts")
+    @classmethod
+    def real_date(cls, value):
+        parts = value[0]
+        if not 1 <= len(parts) <= 3 or not 1 <= parts[0] <= 9999:
+            raise ValueError("date-parts must be [[year, month?, day?]]")
+        try:
+            datetime(parts[0], parts[1] if len(parts) > 1 else 1, parts[2] if len(parts) > 2 else 1)
+        except ValueError:
+            raise ValueError("date-parts must be a real date") from None
+        return value
+
+
+class Bibliography(Input):
+    """CSL-JSON subset (contract #105 §4.1). URL/accessed come from sourceUrl/collectedAt."""
+    type: Literal[csl.TYPES]
+    title: str | None = Field(default=None, min_length=1, max_length=1000)
+    author: list[CslName] | None = Field(default=None, min_length=1, max_length=100)
+    issued: CslDate | None = None
+    container_title: str | None = Field(default=None, alias="container-title", min_length=1, max_length=1000)
+    publisher: str | None = Field(default=None, min_length=1, max_length=500)
+    volume: str | None = Field(default=None, min_length=1, max_length=50)
+    issue: str | None = Field(default=None, min_length=1, max_length=50)
+    page: str | None = Field(default=None, min_length=1, max_length=50)
+    number: str | None = Field(default=None, min_length=1, max_length=100)
+    DOI: str | None = Field(default=None, max_length=256, pattern=r"^10\.\d{4,9}/\S+$")
+    ISBN: str | None = Field(default=None, min_length=1, max_length=32)
+    ISSN: str | None = Field(default=None, min_length=1, max_length=32)
+
+    @field_validator("title", "container_title", "publisher", "volume", "issue", "page", "number", "ISBN", "ISSN")
+    @classmethod
+    def filled(cls, value):
+        return nonblank(value)
+
+    def stored(self):
+        return self.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+
+class DocumentInput(Summarized):
     title: str = Field(min_length=1, max_length=300)
     content: str = Field(min_length=1, max_length=200000)
 
@@ -74,6 +165,7 @@ class MaterialInput(DocumentInput):
     sourceUrl: str = Field(min_length=1, max_length=4096)
     collectedAt: str
     contentKind: Literal["full", "excerpt", "summary"]
+    bibliography: Bibliography | None = None
 
     @field_validator("sourceUrl")
     @classmethod
@@ -123,12 +215,51 @@ class Endpoint(Input):
         return str(parse_id(value))
 
 
+class EvidenceInput(Input):
+    """Where the relation's reason was checked: a version of its source or target."""
+    itemId: str
+    versionId: str
+    locator: str | None = Field(default=None, min_length=1, max_length=100)
+    quote: str | None = Field(default=None, min_length=1, max_length=500)
+
+    @field_validator("itemId", "versionId")
+    @classmethod
+    def identifier(cls, value):
+        return str(parse_id(value))
+
+    @field_validator("locator", "quote")
+    @classmethod
+    def filled(cls, value):
+        return nonblank(value)
+
+    @model_validator(mode="after")
+    def located(self):
+        if self.locator is None and self.quote is None:
+            raise ValueError("Evidence needs a locator or a quote")
+        return self
+
+
+def distinct_evidence(entries):
+    keys = [(entry.itemId, entry.versionId, entry.locator, entry.quote) for entry in entries]
+    if len(keys) != len(set(keys)):
+        raise ValueError("Duplicate evidence entries")
+    return entries
+
+
+# Vocabulary and the 20-entry limit are checked by Store (with details.reason);
+# the schema still advertises them to agents.
+KIND_FIELD = dict(min_length=1, max_length=80, json_schema_extra={"enum": list(relation_kinds.KEYS)})
+EVIDENCE_SCHEMA = {"maxItems": EVIDENCE_LIMIT}
+
+
 class RelationInput(Input):
     source: Endpoint
     target: Endpoint
-    kind: str = Field(min_length=1, max_length=80)
+    kind: str = Field(**KIND_FIELD)
+    # Blank (including omitted) is rejected by Store as relation_reason_required.
     description: str = Field(default="", max_length=4000)
-    directed: bool
+    directed: bool | None = None  # Derived from kind; when sent it must match.
+    evidence: list[EvidenceInput] = Field(default_factory=list, json_schema_extra=EVIDENCE_SCHEMA)
 
     @field_validator("kind")
     @classmethod
@@ -137,12 +268,25 @@ class RelationInput(Input):
             raise ValueError("Relation kind is required")
         return value.strip()
 
+    @field_validator("evidence")
+    @classmethod
+    def distinct(cls, value):
+        return distinct_evidence(value)
+
 
 class RelationChange(Expected):
-    kind: str = Field(min_length=1, max_length=80)
+    kind: str = Field(**KIND_FIELD)
     description: str = Field(max_length=4000)
+    evidence: list[EvidenceInput] | None = Field(default=None, json_schema_extra=EVIDENCE_SCHEMA)  # omitted = keep
 
     _clean_kind = field_validator("kind")(RelationInput.clean_kind.__func__)
+
+    @field_validator("evidence")
+    @classmethod
+    def distinct(cls, value):
+        if value is None:
+            raise ValueError("Omit evidence to keep it; send [] to clear it")
+        return distinct_evidence(value)
 
 
 def parse_id(value):
@@ -213,8 +357,10 @@ class Store:
                   "title": row.title, "createdAt": stamp(row.created_at)}
         if content:
             result["content"] = row.content
+        result["summary"] = row.summary
         if row.kind == "material":
-            result.update(sourceUrl=row.source_url, collectedAt=stamp(row.collected_at), contentKind=row.content_kind)
+            result.update(sourceUrl=row.source_url, collectedAt=stamp(row.collected_at), contentKind=row.content_kind,
+                          bibliography=row.bibliography)
         return result
 
     def serialize_item(self, row, content=True):
@@ -226,21 +372,37 @@ class Store:
                   "latestVersion": {"id": str(latest.id), "number": latest.number, "createdAt": stamp(latest.created_at)}}
         if content:
             result["content"] = latest.content
+        result["summary"] = latest.summary
         if row.kind == "material":
-            result.update(sourceUrl=latest.source_url, collectedAt=stamp(latest.collected_at), contentKind=latest.content_kind)
+            result.update(sourceUrl=latest.source_url, collectedAt=stamp(latest.collected_at), contentKind=latest.content_kind,
+                          bibliography=latest.bibliography)
         else:
             from .publications import owned_publication_info
             result["publication"] = owned_publication_info(self, row)
         return result
 
-    def add_snapshot(self, row, body):
+    def add_snapshot(self, row, body, previous=None):
+        """Append a version. Omitted summary/bibliography carry `previous` (the latest version)."""
+        given = body.model_fields_set
+        summary = body.summary if "summary" in given else getattr(previous, "summary", None)
+        bibliography = None
+        if row.kind == "material":
+            if "bibliography" in given:
+                bibliography = body.bibliography.stored() if body.bibliography is not None else None
+            else:
+                bibliography = getattr(previous, "bibliography", None)
         self.db.add(ContentVersion(item_id=row.id, owner_id=self.owner, kind=row.kind,
                                   **self.author.columns(),
                                   number=row.content_number, title=body.title, content=body.content,
                                   source_url=getattr(body, "sourceUrl", None),
                                   collected_at=datetime.fromisoformat(body.collectedAt) if row.kind == "material" else None,
-                                  content_kind=getattr(body, "contentKind", None)))
+                                  content_kind=getattr(body, "contentKind", None),
+                                  summary=summary, bibliography=bibliography))
         self.db.flush()
+
+    def latest_version(self, row):
+        return self.db.scalar(select(ContentVersion).where(ContentVersion.item_id == row.id,
+                              ContentVersion.owner_id == self.owner, ContentVersion.number == row.content_number))
 
     def create_item(self, kind, body):
         self.graph_lock()
@@ -256,10 +418,11 @@ class Store:
         if row.version != body.expectedVersion:
             fail('conflict', 'The resource changed; reload before retrying', 409,
                  {'reason': 'resource_version', 'current': self.serialize_item(row)})
+        previous = self.latest_version(row)
         row.version += 1
         row.content_number += 1
         row.updated_at = datetime.now(timezone.utc)
-        self.add_snapshot(row, body)
+        self.add_snapshot(row, body, previous)
         return self.serialize_item(row)
 
     @staticmethod
@@ -278,8 +441,24 @@ class Store:
     def items(self, kind, limit=30, cursor=None, archived=False):
         query = select(Item).where(Item.owner_id == self.owner, Item.kind == kind, Item.archived == archived)
         rows = self.db.scalars(page_query(query, Item, limit, cursor)).all()
-        return {"items": [self.serialize_item(row, content=False) for row in rows[:limit]],
+        counts = self.relation_counts([row.id for row in rows[:limit]])
+        return {"items": [{**self.serialize_item(row, content=False), "relationCount": counts.get(row.id, 0)}
+                          for row in rows[:limit]],
                 "nextCursor": encode_cursor(rows[limit - 1]) if len(rows) > limit else None}
+
+    def active_relations(self):
+        """Owner's active relations whose endpoints are both active (the visible graph)."""
+        active = select(Item.id).where(Item.owner_id == self.owner, Item.archived.is_(False))
+        return [Relation.owner_id == self.owner, Relation.archived.is_(False),
+                Relation.source_id.in_(active), Relation.target_id.in_(active)]
+
+    def relation_counts(self, identities):
+        if not identities:
+            return {}
+        visible = self.active_relations()
+        ends = union_all(select(Relation.source_id.label("item")).where(*visible, Relation.source_id.in_(identities)),
+                         select(Relation.target_id.label("item")).where(*visible, Relation.target_id.in_(identities))).subquery()
+        return dict(self.db.execute(select(ends.c.item, func.count()).group_by(ends.c.item)).all())
 
     def versions(self, identity, kind, limit=30, cursor=None):
         item = self.owned_item(identity, kind)
@@ -312,26 +491,60 @@ class Store:
         source, target = self.owned_item(row.source_id), self.owned_item(row.target_id)
         result = {"id": str(row.id), "source": {"type": source.kind, "id": str(source.id), "title": self.serialize_item(source, False)["title"]},
                   "target": {"type": target.kind, "id": str(target.id), "title": self.serialize_item(target, False)["title"]},
-                  "kind": row.kind, "description": row.description, "directed": row.directed,
+                  "kind": row.kind, "kindKnown": relation_kinds.known(row.kind),
+                  "description": row.description, "directed": row.directed, "evidence": list(row.evidence or []),
                   "version": row.version, "createdAt": stamp(row.created_at), "updatedAt": stamp(row.updated_at)}
         if relative is not None:
             result["direction"] = "bidirectional" if not row.directed else "outgoing" if row.source_id == relative else "incoming"
         return result
 
+    @staticmethod
+    def reject(reason, message):
+        fail("validation_error", message, 422, {"reason": reason})
+
+    def relation_rules(self, kind, description):
+        """New saves/updates use the fixed vocabulary and a non-blank reason. Returns kind's direction."""
+        if not relation_kinds.known(kind):
+            self.reject("relation_kind_unknown", "Choose a relation kind from the vocabulary")
+        if not description.strip():
+            self.reject("relation_reason_required", "Describe why the items are related")
+        return relation_kinds.DIRECTED[kind]
+
+    def evidence_values(self, entries, endpoints):
+        """Evidence may cite only versions of the relation's own (owned) endpoints."""
+        if len(entries) > EVIDENCE_LIMIT:
+            self.reject("evidence_limit_exceeded", f"At most {EVIDENCE_LIMIT} evidence entries are allowed")
+        values = []
+        for entry in entries:
+            item = parse_id(entry.itemId)
+            if item not in endpoints:
+                self.reject("evidence_endpoint_mismatch", "Evidence must cite the relation's source or target")
+            version = self.db.scalar(select(ContentVersion).where(ContentVersion.id == parse_id(entry.versionId),
+                                     ContentVersion.item_id == item, ContentVersion.owner_id == self.owner))
+            if version is None:
+                self.reject("evidence_version_not_found", "Evidence must cite a version of that item")
+            values.append({"itemId": entry.itemId, "versionId": entry.versionId, "versionNumber": version.number,
+                           "locator": entry.locator, "quote": entry.quote})
+        return values
+
     def create_relation(self, body):
         self.graph_lock()
+        directed = self.relation_rules(body.kind, body.description)
+        if body.directed is not None and body.directed is not directed:
+            self.reject("relation_direction_mismatch", "The relation kind decides its direction")
         if body.source.id == body.target.id:
             fail("validation_error", "Self relations are not allowed", 422)
-        if body.source.type != body.target.type and not (body.source.type == "document" and body.target.type == "material" and body.directed):
-            fail("validation_error", "Invalid relation direction or target types", 422)
+        if body.source.type != body.target.type and not (body.source.type == "document" and body.target.type == "material" and directed):
+            self.reject("relation_direction_mismatch", "Document-material relations go from the document with a directed kind")
         # Deterministic item-lock order serializes archive vs relation creation.
         endpoints = sorted([body.source, body.target], key=lambda value: value.id)
         for endpoint in endpoints:
             self.owned_item(endpoint.id, endpoint.type, active=True, lock=True)
-        source, target = (body.source, body.target) if body.directed else endpoints
+        evidence = self.evidence_values(body.evidence, {parse_id(body.source.id), parse_id(body.target.id)})
+        source, target = (body.source, body.target) if directed else endpoints
         row = Relation(owner_id=self.owner, source_id=parse_id(source.id), source_kind=source.type,
                        target_id=parse_id(target.id), target_kind=target.type,
-                       kind=body.kind, description=body.description, directed=body.directed)
+                       kind=body.kind, description=body.description, directed=directed, evidence=evidence)
         self.db.add(row)
         self.db.flush()
         return self.serialize_relation(row)
@@ -340,6 +553,13 @@ class Store:
         self.graph_lock()
         row = self.owned_relation(identity, lock=True, archived_targets=archive)
         self.expect(row, body.expectedVersion)
+        if not archive:
+            # Legacy free-text relations must move to the vocabulary on any edit;
+            # a relation's direction and endpoints never change.
+            if self.relation_rules(body.kind, body.description) is not row.directed:
+                self.reject("relation_direction_mismatch", "Choose a kind with this relation's direction")
+            if body.evidence is not None:
+                row.evidence = self.evidence_values(body.evidence, {row.source_id, row.target_id})
         row.version += 1
         row.updated_at = datetime.now(timezone.utc)
         if archive:
@@ -444,7 +664,7 @@ def register_research(app, sessions, settings, current_session, error):
                     fail("csrf_invalid", "Invalid CSRF token", 403)
             from .research_schema_contract import validate_research
             try:
-                if validate_research(db.connection()) != '0009_research_pats':
+                if validate_research(db.connection()) != '0010_research_wiki':
                     raise RuntimeError('Version provenance schema is required')
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
@@ -452,12 +672,17 @@ def register_research(app, sessions, settings, current_session, error):
 
     app.state.research_authorized = authorized
 
+    @app.get(prefix + "/relation-kinds")
+    def relation_kind_catalog():
+        # Static vocabulary (#105 W2): no session, DB or research flag involved.
+        return JSONResponse(relation_kinds.catalog(), headers={"Cache-Control": "no-store"})
+
     @app.get(prefix + "/health")
     def research_health():
         from .research_schema_contract import validate_research
         with sessions() as db:
             try:
-                if validate_research(db.connection()) != '0009_research_pats':
+                if validate_research(db.connection()) != '0010_research_wiki':
                     raise RuntimeError('Version provenance schema is required')
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)

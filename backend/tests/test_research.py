@@ -10,6 +10,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 
 from app.main import create_app, session_digest
 from app.migrate import migrate
+from app.research_schema_contract import REVISIONS
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -99,7 +100,7 @@ def test_foreign_ids_versions_and_relations_are_404(client, admin):
     first = create(client, first_auth)
     another = create(client, first_auth)
     relation = client.post("/api/research/relations", json={"source": {"type": "material", "id": first["id"]},
-                "target": {"type": "material", "id": another["id"]}, "kind": "related", "directed": False}, headers=headers(first_auth)).json()
+                "target": {"type": "material", "id": another["id"]}, "kind": "same_topic", "description": "Same question", "directed": False}, headers=headers(first_auth)).json()
     _, second_auth = identity(client, admin, "222222")
     second = create(client, second_auth)
     first_root = "/api/research/materials/" + first["id"]
@@ -108,7 +109,7 @@ def test_foreign_ids_versions_and_relations_are_404(client, admin):
     assert client.patch(first_root, json={**material(), "expectedVersion": 1}, headers=headers(second_auth)).status_code == 404
     assert client.get("/api/research/materials/" + second["id"] + "/versions/" + first["latestVersion"]["id"]).status_code == 404
     result = client.post("/api/research/relations", json={"source": {"type": "material", "id": second["id"]},
-                         "target": {"type": "material", "id": first["id"]}, "kind": "related", "directed": False}, headers=headers(second_auth))
+                         "target": {"type": "material", "id": first["id"]}, "kind": "same_topic", "description": "Same question", "directed": False}, headers=headers(second_auth))
     assert result.status_code == 404
     assert client.get("/api/research/materials").json()["items"][0]["id"] == second["id"]
 
@@ -117,7 +118,7 @@ def test_relation_direction_dedup_edit_delete_and_archive(client, admin):
     _, auth = identity(client, admin)
     a, b, d = create(client, auth), create(client, auth), create(client, auth, "documents")
     source, target = {"type": "material", "id": a["id"]}, {"type": "material", "id": b["id"]}
-    body = {"source": source, "target": target, "kind": "related", "description": "discovered later", "directed": False}
+    body = {"source": source, "target": target, "kind": "same_topic", "description": "discovered later", "directed": False}
     created = client.post("/api/research/relations", json=body, headers=headers(auth))
     assert created.status_code == 201, created.text
     relation = created.json()
@@ -125,14 +126,14 @@ def test_relation_direction_dedup_edit_delete_and_archive(client, admin):
     assert client.post("/api/research/relations", json=reversed_body, headers=headers(auth)).json()["error"]["code"] == "duplicate"
     assert client.get("/api/research/materials/" + a["id"] + "/relations").json()["items"][0]["direction"] == "bidirectional"
     root = "/api/research/relations/" + relation["id"]
-    change = {"expectedVersion": 1, "kind": "supports", "description": "new"}
+    change = {"expectedVersion": 1, "kind": "same_topic", "description": "new"}
     assert client.patch(root, json=change, headers=headers(auth)).json()["version"] == 2
     assert client.patch(root, json=change, headers=headers(auth)).status_code == 409
     assert client.request("DELETE", root, json={"expectedVersion": 2}, headers=headers(auth)).status_code == 200
     assert client.get(root).status_code == 404
     assert client.post("/api/research/relations", json=body, headers=headers(auth)).status_code == 201
     doc = {"type": "document", "id": d["id"]}
-    directed = {"source": doc, "target": source, "kind": "references", "directed": True}
+    directed = {"source": doc, "target": source, "kind": "supports", "description": "Cited as evidence", "directed": True}
     assert client.post("/api/research/relations", json=directed, headers=headers(auth)).status_code == 201
     outgoing = client.get("/api/research/documents/" + d["id"] + "/relations").json()["items"][0]
     assert outgoing["direction"] == "outgoing"
@@ -231,7 +232,7 @@ def test_m2_marker_and_data_preserved_by_followup(client, admin):
     with admin.connect() as db:
         assert db.execute(text("SELECT * FROM auth.accounts WHERE id=:id"), {"id": owner}).one() == before
         assert db.execute(text("SELECT version_num FROM auth.alembic_version")).scalar_one() == "0001_auth"
-        assert db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() in {"0002_research", "0003_sessions", "0004_publication", "0005_writing", "0006_posts", "0007_post_blocks", "0008_version_authors", "0009_research_pats"}
+        assert db.execute(text("SELECT version_num FROM research.alembic_version")).scalar_one() in REVISIONS
     assert client.get("/readyz").status_code == 200
     assert client.get("/api/research/materials/" + row["id"]).status_code == 200
 
@@ -262,7 +263,7 @@ def test_nul_document_and_relation_text_are_422(client, admin):
     a, b = create(client, auth), create(client, auth)
     for field in ("kind", "description"):
         body = {"source": {"type": "material", "id": a["id"]}, "target": {"type": "material", "id": b["id"]},
-                "kind": "related", "description": "text", "directed": False, field: "bad\x00text"}
+                "kind": "same_topic", "description": "text", "directed": False, field: "bad\x00text"}
         assert client.post("/api/research/relations", json=body, headers=headers(auth)).status_code == 422
 
 

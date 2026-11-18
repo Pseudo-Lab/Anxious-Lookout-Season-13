@@ -34,12 +34,14 @@ def save_result(kind='document', arguments=None, conversation=None):
         latest.source_url = args.get('sourceUrl', 'https://example.invalid/source')
         latest.collected_at = datetime.fromisoformat(args.get('collectedAt', now.isoformat()).replace('Z', '+00:00'))
         latest.content_kind = args.get('contentKind', 'excerpt')
+        latest.summary = args['summary'].strip() if args.get('summary') else None
+        latest.bibliography = args.get('bibliography') if kind == 'material' else None
     class Database:
         def scalar(self, query):
             entity = query.column_descriptions[0].get('entity')
             return latest if entity in {ContentVersion, PostVersion} else None
         def execute(self, *_):
-            return SimpleNamespace(scalar_one=lambda: '0009_research_pats')
+            return SimpleNamespace(scalar_one=lambda: '0010_research_wiki')
         def get(self, *_):
             return SimpleNamespace(login='fixture-owner')
     store = Store(Database(), owner)
@@ -50,13 +52,16 @@ def save_result(kind='document', arguments=None, conversation=None):
 def relation_result(arguments, *, update=False):
     now = datetime(2026, 11, 16, tzinfo=timezone.utc)
     endpoints = arguments.get('source', {'type': 'document', 'id': str(uuid4())}), arguments.get('target', {'type': 'material', 'id': str(uuid4())})
-    directed = arguments.get('directed', True)
+    from app.relation_kinds import DIRECTED
+    directed = arguments.get('directed', DIRECTED.get(arguments['kind'].strip(), True))
     if not directed:
         endpoints = sorted(endpoints, key=lambda endpoint: endpoint['id'])
     items = {endpoint['id']: SimpleNamespace(id=UUID(endpoint['id']), kind=endpoint['type'], title='endpoint') for endpoint in endpoints}
     row = SimpleNamespace(id=UUID(arguments['id']) if update else uuid4(), source_id=endpoints[0]['id'],
         target_id=endpoints[1]['id'], kind=arguments['kind'].strip(), description=arguments.get('description', ''),
-        directed=directed, version=arguments.get('expectedVersion', 0) + 1, created_at=now, updated_at=now)
+        directed=directed, version=arguments.get('expectedVersion', 0) + 1, created_at=now, updated_at=now,
+        evidence=[{'itemId': entry['itemId'], 'versionId': entry['versionId'], 'versionNumber': 1,
+                   'locator': entry.get('locator'), 'quote': entry.get('quote')} for entry in arguments.get('evidence') or []])
     store = SimpleNamespace(owned_item=lambda identity: items[identity],
                             serialize_item=lambda item, _: {'title': item.title})
     return Store.serialize_relation(store, row)

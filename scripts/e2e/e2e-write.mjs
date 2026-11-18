@@ -135,7 +135,7 @@ const docA = (await api.send("POST", "/research/documents", { title: "바탕 문
 check("WP3. setup: document", !!docA.id, JSON.stringify(docA).slice(0, 120));
 const material = async (title, sourceUrl, content) =>
   (await api.send("POST", "/research/materials", { title, sourceUrl, collectedAt: "2026-10-18T00:00:00Z", contentKind: "excerpt", content })).body;
-const relate = (docId, materialId) => api.send("POST", "/research/relations", { source: { type: "document", id: docId }, target: { type: "material", id: materialId }, kind: "근거", directed: true });
+const relate = (docId, materialId) => api.send("POST", "/research/relations", { source: { type: "document", id: docId }, target: { type: "material", id: materialId }, kind: "supports", description: "e2e 근거" });
 const matA = await material("문서 A의 자료", "https://example.com/source-a", "자료 A 본문 비밀 메모");
 const matB = await material("직접 고른 자료", "https://example.com/source-b", "자료 B 본문 비밀 메모");
 check("WP3. setup: materials + document->material relation", !!matA.id && !!matB.id && (await relate(docA.id, matA.id)).status === 201);

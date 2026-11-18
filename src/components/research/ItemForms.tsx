@@ -5,6 +5,8 @@ import type { FetchFailure } from "@/lib/api/client";
 import type { DocumentInput, MaterialInput } from "@/lib/research/api";
 import { CONTENT_KINDS, CONTENT_KIND_LABELS, LIMITS, type ContentKind } from "@/lib/research/types";
 import { fromLocalInput, toLocalInput } from "@/lib/research/format";
+import { CSL_TYPES, cpLength, cslTypeLabel, fromBibliographyForm, toBibliographyForm, type BibliographyForm } from "@/lib/research/bibliography";
+import { readSummary } from "@/lib/research/wikiInput";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import SafeMarkdown from "@/components/research/SafeMarkdown";
 
@@ -50,6 +52,85 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
+/** 글자 수 표시(Unicode code point 기준, 계약 단위). 넘치면 강조한다. 입력을 자르지 않고 저장 전에 확인한다. */
+export function CharCount({ value, limit }: { value: string; limit: number }) {
+  const n = cpLength(value.trim());
+  return (
+    <span aria-hidden="true" className={`text-xs tabular-nums ${n > limit ? "font-medium text-red-700" : "text-stone-500"}`}>
+      {n}/{limit}
+    </span>
+  );
+}
+
+/** #105 한 줄 요약(자료·문서). 목록과 에이전트 index에 보인다. maxLength(UTF-16 단위)는 쓰지 않는다. */
+export function SummaryField({ value, onChange, readOnly, hint }: { value: string; onChange: (v: string) => void; readOnly?: boolean; hint?: string }) {
+  return (
+    <Field label="한 줄 요약 (선택)" hint={hint ?? `목록과 에이전트 index에 보입니다. ${LIMITS.summary}자 이하, 한 줄.`}>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value.replace(/[\r\n]+/g, " "))}
+        readOnly={readOnly}
+        className={`${inputClass} read-only:bg-stone-50`}
+      />
+      <CharCount value={value} limit={LIMITS.summary} />
+    </Field>
+  );
+}
+
+const BIB_TEXT_FIELDS: { key: Exclude<keyof BibliographyForm, "type" | "authors" | "issued">; label: string; placeholder?: string; wide?: boolean }[] = [
+  { key: "title", label: "원문 표제", placeholder: "자료 제목과 다를 때", wide: true },
+  { key: "container-title", label: "게재처", placeholder: "학술지·학회·매체·사이트 이름", wide: true },
+  { key: "publisher", label: "출판사·발행 기관" },
+  { key: "volume", label: "권" },
+  { key: "issue", label: "호" },
+  { key: "page", label: "쪽", placeholder: "예: 12-34" },
+  { key: "number", label: "번호", placeholder: "보고서 번호, arXiv:2401.12345" },
+  { key: "DOI", label: "DOI", placeholder: "10.1000/xyz123" },
+  { key: "ISBN", label: "ISBN" },
+  { key: "ISSN", label: "ISSN" },
+];
+
+/** #105 자료 서지정보 입력(CSL-JSON 부분집합). URL·접근일은 출처 URL·수집 시각을 그대로 쓴다. */
+function BibliographyFields({ value, onChange }: { value: BibliographyForm; onChange: (v: BibliographyForm) => void }) {
+  const set = (patch: Partial<BibliographyForm>) => onChange({ ...value, ...patch });
+  return (
+    <details open={value.type !== ""} className="rounded-lg p-3 ring-1 ring-stone-200">
+      <summary className="cursor-pointer text-sm font-medium text-stone-900">서지정보 (선택)</summary>
+      <div className="@container mt-3 space-y-3">
+        <p className="text-xs text-stone-500">인용 형식에 쓰입니다. URL과 접근일은 위의 출처 URL·수집 시각을 그대로 씁니다.</p>
+        <div className="grid gap-3 @lg:grid-cols-2">
+          <Field label="서지 종류">
+            <select value={value.type} onChange={(e) => set({ type: e.target.value })} className={inputClass}>
+              <option value="">서지정보 없음</option>
+              {value.type && !CSL_TYPES.includes(value.type) && <option value={value.type}>{value.type}</option>}
+              {CSL_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {cslTypeLabel(t)}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="발행일" hint="연도만, 또는 2024-03, 2024-03-15">
+            <input value={value.issued} onChange={(e) => set({ issued: e.target.value })} placeholder="2024" className={inputClass} />
+          </Field>
+        </div>
+        <Field label="저자" hint="한 줄에 한 명. 사람은 ‘성, 이름’(예: Kim, Minji), 기관이나 나눌 수 없는 이름은 그대로. 쉼표가 든 기관 이름은 앞에 =(예: =Research, Inc.).">
+          <textarea value={value.authors} onChange={(e) => set({ authors: e.target.value })} rows={3} className={inputClass} />
+        </Field>
+        <div className="grid gap-3 @lg:grid-cols-2">
+          {BIB_TEXT_FIELDS.map((f) => (
+            <div key={f.key} className={f.wide ? "@lg:col-span-2" : undefined}>
+              <Field label={f.label}>
+                <input value={value[f.key]} onChange={(e) => set({ [f.key]: e.target.value })} placeholder={f.placeholder} className={inputClass} />
+              </Field>
+            </div>
+          ))}
+        </div>
+      </div>
+    </details>
+  );
+}
+
 /** 자료 작성·수정 폼. 수정 저장은 새 내용 버전을 만든다. 실패 시 입력을 그대로 유지한다. */
 export function MaterialForm({
   initial,
@@ -71,6 +152,10 @@ export function MaterialForm({
   const [collectedAt, setCollectedAt] = useState(() => toLocalInput(initial?.collectedAt ?? new Date().toISOString()));
   const [contentKind, setContentKind] = useState<ContentKind>(initial?.contentKind ?? "excerpt");
   const [content, setContent] = useState(initial?.content ?? "");
+  const [summary, setSummary] = useState(initial?.summary ?? "");
+  const [bibliography, setBibliography] = useState(() => toBibliographyForm(initial?.bibliography ?? null));
+  // 처음 값(그대로 두면 저장값을 손대지 않고 다시 보낸다)
+  const [initialBibliography] = useState(() => JSON.stringify(toBibliographyForm(initial?.bibliography ?? null)));
   const [localError, setLocalError] = useState<string | null>(null);
 
   function submit(e: FormEvent) {
@@ -78,8 +163,18 @@ export function MaterialForm({
     const collected = fromLocalInput(collectedAt);
     if (!isHttpUrl(sourceUrl.trim())) return setLocalError("출처 URL은 http:// 또는 https:// 주소여야 합니다.");
     if (!collected) return setLocalError("수집 시각을 입력해 주세요.");
+    const sum = readSummary(summary);
+    if (!sum.ok) return setLocalError(sum.error);
+    // 서지정보 칸을 건드리지 않았으면 저장된 값을 그대로 보낸다(다른 칸만 고쳐도 표현이 바뀌지 않게).
+    const untouched = JSON.stringify(bibliography) === initialBibliography;
+    const bib = untouched ? ({ ok: true, value: initial?.bibliography ?? null } as const) : fromBibliographyForm(bibliography, initial?.bibliography ?? null);
+    if (!bib.ok) return setLocalError(bib.error);
     setLocalError(null);
-    onSubmit({ title: title.trim(), sourceUrl: sourceUrl.trim(), collectedAt: collected, contentKind, content });
+    // 수정은 생략하면 최신 값을 이어 받으므로 화면의 값을 항상 명시한다(null = 지움). 새 자료는 값이 있을 때만 보낸다.
+    const extra = initial
+      ? { summary: sum.value, bibliography: bib.value }
+      : { ...(sum.value ? { summary: sum.value } : {}), ...(bib.value ? { bibliography: bib.value } : {}) };
+    onSubmit({ title: title.trim(), sourceUrl: sourceUrl.trim(), collectedAt: collected, contentKind, content, ...extra });
   }
 
   return (
@@ -117,6 +212,8 @@ export function MaterialForm({
           </select>
         </Field>
       </div>
+      <SummaryField value={summary} onChange={setSummary} />
+      <BibliographyFields value={bibliography} onChange={setBibliography} />
       <Field label="내용" hint={contentHint}>
         <textarea
           value={content}

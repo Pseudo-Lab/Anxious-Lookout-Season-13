@@ -147,7 +147,7 @@ def test_every_mutation_real_response_satisfies_shared_terminal_contract(client,
         'title': 'Revised document', 'content': 'Updated source'})
     checked('research_material_update', {**material(), 'id': source['id'], 'expectedVersion': 1})
     relation = checked('research_relation_save', {'source': {'type': 'document', 'id': document['id']},
-        'target': {'type': 'material', 'id': source['id']}, 'kind': 'cites', 'description': '', 'directed': True})
+        'target': {'type': 'material', 'id': source['id']}, 'kind': 'uses_data', 'description': 'Cites the source', 'directed': True})
     revised = checked('research_relation_update', {'id': relation['id'], 'expectedVersion': 1,
         'kind': 'supports', 'description': 'Verified source'})
     checked('research_post_save', {**proposal_content(content='Cited source'), 'documentIds': [document['id']]})

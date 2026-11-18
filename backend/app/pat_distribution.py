@@ -13,6 +13,7 @@ def register(app, settings, response):
     def llm():
         from typing import get_args
         from .post_block_contract import Language
+        from .wiki_rules import rules
         api = settings.origin + settings.base_path + '/api/research'
         operations = ', '.join(name for name in TOOLS if name != 'research_page_context')
         languages = ', '.join(get_args(Language))
@@ -69,6 +70,11 @@ leave human drafts and public snapshots unchanged. Use the schema for other fiel
 
 Public reads need no PAT: GET {settings.origin}{settings.base_path}/api/public/documents
 or {settings.origin}{settings.base_path}/api/public/posts.
+
+{rules()}
+
+The relation vocabulary is also served as JSON (GET, no authentication):
+{api}/relation-kinds
 '''
         return Response(content, media_type='text/markdown',
                         headers={'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'})

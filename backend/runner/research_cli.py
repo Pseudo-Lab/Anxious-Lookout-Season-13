@@ -17,7 +17,7 @@ SCHEMA = '/usr/local/share/anxious-research/operations.json'
 OPERATIONS = frozenset({'research_list', 'research_get', 'research_versions', 'research_version_get',
     'research_relations', 'research_material_save', 'research_material_update', 'research_document_save',
     'research_document_update', 'research_relation_save', 'research_relation_update', 'research_archive',
-    'research_post_save', 'research_post_draft_get'})
+    'research_post_save', 'research_post_draft_get', 'research_lint'})
 TOKEN = re.compile(r'rturn1\.[0-9a-f-]{36}\.[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}')
 CREDENTIAL_TOKEN = re.compile('(?:' + TOKEN.pattern + r'|rpat1\.[0-9a-f-]{36}\.[A-Za-z0-9_-]{43})')
 CONNECT_HOST = 'traefik.kube-system.svc.cluster.local'

@@ -16,7 +16,7 @@ from . import research_api_budget as budget
 PURPOSE = 'research-pat-v1'
 TOKEN = re.compile(r'rpat1\.[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}')
 READS = frozenset({'research_list', 'research_get', 'research_versions', 'research_version_get',
-                   'research_relations', 'research_post_draft_get'})
+                   'research_relations', 'research_post_draft_get', 'research_lint'})
 
 
 def now():

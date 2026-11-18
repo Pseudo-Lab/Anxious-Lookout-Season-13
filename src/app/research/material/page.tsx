@@ -16,6 +16,7 @@ import { MaterialForm } from "@/components/research/ItemForms";
 import RelationPanel from "@/components/research/RelationPanel";
 import SafeMarkdown, { safeHref } from "@/components/research/SafeMarkdown";
 import VersionHistory from "@/components/research/VersionHistory";
+import { BibliographyLine, SummaryLine } from "@/components/research/WikiMeta";
 
 function MaterialDetail({ id }: { id: string }) {
   const { result, refreshFailure, reload, setResult } = useLoad(`material:${id}`, () => getMaterial(id));
@@ -46,6 +47,7 @@ function MaterialDetail({ id }: { id: string }) {
       <header className="space-y-2">
         {m.archived && <Notice tone="info">보관한 자료입니다. 내용과 버전 기록을 볼 수 있지만 수정·연결할 수 없습니다.</Notice>}
         <h1 className="text-2xl font-bold text-stone-900">{m.title || "(제목 없음)"}</h1>
+        <SummaryLine summary={m.summary} />
         <p className="break-all text-sm text-stone-500">
           출처{" "}
           {source ? (
@@ -60,6 +62,7 @@ function MaterialDetail({ id }: { id: string }) {
           {CONTENT_KIND_LABELS[m.contentKind]} · 수집 {formatDateTime(m.collectedAt)} · v{m.latestVersion.number} · 수정{" "}
           {formatDateTime(m.updatedAt)}
         </p>
+        <BibliographyLine bibliography={m.bibliography} />
         {!m.archived && !editing && (
           <div className="flex gap-4 pt-1">
             <button onClick={() => setEditing(true)} className="text-sm font-medium text-indigo-600 hover:text-indigo-800">

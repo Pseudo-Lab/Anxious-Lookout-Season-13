@@ -23,7 +23,7 @@ def prepare(root):
         auth = {"Origin": origin, "X-CSRF-Token": client.get("/api/auth/me").json()["csrfToken"]}
         doc = post(client, auth, "/api/research/documents", {"title": "Before upgrade", "content": "Retained legacy private draft"})
         ref = post(client, auth, "/api/research/materials", {"title": "Before upgrade source", "content": "Legacy full source", "sourceUrl": "https://example.com/legacy", "collectedAt": "2026-10-08T00:00:00Z", "contentKind": "full"})
-        post(client, auth, "/api/research/relations", {"source": {"type": "document", "id": doc["id"]}, "target": {"type": "material", "id": ref["id"]}, "directed": True, "kind": "references"})
+        post(client, auth, "/api/research/relations", {"source": {"type": "document", "id": doc["id"]}, "target": {"type": "material", "id": ref["id"]}, "directed": True, "kind": "supports", "description": "Reference"})
         post(client, auth, "/api/research/sessions", {"title": "Preserved before upgrade"})
         result = client.patch("/api/research/documents/" + doc["id"], json={"expectedVersion": 1, "content": "Retained legacy revision", "title": "Before upgrade revision"}, headers={**auth, "Idempotency-Key": "bd8e3843-9899-4339-b6b3-db8d75ea7919"})
         assert result.status_code == 200
@@ -50,7 +50,7 @@ def page(root, origin):
     try:
         doc = post(publisher, auth, "/api/research/documents", {"title": "Published offline context", "content": "Complete public document context"})
         ref = post(publisher, auth, "/api/research/materials", {"title": "Public source", "content": "Complete public reference content", "sourceUrl": "https://example.com/page", "collectedAt": "2026-10-08T00:00:00Z", "contentKind": "full"})
-        post(publisher, auth, "/api/research/relations", {"source": {"type": "document", "id": doc["id"]}, "target": {"type": "material", "id": ref["id"]}, "directed": True, "kind": "references"})
+        post(publisher, auth, "/api/research/relations", {"source": {"type": "document", "id": doc["id"]}, "target": {"type": "material", "id": ref["id"]}, "directed": True, "kind": "supports", "description": "Reference"})
         private = "/api/research/documents/" + doc["id"]
         shown = publisher.get(private + "/publication-preview").json()
         released = post(publisher, auth, private + "/publications", {key: shown[key] for key in ("versionId", "expectedVersion", "previewToken")})

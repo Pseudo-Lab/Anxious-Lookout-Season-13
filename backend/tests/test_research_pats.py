@@ -150,6 +150,7 @@ def test_final_lock_wait_rechecks_expiry_before_mutation(pat_client,admin,monkey
 def test_populated_008_upgrade_and_restore_revoke_pats_preserve_provenance(admin,monkeypatch):
     from sqlalchemy import create_engine
     from sqlalchemy.engine import make_url
+    from sqlalchemy.orm import Session
     from app.migrate import migrate
     from app.research_schema_contract import validate_research
     from app.restore_research import restore_candidate
@@ -193,15 +194,32 @@ def test_populated_008_upgrade_and_restore_revoke_pats_preserve_provenance(admin
             assert old.title=='Retained' and old.content=='Original' and old.author_kind=='codex' and old.author_name is None
             credential=uuid4();token=pats.issue_value(credential)
             db.execute(text("INSERT INTO research.credentials(id,owner_id,name,scope,purpose,token_hash,expires_at) VALUES(:id,:owner,'Retained PAT','write',:purpose,:hash,now()+interval '1 day')"),{'id':credential,'owner':owner,'purpose':pats.PURPOSE,'hash':pats.token_hash(token)})
-        from sqlalchemy.orm import Session
-        with Session(candidate) as db,db.begin():
-            saved=Store(db,owner,author=VersionAuthor(credential_id=credential,name='Retained PAT')).create_item('document',DocumentInput(title='PAT version',content='Retained PAT body'))
+            # 0009-era PAT-authored version, written with that revision's columns only
+            # (the current ORM also maps #105's 0010 columns).
+            pat_item=db.execute(text("INSERT INTO research.items(owner_id,kind) VALUES(:owner,'document') RETURNING id"),{'owner':owner}).scalar_one()
+            pat_version=db.execute(text("INSERT INTO research.versions(item_id,owner_id,kind,number,title,content,author_kind,author_credential_id,author_name) VALUES(:item,:owner,'document',1,'PAT version','Retained PAT body','pat',:credential,'Retained PAT') RETURNING id"),{'item':pat_item,'owner':owner,'credential':credential}).scalar_one()
         with candidate.connect() as db:before_restore=signature(db)
         assert restore_candidate(url.render_as_string(hide_password=False),os.environ['API_DATABASE_PASSWORD'],database)=='0009_research_pats'
         with candidate.connect() as db:
             assert validate_research(db)=='0009_research_pats' and signature(db)==before_restore
             assert db.execute(text('SELECT revoked_at IS NOT NULL FROM research.credentials WHERE id=:id'),{'id':credential}).scalar_one()
-            assert db.execute(text('SELECT author_name FROM research.versions WHERE id=:id'),{'id':saved['latestVersion']['id']}).scalar_one()=='Retained PAT'
+            assert db.execute(text('SELECT author_name FROM research.versions WHERE id=:id'),{'id':pat_version}).scalar_one()=='Retained PAT'
+            before_wiki=signature(db)
+            wiki_rows=[dict(row._mapping) for row in db.execute(text('SELECT * FROM research.versions ORDER BY id'))]
+        # #105: the populated 0009 candidate upgrades to the current 0010 and restores there.
+        migrate('0010_research_wiki');migrate('0010_research_wiki')
+        assert restore_candidate(url.render_as_string(hide_password=False),os.environ['API_DATABASE_PASSWORD'],database)=='0010_research_wiki'
+        with candidate.connect() as db:
+            assert validate_research(db)=='0010_research_wiki'
+            after_wiki=signature(db)
+            for table in before_wiki:
+                if table not in {'research.versions','research.relations'}:
+                    assert before_wiki[table]==after_wiki[table],table
+            rows=[dict(row._mapping) for row in db.execute(text('SELECT * FROM research.versions ORDER BY id'))]
+            assert all(row['summary'] is None and row['bibliography'] is None for row in rows)
+            assert [{key:value for key,value in row.items() if key not in {'summary','bibliography'}} for row in rows]==wiki_rows
+            assert db.execute(text('SELECT author_name FROM research.versions WHERE id=:id'),{'id':pat_version}).scalar_one()=='Retained PAT'
+            assert db.execute(text('SELECT revoked_at IS NOT NULL FROM research.credentials WHERE id=:id'),{'id':credential}).scalar_one()
         with Session(candidate) as db:
             from app.pat_models import Credential
             from app.models import Account

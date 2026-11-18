@@ -1,0 +1,19 @@
+{
+  "versions": {
+    "columns": {
+      "summary": ["VARCHAR(300)", true, null],
+      "bibliography": ["JSONB", true, null]
+    },
+    "checks": {
+      "versions_wiki_check": "((summary IS NULL) OR (length(btrim((summary)::text)) > 0)) AND ((bibliography IS NULL) OR (((kind)::text = 'material'::text) AND (jsonb_typeof(bibliography) = 'object'::text)))"
+    }
+  },
+  "relations": {
+    "columns": {
+      "evidence": ["JSONB", false, "'[]'::jsonb"]
+    },
+    "checks": {
+      "relations_evidence_check": "CASE WHEN (jsonb_typeof(evidence) = 'array'::text) THEN (jsonb_array_length(evidence) <= 20) ELSE false END"
+    }
+  }
+}

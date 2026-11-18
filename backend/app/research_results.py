@@ -96,7 +96,9 @@ def snapshot(value, kind):
         from .research import MaterialInput, DocumentInput
         require(value['type'] == kind)
         model = MaterialInput if kind == 'material' else DocumentInput
-        model.model_validate({key: value[key] for key in model.model_fields})
+        # summary/bibliography are absent only from idempotent results stored before #105.
+        added = {'summary', 'bibliography'}
+        model.model_validate({key: value[key] for key in model.model_fields if key not in added or key in value})
         title = text(value['title'], 300, nonempty=True)
         require(title == title.strip())
     summary = value['saved']
@@ -119,6 +121,23 @@ def relation(value):
     require(value['kind'] == value['kind'].strip())
     text(value['description'], 4000)
     require(type(value['directed']) is bool and 'saved' not in value)
+    if 'kindKnown' not in value:
+        # Idempotent result stored before #105: the old shape has neither field.
+        require('evidence' not in value)
+        value = {**value, 'evidence': []}
+    else:
+        from .relation_kinds import known
+        require(value['kindKnown'] is known(value['kind']))
+    require(isinstance(value['evidence'], list) and len(value['evidence']) <= 20)
+    ends = {value['source']['id'], value['target']['id']}
+    for entry in value['evidence']:
+        require(isinstance(entry, dict) and set(entry) == {'itemId', 'versionId', 'versionNumber', 'locator', 'quote'})
+        require(identity(entry['itemId']) in ends)
+        identity(entry['versionId'])
+        positive(entry['versionNumber'])
+        require(entry['locator'] is not None or entry['quote'] is not None)
+        require(entry['locator'] is None or text(entry['locator'], 100, nonempty=True))
+        require(entry['quote'] is None or text(entry['quote'], 500, nonempty=True))
     for endpoint in (value['source'], value['target']):
         require(isinstance(endpoint, dict) and endpoint['type'] in {'material', 'document'})
         identity(endpoint['id'])
@@ -144,12 +163,19 @@ def success(name, value, arguments=None):
             if name.endswith('_save'):
                 require(value['version'] == 1)
             if body is not None:
+                from .relation_kinds import DIRECTED
                 require(value['kind'] == body.kind and value['description'] == body.description)
+                if 'kindKnown' not in value:
+                    require(body.directed is None or value['directed'] is body.directed)
+                else:
+                    require(value['kindKnown'] is True and value['directed'] is DIRECTED[body.kind])
+                if body.evidence is not None and 'kindKnown' in value:
+                    require([(entry['itemId'], entry['versionId'], entry['locator'], entry['quote']) for entry in value['evidence']]
+                            == [(entry.itemId, entry.versionId, entry.locator, entry.quote) for entry in body.evidence])
                 if name.endswith('_save'):
                     endpoints = [(entry['type'], entry['id']) for entry in (value['source'], value['target'])]
                     expected = [(entry.type, entry.id) for entry in (body.source, body.target)]
-                    require(endpoints == expected if body.directed else sorted(endpoints) == sorted(expected))
-                    require(value['directed'] is body.directed)
+                    require(endpoints == expected if value['directed'] else sorted(endpoints) == sorted(expected))
         else:
             kind = name.split('_')[1]
             snapshot(value, kind)
@@ -161,9 +187,13 @@ def success(name, value, arguments=None):
                 require(saved_title == body.title)
                 if kind != 'post':
                     require(value['content'] == body.content)
+                if kind != 'post' and 'summary' in body.model_fields_set:
+                    require(value['summary'] == body.summary)
                 if kind == 'material':
                     require(value['sourceUrl'] == body.sourceUrl and value['contentKind'] == body.contentKind)
                     require(timestamp(value['collectedAt']) == timestamp(body.collectedAt))
+                    if 'bibliography' in body.model_fields_set:
+                        require(value['bibliography'] == (body.bibliography.stored() if body.bibliography else None))
                 if kind == 'post':
                     for key in ('description', 'tags', 'coverImageId', 'documentIds'):
                         require(value['latestVersion'][key] == getattr(body, key))

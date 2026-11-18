@@ -1,5 +1,7 @@
 import { apiUrl, fetchJson, type FetchFailure, type FetchResult } from "@/lib/api/client";
 import { own } from "@/lib/research/own";
+import { parseBibliography } from "@/lib/research/bibliography";
+import { parseRelationKinds } from "@/lib/research/relationKinds";
 import {
   CONTENT_KINDS,
   type ArchiveResult,
@@ -8,8 +10,11 @@ import {
   type DocumentSummary,
   type Draft,
   type Endpoint,
+  LIMITS,
   type Proposal,
   type AnyDocumentProposal,
+  type Bibliography,
+  type Evidence,
   type ItemType,
   type Material,
   type MaterialSummary,
@@ -78,11 +83,31 @@ function parseItemBase(v: Obj) {
   };
 }
 
+const isSummary = (v: unknown): v is string | null => v === null || isStr(v);
+
+// #105 목록에만 있는 활성 관계 수. 없으면 생략, 있으면 0 이상 정수여야 한다.
+function relationCountOf(v: Obj): { relationCount?: number } | null {
+  if (v.relationCount === undefined) return {};
+  return isInt(v.relationCount) && v.relationCount >= 0 ? { relationCount: v.relationCount } : null;
+}
+
 function parseMaterialSummary(v: unknown): MaterialSummary | null {
   if (!isObj(v) || v.type !== "material") return null;
   const base = parseItemBase(v);
-  if (!base || !isStr(v.sourceUrl) || !isStr(v.collectedAt) || !isKind(v.contentKind)) return null;
-  return { ...base, type: "material", sourceUrl: v.sourceUrl, collectedAt: v.collectedAt, contentKind: v.contentKind };
+  if (!base || !isStr(v.sourceUrl) || !isStr(v.collectedAt) || !isKind(v.contentKind) || !isSummary(v.summary)) return null;
+  const bibliography = parseBibliography(v.bibliography);
+  const count = relationCountOf(v);
+  if (bibliography === undefined || !count) return null;
+  return {
+    ...base,
+    type: "material",
+    sourceUrl: v.sourceUrl,
+    collectedAt: v.collectedAt,
+    contentKind: v.contentKind,
+    summary: v.summary,
+    bibliography,
+    ...count,
+  };
 }
 
 function parseMaterial(v: unknown): Material | null {
@@ -120,8 +145,9 @@ function parseDocumentSummary(v: unknown): DocumentSummary | null {
   if (!isObj(v) || v.type !== "document") return null;
   const base = parseItemBase(v);
   const publication = parsePublication(v.publication);
-  if (!base || publication === undefined) return null;
-  return { ...base, type: "document", publication };
+  const count = relationCountOf(v);
+  if (!base || publication === undefined || !isSummary(v.summary) || !count) return null;
+  return { ...base, type: "document", publication, summary: v.summary, ...count };
 }
 
 function parseDocument(v: unknown): ResearchDocument | null {
@@ -131,13 +157,19 @@ function parseDocument(v: unknown): ResearchDocument | null {
 }
 
 function parseVersionSummary(v: unknown): VersionSummary | null {
-  if (!isObj(v) || !isId(v.id) || !isId(v.itemId) || !isInt(v.number) || !isStr(v.title) || !isStr(v.createdAt)) {
+  if (!isObj(v) || !isId(v.id) || !isId(v.itemId) || !isInt(v.number) || !isStr(v.title) || !isStr(v.createdAt) || !isSummary(v.summary)) {
     return null;
   }
-  const out: VersionSummary = { id: v.id, itemId: v.itemId, number: v.number, title: v.title, createdAt: v.createdAt };
+  const out: VersionSummary = { id: v.id, itemId: v.itemId, number: v.number, title: v.title, createdAt: v.createdAt, summary: v.summary };
   if (isStr(v.sourceUrl)) out.sourceUrl = v.sourceUrl;
   if (isStr(v.collectedAt)) out.collectedAt = v.collectedAt;
   if (isKind(v.contentKind)) out.contentKind = v.contentKind;
+  // 자료 버전에만 있다
+  if (v.bibliography !== undefined) {
+    const bibliography = parseBibliography(v.bibliography);
+    if (bibliography === undefined) return null;
+    out.bibliography = bibliography;
+  }
   return out;
 }
 
@@ -237,13 +269,24 @@ function parseEndpoint(v: unknown): Endpoint | null {
   return { type: v.type, id: v.id, title: v.title };
 }
 
+const isNullableText = (v: unknown): v is string | null => v === null || isStr(v);
+
+function parseEvidence(v: unknown): Evidence | null {
+  if (!isObj(v) || !isId(v.itemId) || !isId(v.versionId) || !isInt(v.versionNumber) || !isNullableText(v.locator) || !isNullableText(v.quote))
+    return null;
+  return { itemId: v.itemId, versionId: v.versionId, versionNumber: v.versionNumber, locator: v.locator, quote: v.quote };
+}
+
 function parseRelation(v: unknown): Relation | null {
-  if (!isObj(v)) return null;
+  if (!isObj(v) || !Array.isArray(v.evidence)) return null;
   const source = parseEndpoint(v.source);
   const target = parseEndpoint(v.target);
+  const evidence = v.evidence.map(parseEvidence);
   if (
     !source ||
     !target ||
+    evidence.some((e) => e === null) ||
+    typeof v.kindKnown !== "boolean" ||
     !isId(v.id) ||
     !isStr(v.kind) ||
     !isStr(v.description) ||
@@ -259,8 +302,10 @@ function parseRelation(v: unknown): Relation | null {
     source,
     target,
     kind: v.kind,
+    kindKnown: v.kindKnown,
     description: v.description,
     directed: v.directed,
+    evidence: evidence as Evidence[],
     version: v.version,
     createdAt: v.createdAt,
     updatedAt: v.updatedAt,
@@ -585,17 +630,21 @@ const collection = (type: ItemType) => (type === "material" ? "materials" : "doc
 
 // ---- 자료·문서 ----
 
+// #105 summary·bibliography: 생성에서 생략 = null, 수정에서 생략 = 최신 값을 이어 받음, null = 지움.
 export interface MaterialInput {
   title: string;
   sourceUrl: string;
   collectedAt: string;
   contentKind: ContentKind;
   content: string;
+  summary?: string | null;
+  bibliography?: Bibliography | null;
 }
 
 export interface DocumentInput {
   title: string;
   content: string;
+  summary?: string | null;
 }
 
 export const listMaterials = (cursor?: string | null, archived = false) =>
@@ -656,7 +705,8 @@ export const discardDraft = (id: string, expectedDraftRevision: number, ctx: Mut
 /** 명시 저장: 버전 1개를 만든다. 기존 문서는 expectedVersion 필수, base가 바뀌었으면 비교 뒤 현재 snapshot ID를 resolvedBaseVersionId로. */
 export const commitDraft = (
   id: string,
-  body: { expectedDraftRevision: number; expectedVersion?: number; resolvedBaseVersionId?: string },
+  // #105 summary: 생략 = 최신 값을 이어 받음(새 문서는 null), null = 지움. 초안 본문에는 summary가 없다.
+  body: { expectedDraftRevision: number; expectedVersion?: number; resolvedBaseVersionId?: string; summary?: string | null },
   ctx: MutationContext
 ) => mutate(`/research/document-drafts/${enc(id)}/commit`, "POST", body, parseCommit, ctx);
 
@@ -700,13 +750,25 @@ export const discardDocumentProposal = (proposalId: string, expectedProposalVers
 
 // ---- 관계 ----
 
+// #105 근거 위치 입력. locator와 quote 중 하나 이상(각각 공백뿐 금지).
+export interface EvidenceInput {
+  itemId: string;
+  versionId: string;
+  locator?: string | null;
+  quote?: string | null;
+}
+
+// #105 directed는 보내지 않는다(서버가 kind에서 정한다). description(근거 문구)은 필수.
 export interface RelationInput {
   source: { type: ItemType; id: string };
   target: { type: ItemType; id: string };
   kind: string;
   description: string;
-  directed: boolean;
+  evidence?: EvidenceInput[];
 }
+
+/** #105 관계 어휘(인증 없음). 화면의 kind 선택지·문구·극성 묶음은 이 응답만 따른다. */
+export const getRelationKinds = () => fetchJson(apiUrl("/research/relation-kinds"), parseRelationKinds);
 
 export const listItemRelations = (type: ItemType, id: string, cursor?: string | null) =>
   fetchJson(apiUrl(`/research/${collection(type)}/${enc(id)}/relations${listQuery(cursor)}`), parsePage(parseRelation));
@@ -716,7 +778,8 @@ export const createRelation = (input: RelationInput, ctx: MutationContext) =>
 
 export const updateRelation = (
   id: string,
-  input: { kind: string; description: string },
+  // evidence: 생략 = 기존 목록 유지, 보내면 전체 교체, [] = 비움
+  input: { kind: string; description: string; evidence?: EvidenceInput[] },
   expectedVersion: number,
   ctx: MutationContext
 ) => mutate(`/research/relations/${enc(id)}`, "PATCH", { ...input, expectedVersion }, parseRelation, ctx);
@@ -824,6 +887,16 @@ const CONFLICT_REASONS: Record<string, string> = {
   proposal_closed: "이 제안은 이미 수락되었거나 버려졌습니다. 목록을 새로 불러오세요.",
 };
 
+// #105 422 validation_error의 details.reason
+const VALIDATION_REASONS: Record<string, string> = {
+  relation_kind_unknown: "관계 유형을 목록에서 골라 주세요.",
+  relation_direction_mismatch: "이 관계의 방향과 맞지 않는 유형입니다. 다른 유형을 골라 주세요.",
+  relation_reason_required: "연결한 이유(근거)를 입력해 주세요.",
+  evidence_limit_exceeded: `근거 위치는 ${LIMITS.evidence}개까지 넣을 수 있습니다.`,
+  evidence_endpoint_mismatch: "근거 위치는 이 관계로 연결된 두 항목에서만 고를 수 있습니다.",
+  evidence_version_not_found: "근거로 고른 버전을 찾을 수 없습니다. 목록을 새로 불러온 뒤 다시 골라 주세요.",
+};
+
 /** 계약의 오류 코드를 사용자 안내 문구로 바꾼다. 알 수 없는 실패는 null(호출 측이 일반 문구 사용). */
 export function researchErrorMessage(failure: FetchFailure): string | null {
   if (failure.kind !== "http") return null;
@@ -847,7 +920,7 @@ export function researchErrorMessage(failure: FetchFailure): string | null {
     case "idempotency_conflict":
       return "이전 요청과 충돌했습니다. 다시 시도해 주세요.";
     case "validation_error":
-      return "입력값을 확인해 주세요.";
+      return own(VALIDATION_REASONS, failure.reason ?? "") ?? "입력값을 확인해 주세요.";
     case "policy_pending":
       return "이용 정책이 확정되기 전이라 아직 사용할 수 없습니다.";
     case "codex_unavailable":

@@ -23,7 +23,7 @@ def cases():
     revised = {**post, 'postId': str(uuid4()), 'expectedVersion': 4}
     yield 'research_post_save', revised, save_result('post', revised)
     relation = {'source': {'type': 'document', 'id': str(uuid4())},
-        'target': {'type': 'material', 'id': str(uuid4())}, 'kind': ' cites ',
+        'target': {'type': 'material', 'id': str(uuid4())}, 'kind': ' supports ',
         'description': 'source', 'directed': True, 'mutationId': str(uuid4())}
     yield 'research_relation_save', relation, relation_result(relation)
     edited = {'id': str(uuid4()), 'expectedVersion': 2, 'kind': 'supports',

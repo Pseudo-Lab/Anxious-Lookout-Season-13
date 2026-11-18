@@ -2,18 +2,24 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { FetchFailure } from "@/lib/api/client";
-import { commitDraft, discardDraft, getDocument, getDraft, researchErrorMessage, type DraftInput } from "@/lib/research/api";
+import { commitDraft, discardDraft, getDocument, getDraft, researchErrorMessage, updateDocument, type DraftInput } from "@/lib/research/api";
 import { useMutation } from "@/lib/research/hooks";
 import { formatDateTime } from "@/lib/research/format";
 import { LIMITS, type Draft, type ResearchDocument } from "@/lib/research/types";
 import { useDraftEditor } from "@/lib/research/useDraftEditor";
 import type { DraftLike, SaveStatus } from "@/lib/research/useServerDraft";
 import ErrorNotice from "@/components/research/ErrorNotice";
-import { Field, MarkdownEditor, inputClass } from "@/components/research/ItemForms";
+import { Field, MarkdownEditor, SummaryField, inputClass } from "@/components/research/ItemForms";
+import { readSummary } from "@/lib/research/wikiInput";
 import Notice from "@/components/research/Notice";
 import TextDiff from "@/components/research/TextDiff";
 
 // #22 문서 편집기: 서버 초안 자동 저장 + 명시 저장(새 버전). 초안은 버전이 아니고 공개본도 바꾸지 않는다.
+// #105 한 줄 요약은 초안에 없고 명시 저장(commit 본문) 때만 보낸다. 사용자가 고쳤거나 버전 복원으로 넣은 값만 보내고,
+// 그 밖에는 생략해 최신 값을 이어 받는다(다른 곳에서 바뀐 요약을 덮어쓰지 않는다).
+
+/** 편집기를 열며 넣을 값. summary가 있으면(null 포함) 버전 복원 값이라 저장할 때 그대로 명시한다. */
+export type EditorSeed = DraftInput & { summary?: string | null };
 
 export function StatusLine({ status, onRetry }: { status: SaveStatus<DraftLike>; onRetry: () => void }) {
   let text: string;
@@ -68,8 +74,8 @@ export default function DocumentEditor({
   doc: ResearchDocument | null;
   // 이어 쓸 active 초안
   draft: Draft | null;
-  // 편집기를 열며 넣을 내용(예: 이전 버전으로 되돌리기). 초안으로 자동 저장된다.
-  seed?: DraftInput;
+  // 편집기를 열며 넣을 내용(예: 이전 버전으로 되돌리기). 제목·본문은 초안으로 자동 저장된다.
+  seed?: EditorSeed;
   onDraft?: (draft: Draft) => void;
   onCommitted: (doc: ResearchDocument) => void;
   onClose?: () => void;
@@ -90,6 +96,10 @@ export default function DocumentEditor({
   const [comparing, setComparing] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [showServerDiff, setShowServerDiff] = useState(false);
+  const restoredSummary = seed !== undefined && "summary" in seed;
+  const [summary, setSummary] = useState(() => (restoredSummary ? (seed.summary ?? "") : (doc?.summary ?? "")));
+  // 보낼지: 사용자가 고쳤거나 복원 값일 때만
+  const [summaryTouched, setSummaryTouched] = useState(restoredSummary);
 
   // 문서가 바뀌어 멈춘 자동 저장은 최신 문서가 실제로 도착한 뒤(새 base) 다시 시작한다.
   // 다시 불러오기가 실패하면 문서가 그대로라 재시작하지 않고 멈춘 상태와 안내를 유지한다.
@@ -107,7 +117,7 @@ export default function DocumentEditor({
   useEffect(() => {
     if (seed && !seeded.current) {
       seeded.current = true;
-      editor.setValues(seed);
+      editor.setValues({ title: seed.title, content: seed.content });
     }
   }, [seed, editor]);
 
@@ -141,6 +151,19 @@ export default function DocumentEditor({
       setNote("제목과 본문을 모두 입력해야 저장할 수 있습니다.");
       return false;
     }
+    const sum = readSummary(summary);
+    if (!sum.ok) {
+      setNote(sum.error);
+      return false;
+    }
+    // 기존 문서: 고친 요약만 보낸다(복원 값은 같아도 명시). 새 문서: 값이 있을 때만.
+    const summaryPart = doc
+      ? summaryTouched && (restoredSummary || sum.value !== doc.summary)
+        ? { summary: sum.value }
+        : {}
+      : sum.value
+        ? { summary: sum.value }
+        : {};
     const flushed = await editor.flush();
     if (!flushed.ok) {
       setNote("초안을 먼저 저장하지 못해 새 버전을 만들지 않았습니다. 위 안내를 확인한 뒤 다시 시도하세요.");
@@ -148,6 +171,20 @@ export default function DocumentEditor({
     }
     const d = flushed.draft;
     if (!d) {
+      // 제목·본문은 그대로이고 요약만 바뀌었으면 문서 수정으로 새 버전을 만든다(초안에는 요약이 없다).
+      if (doc && "summary" in summaryPart) {
+        const input = { title: doc.title, content: doc.content, summary: summaryPart.summary };
+        const res = await run(`document:summary:${doc.id}:${doc.version}:${JSON.stringify(input)}`, (ctx) =>
+          updateDocument(doc.id, input, doc.version, ctx)
+        );
+        if (res.ok) {
+          onCommitted(res.data);
+          return true;
+        }
+        setFailure(res.failure);
+        if (res.failure.kind === "http" && res.failure.code === "conflict") await onReloadDocument?.();
+        return false;
+      }
       setNote("바뀐 내용이 없어 새 버전을 만들지 않았습니다.");
       return false;
     }
@@ -157,8 +194,13 @@ export default function DocumentEditor({
       return false;
     }
     const body = doc
-      ? { expectedDraftRevision: d.revision, expectedVersion: doc.version, ...(baseChanged ? { resolvedBaseVersionId: doc.latestVersion.id } : {}) }
-      : { expectedDraftRevision: d.revision };
+      ? {
+          expectedDraftRevision: d.revision,
+          expectedVersion: doc.version,
+          ...(baseChanged ? { resolvedBaseVersionId: doc.latestVersion.id } : {}),
+          ...summaryPart,
+        }
+      : { expectedDraftRevision: d.revision, ...summaryPart };
     const res = await run(`draft:commit:${d.id}:${JSON.stringify(body)}`, (ctx) => commitDraft(d.id, body, ctx));
     if (res.ok) {
       onCommitted(res.data.document);
@@ -227,6 +269,15 @@ export default function DocumentEditor({
           className={`${inputClass} read-only:bg-stone-50`}
         />
       </Field>
+      <SummaryField
+        value={summary}
+        onChange={(v) => {
+          setSummary(v);
+          setSummaryTouched(true);
+        }}
+        readOnly={locked}
+        hint={`목록과 에이전트 index에 보입니다. ${LIMITS.summary}자 이하, 한 줄. 요약은 초안에 자동 저장되지 않고 ‘${doc ? "새 버전으로 저장" : "문서 저장"}’ 때 함께 저장됩니다.`}
+      />
       <MarkdownEditor value={values.content} onChange={(content) => editor.setValues({ ...values, content })} readOnly={locked} />
       {locked && (
         <p role="status" className="text-xs text-stone-900">

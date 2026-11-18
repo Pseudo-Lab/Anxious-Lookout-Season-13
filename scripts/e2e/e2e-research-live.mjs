@@ -173,18 +173,27 @@ check("setup. B/D created", matB.status === 201 && docD.status === 201, `${matB.
 // L5. 관계
 await page.goto(materialAUrl);
 await main.getByLabel("연결할 대상").selectOption({ label: "실물 자료 B" });
-await main.getByLabel("관계 종류").fill("관련");
+// #105 관계 유형은 실제 API의 어휘(GET /research/relation-kinds)에서 온다.
+await main.getByLabel("관계 유형").selectOption("same_topic");
+await main.getByLabel("연결한 이유").fill("같은 사건을 다룬다");
 await main.getByRole("button", { name: "관계 추가" }).click();
 check("L5. undirected relation via real API", await appears(main.getByRole("link", { name: "실물 자료 B" })));
-check("L5. undirected label", await appears(main.getByText("상호 관련 (방향 없음)").nth(1)));
+check("L5. undirected relation grouped as neutral", await appears(main.getByRole("group", { name: "중립" }).getByText("같은 주제", { exact: true })));
 const docUrl = U(`/research/document/?id=${docD.body.id}`);
 await page.goto(docUrl);
 await main.getByLabel("연결할 대상").selectOption({ label: "실물 자료 A" });
-await main.getByLabel("관계 종류").fill("근거");
+await main.getByLabel("관계 유형").selectOption("supports");
+await main.getByLabel("연결한 이유").fill("문서의 주장 근거");
+// 근거 위치: 실제 버전 ID로 저장되고 버전 번호와 함께 돌아온다.
+await main.getByRole("button", { name: "+ 근거 위치 추가" }).click();
+await main.getByLabel("근거 1 항목").selectOption({ label: "대상: 실물 자료 A" });
+await main.getByLabel("근거 1 버전").locator("option", { hasText: "(최신)" }).waitFor({ state: "attached" });
+await main.getByLabel("근거 1 위치").fill("p.3");
 await main.getByRole("button", { name: "관계 추가" }).click();
 check("L5. document→material relation", await appears(main.getByRole("link", { name: "실물 자료 A" })));
+check("L5. evidence locator returned by real API", await appears(main.getByRole("list", { name: "근거 위치" }).getByText("p.3", { exact: false })));
 await page.goto(materialAUrl);
-check("L5. incoming direction on material", await appears(main.getByText("대상 → 이 항목")));
+check("L5. incoming relation reads inverse on material", await appears(main.getByRole("group", { name: "지지·확장" }).getByText("지지받음", { exact: true })));
 
 // L6. 동시 수정 충돌(실제 expectedVersion)
 await main.getByRole("button", { name: "내용 수정" }).click();
@@ -282,7 +291,13 @@ const publicUrl = U(`/public/document/?id=${docD.body.id}`);
   check("setup. document edited", r.status === 200, String(r.status));
   await page.goto(docUrl);
   await main.getByRole("button", { name: "새 내용으로 다시 공개" }).click();
+  // ‘공개 중’은 다시 공개 전부터 보이므로, 새 공개 POST 응답이 온 뒤에 방문자 화면을 새로 고친다.
+  const republished = page.waitForResponse(
+    (res) => res.request().method() === "POST" && /\/api\/research\/documents\/[^/]+\/publications$/.test(new URL(res.url()).pathname)
+  );
   await publishButton().click();
+  const republishRes = await republished;
+  check("L8. republish accepted by real API", republishRes.ok(), String(republishRes.status()));
   await main.getByText("공개 중", { exact: true }).waitFor();
   await V.page.reload();
   check("L8. readers see latest release only", await appears(vm.getByText("D 두 번째 공개본")));
@@ -341,13 +356,12 @@ const publicSessionUrl = U(`/research/session/?id=${publicSessionId}`);
     contentKind: "summary",
     content: "X 내용",
   });
-  for (const kind of ["근거", "배경"]) {
+  for (const kind of ["supports", "uses_data"]) {
     await api.send("POST", "/research/relations", {
       source: { type: "document", id: h.body.id },
       target: { type: "material", id: x.body.id },
       kind,
-      description: "",
-      directed: true,
+      description: "e2e 근거",
     });
   }
   await api.send("DELETE", `/research/materials/${x.body.id}`, { expectedVersion: x.body.version });
@@ -388,13 +402,12 @@ const publicSessionUrl = U(`/research/session/?id=${publicSessionId}`);
     contentKind: "summary",
     content: "Y 내용",
   });
-  for (const kind of ["근거", "배경"]) {
+  for (const kind of ["supports", "uses_data"]) {
     await api.send("POST", "/research/relations", {
       source: { type: "document", id: h.body.id },
       target: { type: "material", id: x.body.id },
       kind,
-      description: "",
-      directed: true,
+      description: "e2e 근거",
     });
   }
   await api.send("DELETE", `/research/materials/${x.body.id}`, { expectedVersion: x.body.version });

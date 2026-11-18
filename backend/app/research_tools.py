@@ -64,21 +64,26 @@ class PageContext(Input):
     materialId: str | None = None
 
 
+class LintInput(Input):
+    limit: int = Field(default=200, ge=1, le=500)
+
+
 TOOLS = {
     "research_page_context": (PageContext, "Public mode only: read the accepted document snapshot and its direct references; supply materialId for one reference's stored content."),
-    "research_list": (Listing, "List your own materials, documents or posts (type material/document/post)."),
+    "research_list": (Listing, "List your own materials, documents or posts (type material/document/post). Material/document items are the wiki index: summary, relationCount and updatedAt; read this first."),
+    "research_lint": (LintInput, "Read-only wiki check: orphan materials, missing bibliography, relations without a reason, supports+refutes on one pair, documents citing materials superseded via updates. Fix findings with normal saves."),
     "research_get": (Lookup, "Read your own material/document/post/relation by type and id."),
     "research_versions": (Versions, "List immutable snapshots of your own material/document/post."),
     "research_version_get": (VersionLookup, "Read a complete immutable material/document/post snapshot."),
     "research_relations": (Versions, "List both endpoints and directions of your own item's relations."),
-    "research_material_save": (SaveMaterial, "Save web research with original sourceUrl, collectedAt and contentKind (full/excerpt/summary). Keep source citations; distinguish summaries from full text. mutationId is a UUID reused only for an identical retry."),
-    "research_document_save": (SaveDocument, "Save a new private Markdown document as an immutable version immediately. Preserve citations. mutationId is a UUID reused for identical retries. The human can compare/restore from version history; publishing is human-only."),
+    "research_material_save": (SaveMaterial, "Save one source as a wiki material with original sourceUrl, collectedAt and contentKind (full/excerpt/summary), a one-line summary (≤300) and CSL-JSON bibliography (no URL/accessed: sourceUrl/collectedAt are used). Quote the source with locations; keep interpretation in the 해석 section. mutationId is a UUID reused only for an identical retry."),
+    "research_document_save": (SaveDocument, "Save a new private Markdown document (comparison/synthesis across materials) with an optional one-line summary (≤300) as an immutable version immediately. Preserve citations. mutationId is a UUID reused for identical retries. The human can compare/restore from version history; publishing is human-only."),
     "research_post_save": (SavePost, "Save a new post or complete revision as an immutable version immediately, using contentInput {format: markdown, text: ...}. Read source documents/materials and the human draft first. Existing posts require postId and expectedVersion. Optional draftId and expectedDraftRevision are paired; human drafts remain unchanged. Preserve citations and materialIds. Never publishes or withdraws. mutationId is reused only for identical retries."),
     "research_post_draft_get": (DraftLookup, "Read your own current post draft using postId, or a specific draftId. Supply exactly one."),
-    "research_material_update": (EditMaterial, "Append a material snapshot using expectedVersion; preserve previous content."),
+    "research_material_update": (EditMaterial, "Append a material snapshot using expectedVersion; preserve previous content. Omitted summary/bibliography keep the latest values; null clears."),
     "research_document_update": (EditDocument, "Append a private document version immediately using expectedVersion. On conflict, reread and reconcile before retrying with a new mutationId. Preserve citations, human drafts and previous versions. Never publishes or withdraws."),
-    "research_relation_save": (SaveRelation, "Connect your active material/material, document/material or document/document. Undirected relations use directed=false."),
-    "research_relation_update": (EditRelation, "Change an owned relation kind/description with expectedVersion."),
+    "research_relation_save": (SaveRelation, "Connect your active material/material, document→material or document/document with a vocabulary kind (source = the item that says it, usually the new one; only same_topic is undirected, omit directed) and a non-blank description of why. Optional evidence: up to 20 {itemId (source or target), versionId, locator, quote ≤500}."),
+    "research_relation_update": (EditRelation, "Change an owned relation's kind (vocabulary only, same direction) and description with expectedVersion. Omitted evidence is kept; a list replaces it."),
     "research_archive": (Archive, "Non-destructively archive your material/document/relation; preserve history."),
 }
 
@@ -147,6 +152,9 @@ def dispatch(store, name, arguments, context=None):
             if version is None: fail('not_found', 'Not found', 404)
             return posts.version_value(version)
         fail('validation_error', 'Posts support read tools and explicit saves only', 422)
+    if name == "research_lint":
+        from .research_lint import lint
+        return lint(store, body.limit)
     if name == "research_list":
         if kind == "relation":
             fail("validation_error", "Use research_relations for an item", 422)

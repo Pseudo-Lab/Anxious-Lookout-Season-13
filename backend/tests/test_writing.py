@@ -271,8 +271,8 @@ def test_partial_snapshot_failure_rolls_back_all_states_and_retry(client, admin,
         path = ROOT+'/'+draft['id']+'/commit'
         body = {'expectedVersion': 1, 'expectedDraftRevision': 1}
     original = Store.add_snapshot
-    def broken(self, row, content):
-        original(self, row, content)
+    def broken(self, row, content, previous=None):
+        original(self, row, content, previous)
         raise OperationalError('private query', None, Exception('private value'))
     monkeypatch.setattr(Store, 'add_snapshot', broken)
     key = str(uuid.uuid4())
