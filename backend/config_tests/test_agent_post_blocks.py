@@ -175,6 +175,10 @@ def test_new_post_from_blocks_has_null_format_changes(monkeypatch):
      '/contentInput/document/blocks/0/runs/0/marks/0'),
     ({'format': 'post-blocks', 'document': {'format': 'post-blocks', 'version': 2, 'blocks': []}}, '/contentInput/document/version'),
     ({'format': 'html'}, '/contentInput/format'),
+    # review 7e44e7a blocker: unhashable formats were a 500 (TypeError), not R4's 422.
+    ({'format': {}}, '/contentInput/format'),
+    ({'format': ['post-blocks']}, '/contentInput/format'),
+    ({'format': None}, '/contentInput/format'),
     ('markdown', '/contentInput'),
     ({'format': 'post-block-patch', 'operations': [{'op': 'remove', 'id': uid()}]}, '/contentInput/format'),
 ])
@@ -377,3 +381,35 @@ def test_pat_client_argument_boundary(size, sent, monkeypatch, capsys):
     assert bool(calls) is sent and code == (0 if sent else 1)
     output = json.loads(capsys.readouterr().out)
     assert output == {'ok': True} if sent else output['error']['code'] == 'research_api_unavailable'
+
+
+def table(widths=None):
+    rows = [{'id': uid(), 'header': True, 'cells': [cell('a'), cell('b')]},
+            {'id': uid(), 'cells': [cell('c'), cell('d')]}]
+    value = {'id': uid(), 'type': 'table', 'rows': rows}
+    if widths: value['columnWidths'] = widths
+    return value
+
+
+@pytest.mark.parametrize('widths', [None, [1, 2]])
+def test_patch_sibling_dependent_errors_point_at_the_causing_operation(widths):
+    # review 7e44e7a major: removing one first-row cell fails on the other row (or columnWidths),
+    # a path the operation never touched; it must still name operation 0, not /contentInput/operations.
+    base = document(para('before'), table(widths))
+    first = base['blocks'][1]['rows'][0]['cells'][0]['id']
+    error = failure(lambda: apply(base, [{'op': 'remove', 'id': first}]))
+    assert error.details['path'] == '/contentInput/operations/0'
+    second = base['blocks'][1]['rows'][1]['cells'][0]['id']
+    assert failure(lambda: apply(base, [{'op': 'remove', 'id': second}])).details['path'] == '/contentInput/operations/0'
+    # An unrelated earlier operation elsewhere does not take the blame.
+    other = base['blocks'][0]['id']
+    error = failure(lambda: apply(base, [{'op': 'replace', 'id': other, 'block': {**para('after'), 'id': other}},
+                                         {'op': 'remove', 'id': first}]))
+    assert error.details['path'] == '/contentInput/operations/1'
+
+
+def test_table_count_limit_points_at_the_inserting_operation():
+    base = document(*[table() for _ in range(20)])
+    extra = table()
+    error = failure(lambda: apply(base, [{'op': 'insert', 'afterId': base['blocks'][-1]['id'], 'block': extra}]))
+    assert error.code == 'content_limit_exceeded' and error.details['path'].startswith('/contentInput/operations/0')

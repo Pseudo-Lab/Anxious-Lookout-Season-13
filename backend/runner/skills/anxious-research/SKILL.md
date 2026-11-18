@@ -127,8 +127,8 @@ schema (`anxious-research schema research_post_save`).
   may follow a completed save: check versions); both print
   `research_api_unavailable`. A patch sends only changed blocks, so its
   arguments are smaller (same limit): prefer it for large posts.
-- The CLI prints text that looks like a research token as `[REDACTED]` (inputs
-  containing such text are refused). A whole-document save of what you read
+- API responses (and the CLI output) show text that looks like a research token
+  as `[REDACTED]`; inputs containing such text are refused. A whole-document save of what you read
   would store the mask instead of the original, so edit existing posts with a
   patch that leaves those blocks alone.
 

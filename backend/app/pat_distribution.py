@@ -86,10 +86,10 @@ research_post_save's argumentsSchema in the schema above.
   `research_api_unavailable` and exit nonzero. A patch
   sends only the changed blocks, so its arguments are smaller (same limit):
   prefer it for large posts.
-- pat-client.py prints text that looks like a research token as `[REDACTED]`
-  (inputs containing such text are refused). Saving a masked document back
-  whole would replace the original text with the mask, so edit existing posts
-  with a patch that leaves those blocks untouched.
+- API responses (and pat-client.py output) show text that looks like a research
+  token as `[REDACTED]`; inputs containing such text are refused. Saving a
+  masked document back whole would replace the original text with the mask, so
+  edit existing posts with a patch that leaves those blocks untouched.
 
 ## Post Markdown
 

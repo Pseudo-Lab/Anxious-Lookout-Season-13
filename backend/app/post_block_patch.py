@@ -67,18 +67,40 @@ def parse(path):
     return [part.replace('~1', '/').replace('~0', '~') for part in path.split('/')[1:]] if path else []
 
 
+def touched(document, marks):
+    """id(node) -> latest operation that changed anything inside that node (itself included)."""
+    result = {}
+    def walk(value):
+        latest = marks.get(id(value), -1)
+        children = value if isinstance(value, list) else [value.get(key) for key in CHILDREN] if isinstance(value, dict) else []
+        for child in children:
+            if isinstance(child, (dict, list)): latest = max(latest, walk(child))
+        if isinstance(value, dict) and 'id' in value and latest >= 0: result[id(value)] = latest
+        return latest
+    walk(document['blocks'])
+    return result
+
+
 def locate(document, parts, marks):
-    """Map a result-document path to the deepest operation-owned object on it."""
-    current, best = document, None
+    """Map a result-document path to the deepest operation-owned object on it.
+
+    Errors on untouched paths that depend on a sibling (row width, columnWidths)
+    go to the latest operation that changed inside the deepest enclosing node.
+    """
+    current, best, nodes, within = document, None, [], None
     for depth in range(len(parts) + 1):
         if id(current) in marks:
             best = (marks[id(current)], depth, isinstance(current, dict))
+        if isinstance(current, dict) and 'id' in current: nodes.append(current)
         if depth == len(parts): break
         part = parts[depth]
         if isinstance(current, dict) and part in current: current = current[part]
         elif isinstance(current, list) and part.isdigit() and int(part) < len(current): current = current[int(part)]
         else: break
-    if best is None: return ROOT
+    if best is None:
+        inside = touched(document, marks)
+        within = next((inside[id(node)] for node in reversed(nodes) if id(node) in inside), None)
+        return ROOT if within is None else (*ROOT, within)
     index, depth, node = best
     return (*ROOT, index, 'block', *parts[depth:]) if node else (*ROOT, index)
 

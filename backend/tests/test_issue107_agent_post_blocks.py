@@ -120,3 +120,31 @@ def test_patch_save_keeps_untouched_formatting_ids_and_cas(client, admin):
     assert rejected.json()['error']['details']['path'].startswith('/contentInput/operations/0/block/runs/0/marks')
     human = client.get('/api/research/posts/' + post['id']).json()
     assert human['version'] == result['version'] and human['latestVersion']['content'] == result['latestVersion']['content']
+
+
+def unhashable_format_args():
+    # review 7e44e7a blocker: an object/array format returned 500 on the PAT and owner Codex paths.
+    for bad in ({}, ['markdown']):
+        args = {**proposal_content(), 'mutationId': str(uuid4())}
+        args['contentInput'] = {'format': bad, 'text': 'x'}
+        yield args
+
+
+def assert_format_pointer(reply):
+    assert reply.status_code == 422, reply.text
+    error = reply.json()['error']
+    assert error['code'] == 'validation_error' and error['details']['path'] == '/contentInput/format'
+
+
+def test_unhashable_format_is_a_422_pointer_on_the_codex_path(client, admin):
+    owner, auth = identity(client, admin)
+    session, runner = turn(client, owner, auth)
+    for args in unhashable_format_args():
+        assert_format_pointer(callback(client, session, runner, 'research_post_save', args))
+
+
+def test_unhashable_format_is_a_422_pointer_on_the_pat_path(pat_client, admin):
+    owner, auth = identity(pat_client, admin)
+    token = issue(pat_client, auth)['token']
+    for args in unhashable_format_args():
+        assert_format_pointer(call(pat_client, token, 'research_post_save', args))

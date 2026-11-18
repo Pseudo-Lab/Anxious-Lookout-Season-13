@@ -94,7 +94,8 @@ FORMATS = {'markdown', 'post-blocks', 'post-block-patch'}
 
 
 def content_format(value):
-    return value.get('format') if isinstance(value, dict) else getattr(value, 'format', None)
+    found = value.get('format') if isinstance(value, dict) else getattr(value, 'format', None)
+    return found if isinstance(found, str) else None
 
 
 class Propose(posts.PostMetadata, DraftPair):
@@ -112,7 +113,8 @@ class Propose(posts.PostMetadata, DraftPair):
         if isinstance(value, dict):
             content = value.get('contentInput')
             if not isinstance(content, dict): invalid(('contentInput',), 'validation_error')
-            if content.get('format') not in FORMATS:
+            # Arrays/objects are unhashable: check the type before set membership (review 7e44e7a blocker).
+            if not isinstance(content.get('format'), str) or content['format'] not in FORMATS:
                 invalid(('contentInput', 'format'), 'validation_error')
             if content['format'] == 'post-block-patch' and value.get('postId') is None:
                 invalid(('contentInput', 'format'), 'validation_error')
