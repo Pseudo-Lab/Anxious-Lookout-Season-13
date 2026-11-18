@@ -23,9 +23,10 @@ ROOT = ('contentInput', 'operations')
 LIMIT = 200
 UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 FIELDS = {'replace': ('id', 'block'), 'remove': ('id',)}
-# Replay work bound: (operations + 1) x encoded base bytes. 1 MiB base -> 15 operations;
-# 80 KiB base -> all 200. Deterministic (no clock). At 32 MiB a rule-limit-dense base
-# (10,000 marked runs, 0.8 MB) took 3.4 s in the unit image, so this is about 1.7 s.
+# Replay work bound (PM R4 supplement 3): the serialized bytes of every state cause() validates,
+# summed; the replay stops before the state that would pass it. 1 MiB base -> base + 15 steps.
+# Deterministic (no clock). A rule-limit-dense 0.8 MB base (10,000 marked runs) took about
+# 2.5 s in the unit image to reach the bound (32 MiB took 3.4 s under the earlier estimate).
 CAUSE_BUDGET = 16 * 1024 * 1024
 
 
@@ -123,38 +124,56 @@ def locate(document, parts, index, origin):
     return (*ROOT, index) if best is None else (*ROOT, index, 'block', *best)
 
 
-def duplicate(document, index, origin):
-    """A repeated id is reported at the copy the causing operation sent, wherever it sorts."""
-    seen, pending = {}, [document['blocks']]
+def duplicate(document, parts, index, origin):
+    """When the first error is a repeated id, point at the copy the causing operation sent.
+
+    canonicalize reports a repeated id at its second occurrence in document order,
+    which may be the original node when the copy was inserted before it.
+    """
+    if not parts or parts[-1] != 'id': return None
+    node = document
+    for part in parts[:-1]:
+        if isinstance(node, dict) and part in node: node = node[part]
+        elif isinstance(node, list) and part.isdigit() and int(part) < len(node): node = node[int(part)]
+        else: return None
+    target = node.get('id') if isinstance(node, dict) else None
+    if not isinstance(target, str): return None
+    matches, pending = [], [document['blocks']]
     while pending:
         container = pending.pop()
         if not isinstance(container, list): continue
-        for node in container:
-            if not isinstance(node, dict): continue
-            if isinstance(node.get('id'), str): seen.setdefault(node['id'], []).append(node)
-            pending.extend(node.get(key) for key in CHILDREN)
-    for nodes in seen.values():
-        sent = [node for node in nodes if id(node) in origin]
-        if len(nodes) > 1 and sent:
-            return (*ROOT, index, 'block', *origin[id(sent[0])], 'id')
-    return None
+        for child in container:
+            if not isinstance(child, dict): continue
+            if child.get('id') == target: matches.append(child)
+            pending.extend(child.get(key) for key in CHILDREN)
+    sent = [child for child in matches if id(child) in origin]
+    return (*ROOT, index, 'block', *origin[id(sent[0])], 'id') if len(matches) > 1 and sent else None
 
 
 def report(document, index, origin, error):
-    path = duplicate(document, index, origin)
+    """Keep the first error's status, code and details; only its path moves to the operation."""
+    found = error.details.get('path') if isinstance(error.details, dict) else None
+    parts = parse(found) if isinstance(found, str) else None
+    path = duplicate(document, parts, index, origin) if parts is not None and error.code == 'invalid_block_document' else None
     if path is None:
-        found = error.details.get('path') if isinstance(error.details, dict) else None
-        path = locate(document, parse(found), index, origin) if isinstance(found, str) else (*ROOT, index)
-        if path is not None and isinstance(error.details, dict):
-            error.details['path'] = pointer(path)
-            return error
-    try: invalid(path)
-    except ResearchError as replaced: return replaced
+        path = locate(document, parts, index, origin) if parts is not None else (*ROOT, index)
+    details = error.details if isinstance(error.details, dict) else {'code': error.code}
+    error.details = {**details, 'path': pointer(path)}
+    return error
 
 
 def cause(base, operations):
-    """Replay with per-step validation (failure path only) and return the causing error."""
-    document, found = deepcopy(base), None
+    """Replay with per-step validation (failure path only) and return the causing error.
+
+    Returns None once the serialized bytes of the validated states would pass
+    CAUSE_BUDGET (checked before each validation, so the work is deterministic).
+    """
+    document, found, spent = deepcopy(base), None, 0
+    def affordable():
+        nonlocal spent
+        spent += len(encoded(document))
+        return spent <= CAUSE_BUDGET
+    if not affordable(): return None
     try: canonicalize(document, ())
     except ResearchError as error:
         # An invalid base has no causing operation unless a later step passes first.
@@ -162,6 +181,7 @@ def cause(base, operations):
         found = error
     for index, operation in enumerate(operations):
         block = step(document, operation, index)
+        if not affordable(): return None
         try:
             canonicalize(document, ())
             found = None  # passes again: earlier failures were transient
@@ -182,8 +202,6 @@ class PatchFailure(ResearchError):
 def refine(failure):
     """Causing-operation error within CAUSE_BUDGET, else the final first error at /contentInput/operations."""
     base, operations = failure.replay
-    if (len(operations) + 1) * max(len(encoded(base)), 1) > CAUSE_BUDGET:
-        return failure
     return cause(base, operations) or failure
 
 

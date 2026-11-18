@@ -490,19 +490,18 @@ def test_cause_search_over_the_work_bound_returns_the_final_first_error(monkeypa
     base = document(table())
     rows = base['blocks'][0]['rows']
     operations = [{'op': 'remove', 'id': rows[0]['cells'][0]['id']}]
-    limit = (len(operations) + 1) * len(patch.encoded(base))
+    after = deepcopy(base); after['blocks'][0]['rows'][0]['cells'].pop(0)
+    limit = len(patch.encoded(base)) + len(patch.encoded(after))  # bytes of both validated states
     monkeypatch.setattr(patch, 'CAUSE_BUDGET', limit)
     assert failure(lambda: apply(base, operations)).details['path'] == '/contentInput/operations/0'
     monkeypatch.setattr(patch, 'CAUSE_BUDGET', limit - 1)
-    monkeypatch.setattr(patch, 'cause', lambda *args: pytest.fail('over the bound: no replay'))
     error = failure(lambda: apply(base, operations))
     # The final document's first error: the second row no longer matches the first row's width.
     assert error.details == {'path': '/contentInput/operations', 'code': 'invalid_block_document'}
 
 
-def test_budget_covers_200_operations_on_an_80_kib_base_and_15_on_1_mib():
-    assert 201 * 80 * 1024 <= patch.CAUSE_BUDGET < 201 * 1024 * 1024
-    assert 16 * 1024 * 1024 <= patch.CAUSE_BUDGET
+def test_budget_is_16_mib():
+    assert patch.CAUSE_BUDGET == 16 * 1024 * 1024
 
 
 def test_api_refines_only_patch_failures():
@@ -555,3 +554,46 @@ def test_pat_path_searches_the_cause_after_the_transaction(monkeypatch):
                                   'token', lambda value, status=200: (value, status))
     assert state['refined_open'] is False and code == 422
     assert result['error']['details']['path'].startswith('/contentInput/operations/0/block/runs/0/marks')
+
+
+# R4 supplement 3 (PM 2026-11-18): the first error stays as canonicalize gives it; the
+# bound sums the bytes of the states actually validated.
+
+def test_review_64ffb59_shape_error_is_not_masked_by_a_duplicate_id():
+    base = formatted()
+    quote = {'id': uid(), 'type': 'quote', 'blocks': [deepcopy(base['blocks'][2]), para('x', ['bogus'])]}
+    error = failure(lambda: apply(base, [{'op': 'insert', 'beforeId': base['blocks'][0]['id'], 'block': quote}]))
+    assert (error.status, error.code) == (422, 'invalid_block_document')
+    assert error.details['path'] == '/contentInput/operations/0/block/blocks/1/runs/0/marks/0'
+
+
+def test_review_64ffb59_payload_too_large_keeps_413_with_a_duplicate_id():
+    base = formatted()
+    huge = {'id': uid(), 'type': 'paragraph', 'runs': [{'text': 'x' * 20000, 'marks': [] if i % 2 else ['bold']} for i in range(60)]}
+    quote = {'id': uid(), 'type': 'quote', 'blocks': [deepcopy(base['blocks'][2]), huge]}
+    error = failure(lambda: apply(base, [{'op': 'insert', 'beforeId': base['blocks'][0]['id'], 'block': quote}]))
+    assert (error.status, error.code) == (413, 'payload_too_large')
+    assert error.details == {'path': '/contentInput/operations/0', 'code': 'payload_too_large'}
+
+
+def test_review_64ffb59_growing_patch_stops_at_the_byte_bound(monkeypatch):
+    # Small base; operation 0 grows the document to ~0.73 MB, operation 1 breaks a table,
+    # 198 valid text edits follow. Summed state bytes pass 16 MiB long before step 200.
+    base = document(para('p'), table())
+    assert len(patch.encoded(base)) < 2000
+    marks = ['bold', 'underline', {'color': '#ABCDEF'}, {'fontSize': 14}]
+    big = {'id': uid(), 'type': 'paragraph', 'runs': [{'text': 'ab' * 11, 'marks': marks if i % 2 else marks[:2]} for i in range(9000)]}
+    target = base['blocks'][0]
+    operations = [{'op': 'insert', 'afterId': target['id'], 'block': big},
+                  {'op': 'remove', 'id': base['blocks'][1]['rows'][0]['cells'][0]['id']}]
+    operations += [{'op': 'replace', 'id': target['id'], 'block': {**target, 'runs': [{'text': 'p' + str(i), 'marks': []}]}}
+                   for i in range(198)]
+    assert len(patch.encoded(operations[0]['block'])) > 700_000
+    calls = []
+    real = patch.canonicalize
+    monkeypatch.setattr(patch, 'canonicalize', lambda value, root=(): calls.append(1) or real(value, root))
+    error = failure(lambda: apply(base, operations))
+    assert error.details == {'path': '/contentInput/operations', 'code': 'invalid_block_document'}
+    assert len(calls) <= 1 + 1 + 24  # final check + base + at most ~23 states of ~0.73 MB
+    # Under the old (operations + 1) x base estimate the replay would have run all 201 states.
+    assert 201 * len(patch.encoded(base)) < patch.CAUSE_BUDGET
