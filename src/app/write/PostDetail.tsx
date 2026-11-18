@@ -46,7 +46,7 @@ const LIST_HREF = `${BASE_PATH}/write/`;
 
 const versionMeta = (v: PostVersion) => (
   <p className="text-xs text-stone-500">
-    주소 /posts/{v.slug}/{v.tags.length > 0 && ` · 태그 ${v.tags.join(", ")}`} · 연결 문서 {v.documentIds.length}개 · 자료 {v.materialIds.length}개
+    {v.tags.length > 0 && `태그 ${v.tags.join(", ")} · `}연결 문서 {v.documentIds.length}개 · 자료 {v.materialIds.length}개
   </p>
 );
 
@@ -104,8 +104,9 @@ export default function PostDetail({ id }: { id: string }) {
         )}
         {p.archived && <Notice tone="info">삭제한 글입니다. 내 글 목록에는 보이지 않으며 수정·발행할 수 없습니다(내용과 버전 기록은 볼 수 있습니다).</Notice>}
         <h1 className="text-2xl font-bold text-stone-900">{v.title || "(제목 없음)"}</h1>
+        {/* #109: 공개 주소는 발행 패널의 '공개 글 보기' 링크(발행 중일 때만)로 보여 주므로 여기서는 버전·수정 시각만 둔다. */}
         <p className="text-xs text-stone-500">
-          v{v.number} · 주소 /posts/{v.slug}/ · 수정 {formatDateTime(p.updatedAt)} · 작성 {formatDateTime(p.createdAt)}
+          v{v.number} · 수정 {formatDateTime(p.updatedAt)}
         </p>
         {!p.archived && !editing && (
           <div className="flex gap-4 pt-1">
