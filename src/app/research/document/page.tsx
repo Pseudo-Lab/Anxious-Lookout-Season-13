@@ -52,7 +52,7 @@ function DocumentDetail({ id }: { id: string }) {
         <h1 className="text-2xl font-bold text-stone-900">{d.title || "(제목 없음)"}</h1>
         <SummaryLine summary={d.summary} />
         <p className="text-xs text-stone-500">
-          v{d.latestVersion.number} · 수정 {formatDateTime(d.updatedAt)} · 작성 {formatDateTime(d.createdAt)}
+          v{d.latestVersion.number} · 수정 {formatDateTime(d.updatedAt)}
         </p>
         {!d.archived && !editing && (
           <div className="flex gap-4 pt-1">

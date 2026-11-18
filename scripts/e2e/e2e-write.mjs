@@ -251,7 +251,14 @@ check(
     (await api.get(`/research/post-drafts/${draftId}`)).state === "committed",
   JSON.stringify({ slug1, sources: p1.latestVersion.materialSources })
 );
-check("WP3. W1: post page shows the public address", await appears(main.getByText(`주소 /posts/${slug1}/`, { exact: false })));
+// #109: 제목 아래 줄은 `v{n} · 수정 {날짜}`만. 주소·작성 시각은 없고, 발행 전에는 공개 주소 링크도 없다.
+{
+  const meta = main.locator("article > header > p", { hasText: /^v1 · 수정 / });
+  check("WP3. #109: meta line is version and updated time only", await appears(meta));
+  const metaText = (await meta.first().textContent()) ?? "";
+  check("WP3. #109: meta line has no address or created time", !metaText.includes("주소") && !metaText.includes("작성"), metaText);
+  check("WP3. #109: unpublished post shows no public address", (await main.getByText(`/posts/${slug1}/`, { exact: false }).count()) === 0 && (await main.getByRole("link", { name: "공개 글 보기" }).count()) === 0);
+}
 
 // WP3b. 리뷰 F1: 업로드를 기다리는 동안 바꾼 제목·본문·메타를 업로드 완료가 되돌리지 않는다. 그동안 저장·버리기는 잠긴다.
 {
@@ -735,6 +742,12 @@ check("WP6. W3: preview lists 2 public materials (title + URL only)", await appe
 check("WP6. page preview renders the article", await appears(pub.locator("article h1", { hasText: "첫 글" })));
 await pub.getByRole("button", { name: "이 버전 발행" }).click();
 check("WP6. published note", await appears(pub.getByText("발행했습니다", { exact: false })));
+{
+  // #109: 발행된 글의 공개 주소는 발행 패널 링크로 한 번만 보인다.
+  const links = main.getByRole("link", { name: "공개 글 보기" });
+  const href = (await links.first().getAttribute("href")) ?? "";
+  check("WP6. #109: published post shows the public address link once", (await links.count()) === 1 && href.endsWith(`/posts/${slug1}/`), href);
+}
 check("WP6. status shows published v1 not latest", await appears(pub.getByText("최신 버전 v2은 아직 발행하지 않았습니다", { exact: false })));
 {
   const anon = await (await browser.newContext()).newPage();
