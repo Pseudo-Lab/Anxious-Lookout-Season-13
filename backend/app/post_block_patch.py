@@ -124,20 +124,12 @@ def locate(document, parts, index, origin):
     return (*ROOT, index) if best is None else (*ROOT, index, 'block', *best)
 
 
-def duplicate(document, parts, index, origin):
-    """When the first error is a repeated id, point at the copy the causing operation sent.
+def duplicate(document, target, index, origin):
+    """Point a repeated id at the copy the causing operation sent.
 
     canonicalize reports a repeated id at its second occurrence in document order,
     which may be the original node when the copy was inserted before it.
     """
-    if not parts or parts[-1] != 'id': return None
-    node = document
-    for part in parts[:-1]:
-        if isinstance(node, dict) and part in node: node = node[part]
-        elif isinstance(node, list) and part.isdigit() and int(part) < len(node): node = node[int(part)]
-        else: return None
-    target = node.get('id') if isinstance(node, dict) else None
-    if not isinstance(target, str): return None
     matches, pending = [], [document['blocks']]
     while pending:
         container = pending.pop()
@@ -154,7 +146,9 @@ def report(document, index, origin, error):
     """Keep the first error's status, code and details; only its path moves to the operation."""
     found = error.details.get('path') if isinstance(error.details, dict) else None
     parts = parse(found) if isinstance(found, str) else None
-    path = duplicate(document, parts, index, origin) if parts is not None and error.code == 'invalid_block_document' else None
+    # Only a repeated id that canonicalize itself rejected (its marker), never any path ending in /id.
+    target = getattr(error, 'duplicate_id', None)
+    path = duplicate(document, target, index, origin) if isinstance(target, str) else None
     if path is None:
         path = locate(document, parts, index, origin) if parts is not None else (*ROOT, index)
     details = error.details if isinstance(error.details, dict) else {'code': error.code}

@@ -8,7 +8,7 @@ import re
 from urllib.parse import urlsplit
 from pydantic import ValidationError
 from .post_block_contract import Document
-from .research import fail
+from .research import ResearchError, fail
 
 ORDER = ['bold', 'italic', 'underline', 'strike', 'code', 'color', 'fontSize']
 CHILDREN = ('blocks', 'items', 'rows', 'cells', 'columns')
@@ -100,7 +100,13 @@ def canonicalize(raw, root=('content',)):
         return result
     def walk(node, path, depth, list_depth=0, cell=False):
         identity = node['id']
-        if identity in identities: invalid((*path, 'id'))
+        if identity in identities:
+            try: invalid((*path, 'id'))
+            except ResearchError as error:
+                # Internal marker only (not serialized): lets a patch caller tell a real
+                # repeated id from other errors whose path also ends in /id (#107).
+                error.duplicate_id = identity
+                raise
         identities.add(identity)
         if len(identities)>2000: invalid(path, 'content_limit_exceeded')
         kind = node.get('type')

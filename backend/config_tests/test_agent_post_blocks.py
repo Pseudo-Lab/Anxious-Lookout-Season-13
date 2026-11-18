@@ -597,3 +597,41 @@ def test_review_64ffb59_growing_patch_stops_at_the_byte_bound(monkeypatch):
     assert len(calls) <= 1 + 1 + 24  # final check + base + at most ~23 states of ~0.73 MB
     # Under the old (operations + 1) x base estimate the replay would have run all 201 states.
     assert 201 * len(patch.encoded(base)) < patch.CAUSE_BUDGET
+
+
+# review 8c75693: only canonicalize's own repeated-id rejection moves to the sent copy.
+
+def test_review_8c75693_forbidden_run_id_in_a_duplicate_paragraph_keeps_its_path():
+    base = formatted()
+    copy = deepcopy(base['blocks'][2])
+    # Runs take no id: a shape error whose path also ends in /id. Its value is the repeated
+    # paragraph id, so a lookup by that value would land on the paragraph (review's case).
+    copy['runs'][0]['id'] = copy['id']
+    quote = {'id': uid(), 'type': 'quote', 'blocks': [copy]}
+    error = failure(lambda: apply(base, [{'op': 'insert', 'beforeId': base['blocks'][0]['id'], 'block': quote}]))
+    assert (error.status, error.code) == (422, 'invalid_block_document')
+    assert error.details['path'] == '/contentInput/operations/0/block/blocks/0/runs/0/id'
+
+
+def test_review_8c75693_same_malformed_uuid_twice_keeps_the_reported_node():
+    base = formatted()
+    bad = 'NOT-A-UUID'
+    # The same malformed value on two nodes. canonicalize reports the deeper one (the list
+    # item paragraph); a lookup by value would land on the earlier paragraph instead.
+    listing = {'id': uid(), 'type': 'list', 'ordered': False,
+               'items': [{'id': uid(), 'blocks': [{**para('deep'), 'id': bad}]}]}
+    quote = {'id': uid(), 'type': 'quote', 'blocks': [{**para('early'), 'id': bad}, listing]}
+    error = failure(lambda: apply(base, [{'op': 'insert', 'beforeId': base['blocks'][0]['id'], 'block': quote}]))
+    assert error.details['path'] == '/contentInput/operations/0/block/blocks/1/items/0/blocks/0/id'
+
+
+def test_canonicalize_marks_only_a_real_repeated_id():
+    from app.post_blocks import canonicalize as canon
+    paragraph = para('x')
+    with pytest.raises(ResearchError) as repeated:
+        canon({'format': 'post-blocks', 'version': 1, 'blocks': [paragraph, deepcopy(paragraph)]})
+    assert repeated.value.duplicate_id == paragraph['id']
+    assert repeated.value.details == {'path': '/content/blocks/1/id', 'code': 'invalid_block_document'}
+    with pytest.raises(ResearchError) as shape:
+        canon({'format': 'post-blocks', 'version': 1, 'blocks': [{**para('x'), 'id': 'NOT-A-UUID'}]})
+    assert not hasattr(shape.value, 'duplicate_id')
