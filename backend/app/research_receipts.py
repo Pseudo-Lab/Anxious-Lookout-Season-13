@@ -12,7 +12,8 @@ MUTATIONS = frozenset(name for name, (model, _) in TOOLS.items() if 'mutationId'
 ERRORS = frozenset({'validation_error', 'conflict', 'not_found', 'forbidden', 'idempotency_conflict',
     'storage_quota_exceeded', 'content_limit_exceeded', 'payload_too_large', 'duplicate',
     'unsupported_content', 'invalid_block_document', 'unsupported_schema_version',
-    'research_token_expired', 'research_turn_inactive', 'research_authorization_stale', 'not_ready'})
+    'research_token_expired', 'research_turn_inactive', 'research_authorization_stale', 'not_ready',
+    'formatting_would_be_lost'})
 
 
 def ensure_capacity(row, request_id):

@@ -34,7 +34,9 @@ def test_llm_is_public_db_free_offline_and_uses_configured_origin_once(base):
     assert 'Publishing and withdrawal are human actions' in response.text and 'commenters' in response.text
     assert r'JSON-encode once: wire `\n`, not `\\n`.' in response.text
     assert 'table-cell backgrounds or embeds' in response.text
-    assert 'Tell the user before saving edits' in response.text
+    # #107: formatted posts are edited with patches; Markdown loss is refused unless allowed.
+    for phrase in ('post-block-patch','formatting_would_be_lost','allowFormatLoss','latestVersion.content','1,000,000 bytes','8,000,000 bytes','[REDACTED]'):
+        assert phrase in response.text,phrase
 
 
 def test_documented_post_example_preserves_structure_with_one_json_encoding():

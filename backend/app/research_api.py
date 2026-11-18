@@ -43,6 +43,17 @@ def operation_failure(error):
     return result, code
 
 
+def refined(failure, result, code):
+    """#107 R4: find a failed patch's causing operation after the transaction and graph lock end.
+
+    Inside the lock the response holds the final document's first error at
+    /contentInput/operations; the receipt keeps that code. The bounded replay
+    runs on a copy of the base and writes nothing.
+    """
+    from .post_block_patch import PatchFailure, refine
+    return operation_failure(refine(failure)) if isinstance(failure, PatchFailure) else (result, code)
+
+
 def current_binding(db, owner, result):
     """Fresh SQL only, supplied connection. Never Registry._current/RPC/checkout."""
     from .runner_registry import Registry
@@ -146,16 +157,19 @@ def register(app, sessions, settings, response, runner_for):
                 deadline.end = time.monotonic() + 30
                 store = Store(db, checked.owner, author=VersionAuthor(checked.conversation))
                 code = 200
+                failure = None
                 try:
                     with db.begin_nested():
                         result = dispatch(store, operation, body)
                         value = receipts.receipt(operation, result, body, request_id,
                                                  turn_id=status['nativeTurnId'])
                 except (ResearchError, ValidationError) as error:
+                    failure = error
                     result, code = operation_failure(error)
                     value = receipts.receipt(operation, None, {}, request_id, code=result['error']['code'],
                                              turn_id=status['nativeTurnId'])
                 receipts.append(row, value)
                 db.flush()
             # The action/receipt outer transaction committed before success leaves.
+            result, code = refined(failure, result, code)
             return response(result, code)

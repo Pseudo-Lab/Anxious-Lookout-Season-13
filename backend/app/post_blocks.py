@@ -8,7 +8,7 @@ import re
 from urllib.parse import urlsplit
 from pydantic import ValidationError
 from .post_block_contract import Document
-from .research import fail
+from .research import ResearchError, fail
 
 ORDER = ['bold', 'italic', 'underline', 'strike', 'code', 'color', 'fontSize']
 CHILDREN = ('blocks', 'items', 'rows', 'cells', 'columns')
@@ -100,7 +100,13 @@ def canonicalize(raw, root=('content',)):
         return result
     def walk(node, path, depth, list_depth=0, cell=False):
         identity = node['id']
-        if identity in identities: invalid((*path, 'id'))
+        if identity in identities:
+            try: invalid((*path, 'id'))
+            except ResearchError as error:
+                # Internal marker only (not serialized): lets a patch caller tell a real
+                # repeated id from other errors whose path also ends in /id (#107).
+                error.duplicate_id = identity
+                raise
         identities.add(identity)
         if len(identities)>2000: invalid(path, 'content_limit_exceeded')
         kind = node.get('type')
@@ -273,6 +279,47 @@ def markdown_projection(document, base_path=''):
     return '\n\n'.join(block(n) for n in document['blocks'])
 
 
+LOSSY = ('color', 'fontSize', 'underline', 'align', 'widthPercent', 'caption', 'background',
+         'columnWidths', 'columns', 'embed', 'cellParagraphLayout', 'headerlessTableLayout')
+LOSSY_MESSAGE = 'Markdown projection cannot preserve all block formatting; compare formatChanges before accepting.'
+# Fixed value served before #107; idempotent results stored then still carry it.
+LEGACY_FORMAT_SUMMARY = {'lossy':True,'omittedProperties':['color','fontSize','underline','align','widthPercent','columnWidths','caption','background','columns','cellParagraphLayout','headerlessTableLayout'],
+                         'message':LOSSY_MESSAGE}
+
+
+def markdown_losses(document):
+    """Nodes whose canonical properties markdown_projection -> convert cannot keep.
+
+    Returns [{'id', 'properties'}] in document order, properties in LOSSY order.
+    """
+    result = []
+    def runs(node):
+        found = set()
+        for run in node.get('runs', []) + node.get('caption', []):
+            for mark in run['marks']:
+                if mark == 'underline': found.add('underline')
+                elif isinstance(mark, dict): found.update(mark)
+        return found
+    def walk(node, cell=False):
+        kind = node.get('type'); found = runs(node)
+        if node.get('align', 'left') != 'left': found.add('align')
+        if kind == 'image' and node.get('widthPercent', 100) != 100: found.add('widthPercent')
+        if kind in ('image', 'embed') and node.get('caption'): found.add('caption')
+        if kind in ('columns', 'embed'): found.add(kind)
+        if kind == 'table':
+            if 'columnWidths' in node: found.add('columnWidths')
+            if not node['rows'][0].get('header'): found.add('headerlessTableLayout')
+        if cell:
+            if 'background' in node: found.add('background')
+            if len(node['blocks']) > 1: found.add('cellParagraphLayout')
+        if found: result.append({'id': node['id'], 'properties': [name for name in LOSSY if name in found]})
+        for key in CHILDREN:
+            for child in node.get(key, []): walk(child, key == 'cells')
+    for node in document['blocks']: walk(node)
+    return result
+
+
 def format_summary(document):
-    return {'lossy':True,'omittedProperties':['color','fontSize','underline','align','widthPercent','columnWidths','caption','background','columns','cellParagraphLayout','headerlessTableLayout'],
-            'message':'Markdown projection cannot preserve all block formatting; compare formatChanges before accepting.'}
+    found = {name for node in markdown_losses(document) for name in node['properties']}
+    omitted = [name for name in LOSSY if name in found]
+    return {'lossy': bool(omitted), 'omittedProperties': omitted, 'message': LOSSY_MESSAGE if omitted else ''}

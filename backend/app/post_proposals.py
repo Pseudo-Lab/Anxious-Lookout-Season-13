@@ -1,11 +1,12 @@
 """Codex can propose; only an authenticated human action creates a post version."""
 from datetime import datetime, timezone
 from uuid import UUID
-from typing import Literal
+from typing import Annotated, Literal, Union
 from fastapi import Request
-from pydantic import Field, model_validator
+from pydantic import Discriminator, Field, SkipValidation, Tag, model_validator
 from sqlalchemy import select
 from . import posts
+from .post_block_contract import Document
 from .post_models import PostProposal
 from .research import Input, fail, parse_id, stamp
 from .writing import ProposalExpected, check_draft, finish_draft, conflict
@@ -25,6 +26,9 @@ class DraftPair(Input):
 class MarkdownInput(Input):
     format: Literal['markdown']
     text: str = Field(max_length=200000)
+    allowFormatLoss: bool = Field(default=False, description=(
+        'Existing posts whose formatting Markdown cannot keep are rejected with formatting_would_be_lost '
+        'unless this is true. Prefer post-block-patch for formatted posts.'))
 
     @model_validator(mode='before')
     @classmethod
@@ -40,11 +44,81 @@ class MarkdownInput(Input):
         return value
 
 
+class BlocksInput(Input):
+    """Whole post-blocks document, validated like a human editor save."""
+    format: Literal['post-blocks']
+    # canonicalize (below) is the only validation; Document supplies the published schema.
+    document: SkipValidation[Document]
+
+    @model_validator(mode='before')
+    @classmethod
+    def canonical(cls, value):
+        from .post_blocks import canonicalize
+        if isinstance(value, dict):
+            # Missing or malformed documents fail here with argument paths, never as
+            # path-less model errors. Strict re-validation would reject canonical lists as tuples.
+            value = {**value, 'document': canonicalize(value.get('document'), ('contentInput', 'document'))}
+        return value
+
+    def content(self):
+        return self.document
+
+
+class PatchOperation(Input):
+    op: Literal['replace', 'insert', 'remove']
+    id: str | None = Field(default=None, description='replace/remove: target node id at any depth.')
+    afterId: str | None = Field(default=None, description='insert: exactly one of afterId/beforeId, a sibling id.')
+    beforeId: str | None = None
+    block: dict | None = Field(default=None, description=(
+        'replace/insert: a node fitting the target container (Paragraph, Heading, ListBlock, ListItem, Row, Cell, '
+        'Column, ... in $defs). The whole result is validated after all operations.'))
+
+
+class PatchInput(Input):
+    """Id-addressed edits of the post's head version; untouched nodes keep formatting and ids."""
+    format: Literal['post-block-patch']
+    operations: list[PatchOperation] = Field(min_length=1, max_length=200)
+
+    @model_validator(mode='before')
+    @classmethod
+    def shapes(cls, value):
+        from .post_block_patch import check
+        if isinstance(value, dict): check(value.get('operations'))
+        return value
+
+    def raw(self):
+        return [operation.model_dump(exclude_none=True) for operation in self.operations]
+
+
+FORMATS = {'markdown', 'post-blocks', 'post-block-patch'}
+
+
+def content_format(value):
+    found = value.get('format') if isinstance(value, dict) else getattr(value, 'format', None)
+    return found if isinstance(found, str) else None
+
+
 class Propose(posts.PostMetadata, DraftPair):
-    contentInput: MarkdownInput
+    # Callable discriminator: Input's field-wide before validator rules out discriminator='format'.
+    contentInput: Annotated[Union[Annotated[MarkdownInput, Tag('markdown')], Annotated[BlocksInput, Tag('post-blocks')],
+                                  Annotated[PatchInput, Tag('post-block-patch')]], Discriminator(content_format)]
     mutationId: str
     postId: str | None = None
     expectedVersion: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode='before')
+    @classmethod
+    def check_content_input(cls, value):
+        from .post_blocks import invalid
+        if isinstance(value, dict):
+            content = value.get('contentInput')
+            if not isinstance(content, dict): invalid(('contentInput',), 'validation_error')
+            # Arrays/objects are unhashable: check the type before set membership (review 7e44e7a blocker).
+            if not isinstance(content.get('format'), str) or content['format'] not in FORMATS:
+                invalid(('contentInput', 'format'), 'validation_error')
+            if content['format'] == 'post-block-patch' and value.get('postId') is None:
+                invalid(('contentInput', 'format'), 'validation_error')
+        return value
 
     @model_validator(mode='after')
     def post_pair(self):

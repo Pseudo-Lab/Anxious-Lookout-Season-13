@@ -103,6 +103,8 @@ def test_post_save_checks_draft_revision_and_preserves_the_human_draft(monkeypat
     monkeypatch.setattr(posts, 'owned', lambda *args, **kwargs: post)
     monkeypatch.setattr(posts, 'draft', lambda *args: draft)
     monkeypatch.setattr(posts, 'draft_value', lambda row: {'revision': row.revision, 'state': row.state})
+    from app.post_block_markdown import convert
+    monkeypatch.setattr(posts, 'head', lambda store, row: SimpleNamespace(payload={'content': convert('Plain', 'base')[0]}))
     writes = []
     monkeypatch.setattr(posts, 'save_version', lambda store, payload, row: writes.append(payload) or row)
     monkeypatch.setattr(posts, 'post_value', lambda *args: current)

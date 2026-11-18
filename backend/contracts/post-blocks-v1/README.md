@@ -44,7 +44,8 @@ content-based automatic layout) and remain omitted, preserving existing tables.
   widths or require weights to total100. Merged cells remain forbidden.
 
 Text projection and structural image authority are unchanged. Markdown projection
-omits fontSize and columnWidths and lists both in formatSummary.omittedProperties.
+omits fontSize and columnWidths; formatSummary.omittedProperties lists them when the
+document actually uses them (#107: actual properties, not a fixed list).
 Font size appears as changedProperties `runs`/`caption` (format-only); image width
 as `widthPercent` (format-only); table weights as `columnWidths` (layout).
 Equivalent canonical weights produce no diff. Existing global budgets stay:

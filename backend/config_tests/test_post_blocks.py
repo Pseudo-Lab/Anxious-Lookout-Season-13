@@ -119,8 +119,9 @@ def test_readable_projection_declares_losses_and_uses_base_path():
     markdown=markdown_projection(doc,'/view')
     assert '/view/api/media/post-images/' in markdown
     assert 'print("안녕")' in markdown
+    # #107: actual properties present, not a fixed list.
     assert format_summary(doc)['lossy'] is True
-    assert 'color' in format_summary(doc)['omittedProperties']
+    assert format_summary(doc)['omittedProperties']==['align','widthPercent','caption','background','columns','embed']
 
 
 def test_v11_projection_and_equal_width_normalization():
@@ -130,7 +131,11 @@ def test_v11_projection_and_equal_width_normalization():
         case=next(c for c in G['formatDiff'] if c.get('name')==name)
         assert text_projection(case['base'])==text_projection(case['candidate'])
         assert markdown_projection(case['base'])==markdown_projection(case['candidate'])
-    assert {'fontSize','columnWidths'} <= set(format_summary(G['valid'][0]['canonical'])['omittedProperties'])
+    assert format_summary(G['valid'][0]['canonical'])=={'lossy':False,'omittedProperties':[],'message':''}
+    for name,prop in (('font-size-only','fontSize'),('table-width-only','columnWidths'),('image-width-only','widthPercent')):
+        case=next(c for c in G['formatDiff'] if c.get('name')==name)
+        found=set(format_summary(canonicalize(case['base']))['omittedProperties'])|set(format_summary(canonicalize(case['candidate']))['omittedProperties'])
+        assert prop in found,name
     table=next(c for c in G['valid'] if c['name']=='table-widths-ratio')
     canonical=canonicalize(table['input'])
     assert digest(canonical)==digest(table['canonical'])

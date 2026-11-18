@@ -16,7 +16,7 @@ from .version_authors import VersionAuthor
 
 
 def call(app, sessions, operation, body, token, response):
-    from .research_api import require_schema, operation_failure
+    from .research_api import require_schema, operation_failure, refined
     with budget.authorization() as deadline:
         principal = pats.observe(sessions, token)
         reject_token_input(body)
@@ -44,11 +44,13 @@ def call(app, sessions, operation, body, token, response):
             store = Store(db, checked.owner, author=VersionAuthor(credential_id=checked.credential, name=checked.name))
             code = 200
             identity = uuid4()
+            failure = None
             try:
                 with db.begin_nested():
                     result = dispatch(store, operation, body)
                     safe = receipts.receipt(operation, result, body, identity)
             except (ResearchError, ValidationError) as error:
+                failure = error
                 result, code = operation_failure(error)
                 safe = receipts.receipt(operation, None, {}, identity, code=result['error']['code'])
             # Explicit fields only, no raw input, body, headers, token/hash or
@@ -57,4 +59,6 @@ def call(app, sessions, operation, body, token, response):
             db.add(PatAudit(id=identity, owner_id=checked.owner, credential_id=checked.credential,
                 operation=operation, status='failed' if code != 200 else 'succeeded', summary=summary))
             db.flush()
+        # #107 R4: a failed patch's cause is searched outside the transaction and graph lock.
+        result, code = refined(failure, result, code)
         return response(result, code)
