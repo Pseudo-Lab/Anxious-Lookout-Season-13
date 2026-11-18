@@ -14,7 +14,8 @@ from uuid import uuid4
 import pytest
 
 from app.agent_saves import SavePost, save_post
-from app.post_block_patch import apply
+from app import post_block_patch as patch
+from app.post_block_patch import PatchFailure, refine
 from app.post_blocks import (LEGACY_FORMAT_SUMMARY, LOSSY, canonicalize, format_summary,
                              markdown_losses, nodes)
 from app.research import ResearchError
@@ -43,6 +44,14 @@ def formatted():
         para('Red words', [{'color': '#ff0000'}, 'bold']),
         para('Plain words'),
         {'id': uid(), 'type': 'list', 'ordered': False, 'items': [{'id': uid(), 'blocks': [para('only item')]}]})
+
+
+def apply(base, operations):
+    """What the API returns: apply() under the lock, refine() after the transaction."""
+    try:
+        return patch.apply(base, operations)
+    except PatchFailure as failed:
+        raise refine(failed)
 
 
 def failure(action):
@@ -413,3 +422,136 @@ def test_table_count_limit_points_at_the_inserting_operation():
     extra = table()
     error = failure(lambda: apply(base, [{'op': 'insert', 'afterId': base['blocks'][-1]['id'], 'block': extra}]))
     assert error.code == 'content_limit_exceeded' and error.details['path'].startswith('/contentInput/operations/0')
+
+
+# R4 supplement (PM 2026-11-18): the causing operation is the first one after which the
+# document fails validation and never passes again.
+
+@pytest.mark.parametrize('widths', [None, [1, 2]])
+def test_review_4a0b5b7_later_valid_edit_does_not_take_the_blame(widths):
+    base = document(table(widths))
+    rows = base['blocks'][0]['rows']
+    paragraph = rows[1]['cells'][0]['blocks'][0]
+    operations = [{'op': 'remove', 'id': rows[0]['cells'][0]['id']},
+                  {'op': 'replace', 'id': paragraph['id'], 'block': {**paragraph, 'runs': [{'text': 'changed', 'marks': []}]}}]
+    assert failure(lambda: apply(base, operations)).details['path'] == '/contentInput/operations/0'
+    assert failure(lambda: apply(base, operations[:1])).details['path'] == '/contentInput/operations/0'
+    assert apply(base, operations[1:])['blocks'][0]['rows'][1]['cells'][0]['blocks'][0]['runs'][0]['text'] == 'changed'
+
+
+def test_review_4a0b5b7_duplicate_keeps_its_argument_position_after_a_later_sibling_insert():
+    first = para('first')
+    quote = {'id': uid(), 'type': 'quote', 'blocks': [para('kept')]}
+    base = document(first, quote)
+    other = para('other')
+    replacement = {'id': quote['id'], 'type': 'quote', 'blocks': [para('one'), deepcopy(first), other]}
+    alone = [{'op': 'replace', 'id': quote['id'], 'block': replacement}]
+    assert failure(lambda: apply(base, alone)).details['path'] == '/contentInput/operations/0/block/blocks/1/id'
+    both = [*alone, {'op': 'insert', 'beforeId': replacement['blocks'][0]['id'], 'block': para('new')}]
+    assert failure(lambda: apply(base, both)).details['path'] == '/contentInput/operations/0/block/blocks/1/id'
+    assert apply(document(first, quote), [{'op': 'insert', 'beforeId': quote['blocks'][0]['id'], 'block': para('new')}])
+
+
+def test_transient_failure_repaired_later_is_not_a_cause():
+    base = formatted()
+    plain = base['blocks'][2]
+    # A move written as insert-then-remove: the duplicate id after operation 0 is repaired by operation 1.
+    move = [{'op': 'insert', 'beforeId': base['blocks'][0]['id'], 'block': deepcopy(plain)},
+            {'op': 'remove', 'id': plain['id']}]
+    result = apply(base, move)
+    assert [block['id'] for block in result['blocks']].count(plain['id']) == 1
+    # A failure after the repair is the cause, not the earlier transient one.
+    later = [*move, {'op': 'insert', 'afterId': base['blocks'][1]['id'], 'block': para('x', ['bogus'])}]
+    assert failure(lambda: apply(base, later)).details['path'].startswith('/contentInput/operations/2/block/runs/0/marks')
+    # Without the repair, operation 0 stays the cause.
+    unrepaired = [move[0], later[2]]
+    assert failure(lambda: apply(base, unrepaired)).details['path'] == '/contentInput/operations/0/block/id'
+
+def test_document_wide_limit_names_the_operation_that_crossed_it():
+    base = document(*[table() for _ in range(20)])
+    error = failure(lambda: apply(base, [{'op': 'replace', 'id': base['blocks'][0]['id'], 'block': {**base['blocks'][0]}},
+                                         {'op': 'insert', 'beforeId': base['blocks'][0]['id'], 'block': table()}]))
+    assert error.code == 'content_limit_exceeded' and error.details['path'].startswith('/contentInput/operations/1')
+
+
+# R4 supplement 2 (PM 2026-11-18): bounded cause search outside the lock -------
+
+def test_apply_under_the_lock_raises_the_final_error_without_replaying(monkeypatch):
+    base = formatted()
+    monkeypatch.setattr(patch, 'cause', lambda *args: pytest.fail('no replay under the graph lock'))
+    operations = [{'op': 'insert', 'afterId': base['blocks'][0]['id'], 'block': para('x', ['bogus'])}]
+    with pytest.raises(PatchFailure) as caught:
+        patch.apply(base, operations)
+    assert caught.value.details['path'] == '/contentInput/operations'
+    assert caught.value.code == 'invalid_block_document' and caught.value.replay == (base, operations)
+
+
+def test_cause_search_over_the_work_bound_returns_the_final_first_error(monkeypatch):
+    base = document(table())
+    rows = base['blocks'][0]['rows']
+    operations = [{'op': 'remove', 'id': rows[0]['cells'][0]['id']}]
+    limit = (len(operations) + 1) * len(patch.encoded(base))
+    monkeypatch.setattr(patch, 'CAUSE_BUDGET', limit)
+    assert failure(lambda: apply(base, operations)).details['path'] == '/contentInput/operations/0'
+    monkeypatch.setattr(patch, 'CAUSE_BUDGET', limit - 1)
+    monkeypatch.setattr(patch, 'cause', lambda *args: pytest.fail('over the bound: no replay'))
+    error = failure(lambda: apply(base, operations))
+    # The final document's first error: the second row no longer matches the first row's width.
+    assert error.details == {'path': '/contentInput/operations', 'code': 'invalid_block_document'}
+
+
+def test_budget_covers_200_operations_on_an_80_kib_base_and_15_on_1_mib():
+    assert 201 * 80 * 1024 <= patch.CAUSE_BUDGET < 201 * 1024 * 1024
+    assert 16 * 1024 * 1024 <= patch.CAUSE_BUDGET
+
+
+def test_api_refines_only_patch_failures():
+    from app.research_api import refined
+    plain = ResearchError('validation_error', 'x', 422)
+    assert refined(plain, {'kept': True}, 422) == ({'kept': True}, 422)
+    assert refined(None, {'ok': True}, 200) == ({'ok': True}, 200)
+    base = formatted()
+    operations = [{'op': 'insert', 'afterId': base['blocks'][0]['id'], 'block': para('x', ['bogus'])}]
+    with pytest.raises(PatchFailure) as caught:
+        patch.apply(base, operations)
+    result, code = refined(caught.value, None, None)
+    assert code == 422 and result['error']['details']['path'].startswith('/contentInput/operations/0/block/runs/0/marks')
+
+
+def test_pat_path_searches_the_cause_after_the_transaction(monkeypatch):
+    from contextlib import contextmanager
+    from app import pat_calls, research_api, research_pats
+    state = {'open': False, 'refined_open': None}
+    @contextmanager
+    def begin():
+        state['open'] = True
+        try: yield db
+        finally: state['open'] = False
+    @contextmanager
+    def nested(): yield
+    db = SimpleNamespace(scalar=lambda *args: SimpleNamespace(), execute=lambda *args: None, connection=lambda: None,
+                         begin_nested=nested, add=lambda row: None, flush=lambda: None)
+    @contextmanager
+    def authorization(): yield SimpleNamespace(remaining=lambda: None, end=0)
+    principal = SimpleNamespace(owner=uuid4(), credential=uuid4(), name='client')
+    monkeypatch.setattr(pat_calls, 'budget', SimpleNamespace(authorization=authorization, checkout=lambda: None))
+    monkeypatch.setattr(research_pats, 'observe', lambda sessions, token: principal)
+    monkeypatch.setattr(research_pats, 'resolve', lambda *args: principal)
+    monkeypatch.setattr(research_pats, 'allowed', lambda *args: None)
+    monkeypatch.setattr(research_api, 'require_schema', lambda connection: None)
+    base = formatted()
+    operations = [{'op': 'insert', 'afterId': base['blocks'][0]['id'], 'block': para('x', ['bogus'])}]
+    def dispatch(store, operation, body):
+        assert state['open']
+        patch.apply(base, operations)
+    monkeypatch.setattr(pat_calls, 'dispatch', dispatch)
+    real = patch.refine
+    def refine_spy(failed):
+        state['refined_open'] = state['open']
+        return real(failed)
+    monkeypatch.setattr(patch, 'refine', refine_spy)
+    app = SimpleNamespace(state=SimpleNamespace(research_policy='editors'))
+    result, code = pat_calls.call(app, SimpleNamespace(begin=begin), 'research_post_save', {'mutationId': uid()},
+                                  'token', lambda value, status=200: (value, status))
+    assert state['refined_open'] is False and code == 422
+    assert result['error']['details']['path'].startswith('/contentInput/operations/0/block/runs/0/marks')

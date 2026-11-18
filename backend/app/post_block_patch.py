@@ -1,19 +1,32 @@
 """Id-addressed edits of a stored post-blocks document (#107).
 
-Operations are applied in order to a copy of the base. The whole result then
-passes the same canonicalize as a full-document save; an error path is mapped
-back to the operation that introduced the failing node (or emptied/filled the
-failing container), so an agent can fix the operation it sent.
+Operations are applied in order to a copy of the base and the whole result
+passes the same canonicalize as a full-document save, so a successful save
+validates once. Only when that fails are the operations replayed one by one to
+find the causing operation (#107 R4 supplement): the first operation after
+which the document fails validation and never passes again. A failure that a
+later operation repairs (a move written as insert-then-remove) is not a cause.
+The error is the first error after the last passing state; its path is the
+causing operation's argument position: /contentInput/operations/N/block/...
+inside the block it sent, otherwise /contentInput/operations/N.
+
+Inside the owner's graph lock apply() only raises PatchFailure (the final
+document's first error at /contentInput/operations). The API layers call
+refine() after the transaction ends; the replay is bounded by work, not time.
 """
 from copy import deepcopy
 import re
-from .post_blocks import CHILDREN, canonicalize, invalid, pointer
+from .post_blocks import CHILDREN, canonicalize, encoded, invalid, pointer
 from .research import ResearchError
 
 ROOT = ('contentInput', 'operations')
 LIMIT = 200
 UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 FIELDS = {'replace': ('id', 'block'), 'remove': ('id',)}
+# Replay work bound: (operations + 1) x encoded base bytes. 1 MiB base -> 15 operations;
+# 80 KiB base -> all 200. Deterministic (no clock). At 32 MiB a rule-limit-dense base
+# (10,000 marked runs, 0.8 MB) took 3.4 s in the unit image, so this is about 1.7 s.
+CAUSE_BUDGET = 16 * 1024 * 1024
 
 
 def anchor(operation):
@@ -63,92 +76,123 @@ def find(document, target):
     return None
 
 
+def step(document, operation, index):
+    """Apply one operation in place; return the block it put into the document, if any."""
+    key = anchor(operation)
+    found = find(document, operation[key])
+    if found is None: invalid((*ROOT, index, key))
+    container, position = found
+    if operation['op'] == 'remove':
+        container.pop(position)
+        return None
+    block = deepcopy(operation['block'])
+    if operation['op'] == 'replace': container[position] = block
+    else: container.insert(position + (key == 'afterId'), block)
+    return block
+
+
+def origins(block):
+    """id() of every object inside the operation's block -> its path relative to `block`.
+
+    Valid while the block stays in the document (ids are unique among live objects).
+    """
+    result, pending = {}, [(block, ())]
+    while pending:
+        value, relative = pending.pop()
+        result[id(value)] = relative
+        items = value.items() if isinstance(value, dict) else enumerate(value) if isinstance(value, list) else ()
+        for key, child in items:
+            if isinstance(child, (dict, list)): pending.append((child, (*relative, str(key))))
+    return result
+
+
 def parse(path):
     return [part.replace('~1', '/').replace('~0', '~') for part in path.split('/')[1:]] if path else []
 
 
-def touched(document, marks):
-    """id(node) -> latest operation that changed anything inside that node (itself included)."""
-    result = {}
-    def walk(value):
-        latest = marks.get(id(value), -1)
-        children = value if isinstance(value, list) else [value.get(key) for key in CHILDREN] if isinstance(value, dict) else []
-        for child in children:
-            if isinstance(child, (dict, list)): latest = max(latest, walk(child))
-        if isinstance(value, dict) and 'id' in value and latest >= 0: result[id(value)] = latest
-        return latest
-    walk(document['blocks'])
-    return result
-
-
-def locate(document, parts, marks):
-    """Map a result-document path to the deepest operation-owned object on it.
-
-    Errors on untouched paths that depend on a sibling (row width, columnWidths)
-    go to the latest operation that changed inside the deepest enclosing node.
-    """
-    current, best, nodes, within = document, None, [], None
+def locate(document, parts, index, origin):
+    """Path inside the causing operation's block when the error lies in it, else the operation."""
+    current, best = document, None
     for depth in range(len(parts) + 1):
-        if id(current) in marks:
-            best = (marks[id(current)], depth, isinstance(current, dict))
-        if isinstance(current, dict) and 'id' in current: nodes.append(current)
+        if id(current) in origin: best = (*origin[id(current)], *parts[depth:])
         if depth == len(parts): break
         part = parts[depth]
         if isinstance(current, dict) and part in current: current = current[part]
         elif isinstance(current, list) and part.isdigit() and int(part) < len(current): current = current[int(part)]
         else: break
-    if best is None:
-        inside = touched(document, marks)
-        within = next((inside[id(node)] for node in reversed(nodes) if id(node) in inside), None)
-        return ROOT if within is None else (*ROOT, within)
-    index, depth, node = best
-    return (*ROOT, index, 'block', *parts[depth:]) if node else (*ROOT, index)
+    return (*ROOT, index) if best is None else (*ROOT, index, 'block', *best)
 
 
-def duplicates(document, marks):
-    """Report a repeated id at the copy an operation introduced (latest operation first)."""
-    seen = {}
-    pending = [(document['blocks'], ['blocks'])]
+def duplicate(document, index, origin):
+    """A repeated id is reported at the copy the causing operation sent, wherever it sorts."""
+    seen, pending = {}, [document['blocks']]
     while pending:
-        container, path = pending.pop()
+        container = pending.pop()
         if not isinstance(container, list): continue
-        for index, node in enumerate(container):
+        for node in container:
             if not isinstance(node, dict): continue
-            here = [*path, str(index)]
-            if isinstance(node.get('id'), str): seen.setdefault(node['id'], []).append(here)
-            pending.extend((node.get(key), [*here, key]) for key in CHILDREN)
-    for paths in seen.values():
-        if len(paths) > 1:
-            mapped = [locate(document, [*path, 'id'], marks) for path in paths]
-            owned = [path for path in mapped if len(path) > 3 and path[3] == 'block']
-            invalid(max(owned, key=lambda path: path[2]) if owned else mapped[-1])
+            if isinstance(node.get('id'), str): seen.setdefault(node['id'], []).append(node)
+            pending.extend(node.get(key) for key in CHILDREN)
+    for nodes in seen.values():
+        sent = [node for node in nodes if id(node) in origin]
+        if len(nodes) > 1 and sent:
+            return (*ROOT, index, 'block', *origin[id(sent[0])], 'id')
+    return None
+
+
+def report(document, index, origin, error):
+    path = duplicate(document, index, origin)
+    if path is None:
+        found = error.details.get('path') if isinstance(error.details, dict) else None
+        path = locate(document, parse(found), index, origin) if isinstance(found, str) else (*ROOT, index)
+        if path is not None and isinstance(error.details, dict):
+            error.details['path'] = pointer(path)
+            return error
+    try: invalid(path)
+    except ResearchError as replaced: return replaced
+
+
+def cause(base, operations):
+    """Replay with per-step validation (failure path only) and return the causing error."""
+    document, found = deepcopy(base), None
+    try: canonicalize(document, ())
+    except ResearchError as error:
+        # An invalid base has no causing operation unless a later step passes first.
+        error.details = {**(error.details or {}), 'path': pointer(ROOT)}
+        found = error
+    for index, operation in enumerate(operations):
+        block = step(document, operation, index)
+        try:
+            canonicalize(document, ())
+            found = None  # passes again: earlier failures were transient
+        except ResearchError as error:
+            if found is None: found = report(document, index, origins(block) if block is not None else {}, error)
+    return found
+
+
+class PatchFailure(ResearchError):
+    """The final document's first error, raised under the lock; refine() finds the cause later."""
+
+    def __init__(self, error, base, operations):
+        details = error.details if isinstance(error.details, dict) else {'code': error.code}
+        super().__init__(error.code, error.message, error.status, {**details, 'path': pointer(ROOT)})
+        self.replay = (base, operations)
+
+
+def refine(failure):
+    """Causing-operation error within CAUSE_BUDGET, else the final first error at /contentInput/operations."""
+    base, operations = failure.replay
+    if (len(operations) + 1) * max(len(encoded(base)), 1) > CAUSE_BUDGET:
+        return failure
+    return cause(base, operations) or failure
 
 
 def apply(base, operations):
     check(operations)
     document = deepcopy(base)
-    marks, alive = {}, []  # id() keys stay unique only while every keyed object is alive.
-    for index, operation in enumerate(operations):
-        key = anchor(operation)
-        found = find(document, operation[key])
-        if found is None: invalid((*ROOT, index, key))
-        container, position = found
-        if operation['op'] == 'remove':
-            alive.append(container.pop(position))
-            marks[id(container)] = index
-            continue
-        block = deepcopy(operation['block'])
-        alive.append(block)
-        marks[id(block)] = index
-        if operation['op'] == 'replace':
-            alive.append(container[position]); container[position] = block
-        else:
-            container.insert(position + (key == 'afterId'), block)
-            marks[id(container)] = index
-    duplicates(document, marks)
+    for index, operation in enumerate(operations): step(document, operation, index)
     try:
         return canonicalize(document, ())
     except ResearchError as error:
-        if isinstance(error.details, dict) and isinstance(error.details.get('path'), str):
-            error.details['path'] = pointer(locate(document, parse(error.details['path']), marks))
-        raise
+        failure = PatchFailure(error, base, operations)
+    raise failure

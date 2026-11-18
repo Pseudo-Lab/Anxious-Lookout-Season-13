@@ -51,8 +51,10 @@ and tool callback authorization/readiness still run before cache access.
 `markdown` (optional `allowFormatLoss`), `post-blocks` (whole `document`, same
 `canonicalize`/image/limit checks as human saves) or `post-block-patch`
 (`replace`/`insert`/`remove` by node id on the CAS-pinned head; existing posts
-only). `app/post_block_patch.py` applies operations to a copy, validates the whole
-result and maps JSON Pointer errors to the introducing operation. A Markdown save
+only). `app/post_block_patch.py` applies operations to a copy and validates the whole
+result once. On failure the API layers (`research_api.refined`, after the
+transaction and graph lock) replay it step by step within a 16 MiB work bound to
+name the causing operation: the last pass-to-fail transition. A Markdown save
 of a head with formatting it cannot keep (`post_blocks.markdown_losses`) is
 refused with 422 `formatting_would_be_lost` unless allowed. Responses add
 `formatChanges` (null for a new post); block saves store `conversionWarnings: []`.
