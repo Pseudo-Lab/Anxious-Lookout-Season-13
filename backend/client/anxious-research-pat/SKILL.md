@@ -36,7 +36,8 @@ editor/admin; a token does not grant an account role.
 Read the current resource/history, source documents/materials and human post
 draft before edits. Collect materials with sourceUrl, actual collectedAt and
 contentKind(full/excerpt/summary); preserve citations and distinguish synthesis.
-Save posts with contentInput {format: markdown, text: ...}. Existing resources
+Save posts with contentInput as in Post blocks; edit existing posts with
+post-block-patch. Existing resources
 need their current expectedVersion; draftId/expectedDraftRevision are paired.
 Saves append immutable versions immediately and retain active human drafts and
 public snapshots. Archive only when requested, with history preserved.
@@ -99,6 +100,42 @@ Ingest a new source:
 4. Relate the new material to existing items; record contradictions as refutes or disputes.
 5. Run research_lint and fix what it reports. Semantic contradictions are yours to check.
 
+## Post blocks
+
+Posts are stored as a block document (`post-blocks` v1): `latestVersion.content`
+from research_get, `content` from research_version_get, `draft.content` from
+research_post_draft_get. Block shapes are the `$defs` in research_post_save's
+schema (`pat-client.py ... schema research_post_save`).
+
+- Edit an existing post with contentInput `post-block-patch`: 1–200 operations
+  applied in order to the head version; every other block keeps its formatting
+  and id. `{"op":"replace","id":ID,"block":{...}}`,
+  `{"op":"insert","afterId":ID,"block":{...}}` (or `beforeId`; exactly one),
+  `{"op":"remove","id":ID}`. IDs may be any node (block, list item, table
+  row/cell, column); move = remove then insert with the same id; replace a
+  parent to fill an empty container.
+- `post-blocks` sends a whole `document` (`{"format":"post-blocks","version":1,"blocks":[...]}`)
+  for a new post, full rewrite or a post built from a human draft. New nodes
+  need new lowercase UUID ids, unique in the document.
+- `markdown` suits new or plain posts. If the head has formatting Markdown
+  cannot keep, the save is refused with 422 `formatting_would_be_lost`
+  (`error.details.properties`, `blocks`, `hint`). Use a patch; set
+  `allowFormatLoss: true` in contentInput only when the user accepts the loss.
+  A post's `formatSummary` shows whether it has such formatting.
+- Block errors give one JSON Pointer in `error.details.path`, e.g.
+  `/contentInput/document/blocks/3/runs/0` or, for a patch, the operation:
+  `/contentInput/operations/2/block/...`. Saves return `formatChanges`.
+- Limits: a document is at most 1 MiB compact UTF-8 JSON and 200,000 text
+  characters. The CLI sends at most 1,000,000 bytes of arguments (larger input
+  is not sent) and reads at most 8,000,000 bytes of response (a larger response
+  may follow a completed save: check versions); both print
+  `research_api_unavailable`. A patch sends only changed blocks, so its
+  arguments are smaller (same limit): prefer it for large posts.
+- The CLI prints text that looks like a research token as `[REDACTED]` (inputs
+  containing such text are refused). A whole-document save of what you read
+  would store the mask instead of the original, so edit existing posts with a
+  patch that leaves those blocks alone.
+
 ## Post Markdown
 
 - H1–H6 are supported; start body headings at `##` because the post title is H1.
@@ -116,8 +153,8 @@ Ingest a new source:
   `content_limit_exceeded` (422). Unsupported structures are not flattened.
 - Text must contain real newline characters. JSON-encode once: wire `\n`, not `\\n`.
 - Markdown saves cannot represent font size/color, underline, alignment, columns,
-  table-cell backgrounds or embeds. Existing formatting of these kinds is lost
-  in the new version. Tell the user before saving edits to a human-formatted post.
+  table-cell backgrounds or embeds. Edit formatted posts with post-block-patch
+  (see Post blocks).
 - Research documents use GFM, skip HTML, show images as links and code without
   execution/highlighting; they do not use the post-block converter.
 

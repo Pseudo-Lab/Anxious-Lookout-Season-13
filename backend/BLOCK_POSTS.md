@@ -13,7 +13,8 @@ block `content` (raw Markdown is rejected). The shared validator normalizes it,
 reports source-free JSON Pointer errors in `error.details.path/code`, and validates
 all structural and aggregate rules. Persisted versions/drafts/proposals/publication
 snapshots retain block content and server `textProjection`. Owner serialization
-also returns a readable `markdownProjection` and explicit lossy `formatSummary`.
+also returns a readable `markdownProjection` and a `formatSummary` listing the
+formatting actually present that Markdown cannot keep (#107).
 Source selectors, image-owner checks, CAS, draft revision checks, preview tokens,
 publication immutability, acceptance-only version creation and idempotency remain.
 Image references come from `type=image.imageId` plus cover; their union is at most
@@ -43,6 +44,20 @@ fingerprint is checked before the new input model. Only exact successful cache
 hits bypass that model; changed bodies with the same key return 409, while
 uncached legacy Markdown writes return 422. HTTP authentication/CSRF/readiness
 and tool callback authorization/readiness still run before cache access.
+
+## Agent block saves (#107)
+
+`research_post_save` (Codex CLI and PAT, one dispatch) takes `contentInput` as
+`markdown` (optional `allowFormatLoss`), `post-blocks` (whole `document`, same
+`canonicalize`/image/limit checks as human saves) or `post-block-patch`
+(`replace`/`insert`/`remove` by node id on the CAS-pinned head; existing posts
+only). `app/post_block_patch.py` applies operations to a copy, validates the whole
+result and maps JSON Pointer errors to the introducing operation. A Markdown save
+of a head with formatting it cannot keep (`post_blocks.markdown_losses`) is
+refused with 422 `formatting_would_be_lost` unless allowed. Responses add
+`formatChanges` (null for a new post); block saves store `conversionWarnings: []`.
+Cached results from before #107 (fixed formatSummary, no formatChanges) still
+validate on idempotent replay. Contract: `api-contracts/issue107-agent-post-blocks-v1.1.md`.
 
 ## Migration and preservation
 

@@ -65,14 +65,19 @@ def snapshot(value, kind):
     provenance(version)
     if kind == 'post':
         from .posts import PostText
-        from .post_blocks import text_projection, format_summary
+        from .post_blocks import text_projection, format_summary, LEGACY_FORMAT_SUMMARY
         require(version['postId'] == value['id'])
         PostText.model_validate({key: version[key] for key in PostText.model_fields})
         text(version['title'], 300, nonempty=True)
         text(version['slug'], 100, nonempty=True)
         require(version['textProjection'] == text_projection(version['content']))
         require(type(version['formatSummary']['lossy']) is bool)
-        require(version['formatSummary'] == format_summary(version['content']))
+        if 'formatChanges' in value:
+            require(version['formatSummary'] == format_summary(version['content']))
+            require(value['formatChanges'] is None or isinstance(value['formatChanges'], list))
+        else:
+            # Idempotent result stored before #107: fixed summary, no formatChanges.
+            require(version['formatSummary'] == LEGACY_FORMAT_SUMMARY)
         text(version['markdownProjection'], 10_000_000)
         for key in ('documentIds', 'materialIds'):
             require(isinstance(version[key], list))

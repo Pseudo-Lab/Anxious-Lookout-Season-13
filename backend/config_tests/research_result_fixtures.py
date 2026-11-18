@@ -46,7 +46,11 @@ def save_result(kind='document', arguments=None, conversation=None):
             return SimpleNamespace(login='fixture-owner')
     store = Store(Database(), owner)
     resource = post_value(store, item) if kind == 'post' else store.serialize_item(item)
-    return saved(resource, kind)
+    result = saved(resource, kind)
+    if kind == 'post':
+        # agent_saves.save_post adds formatChanges since #107 (null for a new post).
+        result['formatChanges'] = [] if args.get('postId') else None
+    return result
 
 
 def relation_result(arguments, *, update=False):
