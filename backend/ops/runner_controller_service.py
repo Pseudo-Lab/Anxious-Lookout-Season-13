@@ -15,6 +15,7 @@ NOTIFY (`runner_registry.CHANNEL`), on Pod watch events and every 30 s, then:
 
 Storage preparation and binding publication for a new owner stay a host oneshot until #63.
 """
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import ipaddress
 import json
@@ -32,13 +33,13 @@ from app.conversations import Runner
 from app.runner_controller import Controller
 from app.runner_limits import load_limits
 from app.runner_registry import CHANNEL, Registry
-from app.runner_termination_control import (accept_drain, accept_operator, accept_terminal, accept_unavailable,
-                                            drain_body, health_failure_matches, no_pending_work, release,
-                                            request_idle_stop, request_stop, stop_for, OPERATOR_HEALTH)
+from app.runner_termination_control import (accept_drain, accept_operator, accept_operator_available, accept_terminal,
+                                            accept_unavailable, drain_body, health_failure_matches, no_pending_work,
+                                            release, request_idle_stop, request_stop, stop_for, OPERATOR_HEALTH)
 from app.runner_termination_schema import validate as validate_termination
 from ops.runner_one_shot import request
 from ops.runner_provision_worker import allowed
-from runner.lifecycle import Fence, Phase, require
+from runner.lifecycle import Fence, Phase, Refused, require
 
 TERMINAL_PHASES = {'Failed', 'Succeeded'}
 
@@ -53,6 +54,65 @@ class Refusal(Exception):
 def check(condition, code, **observed):
     if not condition:
         raise Refusal(code, **observed)
+
+
+class Stuck(Refused):
+    """#114: a step that cannot advance, with a fixed reason code for the controller log. It never
+    carries exception text, URLs, tokens or conversation content."""
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+@contextmanager
+def stage(reason):
+    """Any failure inside becomes `Stuck(reason)`; an inner Stuck keeps its own reason."""
+    try:
+        yield
+    except Stuck:
+        raise
+    except Exception:
+        raise Stuck(reason) from None
+
+
+def call(runner, name, method, path, body):
+    """One runner call; a failure becomes a fixed reason: `<name>_status_<code>` for an HTTP answer
+    (`drain_conflict` for a 409 drain), `<name>_unreachable` for a transport error, `<name>_invalid`
+    for an answer that fails the ownership/state checks."""
+    try:
+        return runner.call(method, path, body)
+    except httpx.HTTPStatusError as failure:
+        status = failure.response.status_code
+        raise Stuck('drain_conflict' if (name, status) == ('drain', 409) else name+'_status_'+str(status)) from None
+    except httpx.HTTPError:
+        raise Stuck(name+'_unreachable') from None
+    except Exception:
+        raise Stuck(name+'_invalid') from None
+
+
+def reason_of(failure):
+    return failure.reason if isinstance(failure, Stuck) else 'error:'+type(failure).__name__
+
+
+def lock_running(db, owner):
+    """#114: take the owner's running conversation rows BEFORE the registry owner lock, in every
+    transaction that fails leftover turns. A conversation read in the API holds its row lock and asks the
+    runner on a second connection that takes the owner lock; the other order here would make the two
+    connections wait on each other, which PostgreSQL cannot detect as a deadlock. lock_timeout turns any
+    wait that remains into a retried pass (`conversation_locked`) instead of a stuck controller."""
+    with stage('conversation_locked'):
+        db.execute(text("SET LOCAL lock_timeout='5s'"))
+        db.execute(text("""SELECT 1 FROM research.conversations
+            WHERE owner_id=:owner AND state='running' FOR UPDATE"""), {'owner': owner}).all()
+
+
+def running_conversations(db, owner):
+    return db.execute(text("""SELECT count(*) FROM research.conversations
+        WHERE owner_id=:owner AND state='running'"""), {'owner': owner}).scalar_one()
+
+
+# Step outcomes that are not failures but say why no stop was recorded (#114).
+WAITING = {'runner_not_idle', 'stale_running_conversations'}
 RESCAN_SECONDS = 30
 
 
@@ -104,6 +164,7 @@ class Service:
         self.controller_engine, self.observer_engine = controller_engine, observer_engine
         self.controller_pool, self.observer_pool = controller_pool, observer_pool
         self.node, self.runner, self.now = node, runner, now
+        self.not_idle = {}  # owner -> first time its runner refused idle with no running conversation
 
     # Creation -------------------------------------------------------------
     def waiting(self):
@@ -142,30 +203,55 @@ class Service:
         return 'http://' + ('['+str(address)+']' if address.version == 6 else str(address)) + ':8080'
 
     def idle(self, runtime, owner, state, obj, idle_seconds):
-        """Record an idle stop when the live runner confirms quiescence."""
+        """Record an idle stop when the live runner confirms quiescence. Returns None once the stop
+        intent is recorded, else the outcome that says why not (#114: never an exception for a busy runner)."""
         if state.phase not in {Phase.READY, Phase.UNREACHABLE} or state.active_requests or (
                 state.ambiguous and state.phase != Phase.UNREACHABLE):
-            return False
+            return 'running'
         if (self.now() - state.last_activity).total_seconds() < idle_seconds:
-            return False
-        evidence = self.runner(self.address(runtime, obj), runtime.token, owner, str(state.state_id)).call(
-            'POST', '/lifecycle/idle', {'idleSeconds': idle_seconds})
-        require(evidence == {'ownerId': str(owner), 'stateId': str(state.state_id), 'podUid': str(state.pod_uid), 'idle': True})
+            return 'running'
         with self.observer_engine.begin() as db:
+            running = running_conversations(db, owner)
+        with stage('pod_address_invalid'):
+            address = self.address(runtime, obj)
+        evidence = call(self.runner(address, runtime.token, owner, str(state.state_id)),
+                        'idle', 'POST', '/lifecycle/idle', {'idleSeconds': idle_seconds})
+        expected = {'ownerId': str(owner), 'stateId': str(state.state_id), 'podUid': str(state.pod_uid)}
+        if evidence == {**expected, 'idle': False}:
+            if running:
+                self.not_idle.pop(owner, None)
+                return 'runner_not_idle'  # A turn is running: ordinary busy.
+            # No running conversation, yet the runner keeps refusing: a turn that ended less than
+            # idle_seconds ago is ordinary; twice that long is a runner that will not go idle.
+            first = self.not_idle.setdefault(owner, self.now())
+            if (self.now() - first).total_seconds() >= 2 * idle_seconds:
+                raise Stuck('idle_refused')
+            return 'runner_not_idle'
+        self.not_idle.pop(owner, None)
+        if evidence != {**expected, 'idle': True}:
+            raise Stuck('idle_evidence_mismatch')
+        if running:
+            # The runner holds no turn but a conversation is still `running` in the database: the
+            # API resolves it on the next read; an idle stop waits for that (no_pending_work).
+            return 'stale_running_conversations'
+        with self.observer_engine.begin() as db, stage('idle_stop_refused'):
             request_idle_stop(db, owner, idle_seconds=idle_seconds, native_idle=True)
-        return True
+        return None
 
     def close_dead_work(self, db, state):
-        """A dead runner cannot finish its turns: fail them visibly and close their admissions."""
-        db.execute(text('''UPDATE research.conversations SET state='failed', error_code='codex_runner_lost',
+        """A runner that cannot finish its turns: fail them visibly and close their admissions.
+        Returns how many conversations it failed."""
+        failed = db.execute(text('''UPDATE research.conversations SET state='failed', error_code='codex_runner_lost',
             version=version+1, updated_at=now(), tool_token_hash=NULL
-            WHERE owner_id=:owner AND state='running' '''), {'owner': state.owner})
+            WHERE owner_id=:owner AND state='running' '''), {'owner': state.owner}).rowcount
         db.execute(text('''UPDATE runner_runtime.admissions SET completed_at=greatest(now(), admitted_at)
             WHERE owner_id=:owner AND state_id=:state AND generation=:generation AND completed_at IS NULL'''),
             {'owner': state.owner, 'state': state.state_id, 'generation': state.generation})
+        return failed
 
     def step(self, owner, idle_seconds):
-        """Advance one owner's stop by at most one destructive action. Returns a fixed outcome."""
+        """Advance one owner's stop by at most one destructive action. Returns a fixed outcome; a step
+        that cannot advance raises Stuck with a fixed reason (#114)."""
         with self.observer_pool.bound(owner) as runtime:
             runtime.namespace()
             obj = self.pod(runtime)
@@ -174,17 +260,19 @@ class Service:
                 stop = stop_for(db, state)
             if state.pod_uid is None:
                 return 'no_pod'
-            if obj is not None:
-                require(obj['metadata']['uid'] == str(state.pod_uid))  # Never act on a replaced object.
+            if obj is not None and obj['metadata']['uid'] != str(state.pod_uid):
+                raise Stuck('pod_uid_mismatch')  # Never act on a replaced object.
             dead = terminal_evidence(obj)
             if stop is None and dead is None and (obj.get('status') or {}).get('phase') != 'Running':
                 return 'starting'  # Pending: no address to ask yet, and nothing to stop.
             if stop is None:
                 if dead is not None:
-                    with self.observer_engine.begin() as db:
+                    with self.observer_engine.begin() as db, stage('stop_refused'):
                         request_stop(db, owner)
-                elif not self.idle(runtime, owner, state, obj, idle_seconds):
-                    return 'running'
+                else:
+                    waiting = self.idle(runtime, owner, state, obj, idle_seconds)
+                    if waiting is not None:
+                        return waiting
                 with self.observer_engine.begin() as db:
                     stop = stop_for(db, Registry(db)._current(owner))
             if obj is not None and obj['metadata'].get('deletionTimestamp'):
@@ -192,33 +280,46 @@ class Service:
             if obj is not None:
                 if stop['receipt'] is None:
                     if dead is not None:
-                        with self.observer_engine.begin() as db:
+                        with self.observer_engine.begin() as db, stage('receipt_rejected'):
+                            lock_running(db, owner)  # rows before the owner lock (#114)
                             state = Registry(db)._current(owner)
                             self.close_dead_work(db, state)
                             accept_terminal(db, owner, stop['stop_id'], dead)
                     else:
-                        runner = self.runner(self.address(runtime, obj), runtime.token, owner, str(state.state_id))
-                        health = runner.call('GET', '/health', None)  # Before the drain: R1 needs the runner's own failure.
-                        receipt = runner.call('POST', '/lifecycle/drain', drain_body(stop))
+                        with stage('pod_address_invalid'):
+                            address = self.address(runtime, obj)
+                        runner = self.runner(address, runtime.token, owner, str(state.state_id))
+                        health = call(runner, 'health', 'GET', '/health', None)  # Before the drain: R1 needs the runner's own failure.
+                        receipt = call(runner, 'drain', 'POST', '/lifecycle/drain', drain_body(stop))
                         if type(receipt) is dict and receipt.get('version') == 3:
                             # #61 R1: native never started. Accept only if /health names the same failure.
                             if not health_failure_matches(health, stop, (receipt.get('unavailable') or {}).get('reason')):
                                 return 'unavailable_reason_mismatch'
-                            with self.observer_engine.begin() as db:
+                            with self.observer_engine.begin() as db, stage('receipt_rejected'):
+                                lock_running(db, owner)  # rows before the owner lock (#114)
                                 state = Registry(db)._current(owner)
                                 self.close_dead_work(db, state)
                                 accept_unavailable(db, owner, stop['stop_id'], receipt, health)
                         else:
-                            with self.observer_engine.begin() as db:
+                            # #114 ①: the runner drained, so no turn is in flight in it. The API recorded each
+                            # running turn's actual result before it fenced the runner (user_runners.stop_runtime);
+                            # a conversation still `running` here is closed, in the same transaction that
+                            # accepts this stop's own receipt. A refused receipt rolls the closing back.
+                            with self.observer_engine.begin() as db, stage('receipt_rejected'):
+                                lock_running(db, owner)  # rows before the owner lock (#114)
+                                state = Registry(db)._current(owner)
+                                self.close_dead_work(db, state)
                                 accept_drain(db, owner, stop['stop_id'], receipt)
-                with self.observer_engine.begin() as db:
+                with self.observer_engine.begin() as db, stage('node_not_ready'):
                     self.anchor(db, runtime, stop)
                 # Receipt and dispatch fence are committed; ordinary graceful deletion of that UID only.
-                runtime.pods._request('DELETE', 'pods', runtime.plan.identity.name,
-                    body={'apiVersion': 'v1', 'kind': 'DeleteOptions', 'preconditions': {'uid': str(state.pod_uid)}})
+                with stage('pod_delete_failed'):
+                    runtime.pods._request('DELETE', 'pods', runtime.plan.identity.name,
+                        body={'apiVersion': 'v1', 'kind': 'DeleteOptions', 'preconditions': {'uid': str(state.pod_uid)}})
                 return 'deleting'
             # The Pod with this UID is gone: kubelet has finished it, or it vanished before any drain.
-            with self.observer_engine.begin() as db:
+            with self.observer_engine.begin() as db, stage('release_refused'):
+                lock_running(db, owner)  # rows before the owner lock (#114)
                 state = Registry(db)._current(owner)
                 if stop['receipt'] is None:
                     self.close_dead_work(db, state)
@@ -248,14 +349,19 @@ class Service:
         return {'podUid': str(state.pod_uid), **node, 'verifiedAt': self.now().isoformat(), 'evidence': 'pod-deleted'}
 
     # Operator reclaim (#61 R2) ---------------------------------------------
-    def reclaim(self, owner, pod_uid):
+    def reclaim(self, owner, pod_uid, *, runner_available=False):
         """Reclaim a Running runner that is blocked and refuses its drain, on an operator's command.
 
         Every precondition is observed now, by this process. On success the version 4 receipt holds
         what was observed; the running loop then deletes that Pod UID, waits for 404 and releases,
         as on the dead-runner path. The operator accepts losing an uncertain turn.
+
+        `runner_available` (#114, the operator's explicit `--runner-available`) is a separate path for
+        a runner that reports itself available but refuses its drain with 409 while no conversation
+        of the owner is running in the database (an older image blocks drain on a settled `failed`
+        session). It records a version 5 receipt and fails no conversation; version 4 is unchanged.
         """
-        require(isinstance(owner, UUID) and isinstance(pod_uid, UUID))
+        require(isinstance(owner, UUID) and isinstance(pod_uid, UUID) and type(runner_available) is bool)
         with self.observer_pool.bound(owner) as runtime:
             runtime.namespace()
             obj = self.pod(runtime)
@@ -286,10 +392,18 @@ class Service:
                 raise Refusal('health_failed', status=None) from None
             observed = {key: health.get(key) for key in sorted(OPERATOR_HEALTH)}
             check(health.get('podUid') == str(pod_uid), 'health_identity', healthPodUid=health.get('podUid'))
-            check(observed['available'] is False, 'runner_available', health=observed)
-            check(observed['reason'] != 'unavailable', 'runner_stopping', health=observed)
-            check(type(observed['reason']) is str and 0 < len(observed['reason']) <= 63
-                  and observed['verification'] in {'unverified', 'real', 'fixture'}, 'health_invalid', health=observed)
+            if runner_available:
+                check(observed['available'] is True and observed['reason'] is None, 'runner_not_available', health=observed)
+                check(observed['verification'] in {'unverified', 'real', 'fixture'}, 'health_invalid', health=observed)
+                with self.observer_engine.begin() as db:
+                    running = running_conversations(db, owner)
+                # A running conversation may be a turn in flight: never with this flag.
+                check(running == 0, 'running_conversations', runningConversations=running, health=observed)
+            else:
+                check(observed['available'] is False, 'runner_available', health=observed)
+                check(observed['reason'] != 'unavailable', 'runner_stopping', health=observed)
+                check(type(observed['reason']) is str and 0 < len(observed['reason']) <= 63
+                      and observed['verification'] in {'unverified', 'real', 'fixture'}, 'health_invalid', health=observed)
             opened = stop is None
             with self.observer_engine.begin() as db:
                 stop = request_stop(db, owner)  # Intent only; nothing is deleted on a refusal below.
@@ -303,9 +417,21 @@ class Service:
             else:
                 # The runner drained after all: the loop accepts that receipt on its normal path.
                 raise Refusal('drain_accepted', receiptVersion=(receipt or {}).get('version'), **after)
+            if runner_available:
+                check(status == 409, 'drain_status', drainStatus=status, **after)
+                operator = {'health': observed, 'drainStatus': 409, 'runningConversations': 0, 'at': self.now().isoformat()}
+                with self.observer_engine.begin() as db:
+                    state = Registry(db)._current(owner)
+                    require(state.pod_uid == pod_uid)
+                    running = running_conversations(db, owner)  # Again, in the accepting transaction.
+                    check(running == 0, 'running_conversations', runningConversations=running, **after)
+                    accept_operator_available(db, owner, stop['stop_id'], operator)
+                return {'result': 'accepted', 'owner': str(owner), 'podUid': str(pod_uid), 'stopId': str(stop['stop_id']),
+                        'stopOpenedByThisRun': opened, 'failedConversations': 0, 'receiptVersion': 5, 'operator': operator}
             check(status in {409, 503}, 'drain_status', drainStatus=status, **after)
             operator = {'health': observed, 'drainStatus': status, 'at': self.now().isoformat()}
             with self.observer_engine.begin() as db:
+                lock_running(db, owner)  # rows before the owner lock (#114)
                 state = Registry(db)._current(owner)
                 require(state.pod_uid == pod_uid)
                 lost = db.execute(text("""SELECT count(*) FROM research.conversations
@@ -313,25 +439,30 @@ class Service:
                 self.close_dead_work(db, state)
                 accept_operator(db, owner, stop['stop_id'], operator)
         return {'result': 'accepted', 'owner': str(owner), 'podUid': str(pod_uid), 'stopId': str(stop['stop_id']),
-                'stopOpenedByThisRun': opened, 'failedConversations': lost, 'operator': operator}
+                'stopOpenedByThisRun': opened, 'failedConversations': lost, 'receiptVersion': 4, 'operator': operator}
 
     # Loop -----------------------------------------------------------------
     def reconcile(self):
+        """One pass. Returns (owner, result, reason): reason is a fixed code (#114) for a step that
+        could not advance (`reconciliation_required`) or for a runner that is not stopped yet
+        (`running` with `runner_not_idle` / `stale_running_conversations`), else None."""
         outcomes = []
         idle_seconds = load_limits().idle_seconds
         for owner in self.candidates(idle_seconds):
             try:
-                outcomes.append((owner, self.step(owner, idle_seconds)))
-            except Exception:
-                outcomes.append((owner, 'reconciliation_required'))
+                outcome = self.step(owner, idle_seconds)
+            except Exception as failure:
+                outcomes.append((owner, 'reconciliation_required', reason_of(failure)))
+            else:
+                outcomes.append((owner, 'running', outcome) if outcome in WAITING else (owner, outcome, None))
         for owner in self.waiting():
             if not allowed(owner):
                 continue
             try:
                 self.ensure(owner)
-                outcomes.append((owner, 'ensured'))
-            except Exception:
-                outcomes.append((owner, 'reconciliation_required'))
+                outcomes.append((owner, 'ensured', None))
+            except Exception as failure:
+                outcomes.append((owner, 'reconciliation_required', 'ensure:'+reason_of(failure)))
         return outcomes
 
 
@@ -416,13 +547,22 @@ def serve():
     while True:
         wake.event.wait(RESCAN_SECONDS)
         wake.event.clear()
-        for owner, outcome in service.reconcile():
-            print(json.dumps({'owner': str(owner), 'stage': 'controller', 'result': outcome}), flush=True)
+        for owner, outcome, reason in service.reconcile():
+            print(json.dumps(log_line(owner, outcome, reason)), flush=True)
+
+
+def log_line(owner, outcome, reason):
+    line = {'owner': str(owner), 'stage': 'controller', 'result': outcome}
+    if reason is not None:
+        line['reason'] = reason
+    return line
 
 
 def main(argv=None, *, factory=build):
-    """No arguments: the resident controller. `reclaim --owner U --pod-uid U`: the operator's R2 command,
-    run with `kubectl -n runner-control exec deploy/runner-controller -- python -B -m ops.runner_controller_service ...`.
+    """No arguments: the resident controller. `reclaim --owner U --pod-uid U [--runner-available]`: the
+    operator's R2 command, run with
+    `kubectl -n runner-control exec deploy/runner-controller -- python -B -m ops.runner_controller_service ...`.
+    `--runner-available` (#114) selects the version 5 path for an available runner that refuses its drain.
     rc 0 accepted, 3 refused (code and observed values printed), 1 any other failure (fixed text)."""
     import argparse
     parser = argparse.ArgumentParser(prog='ops.runner_controller_service')
@@ -430,11 +570,12 @@ def main(argv=None, *, factory=build):
     reclaim = commands.add_parser('reclaim')
     reclaim.add_argument('--owner', type=UUID, required=True)
     reclaim.add_argument('--pod-uid', type=UUID, required=True)
+    reclaim.add_argument('--runner-available', action='store_true')
     args = parser.parse_args(argv)
     if args.command is None:
         return serve()
     try:
-        result = factory()[0].reclaim(args.owner, args.pod_uid)
+        result = factory()[0].reclaim(args.owner, args.pod_uid, runner_available=args.runner_available)
     except Refusal as refusal:
         print(json.dumps({'stage': 'reclaim', 'result': 'refused', 'code': refusal.code, 'observed': refusal.observed},
                          sort_keys=True, default=str), flush=True)

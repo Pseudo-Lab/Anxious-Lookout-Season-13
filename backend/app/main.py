@@ -82,6 +82,10 @@ def create_app(settings=None):
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None, redirect_slashes=False)
     app.state.engine = engine
+    # #114: the pre-stop sync's SQL deadline listener, registered once before any request; adding an event
+    # listener to an engine that is executing statements is not safe (review 77faa81).
+    from . import sql_budget
+    sql_budget.install(engine)
     app.state.sessions = sessions
     app.state.settings = settings
     app.state.user_runners_enabled = feature_enabled()

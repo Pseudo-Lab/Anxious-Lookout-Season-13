@@ -97,6 +97,9 @@ REPLY_CODES = frozenset({
     "policy_refused", "budget_exhausted", "provider_rate_limited", "unavailable"})
 STAGES = frozenset({"unknown", "turn_mismatch", "binding", "permission", "scope", "callback", "callback_body",
                     "callback_done"})
+# #114: session states that hold no work. `failed` is a finished turn (kept on the volume until the
+# session's next turn), so it no longer blocks idle evidence or drain; any other non-idle state does.
+SETTLED_SESSION_STATES = frozenset({'idle', 'failed'})
 
 
 def failure_kind(error):
@@ -1447,6 +1450,7 @@ def create_app():
             app.state.stopping = False
             app.state.idle_since = time.monotonic()
             app.state.drain = None
+            app.state.drain_pending = None  # #114: (request, receipt) decided but not yet stored
             try:
                 mode = os.getenv("CODEX_AUTH_MODE", "none")
                 if mode == "personal-cache":
@@ -1568,7 +1572,7 @@ def create_app():
             if not app.state.stopping and native is not None:
                 with native.state_lock:
                     idle = (native.active_session is None and not native.lock.locked()
-                            and all(entry.get('state') == 'idle' for entry in native.mapping.values())
+                            and all(entry.get('state') in SETTLED_SESSION_STATES for entry in native.mapping.values())
                             and time.monotonic()-native.idle_since >= body.idleSeconds)
             elif not app.state.stopping and app.state.auth_failure == 'not_configured':
                 idle = (not (root/'broker.json').exists() and not (root/'codex').exists()
@@ -1632,6 +1636,13 @@ def create_app():
                     return JSONResponse({'error': 'conflict'}, status_code=409)
                 receipt = read_private(root / ('termination-'+pod_uid+'.json'))
                 return receipt
+            if app.state.drain_pending is not None:
+                # #114: this process already stopped and decided the receipt, but storing it failed.
+                # Only the same request may store that same receipt; nothing is closed again.
+                pending, receipt = app.state.drain_pending
+                if pending != value:
+                    return JSONResponse({'error': 'conflict'}, status_code=409)
+                return store_receipt(value, receipt)
             native = app.state.native
             if app.state.stopping:
                 return JSONResponse({'error': 'codex_runner_stopped'}, status_code=503)
@@ -1639,14 +1650,20 @@ def create_app():
                 return JSONResponse({'error': 'codex_policy_refused'}, status_code=409)
             if native is not None:
                 with native.state_lock:
-                    # Failed/unknown projections require reconciliation too;
-                    # process death alone cannot resolve an uncertain request.
+                    # Unknown projections and running entries require reconciliation; process death alone
+                    # cannot resolve an uncertain request. A `failed` entry is settled (#114).
                     if (native.active_session is not None or native.lock.locked()
-                            or any(entry.get('state') != 'idle' for entry in native.mapping.values())):
+                            or not all(entry.get('state') in SETTLED_SESSION_STATES for entry in native.mapping.values())):
                         return JSONResponse({'error': 'conflict'}, status_code=409)
                     app.state.stopping = True
                     native.closing = True
-                receipt = {**value, 'version': 1, 'clean': native.close() is True}
+                try:
+                    clean = native.close() is True
+                except Exception:
+                    # #114: stopping is already set and no turn was in flight; a receipt (never clean)
+                    # instead of a runner that refuses every later drain with no receipt.
+                    clean = False
+                receipt = {**value, 'version': 1, 'clean': clean}
             elif app.state.auth_failure == 'not_configured':
                 # Never supplied: nothing was installed or started.
                 app.state.stopping = True
@@ -1661,10 +1678,26 @@ def create_app():
                 receipt = {**value, 'version': 3, 'unavailable': {'reason': unavailable_reason(), 'clean': clean}}
             else:
                 return JSONResponse({'error': 'codex_unavailable'}, status_code=503)
-            require_binding(root, owner, state_id)
-            write_private(root / ('termination-'+pod_uid+'.json'), receipt)
-            app.state.drain = value
-            return receipt
+            app.state.drain_pending = (value, receipt)
+            return store_receipt(value, receipt)
+
+    def store_receipt(value, receipt):
+        """Persist the decided receipt. A failure leaves drain_pending set, so the same request retries
+        the write instead of meeting a stopping runner with no receipt (#114). An existing file is never
+        overwritten unless it already holds exactly this receipt (a write that failed after its rename)."""
+        require_binding(root, owner, state_id)
+        target = root / ('termination-'+pod_uid+'.json')
+        if target.exists() or target.is_symlink():
+            try:
+                existing = read_private(target)
+            except Exception:
+                existing = None
+            if existing != receipt:
+                return JSONResponse({'error': 'codex_policy_refused'}, status_code=409)
+        else:
+            write_private(target, receipt)
+        app.state.drain, app.state.drain_pending = value, None
+        return receipt
 
     def read_locked(identity):
         if app.state.stopping:

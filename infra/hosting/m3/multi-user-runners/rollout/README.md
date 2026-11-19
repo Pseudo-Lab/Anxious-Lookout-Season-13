@@ -402,7 +402,9 @@ It replaces the host observer and the host worker's Pod creation:
   Such a runner reports idle and drains with a v3 `unavailable` receipt, then DELETE → 404 → release.
 - **Wake-ups:** Postgres `NOTIFY runner_runtime` (sent by API code on entry/stop and by the
   host worker on publication), the Pod watch (errors back off 1 s → 60 s) and a 30 s rescan.
-- **Logs:** one JSON line per owner per pass: `{"owner", "stage": "controller", "result"}`.
+- **Logs:** one JSON line per owner per pass: `{"owner", "stage": "controller", "result"}`, plus a
+  fixed `reason` code where one applies (#114; see "Controller reason codes" below). No exception
+  text, URL, token or conversation content is logged.
 
 New owners' storage is still prepared by the host `issue16-controller` oneshot until #63.
 It no longer creates Pods: it publishes the binding and sends NOTIFY.
@@ -424,7 +426,10 @@ its state and on the runner image:
 | Runner state | `/health` | Path |
 | --- | --- | --- |
 | Native started, mapping idle (for example auth revoked at runtime) | `available=false` | Ordinary idle stop and v1 drain. Nothing new |
-| Native started, a mapping entry `failed`/`unknown`, or a turn lock held | any | Drain refuses with 409 on purpose: R2 |
+| Native started, a mapping entry `failed` only; image from #114 on | any | Settled: ordinary idle stop and v1 drain (#114) |
+| Native started, a mapping entry `failed`; image **before #114** | `available=true` | Never idle, drain refuses with 409 (`idle_refused`, `drain_conflict`): **R2 `--runner-available`** below |
+| Native started, a mapping entry `running`/unknown, or a turn lock held | any | Drain refuses with 409 on purpose: R2 |
+| Drained (stopping, v1 receipt) while a conversation is still `running` in the database | `reason=unavailable` | Automatic since #114: that conversation is failed with `codex_runner_lost` and the receipt accepted (below) |
 | Native never started (startup or broker supply failed, for example `auth_revoked`); image from #61 on | `available=false`, `reason` and `failure` = that failure | **R1**, automatic |
 | Native never started; image **before #61** (for example the dev VM's …5804) | `available=false`, no `failure` field | Never idle, drain refuses with 503: **R2 only** |
 
@@ -476,6 +481,69 @@ observes everything itself, at that moment, and refuses (rc 3, one JSON line
 
 There is no automatic timeout (rejected option C): an uncertain conversation is never failed
 without a person deciding it.
+
+**R2 `--runner-available` (#114, version 5; user decision 2026-11-19).** For a runner on an image
+**before #114** that reports `available=true` but never goes idle and refuses its drain with 409,
+because a finished `failed` session entry is kept on its volume (`/state/broker.json`) and blocks
+both. The controller logs `reconciliation_required` with `idle_refused` (no stop) or
+`drain_conflict` (a stop is open, for example after logout). After checking that the owner has no
+turn in progress:
+
+```sh
+kubectl -n runner-control exec deploy/runner-controller -- \
+  python -B -m ops.runner_controller_service reclaim --owner <owner-uuid> --pod-uid <pod-uid> --runner-available
+```
+
+- It has the same Pod, phase, receipt and health-identity checks as above. In place of
+  `runner_available` / `runner_stopping` it refuses with:
+
+  | Refusal code | Means |
+  | --- | --- |
+  | `runner_not_available` | `/health` is not `available=true` with `reason` null: use the version 4 command (no flag) |
+  | `running_conversations` | A conversation of the owner is `running` in the database (`observed.runningConversations`): it may be a turn in flight. Checked before the drain and again in the accepting transaction |
+  | `drain_status` | The drain answered something other than 409 |
+  | `drain_accepted` | The drain succeeded: the loop accepts that receipt normally |
+
+- **On success (rc 0)** it writes a v5 receipt
+  `operator: {health: {available: true, reason: null, verification}, drainStatus: 409, runningConversations: 0, at}`
+  and sets `stopping`. It fails no conversation (`failedConversations` 0, `receiptVersion` 5).
+  The loop then deletes that Pod UID, waits for 404 and releases.
+- Without the flag nothing changes: version 4 still refuses an available runner (`runner_available`).
+- Images from #114 on drain past a `failed` entry, so this command is only for runners started
+  from an older image. The next Pod of that owner (new image) is not affected by the entry.
+
+**Drained runner with a conversation still `running` (#114, automatic).** The database marks a
+conversation's turn finished only when the API reads it from the runner. Before a stop from logout
+or `DELETE …/codex/runner` fences the runner, the API reads each `running` conversation of the
+owner once and records the runner's actual result (best effort). If the runner then drains (no turn
+in flight) and a conversation is still `running`, runner-controller fails it with
+`codex_runner_lost` in the same transaction that accepts this stop's own v1 receipt. A v1 receipt
+with `clean: false` (native did not exit gracefully, or its close failed) is accepted the same way;
+`clean` is evidence only. A receipt that does not match the stop is refused and nothing is failed.
+
+### Controller reason codes (#114)
+
+`result` and `reason` in the controller's log line:
+
+| `result` | `reason` | Means |
+| --- | --- | --- |
+| `running` | none | The registry says the runner is in use, or it has not been idle `idleSeconds` yet |
+| `running` | `runner_not_idle` | The runner says it is not idle. Ordinary while a turn runs or just ended |
+| `running` | `stale_running_conversations` | The runner is idle but a conversation is still `running` in the database; a read of it in the app resolves it. No idle stop until then |
+| `reconciliation_required` | `idle_refused` | **Stuck:** the runner has refused idle for twice `idleSeconds` with no conversation running. Old image with a `failed` entry: R2 `--runner-available` |
+| `reconciliation_required` | `drain_conflict` | A stop is open and the runner refuses its drain with 409. A turn in progress ends it; otherwise as above |
+| `reconciliation_required` | `drain_status_<code>`, `drain_unreachable`, `drain_invalid` | The drain failed otherwise. `drain_status_503` with `/health` reason `unavailable` and no receipt: a runner from before #114 whose close failed; R2 cannot take it (`runner_stopping`), see #114 |
+| `reconciliation_required` | `health_*`, `idle_status_<code>`, `idle_unreachable`, `idle_invalid`, `idle_evidence_mismatch` | The runner could not be asked, or answered for another identity |
+| `reconciliation_required` | `pod_uid_mismatch`, `pod_address_invalid` | The live Pod is not the registry's, or has no usable address |
+| `reconciliation_required` | `receipt_rejected`, `stop_refused`, `idle_stop_refused` | The database refused the receipt or the stop intent (nothing was changed) |
+| `reconciliation_required` | `conversation_locked` | A running conversation row stayed locked by an app request for 5 s (lock_timeout); the next pass retries. The controller takes those rows before the owner lock |
+| `reconciliation_required` | `node_not_ready`, `pod_delete_failed`, `release_refused` | Node evidence, the DELETE, or the release proof failed; retried next pass |
+| `reconciliation_required` | `error:<ExceptionClass>` | Anything else (class name only) |
+| `reconciliation_required` | `ensure:<reason>` | Pod creation for a waiting owner failed |
+
+Registry phase `runner_unreachable` with `ambiguous=true` is the ordinary state of every
+in-cluster runner: Pod creation records it, and no code moves it to `ready` (#114 C2). It is not
+evidence that the runner cannot be reached.
 
 ### Production window: #61 and #63 together
 

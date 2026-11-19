@@ -151,6 +151,14 @@ def stop_runtime(app, owner):
     runtime = app.state.user_runner_runtime
     if runtime is None:
         return
+    # #114 ①: while the runner still answers reads (before the stop fences it and the controller
+    # drains it), record each running conversation's actual result. Best effort: what stays running
+    # is closed by the controller only after the runner's own drain receipt.
+    try:
+        from .conversations import sync_running
+        sync_running(app.state.sessions, runtime.runner(owner), owner)  # SQL budget: installed in app.main
+    except Exception:
+        pass
     try:
         runtime.stop(owner)
     except Exception:

@@ -20,6 +20,11 @@ def begin(end, clock):
     return _budget.set((end, clock))
 
 
+def active():
+    """True inside an outer budget (a caller that bounds several runner calls together, #114)."""
+    return _budget.get(None) is not None
+
+
 def finish(token):
     _budget.reset(token)
 

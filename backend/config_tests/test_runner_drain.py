@@ -56,16 +56,45 @@ def test_wrong_identity_never_drains(setup, field):
     assert not list(root.glob('termination-*'))
 
 
-@pytest.mark.parametrize('busy', ['active','locked','running','failed','unknown'])
+@pytest.mark.parametrize('busy', ['active','locked','running','unknown','missing-state'])
 def test_uncertain_work_never_creates_receipt(setup, busy):
     client, body, headers, root = setup
     native = client.app.state.native
     if busy == 'active': native.active_session = str(uuid4())
     elif busy == 'locked': native.lock.acquire()
-    else: native.mapping = {'session': {'state':busy}}
+    elif busy == 'missing-state': native.mapping = {'settled': {'state': 'failed'}, 'session': {}}
+    else: native.mapping = {'settled': {'state': 'failed'}, 'session': {'state':busy}}
     assert client.post('/lifecycle/drain',json=body,headers=headers).status_code == 409
     assert not client.app.state.stopping and native.closes == 0
     assert not list(root.glob('termination-*'))
+
+
+def test_failed_session_is_settled_and_drains(setup):
+    """#114: a finished failed turn holds no work; it no longer blocks drain (it did on every later Pod)."""
+    client, body, headers, root = setup
+    native = client.app.state.native
+    native.mapping = {'a': {'state': 'failed'}, 'b': {'state': 'idle'}}
+    response = client.post('/lifecycle/drain', json=body, headers=headers)
+    assert response.status_code == 200 and response.json() == {**body, 'version': 1, 'clean': True}
+    assert native.closes == 1 and client.app.state.stopping
+
+
+def test_close_failure_still_leaves_an_unclean_receipt(setup):
+    """#114: native.close() raising after stopping was set must not leave a runner that refuses every
+    later drain with no receipt; the receipt says clean false and the same request gets it again."""
+    client, body, headers, root = setup
+    native = client.app.state.native
+    def broken():
+        native.closes += 1
+        if native.closes == 1:
+            raise OSError('close failed')
+        return False  # the lifespan shutdown's later close
+    native.close = broken
+    response = client.post('/lifecycle/drain', json=body, headers=headers)
+    assert response.status_code == 200 and response.json() == {**body, 'version': 1, 'clean': False}
+    assert read_private(root/('termination-'+body['podUid']+'.json')) == response.json()
+    assert client.post('/lifecycle/drain', json=body, headers=headers).json() == response.json()
+    assert native.closes == 1
 
 
 def test_unclean_shutdown_never_claims_clean_receipt(setup):
@@ -73,6 +102,60 @@ def test_unclean_shutdown_never_claims_clean_receipt(setup):
     client.app.state.native.clean = False
     assert client.post('/lifecycle/drain',json=body,headers=headers).json()['clean'] is False
     assert read_private(root/('termination-'+body['podUid']+'.json'))['clean'] is False
+
+
+@pytest.mark.parametrize('failure', ['before-rename', 'after-rename'])
+def test_receipt_write_failure_is_retried_by_the_same_request_only(setup, monkeypatch, failure):
+    """#114 (review 647653f): one failed receipt write must not leave a stopping runner that answers every
+    later drain with 503 and no receipt. The same request stores the same receipt; native closes once."""
+    import runner.app as runner_app
+    client, body, headers, root = setup
+    native = client.app.state.native
+    write, attempts = runner_app.write_private, []
+    def flaky(path, value):
+        if path.name.startswith('termination-'):
+            attempts.append(path.name)
+            if len(attempts) == 1 and failure == 'before-rename':
+                raise OSError('synthetic transient write error')
+        return write(path, value)
+    monkeypatch.setattr(runner_app, 'write_private', flaky)
+    if failure == 'after-rename':
+        # The real failure point (review 70c4a60): the rename happened, then fsync of the directory failed.
+        import os, stat
+        fsync, failed = os.fsync, []
+        def directory_fsync(descriptor):
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode) and not failed:
+                failed.append(descriptor)
+                raise OSError('synthetic directory fsync error')
+            return fsync(descriptor)
+        monkeypatch.setattr(os, 'fsync', directory_fsync)
+    with pytest.raises(OSError):
+        client.post('/lifecycle/drain', json=body, headers=headers)
+    assert client.get('/health', headers=headers).json()['reason'] == 'unavailable'
+    other = client.post('/lifecycle/drain', json={**body, 'stopId': str(uuid4())}, headers=headers)
+    assert other.status_code == 409  # another stop never takes this decided receipt
+    retry = client.post('/lifecycle/drain', json=body, headers=headers)
+    expected = {**body, 'version': 1, 'clean': True}
+    assert retry.status_code == 200 and retry.json() == expected
+    assert read_private(root/('termination-'+body['podUid']+'.json')) == expected
+    assert client.post('/lifecycle/drain', json=body, headers=headers).json() == expected
+    assert native.closes == 1 and len(attempts) == (1 if failure == 'after-rename' else 2)
+    if failure == 'after-rename':
+        assert len(failed) == 1  # the directory fsync was the point that failed
+
+
+def test_pending_receipt_never_overwrites_a_different_file(setup, monkeypatch):
+    import runner.app as runner_app
+    client, body, headers, root = setup
+    target = root/('termination-'+body['podUid']+'.json')
+    def fail(path, value):
+        target.write_text('{"other": "evidence"}')  # something else appeared at that path
+        raise OSError('synthetic')
+    monkeypatch.setattr(runner_app, 'write_private', fail)
+    with pytest.raises(OSError):
+        client.post('/lifecycle/drain', json=body, headers=headers)
+    assert client.post('/lifecycle/drain', json=body, headers=headers).status_code == 409
+    assert target.read_text() == '{"other": "evidence"}'
 
 
 def test_unauthenticated_drain_never_stops(setup):
@@ -127,9 +210,11 @@ def test_idle_evidence_uses_native_clock_and_refuses_pending_work(setup):
     for _ in range(2):
         assert client.post('/lifecycle/idle',json=query,headers=headers).json() == {
             'ownerId':body['ownerId'],'stateId':body['stateId'],'podUid':body['podUid'],'idle':True}
-    for state in ('running','failed','unknown'):
-        native.mapping = {'session':{'state':state}}
+    for state in ('running','unknown'):
+        native.mapping = {'settled':{'state':'failed'}, 'session':{'state':state}}
         assert client.post('/lifecycle/idle',json=query,headers=headers).json()['idle'] is False
+    native.mapping = {'session':{'state':'failed'}, 'other':{'state':'idle'}}  # #114: failed is settled
+    assert client.post('/lifecycle/idle',json=query,headers=headers).json()['idle'] is True
     native.mapping = {}
     native.active_session = 'busy'
     assert client.post('/lifecycle/idle',json=query,headers=headers).json()['idle'] is False

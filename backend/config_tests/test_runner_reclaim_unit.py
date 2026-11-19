@@ -4,8 +4,8 @@ from uuid import uuid4
 
 import pytest
 
-from app.runner_termination_control import (drain_body, health_failure_matches, operator_receipt, receipt_valid,
-                                            terminal_receipt, unavailable_receipt)
+from app.runner_termination_control import (drain_body, health_failure_matches, operator_available_receipt,
+                                            operator_receipt, receipt_valid, terminal_receipt, unavailable_receipt)
 from ops import runner_controller_service as service
 from runner.lifecycle import Refused
 
@@ -21,19 +21,47 @@ def operator(**changes):
     return {**value, **changes}
 
 
+def available(**changes):
+    value = {'health': {'available': True, 'reason': None, 'verification': 'real'},
+             'drainStatus': 409, 'runningConversations': 0, 'at': '2026-11-19T12:00:00+00:00'}
+    return {**value, **changes}
+
+
 def test_every_receipt_kind_is_valid_only_in_its_exact_shape(stop):
     kinds = [{**drain_body(stop), 'version': 1, 'clean': True},
+             {**drain_body(stop), 'version': 1, 'clean': False},  # #114 ②: clean is evidence only
              terminal_receipt(stop, {'podAbsent': True}),
              unavailable_receipt(stop, {'reason': 'auth_revoked', 'clean': False}),
-             operator_receipt(stop, operator())]
+             operator_receipt(stop, operator()),
+             operator_available_receipt(stop, available())]
     for receipt in kinds:
         assert receipt_valid({**stop, 'receipt': receipt})
         assert not receipt_valid({**stop, 'receipt': {**receipt, 'stopId': str(uuid4())}})
         assert not receipt_valid({**stop, 'receipt': {**receipt, 'extra': 1}})
-    assert not receipt_valid({**stop, 'receipt': {**drain_body(stop), 'version': 1, 'clean': False}})
+    assert not receipt_valid({**stop, 'receipt': {**drain_body(stop), 'version': 1, 'clean': None}})
+    assert not receipt_valid({**stop, 'receipt': {**drain_body(stop), 'version': 1}})
     assert not receipt_valid({**stop, 'receipt': {**drain_body(stop), 'version': 3, 'unavailable': {'reason': 'not_configured', 'clean': True}}})
     assert not receipt_valid({**stop, 'receipt': {**drain_body(stop), 'version': 5}})
+    assert not receipt_valid({**stop, 'receipt': {**drain_body(stop), 'version': 6}})
+    # A version 4 (blocked runner) observation never passes as version 5, nor the reverse.
+    assert not receipt_valid({**stop, 'receipt': {**operator_receipt(stop, operator()), 'version': 5}})
+    assert not receipt_valid({**stop, 'receipt': {**operator_available_receipt(stop, available()), 'version': 4}})
     assert not receipt_valid({**stop, 'receipt': None})
+
+
+@pytest.mark.parametrize('value', [
+    available(runningConversations=1),                                              # a turn may be in flight
+    available(runningConversations=True), available(drainStatus=503), available(drainStatus=200),
+    available(health={'available': False, 'reason': 'auth_revoked', 'verification': 'real'}),  # that is version 4
+    available(health={'available': True, 'reason': 'auth_revoked', 'verification': 'real'}),
+    available(health={'available': True, 'reason': None, 'verification': 'other'}),
+    available(health={'available': True, 'reason': None}),
+    available(at='2026-11-19T12:00:00'),
+    {k: v for k, v in available().items() if k != 'runningConversations'},
+    {**available(), 'note': 'free text'}, None])
+def test_available_operator_receipt_holds_only_its_conditions(stop, value):
+    with pytest.raises((Refused, TypeError, ValueError)):
+        operator_available_receipt(stop, value)
 
 
 @pytest.mark.parametrize('value', [
@@ -71,8 +99,9 @@ def test_health_must_name_the_same_failure_for_this_runner(stop):
 
 class Fake:
     def __init__(self, outcome): self.outcome, self.calls = outcome, []
-    def reclaim(self, owner, pod_uid):
+    def reclaim(self, owner, pod_uid, *, runner_available):
         self.calls.append((owner, pod_uid))
+        self.runner_available = runner_available
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
@@ -88,6 +117,16 @@ def run(capsys, outcome, argv=None):
 def test_cli_accepted_prints_the_result(capsys):
     rc, out, fake, ids = run(capsys, {'result': 'accepted', 'stopId': 's'})
     assert rc == 0 and json.loads(out) == {'stage': 'reclaim', 'result': 'accepted', 'stopId': 's'} and fake.calls == [ids]
+    assert fake.runner_available is False  # version 4 unless the operator names the flag
+
+
+def test_cli_runner_available_flag_selects_the_version_5_path(capsys):
+    owner, pod = uuid4(), uuid4()
+    fake = Fake({'result': 'accepted', 'receiptVersion': 5})
+    rc = service.main(['reclaim', '--owner', str(owner), '--pod-uid', str(pod), '--runner-available'],
+                      factory=lambda: (fake, None, None))
+    assert rc == 0 and fake.calls == [(owner, pod)] and fake.runner_available is True
+    assert json.loads(capsys.readouterr().out)['receiptVersion'] == 5
 
 
 def test_cli_refusal_prints_code_and_observed(capsys):
