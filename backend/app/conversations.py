@@ -58,7 +58,8 @@ class Runner:
         research = path.endswith('/research-authorize')
         marker = runner_http_budget.begin(time.monotonic() + 2, time.monotonic) if research else None
         try:
-            return self._call(method, path, body, research)
+            # #114: a caller's outer budget (the pre-stop sync) bounds any call made inside it.
+            return self._call(method, path, body, research or runner_http_budget.active())
         finally:
             if marker is not None:
                 runner_http_budget.finish(marker)
@@ -205,26 +206,47 @@ def apply_runner_read(row, result):
             row.pending_text = None
 
 
-def sync_running(sessions, runner, owner):
+SYNC_SECONDS = 3
+
+
+def sync_running(sessions, runner, owner, *, seconds=SYNC_SECONDS, clock=None):
     """#114 ①: before a stop fences the runner, record each running conversation's actual runner result,
-    as a conversation read would. Best effort, one row lock and one runner read at a time: a read that
-    fails or still says `running` leaves the row as it is; the controller closes only what is still
-    running after the runner's own drain receipt. Returns how many rows left `running`."""
-    with sessions.begin() as db:
-        identities = db.scalars(select(Conversation.id).where(
-            Conversation.owner_id == owner, Conversation.state == "running")).all()
+    as a conversation read would. Best effort, one row and one runner read at a time: a read that fails
+    or still says `running` leaves the row as it is; the controller closes only what is still running
+    after the runner's own drain receipt. Returns how many rows left `running`.
+
+    It runs inside logout, so it is bounded: every runner HTTP call shares one `seconds` budget; no
+    read starts after it; the first runner, Kubernetes or database failure ends the sync (the rest
+    would wait the same way); a row another request holds is skipped, not waited for."""
+    import time
+    from . import runner_http_budget
+    clock = clock or time.monotonic
+    end = clock() + seconds
+    marker = runner_http_budget.begin(end, clock)
     settled = 0
-    for identity in identities:
-        try:
-            with sessions.begin() as db:
-                row = db.scalar(select(Conversation).where(
-                    Conversation.id == identity, Conversation.owner_id == owner).with_for_update())
-                if row is None or row.state != "running":
-                    continue
-                apply_runner_read(row, checked_runner_read(row, runner.read(row.id)))
-                settled += row.state != "running"
-        except Exception:
-            continue  # Never blocks the stop; accepted uncertainty stays for the controller.
+    try:
+        with sessions.begin() as db:
+            identities = db.scalars(select(Conversation.id).where(
+                Conversation.owner_id == owner, Conversation.state == "running")).all()
+        for identity in identities:
+            if clock() >= end:
+                break
+            try:
+                with sessions.begin() as db:
+                    row = db.scalar(select(Conversation).where(
+                        Conversation.id == identity, Conversation.owner_id == owner).with_for_update(skip_locked=True))
+                    if row is None or row.state != "running":
+                        continue
+                    apply_runner_read(row, checked_runner_read(row, runner.read(row.id)))
+                    settled += row.state != "running"
+            except (ValueError, KeyError, RunnerHistoryInvalid):
+                continue  # This row's answer only (another request id or thread, no history).
+            except Exception:
+                break  # Runner, Kubernetes or database not answering. Never blocks the stop.
+    except Exception:
+        pass
+    finally:
+        runner_http_budget.finish(marker)
     return settled
 
 
