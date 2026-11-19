@@ -108,8 +108,9 @@ def test_lost_delete_response_is_retried_against_the_same_uid(service, admin, mo
         if method == 'DELETE': raise TimeoutError()
         return result
     monkeypatch.setattr(service.rt.pods, '_request', lost)
-    with pytest.raises(TimeoutError):
+    with pytest.raises(Refused) as caught:  # #114: a fixed reason, not the transport's exception
         service.service.step(service.owner, 300)
+    assert caught.value.reason == 'pod_delete_failed'
     assert read(admin, service.owner).phase == Phase.STOPPING
     monkeypatch.setattr(service.rt.pods, '_request', original)
     assert service.service.step(service.owner, 300) == 'released'
