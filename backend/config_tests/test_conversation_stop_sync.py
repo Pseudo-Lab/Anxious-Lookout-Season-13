@@ -202,7 +202,19 @@ def test_sql_budget_is_set_only_inside_the_sync_and_installs_once():
         def read(self, identity):
             seen.append(sql_budget.DEADLINE.get() is not None)
             return super().read(identity)
-    y = row()
-    assert sync_running(Sessions([y]), Reading({y.id: answer(y, 'idle')}), uuid4(), engines=(engine, engine, None)) == 1
-    assert seen == [True] and sql_budget.DEADLINE.get() is None
+    sql_budget.install(engine)
+    sql_budget.install(engine)
+    sql_budget.install(None)
     assert engine._sql_budget_installed is True
+    y = row()
+    assert sync_running(Sessions([y]), Reading({y.id: answer(y, 'idle')}), uuid4()) == 1
+    assert seen == [True] and sql_budget.DEADLINE.get() is None
+
+
+def test_the_app_installs_the_sql_budget_before_serving(monkeypatch):
+    """Review 77faa81: never add the listener to an engine while it runs statements (first logout)."""
+    import inspect
+    from app import main, user_runners, conversations
+    assert 'sql_budget.install(engine)' in inspect.getsource(main)
+    assert 'install(' not in inspect.getsource(user_runners.stop_runtime)
+    assert 'install(' not in inspect.getsource(conversations.sync_running)

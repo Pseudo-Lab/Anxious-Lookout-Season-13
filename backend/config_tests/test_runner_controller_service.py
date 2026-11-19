@@ -502,19 +502,34 @@ def test_pre_stop_sync_gives_up_an_owner_lock_held_elsewhere_within_its_budget(s
     """#114 (review 70c4a60): the controller (or anything) holding the owner advisory lock must not hold
     logout past the sync budget; the sync ends and the row stays for the controller."""
     import time
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as Late
+    from app import sql_budget
     from app.conversations import sync_running
     from app.runner_registry import Registry
+    # The app installs the listener at startup (app.main); the runtime fixture may use its own engine. Both are
+    # installed here, before any concurrent statement.
+    sql_budget.install(client.app.state.engine)
+    sql_budget.install(service.rt.engine)
     running_conversation(admin, service.owner)
     held = admin.connect()
     holding = held.begin()
     Registry(held)._lock(service.owner)
     try:
-        started = time.monotonic()
-        settled = sync_running(client.app.state.sessions, service.rt.runner(service.owner), service.owner,
-                               seconds=3, engines=(client.app.state.engine, service.rt.engine))
-        elapsed = time.monotonic() - started
+        # The sync runs on its own thread, so a regression fails at a bounded wait instead of hanging the test.
+        with ThreadPoolExecutor(1) as pool:
+            started = time.monotonic()
+            sync = pool.submit(sync_running, client.app.state.sessions, service.rt.runner(service.owner),
+                               service.owner, seconds=3)
+            try:
+                settled = sync.result(timeout=8)
+            except Late:
+                pytest.fail('the pre-stop sync still waits for the owner lock after 8 s')
+            finally:
+                elapsed = time.monotonic() - started
+                holding.rollback()  # always freed, so a late sync can finish and the pool can close
     finally:
-        holding.rollback()
+        if holding.is_active:
+            holding.rollback()
         held.close()
     assert settled == 0 and elapsed < 4.5, elapsed  # 3 s budget plus a little bookkeeping, not the lock
     assert conversation(admin, service.owner) == ('running', None)
