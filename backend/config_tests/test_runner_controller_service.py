@@ -175,8 +175,13 @@ def test_idle_needs_runner_evidence_before_the_stop_intent(service, admin, nativ
     if native_idle is True:
         assert service.service.step(service.owner, 300) == 'deleting'
     else:
-        with pytest.raises(Refused):
-            service.service.step(service.owner, 300)
+        if native_idle is False:
+            # #114: a runner that is not idle is ordinary, not an error (it was reconciliation_required).
+            assert service.service.step(service.owner, 300) == 'runner_not_idle'
+        else:
+            with pytest.raises(Refused) as caught:
+                service.service.step(service.owner, 300)
+            assert caught.value.reason == 'idle_evidence_mismatch'
         with admin.begin() as db:
             assert stop_for(db, read(admin, service.owner)) is None
 
@@ -306,3 +311,110 @@ def test_operator_reclaim_refuses_with_observed_values_and_writes_no_receipt(ser
     assert service.deletes == [] and conversation(admin, service.owner) == ('running', None)
     receipt = receipt_of(admin, service.owner)
     assert receipt is None or receipt == {'version': 1}
+
+
+# #114: a drained runner with a stale running conversation, and the R2 version 5 path -----------------
+@pytest.mark.parametrize('clean', [True, False])
+def test_drained_runner_closes_leftover_running_conversations_and_releases(service, admin, clean):
+    """State (a): the stop came from logout while the database still said `running`; the runner had no
+    turn in flight and drained. Before #114 accept_drain refused (no_pending_work) on every pass."""
+    running_conversation(admin, service.owner)
+    blocked(service, health={}, drain=lambda body: {**body, 'version': 1, 'clean': clean})
+    assert service.service.step(service.owner, 300) == 'deleting'
+    assert receipt_of(admin, service.owner) == {**service.drains[0], 'version': 1, 'clean': clean}
+    assert conversation(admin, service.owner) == ('failed', 'codex_runner_lost')
+    assert read(admin, service.owner).phase == Phase.STOPPING and len(service.deletes) == 1
+    assert service.service.step(service.owner, 300) == 'released'
+    assert read(admin, service.owner).phase == Phase.STOPPED
+
+
+@pytest.mark.parametrize('receipt', ['other-stop', 'version-2', 'clean-missing'])
+def test_a_receipt_that_is_not_this_stops_own_closes_nothing(service, admin, receipt):
+    running_conversation(admin, service.owner)
+    def drain(body):
+        if receipt == 'other-stop':
+            return {**body, 'stopId': str(uuid4()), 'version': 1, 'clean': True}
+        if receipt == 'version-2':
+            return {**body, 'version': 2, 'terminal': {'podAbsent': True}}
+        return {**body, 'version': 1}
+    blocked(service, health={}, drain=drain)
+    with pytest.raises(Refused) as caught:
+        service.service.step(service.owner, 300)
+    assert caught.value.reason == 'receipt_rejected'
+    assert conversation(admin, service.owner) == ('running', None)  # rolled back with the refused receipt
+    assert receipt_of(admin, service.owner) is None and service.deletes == []
+
+
+def test_drain_conflict_is_reported_by_reason(service, admin):
+    blocked(service, health={}, drain=refuse_drain(409))
+    with pytest.raises(Refused) as caught:
+        service.service.step(service.owner, 300)
+    assert caught.value.reason == 'drain_conflict'
+    assert receipt_of(admin, service.owner) is None and service.deletes == []
+
+
+@pytest.mark.parametrize('open_stop', [True, False])
+def test_operator_reclaim_of_an_available_runner_records_version_5_and_fails_nothing(service, admin, open_stop):
+    if not open_stop:
+        with admin.begin() as db:
+            db.execute(text('DELETE FROM runner_termination.stops WHERE owner_id=:owner'), {'owner': service.owner})
+    idle_conversation = conversation_row(admin, service.owner, 'idle')
+    blocked(service, health={}, drain=refuse_drain(409))
+    result = service.service.reclaim(service.owner, service.stop['pod_uid'], runner_available=True)
+    assert result['result'] == 'accepted' and result['receiptVersion'] == 5 and result['failedConversations'] == 0
+    assert result['stopOpenedByThisRun'] is (not open_stop)
+    receipt = receipt_of(admin, service.owner)
+    assert receipt['version'] == 5 and receipt['operator'] == result['operator']
+    assert receipt['operator']['health'] == {'available': True, 'reason': None, 'verification': 'real'}
+    assert (receipt['operator']['drainStatus'], receipt['operator']['runningConversations']) == (409, 0)
+    assert state_of(admin, idle_conversation) == 'idle'
+    assert service.service.step(service.owner, 300) == 'deleting'
+    assert service.service.step(service.owner, 300) == 'released'
+    assert read(admin, service.owner).phase == Phase.STOPPED
+
+
+@pytest.mark.parametrize('case,code', [
+    ('running', 'running_conversations'), ('unavailable', 'runner_not_available'),
+    ('stopping', 'runner_not_available'), ('drain-503', 'drain_status'), ('drained', 'drain_accepted')])
+def test_operator_reclaim_of_an_available_runner_refuses_and_writes_no_receipt(service, admin, case, code):
+    from ops.runner_controller_service import Refusal
+    health, drain = {}, refuse_drain(409)
+    if case == 'running': running_conversation(admin, service.owner)
+    if case == 'unavailable': health = {'available': False, 'reason': 'auth_revoked', 'verification': 'unverified'}
+    if case == 'stopping': health = {'available': False, 'reason': 'unavailable'}
+    if case == 'drain-503': drain = refuse_drain(503)
+    if case == 'drained': drain = lambda body: {**body, 'version': 1, 'clean': True}
+    blocked(service, health=health, drain=drain)
+    drains = len(service.drains)
+    with pytest.raises(Refusal) as caught:
+        service.service.reclaim(service.owner, service.stop['pod_uid'], runner_available=True)
+    assert caught.value.code == code
+    if case == 'running':
+        assert caught.value.observed['runningConversations'] == 1
+        assert len(service.drains) == drains  # refused before any drain
+        assert conversation(admin, service.owner) == ('running', None)
+    assert receipt_of(admin, service.owner) is None and service.deletes == []
+
+
+def test_operator_reclaim_of_an_available_runner_rechecks_running_after_the_drain(service, admin):
+    """A conversation that starts running between the first check and the accepting transaction refuses."""
+    from ops.runner_controller_service import Refusal
+    def drain(body):
+        running_conversation(admin, service.owner)
+        return refuse_drain(409)(body)
+    blocked(service, health={}, drain=drain)
+    with pytest.raises(Refusal) as caught:
+        service.service.reclaim(service.owner, service.stop['pod_uid'], runner_available=True)
+    assert caught.value.code == 'running_conversations' and caught.value.observed['runningConversations'] == 1
+    assert receipt_of(admin, service.owner) is None and conversation(admin, service.owner) == ('running', None)
+
+
+def conversation_row(admin, owner, state):
+    with admin.begin() as db:
+        return db.execute(text("INSERT INTO research.conversations(owner_id,title,state) VALUES(:owner,'done',:state) RETURNING id"),
+                          {'owner': owner, 'state': state}).scalar_one()
+
+
+def state_of(admin, identity):
+    with admin.begin() as db:
+        return db.execute(text('SELECT state FROM research.conversations WHERE id=:id'), {'id': identity}).scalar_one()

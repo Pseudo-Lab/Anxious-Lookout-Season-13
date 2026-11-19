@@ -56,16 +56,45 @@ def test_wrong_identity_never_drains(setup, field):
     assert not list(root.glob('termination-*'))
 
 
-@pytest.mark.parametrize('busy', ['active','locked','running','failed','unknown'])
+@pytest.mark.parametrize('busy', ['active','locked','running','unknown','missing-state'])
 def test_uncertain_work_never_creates_receipt(setup, busy):
     client, body, headers, root = setup
     native = client.app.state.native
     if busy == 'active': native.active_session = str(uuid4())
     elif busy == 'locked': native.lock.acquire()
-    else: native.mapping = {'session': {'state':busy}}
+    elif busy == 'missing-state': native.mapping = {'settled': {'state': 'failed'}, 'session': {}}
+    else: native.mapping = {'settled': {'state': 'failed'}, 'session': {'state':busy}}
     assert client.post('/lifecycle/drain',json=body,headers=headers).status_code == 409
     assert not client.app.state.stopping and native.closes == 0
     assert not list(root.glob('termination-*'))
+
+
+def test_failed_session_is_settled_and_drains(setup):
+    """#114: a finished failed turn holds no work; it no longer blocks drain (it did on every later Pod)."""
+    client, body, headers, root = setup
+    native = client.app.state.native
+    native.mapping = {'a': {'state': 'failed'}, 'b': {'state': 'idle'}}
+    response = client.post('/lifecycle/drain', json=body, headers=headers)
+    assert response.status_code == 200 and response.json() == {**body, 'version': 1, 'clean': True}
+    assert native.closes == 1 and client.app.state.stopping
+
+
+def test_close_failure_still_leaves_an_unclean_receipt(setup):
+    """#114: native.close() raising after stopping was set must not leave a runner that refuses every
+    later drain with no receipt; the receipt says clean false and the same request gets it again."""
+    client, body, headers, root = setup
+    native = client.app.state.native
+    def broken():
+        native.closes += 1
+        if native.closes == 1:
+            raise OSError('close failed')
+        return False  # the lifespan shutdown's later close
+    native.close = broken
+    response = client.post('/lifecycle/drain', json=body, headers=headers)
+    assert response.status_code == 200 and response.json() == {**body, 'version': 1, 'clean': False}
+    assert read_private(root/('termination-'+body['podUid']+'.json')) == response.json()
+    assert client.post('/lifecycle/drain', json=body, headers=headers).json() == response.json()
+    assert native.closes == 1
 
 
 def test_unclean_shutdown_never_claims_clean_receipt(setup):
@@ -127,9 +156,11 @@ def test_idle_evidence_uses_native_clock_and_refuses_pending_work(setup):
     for _ in range(2):
         assert client.post('/lifecycle/idle',json=query,headers=headers).json() == {
             'ownerId':body['ownerId'],'stateId':body['stateId'],'podUid':body['podUid'],'idle':True}
-    for state in ('running','failed','unknown'):
-        native.mapping = {'session':{'state':state}}
+    for state in ('running','unknown'):
+        native.mapping = {'settled':{'state':'failed'}, 'session':{'state':state}}
         assert client.post('/lifecycle/idle',json=query,headers=headers).json()['idle'] is False
+    native.mapping = {'session':{'state':'failed'}, 'other':{'state':'idle'}}  # #114: failed is settled
+    assert client.post('/lifecycle/idle',json=query,headers=headers).json()['idle'] is True
     native.mapping = {}
     native.active_session = 'busy'
     assert client.post('/lifecycle/idle',json=query,headers=headers).json()['idle'] is False

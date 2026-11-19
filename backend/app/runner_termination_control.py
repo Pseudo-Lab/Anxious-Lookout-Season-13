@@ -127,11 +127,31 @@ def operator_receipt(stop, operator):
             'operator': {'health': dict(health), 'drainStatus': operator['drainStatus'], 'at': operator['at']}}
 
 
+AVAILABLE_OPERATOR = {'health', 'drainStatus', 'runningConversations', 'at'}
+
+
+def operator_available_receipt(stop, operator):
+    """#114 R2 extension, only on the operator's explicit flag: a runner that reports itself available
+    but refuses its drain with 409 while the database holds no running conversation of the owner (an
+    older runner image blocks drain on a settled `failed` session entry). Version 4 stays unchanged."""
+    require(type(operator) is dict and set(operator) == AVAILABLE_OPERATOR)
+    health = operator['health']
+    require(type(health) is dict and set(health) == OPERATOR_HEALTH and health['available'] is True
+            and health['reason'] is None and health['verification'] in {'unverified', 'real', 'fixture'})
+    require(type(operator['drainStatus']) is int and operator['drainStatus'] == 409)
+    require(type(operator['runningConversations']) is int and operator['runningConversations'] == 0)
+    at = datetime.fromisoformat(operator['at'])
+    require(at.tzinfo is not None)
+    return {**drain_body(stop), 'version': 5,
+            'operator': {'health': dict(health), 'drainStatus': 409, 'runningConversations': 0, 'at': operator['at']}}
+
+
 def receipt_valid(stop):
     receipt = stop['receipt']
-    if receipt == {**drain_body(stop), 'version': 1, 'clean': True}:
-        return True
-    builders = {2: ('terminal', terminal_receipt), 3: ('unavailable', unavailable_receipt), 4: ('operator', operator_receipt)}
+    if receipt in ({**drain_body(stop), 'version': 1, 'clean': True}, {**drain_body(stop), 'version': 1, 'clean': False}):
+        return True  # #114 ②: clean is evidence only.
+    builders = {2: ('terminal', terminal_receipt), 3: ('unavailable', unavailable_receipt), 4: ('operator', operator_receipt),
+                5: ('operator', operator_available_receipt)}
     if type(receipt) is not dict or type(receipt.get('version')) is not int or receipt['version'] not in builders:
         return False
     key, build = builders[receipt['version']]
@@ -155,9 +175,11 @@ def accept_drain(db, owner, stop_id, receipt):
     state = registry._current(owner)
     stop = stop_for(db,state)
     require(stop is not None and stop['stop_id'] == stop_id and stop['pod_uid'] == state.pod_uid)
-    require(type(receipt) is dict and receipt.get('clean') is True
+    # #114 ②: the runner drains only with no turn in flight; `clean` (graceful native exit) is
+    # recorded as evidence, as in version 3, and does not decide acceptance.
+    require(type(receipt) is dict and type(receipt.get('clean')) is bool
             and type(receipt.get('version')) is int and type(receipt.get('generation')) is int
-            and receipt == {**drain_body(stop),'version':1,'clean':True})
+            and receipt == {**drain_body(stop),'version':1,'clean':receipt['clean']})
     no_pending_work(db,state)
     require(state.phase in {Phase.READY,Phase.UNREACHABLE,Phase.STOPPING})
     if stop['receipt'] is not None:
@@ -219,6 +241,14 @@ def accept_unavailable(db, owner, stop_id, receipt, health):
 def accept_operator(db, owner, stop_id, operator):
     """#61 R2: an operator reclaim; never replaces an existing receipt."""
     return _accept_closed(db, owner, stop_id, lambda stop: operator_receipt(stop, operator),
+                          lambda stop, value: False)
+
+
+@atomic
+def accept_operator_available(db, owner, stop_id, operator):
+    """#114 R2 extension (version 5); never replaces an existing receipt. `_accept_closed` rechecks that
+    no conversation of the owner is running in this transaction."""
+    return _accept_closed(db, owner, stop_id, lambda stop: operator_available_receipt(stop, operator),
                           lambda stop, value: False)
 
 

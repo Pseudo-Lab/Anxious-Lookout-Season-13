@@ -97,6 +97,9 @@ REPLY_CODES = frozenset({
     "policy_refused", "budget_exhausted", "provider_rate_limited", "unavailable"})
 STAGES = frozenset({"unknown", "turn_mismatch", "binding", "permission", "scope", "callback", "callback_body",
                     "callback_done"})
+# #114: session states that hold no work. `failed` is a finished turn (kept on the volume until the
+# session's next turn), so it no longer blocks idle evidence or drain; any other non-idle state does.
+SETTLED_SESSION_STATES = frozenset({'idle', 'failed'})
 
 
 def failure_kind(error):
@@ -1568,7 +1571,7 @@ def create_app():
             if not app.state.stopping and native is not None:
                 with native.state_lock:
                     idle = (native.active_session is None and not native.lock.locked()
-                            and all(entry.get('state') == 'idle' for entry in native.mapping.values())
+                            and all(entry.get('state') in SETTLED_SESSION_STATES for entry in native.mapping.values())
                             and time.monotonic()-native.idle_since >= body.idleSeconds)
             elif not app.state.stopping and app.state.auth_failure == 'not_configured':
                 idle = (not (root/'broker.json').exists() and not (root/'codex').exists()
@@ -1639,14 +1642,20 @@ def create_app():
                 return JSONResponse({'error': 'codex_policy_refused'}, status_code=409)
             if native is not None:
                 with native.state_lock:
-                    # Failed/unknown projections require reconciliation too;
-                    # process death alone cannot resolve an uncertain request.
+                    # Unknown projections and running entries require reconciliation; process death alone
+                    # cannot resolve an uncertain request. A `failed` entry is settled (#114).
                     if (native.active_session is not None or native.lock.locked()
-                            or any(entry.get('state') != 'idle' for entry in native.mapping.values())):
+                            or not all(entry.get('state') in SETTLED_SESSION_STATES for entry in native.mapping.values())):
                         return JSONResponse({'error': 'conflict'}, status_code=409)
                     app.state.stopping = True
                     native.closing = True
-                receipt = {**value, 'version': 1, 'clean': native.close() is True}
+                try:
+                    clean = native.close() is True
+                except Exception:
+                    # #114: stopping is already set and no turn was in flight; a receipt (never clean)
+                    # instead of a runner that refuses every later drain with no receipt.
+                    clean = False
+                receipt = {**value, 'version': 1, 'clean': clean}
             elif app.state.auth_failure == 'not_configured':
                 # Never supplied: nothing was installed or started.
                 app.state.stopping = True

@@ -153,6 +153,81 @@ def owned(store, identity, lock=False):
     return row
 
 
+class RunnerHistoryInvalid(Exception):
+    """The runner's read names this request but carries no usable record."""
+
+
+def checked_runner_read(row, result):
+    """The runner's read of this row's own request, else ValueError (keep accepted uncertainty)."""
+    if result.get("requestId") != str(row.request_id) or result.get("state") not in {"running", "idle", "failed"}:
+        raise ValueError()
+    thread_id = result.get("threadId")
+    if thread_id is not None and (not isinstance(thread_id, str) or not 1 <= len(thread_id) <= 200):
+        raise ValueError()
+    expected_thread = row.native_record.get("nativeThreadId")
+    if expected_thread is not None and thread_id != expected_thread:
+        raise ValueError()
+    return result
+
+
+def apply_runner_read(row, result):
+    """Record a checked runner read on a running row: the native record, and the runner's own end state
+    once the turn is no longer running. Shared by the conversation read (refresh) and the pre-stop
+    sync (#114 ①), so both record the same actual result."""
+    record = result.get("record")
+    if not isinstance(record, dict) or not isinstance(record.get("turns", []), list):
+        raise RunnerHistoryInvalid()
+    # Native snapshots cannot overwrite platform-retained failed inputs.
+    scopes = row.native_record.get("platformRequests", [])
+    turn_id = result.get("turnId")
+    if isinstance(turn_id, str) and any(turn.get("id") == turn_id for turn in record.get("turns", [])):
+        scopes = [{**entry, "turnId": turn_id} if entry["requestId"] == str(row.request_id) and not entry.get("turnId") else entry for entry in scopes]
+    thread_id = result.get("threadId")
+    row.native_record = {**credentials.redact(record),
+                         "unrecordedInputs": row.native_record.get("unrecordedInputs", []),
+                         "platformRequests": scopes,
+                         'researchCalls': row.native_record.get('researchCalls', [])}
+    if thread_id is not None:
+        row.native_record["nativeThreadId"] = thread_id  # Server-only mapping, excluded from browser summaries/items.
+    if result["state"] != row.state:
+        row.state = result["state"]
+        safe_errors = {*ERRORS.values(), "codex_failed", "codex_rejected", "codex_unavailable"}
+        row.error_code = result.get("errorCode") if row.state == "failed" and result.get("errorCode") in safe_errors else "codex_failed" if row.state == "failed" else None
+        row.version += 1
+        row.updated_at = datetime.now(timezone.utc)
+        row.tool_token_hash = None
+        credentials.revoke(row)
+        # A failed later turn can repeat earlier text. Only its own native
+        # turn, not an older matching message, proves the input was recorded.
+        if result.get("turnId") and any(item.get("type") == "userMessage"
+               for turn in record.get("turns", []) if turn.get("id") == result["turnId"]
+               for item in turn.get("items", [])):
+            row.pending_text = None
+
+
+def sync_running(sessions, runner, owner):
+    """#114 ①: before a stop fences the runner, record each running conversation's actual runner result,
+    as a conversation read would. Best effort, one row lock and one runner read at a time: a read that
+    fails or still says `running` leaves the row as it is; the controller closes only what is still
+    running after the runner's own drain receipt. Returns how many rows left `running`."""
+    with sessions.begin() as db:
+        identities = db.scalars(select(Conversation.id).where(
+            Conversation.owner_id == owner, Conversation.state == "running")).all()
+    settled = 0
+    for identity in identities:
+        try:
+            with sessions.begin() as db:
+                row = db.scalar(select(Conversation).where(
+                    Conversation.id == identity, Conversation.owner_id == owner).with_for_update())
+                if row is None or row.state != "running":
+                    continue
+                apply_runner_read(row, checked_runner_read(row, runner.read(row.id)))
+                settled += row.state != "running"
+        except Exception:
+            continue  # Never blocks the stop; accepted uncertainty stays for the controller.
+    return settled
+
+
 def summary(row):
     metadata = request_metadata(row)
     return {"id": str(row.id), "title": row.title, "state": row.state, "version": row.version,
@@ -376,47 +451,15 @@ def register_conversations(app, authorized, sessions, settings, response, write,
         try:
             if not runner:
                 raise ValueError()
-            result = runner.read(row.id)
-            if result.get("requestId") != str(row.request_id) or result.get("state") not in {"running", "idle", "failed"}:
-                raise ValueError()
-            thread_id = result.get("threadId")
-            if thread_id is not None and (not isinstance(thread_id, str) or not 1 <= len(thread_id) <= 200):
-                raise ValueError()
-            expected_thread = row.native_record.get("nativeThreadId")
-            if expected_thread is not None and thread_id != expected_thread:
-                raise ValueError()
+            result = checked_runner_read(row, runner.read(row.id))
         except (httpx.HTTPError, ValueError, KeyError):
             # Tool-token expiry is not proof of turn termination, including
             # during feature-off recovery. Keep accepted uncertainty intact.
             return
-        record = result.get("record")
-        if not isinstance(record, dict) or not isinstance(record.get("turns", []), list):
+        try:
+            apply_runner_read(row, result)
+        except RunnerHistoryInvalid:
             fail("codex_unavailable", "Codex history is unavailable", 503)
-        # Native snapshots cannot overwrite platform-retained failed inputs.
-        scopes = row.native_record.get("platformRequests", [])
-        turn_id = result.get("turnId")
-        if isinstance(turn_id, str) and any(turn.get("id") == turn_id for turn in record.get("turns", [])):
-            scopes = [{**entry, "turnId": turn_id} if entry["requestId"] == str(row.request_id) and not entry.get("turnId") else entry for entry in scopes]
-        row.native_record = {**credentials.redact(record),
-                             "unrecordedInputs": row.native_record.get("unrecordedInputs", []),
-                             "platformRequests": scopes,
-                             'researchCalls': row.native_record.get('researchCalls', [])}
-        if thread_id is not None:
-            row.native_record["nativeThreadId"] = thread_id  # Server-only mapping, excluded from browser summaries/items.
-        if result["state"] != row.state:
-            row.state = result["state"]
-            safe_errors = {*ERRORS.values(), "codex_failed", "codex_rejected", "codex_unavailable"}
-            row.error_code = result.get("errorCode") if row.state == "failed" and result.get("errorCode") in safe_errors else "codex_failed" if row.state == "failed" else None
-            row.version += 1
-            row.updated_at = datetime.now(timezone.utc)
-            row.tool_token_hash = None
-            credentials.revoke(row)
-            # A failed later turn can repeat earlier text. Only its own native
-            # turn, not an older matching message, proves the input was recorded.
-            if result.get("turnId") and any(item.get("type") == "userMessage"
-                   for turn in record.get("turns", []) if turn.get("id") == result["turnId"]
-                   for item in turn.get("items", [])):
-                row.pending_text = None
         if store.db.is_modified(row):
             # #90 M5: refresh UPDATEs counted apart (fallback polling vs the stream path, which writes nothing).
             logging.getLogger("uvicorn.error").info("conversation_refresh_write %s", json.dumps({"state": row.state}))
