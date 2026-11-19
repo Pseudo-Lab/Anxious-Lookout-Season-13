@@ -4045,6 +4045,985 @@
           ]
         }
       ]
+    },
+    {
+      "name": "insert-middle-keeps-order",
+      "base": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001121",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "첫째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001122",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "둘째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001123",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "셋째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "candidate": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001121",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "첫째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001125",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "새 블록",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001122",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "둘째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001123",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "셋째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "baseTextProjection": "첫째\n\n둘째\n\n셋째",
+      "candidateTextProjection": "첫째\n\n새 블록\n\n둘째\n\n셋째",
+      "formatChanges": [
+        {
+          "baseBlockId": null,
+          "candidateBlockId": "00000000-0000-0000-0000-000000001125",
+          "kind": "added",
+          "changedProperties": [
+            "structure"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "remove-middle-keeps-order",
+      "base": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001121",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "첫째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001122",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "둘째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001123",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "셋째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "candidate": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001121",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "첫째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001123",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "셋째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "baseTextProjection": "첫째\n\n둘째\n\n셋째",
+      "candidateTextProjection": "첫째\n\n셋째",
+      "formatChanges": [
+        {
+          "baseBlockId": "00000000-0000-0000-0000-000000001122",
+          "candidateBlockId": null,
+          "kind": "removed",
+          "changedProperties": [
+            "structure"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "move-last-to-first",
+      "base": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001121",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "첫째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001122",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "둘째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001123",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "셋째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001124",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "넷째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "candidate": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001124",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "넷째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001121",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "첫째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001122",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "둘째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001123",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "셋째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "baseTextProjection": "첫째\n\n둘째\n\n셋째\n\n넷째",
+      "candidateTextProjection": "넷째\n\n첫째\n\n둘째\n\n셋째",
+      "formatChanges": [
+        {
+          "baseBlockId": "00000000-0000-0000-0000-000000001124",
+          "candidateBlockId": "00000000-0000-0000-0000-000000001124",
+          "kind": "moved",
+          "changedProperties": [
+            "position"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "swap-adjacent-later-moves",
+      "base": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001121",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "첫째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001122",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "둘째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "candidate": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001122",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "둘째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001121",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "첫째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "baseTextProjection": "첫째\n\n둘째",
+      "candidateTextProjection": "둘째\n\n첫째",
+      "formatChanges": [
+        {
+          "baseBlockId": "00000000-0000-0000-0000-000000001121",
+          "candidateBlockId": "00000000-0000-0000-0000-000000001121",
+          "kind": "moved",
+          "changedProperties": [
+            "position"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "insert-and-move",
+      "base": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001121",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "첫째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001122",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "둘째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001123",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "셋째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001124",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "넷째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "candidate": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001122",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "둘째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001125",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "새 블록",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001123",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "셋째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001121",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "첫째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001124",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "넷째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "baseTextProjection": "첫째\n\n둘째\n\n셋째\n\n넷째",
+      "candidateTextProjection": "둘째\n\n새 블록\n\n셋째\n\n첫째\n\n넷째",
+      "formatChanges": [
+        {
+          "baseBlockId": null,
+          "candidateBlockId": "00000000-0000-0000-0000-000000001125",
+          "kind": "added",
+          "changedProperties": [
+            "structure"
+          ]
+        },
+        {
+          "baseBlockId": "00000000-0000-0000-0000-000000001121",
+          "candidateBlockId": "00000000-0000-0000-0000-000000001121",
+          "kind": "moved",
+          "changedProperties": [
+            "position"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "insert-then-format-only",
+      "base": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001121",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "첫째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001122",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "둘째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001123",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "셋째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "candidate": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001121",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "첫째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001125",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "새 블록",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001122",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "둘째",
+                "marks": []
+              }
+            ],
+            "align": "center"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001123",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "셋째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "baseTextProjection": "첫째\n\n둘째\n\n셋째",
+      "candidateTextProjection": "첫째\n\n새 블록\n\n둘째\n\n셋째",
+      "formatChanges": [
+        {
+          "baseBlockId": null,
+          "candidateBlockId": "00000000-0000-0000-0000-000000001125",
+          "kind": "added",
+          "changedProperties": [
+            "structure"
+          ]
+        },
+        {
+          "baseBlockId": "00000000-0000-0000-0000-000000001122",
+          "candidateBlockId": "00000000-0000-0000-0000-000000001122",
+          "kind": "format-only",
+          "changedProperties": [
+            "align"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "insert-then-layout-without-position",
+      "base": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001121",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "첫째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001127",
+            "type": "list",
+            "ordered": false,
+            "items": [
+              {
+                "id": "00000000-0000-0000-0000-000000001129",
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000001132",
+                    "type": "paragraph",
+                    "runs": [
+                      {
+                        "text": "항목 하나",
+                        "marks": []
+                      }
+                    ],
+                    "align": "left"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "candidate": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001125",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "새 블록",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001121",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "첫째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001127",
+            "type": "list",
+            "ordered": true,
+            "items": [
+              {
+                "id": "00000000-0000-0000-0000-000000001129",
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000001132",
+                    "type": "paragraph",
+                    "runs": [
+                      {
+                        "text": "항목 하나",
+                        "marks": []
+                      }
+                    ],
+                    "align": "left"
+                  }
+                ]
+              }
+            ],
+            "start": 1
+          }
+        ]
+      },
+      "baseTextProjection": "첫째\n\n항목 하나",
+      "candidateTextProjection": "새 블록\n\n첫째\n\n항목 하나",
+      "formatChanges": [
+        {
+          "baseBlockId": null,
+          "candidateBlockId": "00000000-0000-0000-0000-000000001125",
+          "kind": "added",
+          "changedProperties": [
+            "structure"
+          ]
+        },
+        {
+          "baseBlockId": "00000000-0000-0000-0000-000000001127",
+          "candidateBlockId": "00000000-0000-0000-0000-000000001127",
+          "kind": "layout",
+          "changedProperties": [
+            "ordered",
+            "start"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "nested-insert-keeps-order",
+      "base": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001126",
+            "type": "quote",
+            "blocks": [
+              {
+                "id": "00000000-0000-0000-0000-000000001121",
+                "type": "paragraph",
+                "runs": [
+                  {
+                    "text": "첫째",
+                    "marks": []
+                  }
+                ],
+                "align": "left"
+              },
+              {
+                "id": "00000000-0000-0000-0000-000000001122",
+                "type": "paragraph",
+                "runs": [
+                  {
+                    "text": "둘째",
+                    "marks": []
+                  }
+                ],
+                "align": "left"
+              }
+            ]
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001123",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "셋째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "candidate": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001126",
+            "type": "quote",
+            "blocks": [
+              {
+                "id": "00000000-0000-0000-0000-000000001125",
+                "type": "paragraph",
+                "runs": [
+                  {
+                    "text": "새 블록",
+                    "marks": []
+                  }
+                ],
+                "align": "left"
+              },
+              {
+                "id": "00000000-0000-0000-0000-000000001121",
+                "type": "paragraph",
+                "runs": [
+                  {
+                    "text": "첫째",
+                    "marks": []
+                  }
+                ],
+                "align": "left"
+              },
+              {
+                "id": "00000000-0000-0000-0000-000000001122",
+                "type": "paragraph",
+                "runs": [
+                  {
+                    "text": "둘째",
+                    "marks": []
+                  }
+                ],
+                "align": "left"
+              }
+            ]
+          },
+          {
+            "id": "00000000-0000-0000-0000-000000001123",
+            "type": "paragraph",
+            "runs": [
+              {
+                "text": "셋째",
+                "marks": []
+              }
+            ],
+            "align": "left"
+          }
+        ]
+      },
+      "baseTextProjection": "첫째\n\n둘째\n\n셋째",
+      "candidateTextProjection": "새 블록\n\n첫째\n\n둘째\n\n셋째",
+      "formatChanges": [
+        {
+          "baseBlockId": null,
+          "candidateBlockId": "00000000-0000-0000-0000-000000001125",
+          "kind": "added",
+          "changedProperties": [
+            "structure"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "item-insert-keeps-order",
+      "base": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001127",
+            "type": "list",
+            "ordered": false,
+            "items": [
+              {
+                "id": "00000000-0000-0000-0000-000000001129",
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000001132",
+                    "type": "paragraph",
+                    "runs": [
+                      {
+                        "text": "항목 하나",
+                        "marks": []
+                      }
+                    ],
+                    "align": "left"
+                  }
+                ]
+              },
+              {
+                "id": "00000000-0000-0000-0000-000000001130",
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000001133",
+                    "type": "paragraph",
+                    "runs": [
+                      {
+                        "text": "항목 둘",
+                        "marks": []
+                      }
+                    ],
+                    "align": "left"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "candidate": {
+        "format": "post-blocks",
+        "version": 1,
+        "blocks": [
+          {
+            "id": "00000000-0000-0000-0000-000000001127",
+            "type": "list",
+            "ordered": false,
+            "items": [
+              {
+                "id": "00000000-0000-0000-0000-000000001128",
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000001131",
+                    "type": "paragraph",
+                    "runs": [
+                      {
+                        "text": "새 항목",
+                        "marks": []
+                      }
+                    ],
+                    "align": "left"
+                  }
+                ]
+              },
+              {
+                "id": "00000000-0000-0000-0000-000000001129",
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000001132",
+                    "type": "paragraph",
+                    "runs": [
+                      {
+                        "text": "항목 하나",
+                        "marks": []
+                      }
+                    ],
+                    "align": "left"
+                  }
+                ]
+              },
+              {
+                "id": "00000000-0000-0000-0000-000000001130",
+                "blocks": [
+                  {
+                    "id": "00000000-0000-0000-0000-000000001133",
+                    "type": "paragraph",
+                    "runs": [
+                      {
+                        "text": "항목 둘",
+                        "marks": []
+                      }
+                    ],
+                    "align": "left"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "baseTextProjection": "항목 하나\n항목 둘",
+      "candidateTextProjection": "새 항목\n항목 하나\n항목 둘",
+      "formatChanges": [
+        {
+          "baseBlockId": null,
+          "candidateBlockId": "00000000-0000-0000-0000-000000001128",
+          "kind": "added",
+          "changedProperties": [
+            "structure"
+          ]
+        },
+        {
+          "baseBlockId": null,
+          "candidateBlockId": "00000000-0000-0000-0000-000000001131",
+          "kind": "added",
+          "changedProperties": [
+            "structure"
+          ]
+        }
+      ]
     }
   ],
   "markdown": [
