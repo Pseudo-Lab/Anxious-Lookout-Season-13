@@ -115,12 +115,20 @@ def test_receipt_write_failure_is_retried_by_the_same_request_only(setup, monkey
     def flaky(path, value):
         if path.name.startswith('termination-'):
             attempts.append(path.name)
-            if len(attempts) == 1:
-                if failure == 'after-rename':
-                    write(path, value)  # stored, then the directory fsync failed
+            if len(attempts) == 1 and failure == 'before-rename':
                 raise OSError('synthetic transient write error')
         return write(path, value)
     monkeypatch.setattr(runner_app, 'write_private', flaky)
+    if failure == 'after-rename':
+        # The real failure point (review 70c4a60): the rename happened, then fsync of the directory failed.
+        import os, stat
+        fsync, failed = os.fsync, []
+        def directory_fsync(descriptor):
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode) and not failed:
+                failed.append(descriptor)
+                raise OSError('synthetic directory fsync error')
+            return fsync(descriptor)
+        monkeypatch.setattr(os, 'fsync', directory_fsync)
     with pytest.raises(OSError):
         client.post('/lifecycle/drain', json=body, headers=headers)
     assert client.get('/health', headers=headers).json()['reason'] == 'unavailable'
@@ -132,6 +140,8 @@ def test_receipt_write_failure_is_retried_by_the_same_request_only(setup, monkey
     assert read_private(root/('termination-'+body['podUid']+'.json')) == expected
     assert client.post('/lifecycle/drain', json=body, headers=headers).json() == expected
     assert native.closes == 1 and len(attempts) == (1 if failure == 'after-rename' else 2)
+    if failure == 'after-rename':
+        assert len(failed) == 1  # the directory fsync was the point that failed
 
 
 def test_pending_receipt_never_overwrites_a_different_file(setup, monkeypatch):

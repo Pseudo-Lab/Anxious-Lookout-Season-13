@@ -191,3 +191,18 @@ def test_a_runner_error_other_than_not_found_ends_the_sync():
     runner = Runner({first.id: stopping, second.id: answer(second, 'idle')})
     assert sync_running(Sessions([first, second]), runner, uuid4()) == 0
     assert runner.reads == [first.id]
+
+
+def test_sql_budget_is_set_only_inside_the_sync_and_installs_once():
+    from sqlalchemy import create_engine
+    from app import sql_budget
+    engine = create_engine('sqlite://')
+    seen = []
+    class Reading(Runner):
+        def read(self, identity):
+            seen.append(sql_budget.DEADLINE.get() is not None)
+            return super().read(identity)
+    y = row()
+    assert sync_running(Sessions([y]), Reading({y.id: answer(y, 'idle')}), uuid4(), engines=(engine, engine, None)) == 1
+    assert seen == [True] and sql_budget.DEADLINE.get() is None
+    assert engine._sql_budget_installed is True

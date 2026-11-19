@@ -209,7 +209,7 @@ def apply_runner_read(row, result):
 SYNC_SECONDS = 3
 
 
-def sync_running(sessions, runner, owner, *, seconds=SYNC_SECONDS, clock=None):
+def sync_running(sessions, runner, owner, *, seconds=SYNC_SECONDS, clock=None, engines=()):
     """#114 ①: before a stop fences the runner, record each running conversation's actual runner result,
     as a conversation read would. Best effort, one row and one runner read at a time: a read that fails
     or still says `running` leaves the row as it is; the controller closes only what is still running
@@ -222,12 +222,20 @@ def sync_running(sessions, runner, owner, *, seconds=SYNC_SECONDS, clock=None):
     No conversation row is locked while the runner is asked: the runner call takes the registry owner
     lock on its own connection, and runner-controller holds that lock while it fails leftover running
     rows. The row is read, the runner asked, then the row locked again and updated only if it is still
-    the same running request at the same version."""
+    the same running request at the same version.
+
+    PostgreSQL waits share the same budget (`engines`: the API engine and the runner runtime's): every
+    statement inside sets lock_timeout/statement_timeout to the time left, so an owner lock held by the
+    controller ends the sync at the deadline instead of holding logout (#114, review 70c4a60)."""
     import time
-    from . import runner_http_budget
+    from . import runner_http_budget, sql_budget
     clock = clock or time.monotonic
     end = clock() + seconds
+    for engine in engines:
+        sql_budget.install(engine)
     marker = runner_http_budget.begin(end, clock)
+    database = sql_budget.bounded(time.monotonic() + seconds)
+    database.__enter__()
     settled = 0
     try:
         with sessions.begin() as db:
@@ -261,6 +269,7 @@ def sync_running(sessions, runner, owner, *, seconds=SYNC_SECONDS, clock=None):
     except Exception:
         pass
     finally:
+        database.__exit__(None, None, None)
         runner_http_budget.finish(marker)
     return settled
 

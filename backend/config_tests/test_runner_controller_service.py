@@ -496,3 +496,25 @@ def test_controller_gives_up_a_held_conversation_row_with_a_reason(service, admi
         holder.close()
     assert receipt_of(admin, service.owner) is None and conversation(admin, service.owner) == ('running', None)
     assert service.service.step(service.owner, 300) == 'deleting'  # the next pass, once the row is free
+
+
+def test_pre_stop_sync_gives_up_an_owner_lock_held_elsewhere_within_its_budget(service, client, admin):
+    """#114 (review 70c4a60): the controller (or anything) holding the owner advisory lock must not hold
+    logout past the sync budget; the sync ends and the row stays for the controller."""
+    import time
+    from app.conversations import sync_running
+    from app.runner_registry import Registry
+    running_conversation(admin, service.owner)
+    held = admin.connect()
+    holding = held.begin()
+    Registry(held)._lock(service.owner)
+    try:
+        started = time.monotonic()
+        settled = sync_running(client.app.state.sessions, service.rt.runner(service.owner), service.owner,
+                               seconds=3, engines=(client.app.state.engine, service.rt.engine))
+        elapsed = time.monotonic() - started
+    finally:
+        holding.rollback()
+        held.close()
+    assert settled == 0 and elapsed < 4.5, elapsed  # 3 s budget plus a little bookkeeping, not the lock
+    assert conversation(admin, service.owner) == ('running', None)

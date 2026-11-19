@@ -156,7 +156,8 @@ def stop_runtime(app, owner):
     # is closed by the controller only after the runner's own drain receipt.
     try:
         from .conversations import sync_running
-        sync_running(app.state.sessions, runtime.runner(owner), owner)
+        sync_running(app.state.sessions, runtime.runner(owner), owner,
+                     engines=(getattr(app.state, 'engine', None), getattr(runtime, 'engine', None)))
     except Exception:
         pass
     try:
