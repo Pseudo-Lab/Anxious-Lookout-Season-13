@@ -1450,6 +1450,7 @@ def create_app():
             app.state.stopping = False
             app.state.idle_since = time.monotonic()
             app.state.drain = None
+            app.state.drain_pending = None  # #114: (request, receipt) decided but not yet stored
             try:
                 mode = os.getenv("CODEX_AUTH_MODE", "none")
                 if mode == "personal-cache":
@@ -1635,6 +1636,13 @@ def create_app():
                     return JSONResponse({'error': 'conflict'}, status_code=409)
                 receipt = read_private(root / ('termination-'+pod_uid+'.json'))
                 return receipt
+            if app.state.drain_pending is not None:
+                # #114: this process already stopped and decided the receipt, but storing it failed.
+                # Only the same request may store that same receipt; nothing is closed again.
+                pending, receipt = app.state.drain_pending
+                if pending != value:
+                    return JSONResponse({'error': 'conflict'}, status_code=409)
+                return store_receipt(value, receipt)
             native = app.state.native
             if app.state.stopping:
                 return JSONResponse({'error': 'codex_runner_stopped'}, status_code=503)
@@ -1670,10 +1678,26 @@ def create_app():
                 receipt = {**value, 'version': 3, 'unavailable': {'reason': unavailable_reason(), 'clean': clean}}
             else:
                 return JSONResponse({'error': 'codex_unavailable'}, status_code=503)
-            require_binding(root, owner, state_id)
-            write_private(root / ('termination-'+pod_uid+'.json'), receipt)
-            app.state.drain = value
-            return receipt
+            app.state.drain_pending = (value, receipt)
+            return store_receipt(value, receipt)
+
+    def store_receipt(value, receipt):
+        """Persist the decided receipt. A failure leaves drain_pending set, so the same request retries
+        the write instead of meeting a stopping runner with no receipt (#114). An existing file is never
+        overwritten unless it already holds exactly this receipt (a write that failed after its rename)."""
+        require_binding(root, owner, state_id)
+        target = root / ('termination-'+pod_uid+'.json')
+        if target.exists() or target.is_symlink():
+            try:
+                existing = read_private(target)
+            except Exception:
+                existing = None
+            if existing != receipt:
+                return JSONResponse({'error': 'codex_policy_refused'}, status_code=409)
+        else:
+            write_private(target, receipt)
+        app.state.drain, app.state.drain_pending = value, None
+        return receipt
 
     def read_locked(identity):
         if app.state.stopping:

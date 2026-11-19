@@ -536,6 +536,7 @@ with `clean: false` (native did not exit gracefully, or its close failed) is acc
 | `reconciliation_required` | `health_*`, `idle_status_<code>`, `idle_unreachable`, `idle_invalid`, `idle_evidence_mismatch` | The runner could not be asked, or answered for another identity |
 | `reconciliation_required` | `pod_uid_mismatch`, `pod_address_invalid` | The live Pod is not the registry's, or has no usable address |
 | `reconciliation_required` | `receipt_rejected`, `stop_refused`, `idle_stop_refused` | The database refused the receipt or the stop intent (nothing was changed) |
+| `reconciliation_required` | `conversation_locked` | A running conversation row stayed locked by an app request for 5 s (lock_timeout); the next pass retries. The controller takes those rows before the owner lock |
 | `reconciliation_required` | `node_not_ready`, `pod_delete_failed`, `release_refused` | Node evidence, the DELETE, or the release proof failed; retried next pass |
 | `reconciliation_required` | `error:<ExceptionClass>` | Anything else (class name only) |
 | `reconciliation_required` | `ensure:<reason>` | Pod creation for a waiting owner failed |

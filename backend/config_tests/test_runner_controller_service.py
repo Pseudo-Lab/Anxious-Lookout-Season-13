@@ -419,3 +419,80 @@ def conversation_row(admin, owner, state):
 def state_of(admin, identity):
     with admin.begin() as db:
         return db.execute(text('SELECT state FROM research.conversations WHERE id=:id'), {'id': identity}).scalar_one()
+
+
+# #114 (review 647653f): the pre-stop sync and the controller never wait on each other ------------------
+def test_pre_stop_sync_holds_no_conversation_row_while_it_waits_for_the_owner_lock(service, client, admin, monkeypatch):
+    """A second logout/DELETE on an open stop runs the sync while the controller fails the leftover row."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from app.conversations import sync_running
+    from app.runner_registry import Registry
+    running_conversation(admin, service.owner)
+    waiting, release, seen = threading.Event(), threading.Event(), {}
+    lock = Registry._lock
+    def observe_lock(registry, owner):
+        if threading.current_thread().name.startswith('sync') and not waiting.is_set():
+            with admin.begin() as db:  # Could another transaction take the running row right now?
+                seen['free'] = db.execute(text("""SELECT count(*) FROM (SELECT 1 FROM research.conversations
+                    WHERE owner_id=:owner AND state='running' FOR UPDATE SKIP LOCKED) rows"""), {'owner': owner}).scalar_one()
+            waiting.set()
+            release.wait(10)
+        return lock(registry, owner)
+    monkeypatch.setattr(Registry, '_lock', observe_lock)
+    with ThreadPoolExecutor(1, thread_name_prefix='sync') as api, ThreadPoolExecutor(1) as controller:
+        sync = api.submit(sync_running, client.app.state.sessions, service.rt.runner(service.owner), service.owner)
+        try:
+            assert waiting.wait(5)
+            assert seen['free'] == 1  # the sync asks the runner with no row lock held
+            step = controller.submit(service.service.step, service.owner, 300)
+            assert step.result(timeout=10) == 'deleting'  # not blocked by the sync
+        finally:
+            release.set()
+        assert sync.result(timeout=10) == 0  # the runner is stopping now: nothing to record
+    assert conversation(admin, service.owner) == ('failed', 'codex_runner_lost')
+
+
+def test_controller_waits_for_a_held_conversation_row_without_holding_the_owner_lock(service, admin):
+    """A conversation read holds its row and then asks for the owner lock on another connection: the
+    controller takes the rows first, so the owner lock stays free while it waits."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from app.runner_registry import Registry
+    running_conversation(admin, service.owner)
+    holder = admin.connect()
+    reader = holder.begin()
+    holder.execute(text("SELECT 1 FROM research.conversations WHERE owner_id=:owner AND state='running' FOR UPDATE"),
+                   {'owner': service.owner})
+    try:
+        with ThreadPoolExecutor(1) as controller:
+            step = controller.submit(service.service.step, service.owner, 300)
+            threading.Event().wait(1)
+            assert not step.done()
+            with admin.begin() as db:  # what the API's runner call does next, on its own connection
+                db.execute(text("SET LOCAL lock_timeout='1s'"))
+                Registry(db)._lock(service.owner)
+            reader.commit()
+            assert step.result(timeout=10) == 'deleting'
+    finally:
+        if reader.is_active:
+            reader.rollback()
+        holder.close()
+    assert conversation(admin, service.owner) == ('failed', 'codex_runner_lost')
+
+
+def test_controller_gives_up_a_held_conversation_row_with_a_reason(service, admin):
+    running_conversation(admin, service.owner)
+    holder = admin.connect()
+    reader = holder.begin()
+    holder.execute(text("SELECT 1 FROM research.conversations WHERE owner_id=:owner AND state='running' FOR UPDATE"),
+                   {'owner': service.owner})
+    try:
+        with pytest.raises(Refused) as caught:
+            service.service.step(service.owner, 300)  # lock_timeout 5 s
+        assert caught.value.reason == 'conversation_locked'
+    finally:
+        reader.rollback()
+        holder.close()
+    assert receipt_of(admin, service.owner) is None and conversation(admin, service.owner) == ('running', None)
+    assert service.service.step(service.owner, 300) == 'deleting'  # the next pass, once the row is free

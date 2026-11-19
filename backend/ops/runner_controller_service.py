@@ -94,6 +94,18 @@ def reason_of(failure):
     return failure.reason if isinstance(failure, Stuck) else 'error:'+type(failure).__name__
 
 
+def lock_running(db, owner):
+    """#114: take the owner's running conversation rows BEFORE the registry owner lock, in every
+    transaction that fails leftover turns. A conversation read in the API holds its row lock and asks the
+    runner on a second connection that takes the owner lock; the other order here would make the two
+    connections wait on each other, which PostgreSQL cannot detect as a deadlock. lock_timeout turns any
+    wait that remains into a retried pass (`conversation_locked`) instead of a stuck controller."""
+    with stage('conversation_locked'):
+        db.execute(text("SET LOCAL lock_timeout='5s'"))
+        db.execute(text("""SELECT 1 FROM research.conversations
+            WHERE owner_id=:owner AND state='running' FOR UPDATE"""), {'owner': owner}).all()
+
+
 def running_conversations(db, owner):
     return db.execute(text("""SELECT count(*) FROM research.conversations
         WHERE owner_id=:owner AND state='running'"""), {'owner': owner}).scalar_one()
@@ -269,6 +281,7 @@ class Service:
                 if stop['receipt'] is None:
                     if dead is not None:
                         with self.observer_engine.begin() as db, stage('receipt_rejected'):
+                            lock_running(db, owner)  # rows before the owner lock (#114)
                             state = Registry(db)._current(owner)
                             self.close_dead_work(db, state)
                             accept_terminal(db, owner, stop['stop_id'], dead)
@@ -283,6 +296,7 @@ class Service:
                             if not health_failure_matches(health, stop, (receipt.get('unavailable') or {}).get('reason')):
                                 return 'unavailable_reason_mismatch'
                             with self.observer_engine.begin() as db, stage('receipt_rejected'):
+                                lock_running(db, owner)  # rows before the owner lock (#114)
                                 state = Registry(db)._current(owner)
                                 self.close_dead_work(db, state)
                                 accept_unavailable(db, owner, stop['stop_id'], receipt, health)
@@ -292,6 +306,7 @@ class Service:
                             # a conversation still `running` here is closed, in the same transaction that
                             # accepts this stop's own receipt. A refused receipt rolls the closing back.
                             with self.observer_engine.begin() as db, stage('receipt_rejected'):
+                                lock_running(db, owner)  # rows before the owner lock (#114)
                                 state = Registry(db)._current(owner)
                                 self.close_dead_work(db, state)
                                 accept_drain(db, owner, stop['stop_id'], receipt)
@@ -304,6 +319,7 @@ class Service:
                 return 'deleting'
             # The Pod with this UID is gone: kubelet has finished it, or it vanished before any drain.
             with self.observer_engine.begin() as db, stage('release_refused'):
+                lock_running(db, owner)  # rows before the owner lock (#114)
                 state = Registry(db)._current(owner)
                 if stop['receipt'] is None:
                     self.close_dead_work(db, state)
@@ -415,6 +431,7 @@ class Service:
             check(status in {409, 503}, 'drain_status', drainStatus=status, **after)
             operator = {'health': observed, 'drainStatus': status, 'at': self.now().isoformat()}
             with self.observer_engine.begin() as db:
+                lock_running(db, owner)  # rows before the owner lock (#114)
                 state = Registry(db)._current(owner)
                 require(state.pod_uid == pod_uid)
                 lost = db.execute(text("""SELECT count(*) FROM research.conversations

@@ -217,7 +217,12 @@ def sync_running(sessions, runner, owner, *, seconds=SYNC_SECONDS, clock=None):
 
     It runs inside logout, so it is bounded: every runner HTTP call shares one `seconds` budget; no
     read starts after it; the first runner, Kubernetes or database failure ends the sync (the rest
-    would wait the same way); a row another request holds is skipped, not waited for."""
+    would wait the same way); a row another request holds is skipped, not waited for.
+
+    No conversation row is locked while the runner is asked: the runner call takes the registry owner
+    lock on its own connection, and runner-controller holds that lock while it fails leftover running
+    rows. The row is read, the runner asked, then the row locked again and updated only if it is still
+    the same running request at the same version."""
     import time
     from . import runner_http_budget
     clock = clock or time.monotonic
@@ -231,16 +236,26 @@ def sync_running(sessions, runner, owner, *, seconds=SYNC_SECONDS, clock=None):
         for identity in identities:
             if clock() >= end:
                 break
+            find = select(Conversation).where(Conversation.id == identity, Conversation.owner_id == owner)
             try:
-                with sessions.begin() as db:
-                    row = db.scalar(select(Conversation).where(
-                        Conversation.id == identity, Conversation.owner_id == owner).with_for_update(skip_locked=True))
+                with sessions.begin() as db:  # Snapshot only; committed before the runner call.
+                    row = db.scalar(find)
                     if row is None or row.state != "running":
                         continue
-                    apply_runner_read(row, checked_runner_read(row, runner.read(row.id)))
+                    seen = (row.request_id, row.version)
+                result = runner.read(identity)
+                with sessions.begin() as db:
+                    row = db.scalar(find.with_for_update(skip_locked=True))
+                    if row is None or row.state != "running" or (row.request_id, row.version) != seen:
+                        continue  # Held by another request, or changed since the read: leave it.
+                    apply_runner_read(row, checked_runner_read(row, result))
                     settled += row.state != "running"
             except (ValueError, KeyError, RunnerHistoryInvalid):
                 continue  # This row's answer only (another request id or thread, no history).
+            except httpx.HTTPStatusError as failure:
+                if failure.response.status_code == 404:
+                    continue  # The runner has no such session: this row only, the next one may answer.
+                break
             except Exception:
                 break  # Runner, Kubernetes or database not answering. Never blocks the stop.
     except Exception:

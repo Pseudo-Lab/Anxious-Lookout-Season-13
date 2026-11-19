@@ -104,6 +104,50 @@ def test_unclean_shutdown_never_claims_clean_receipt(setup):
     assert read_private(root/('termination-'+body['podUid']+'.json'))['clean'] is False
 
 
+@pytest.mark.parametrize('failure', ['before-rename', 'after-rename'])
+def test_receipt_write_failure_is_retried_by_the_same_request_only(setup, monkeypatch, failure):
+    """#114 (review 647653f): one failed receipt write must not leave a stopping runner that answers every
+    later drain with 503 and no receipt. The same request stores the same receipt; native closes once."""
+    import runner.app as runner_app
+    client, body, headers, root = setup
+    native = client.app.state.native
+    write, attempts = runner_app.write_private, []
+    def flaky(path, value):
+        if path.name.startswith('termination-'):
+            attempts.append(path.name)
+            if len(attempts) == 1:
+                if failure == 'after-rename':
+                    write(path, value)  # stored, then the directory fsync failed
+                raise OSError('synthetic transient write error')
+        return write(path, value)
+    monkeypatch.setattr(runner_app, 'write_private', flaky)
+    with pytest.raises(OSError):
+        client.post('/lifecycle/drain', json=body, headers=headers)
+    assert client.get('/health', headers=headers).json()['reason'] == 'unavailable'
+    other = client.post('/lifecycle/drain', json={**body, 'stopId': str(uuid4())}, headers=headers)
+    assert other.status_code == 409  # another stop never takes this decided receipt
+    retry = client.post('/lifecycle/drain', json=body, headers=headers)
+    expected = {**body, 'version': 1, 'clean': True}
+    assert retry.status_code == 200 and retry.json() == expected
+    assert read_private(root/('termination-'+body['podUid']+'.json')) == expected
+    assert client.post('/lifecycle/drain', json=body, headers=headers).json() == expected
+    assert native.closes == 1 and len(attempts) == (1 if failure == 'after-rename' else 2)
+
+
+def test_pending_receipt_never_overwrites_a_different_file(setup, monkeypatch):
+    import runner.app as runner_app
+    client, body, headers, root = setup
+    target = root/('termination-'+body['podUid']+'.json')
+    def fail(path, value):
+        target.write_text('{"other": "evidence"}')  # something else appeared at that path
+        raise OSError('synthetic')
+    monkeypatch.setattr(runner_app, 'write_private', fail)
+    with pytest.raises(OSError):
+        client.post('/lifecycle/drain', json=body, headers=headers)
+    assert client.post('/lifecycle/drain', json=body, headers=headers).status_code == 409
+    assert target.read_text() == '{"other": "evidence"}'
+
+
 def test_unauthenticated_drain_never_stops(setup):
     client, body, headers, root = setup
     assert client.post('/lifecycle/drain',json=body).status_code == 401

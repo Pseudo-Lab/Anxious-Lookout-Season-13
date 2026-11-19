@@ -26,30 +26,44 @@ def answer(conversation, state, **changes):
 
 
 class Sessions:
+    """Rows by id; records whether a transaction is open and whether it asked for a row lock."""
     def __init__(self, rows):
         self.rows = {item.id: item for item in rows}
-        self.queue = []
+        self.open, self.locks = 0, []
     @contextmanager
     def begin(self):
         sessions = self
         class Db:
             def scalars(self, statement):
-                ids = [item.id for item in sessions.rows.values() if item.state == 'running']
-                sessions.queue = list(ids)
-                return SimpleNamespace(all=lambda: ids)
+                return SimpleNamespace(all=lambda: [item.id for item in sessions.rows.values() if item.state == 'running'])
             def scalar(self, statement):
-                return sessions.rows[sessions.queue.pop(0)]
-        yield Db()
+                values = statement.compile().params.values()
+                found, = [sessions.rows[value] for value in values if value in sessions.rows]
+                if statement._for_update_arg is not None:
+                    sessions.locks.append((found.id, statement._for_update_arg.skip_locked))
+                return found
+        self.open += 1
+        try:
+            yield Db()
+        finally:
+            self.open -= 1
 
 
 class Runner:
-    def __init__(self, answers): self.answers, self.reads = answers, []
+    def __init__(self, answers, sessions=None): self.answers, self.reads, self.sessions = answers, [], sessions
     def read(self, identity):
+        # #114 (review 647653f): no transaction (row lock) may be open while the runner is asked.
+        assert self.sessions is None or self.sessions.open == 0
         self.reads.append(identity)
         value = self.answers[identity]
         if isinstance(value, Exception):
             raise value
         return value
+
+
+def not_found():
+    return httpx.HTTPStatusError('not found', request=httpx.Request('GET', 'http://runner/sessions/x'),
+                                 response=httpx.Response(404, json={'error': 'not_found'}))
 
 
 def test_finished_turns_take_the_runner_result_and_unknown_ones_stay_running():
@@ -136,3 +150,44 @@ def test_runner_calls_use_the_bounded_transport_only_inside_an_outer_budget(monk
         runner_http_budget.finish(marker)
     client.call('GET', '/sessions/x')
     assert bounded == [False, True, False]
+
+
+def test_a_conversation_the_runner_does_not_know_does_not_end_the_sync():
+    """#114 (review 3fe8d18): X' (no runner session, 404) read first must not stop Y's actual result."""
+    unknown, y = row(), row()
+    sessions = Sessions([unknown, y])
+    runner = Runner({unknown.id: not_found(), y.id: answer(y, 'idle')}, sessions)
+    assert sync_running(sessions, runner, uuid4()) == 1
+    assert runner.reads == [unknown.id, y.id]
+    assert unknown.state == 'running' and y.state == 'idle'  # X' is left for the controller
+
+
+def test_the_runner_is_asked_outside_any_transaction_and_the_row_is_relocked_without_waiting():
+    y = row()
+    sessions = Sessions([y])
+    assert sync_running(sessions, Runner({y.id: answer(y, 'idle')}, sessions), uuid4()) == 1
+    assert sessions.locks == [(y.id, True)]  # one lock, after the read, SKIP LOCKED
+
+
+@pytest.mark.parametrize('change', ['version', 'request', 'state'])
+def test_a_row_changed_during_the_runner_read_is_left_alone(change):
+    y = row()
+    sessions = Sessions([y])
+    class Changing(Runner):
+        def read(self, identity):
+            result = super().read(identity)
+            if change == 'version': y.version += 1          # a conversation read already recorded something
+            if change == 'request': y.request_id = uuid4()  # a new turn was admitted meanwhile
+            if change == 'state': y.state = 'failed'
+            return result
+    assert sync_running(sessions, Changing({y.id: answer(y, 'idle')}, sessions), uuid4()) == 0
+    assert y.native_record == {'turns': [], 'platformRequests': []}  # nothing applied
+
+
+def test_a_runner_error_other_than_not_found_ends_the_sync():
+    first, second = row(), row()
+    stopping = httpx.HTTPStatusError('stopping', request=httpx.Request('GET', 'http://runner/x'),
+                                     response=httpx.Response(503, json={'error': 'codex_runner_stopped'}))
+    runner = Runner({first.id: stopping, second.id: answer(second, 'idle')})
+    assert sync_running(Sessions([first, second]), runner, uuid4()) == 0
+    assert runner.reads == [first.id]
