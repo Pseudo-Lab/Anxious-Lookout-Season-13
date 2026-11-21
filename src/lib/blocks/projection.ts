@@ -82,6 +82,39 @@ function locations(doc: BlockDocument) {
   return out;
 }
 
+/**
+ * 서로 다른 값의 최장 증가 부분열 index(#112, backend `kept_order`와 같은 결과).
+ * 최장이 여럿이면 index 집합이 사전순으로 가장 작은 것, 즉 candidate에서 앞선 블록을 남긴다.
+ */
+export function keptOrder(values: number[]): Set<number> {
+  // longest[i]: i에서 시작하는 최장 증가열 길이. 오른쪽에서 훑으며 -value의 증가열(tails)을 쌓는다.
+  const longest = new Array<number>(values.length).fill(0);
+  const tails: number[] = [];
+  for (let i = values.length - 1; i >= 0; i--) {
+    const v = -values[i];
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (tails[mid] < v) lo = mid + 1;
+      else hi = mid;
+    }
+    tails[lo] = v;
+    longest[i] = lo + 1;
+  }
+  const kept = new Set<number>();
+  let need = longest.reduce((m, v) => Math.max(m, v), 0);
+  let last: number | null = null;
+  values.forEach((value, i) => {
+    if (need && longest[i] === need && (last === null || value > last)) {
+      kept.add(i);
+      need--;
+      last = value;
+    }
+  });
+  return kept;
+}
+
 const local = (n: AnyNode) => Object.fromEntries(Object.entries(n).filter(([k]) => k !== "id" && !(CHILDREN as readonly string[]).includes(k)));
 
 /** base → candidate 서식·배치 변화(같은 id 우선, 나머지는 종류+텍스트 순서 대응). 텍스트가 같아도 서식 변화는 남는다. */
@@ -121,6 +154,28 @@ export function formatChanges(base: BlockDocument, candidate: BlockDocument): Fo
       matched.set(n.id, old.id);
     }
   }
+  // 같은 (기준 부모, 자식 필드)에 남은 형제는 기준·후보 순서의 최장 공통 부분열을 유지한 것으로 보고, 그 밖의 블록만
+  // 순서 이동이다. 추가·삭제·부모 변경 블록은 열에 넣지 않으므로 삽입·삭제만으로 뒤쪽 형제가 이동이 되지 않는다(#112).
+  const siblings = new Map<string, [number, number, string][]>();
+  for (const [n, old] of pairs) {
+    if (!old) continue;
+    const [op, of, oi] = oldLoc.get(old.id)!;
+    const [np, nf, ni] = newLoc.get(n.id)!;
+    if (op === (np === null ? null : (matched.get(np) ?? np)) && of === nf) {
+      const group = JSON.stringify([op, of]);
+      siblings.set(group, [...(siblings.get(group) ?? []), [ni, oi, n.id]]);
+    }
+  }
+  const reordered = new Set<string>();
+  const byTuple = (x: [number, number, string], y: [number, number, string]) =>
+    x[0] - y[0] || x[1] - y[1] || (x[2] < y[2] ? -1 : x[2] > y[2] ? 1 : 0);
+  for (const group of siblings.values()) {
+    group.sort(byTuple);
+    const kept = keptOrder(group.map(([, oi]) => oi));
+    group.forEach(([, , id], i) => {
+      if (!kept.has(i)) reordered.add(id);
+    });
+  }
   // 2단계: 속성·위치 비교. 부모는 대응된 기준 id로 바꿔 비교한다(내용으로 대응된 부모의 id만 바뀐 경우는 이동이 아니다)
   for (const [n, old, ambiguous] of pairs) {
     if (!old) {
@@ -134,7 +189,7 @@ export function formatChanges(base: BlockDocument, candidate: BlockDocument): Fo
     const [np, nf, ni] = newLoc.get(n.id)!;
     const newParent = np === null ? null : (matched.get(np) ?? np);
     const reparented = op !== newParent || of !== nf;
-    const moved = oi !== ni;
+    const moved = reparented ? oi !== ni : reordered.has(n.id);
     if (reparented) keys.push("parent");
     if (moved) keys.push("position");
     if (keys.length || moved || ambiguous) {

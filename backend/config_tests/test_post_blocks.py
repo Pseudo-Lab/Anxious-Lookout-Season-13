@@ -19,7 +19,7 @@ def test_all_invalid_pointers(case):
     err=caught.value
     assert (err.status,err.code,err.details['path'])==(case['status'],case['code'],case['path'])
 
-@pytest.mark.parametrize('case', G['formatDiff'])
+@pytest.mark.parametrize('case', G['formatDiff'], ids=lambda c:c['name'])
 def test_diff(case):
     assert format_changes(case['base'],case['candidate'])==case['formatChanges']
 
@@ -57,6 +57,42 @@ def test_format_changes_target_move_add_remove():
     b['blocks'].pop()
     assert any(x['kind']=='removed' for x in format_changes(a,b))
 
+@pytest.mark.parametrize('values,kept', [
+    ([], set()), ([0, 1, 2], {0, 1, 2}), ([1, 0], {0}), ([3, 0, 1, 2], {1, 2, 3}),
+    ([1, 0, 3, 2], {0, 2}), ([2, 0, 1], {1, 2}), ([1, 2, 0, 3], {0, 1, 3}),
+])
+def test_kept_order_is_longest_with_earliest_candidate_tie_break(values, kept):
+    from app.post_blocks import kept_order
+    assert kept_order(values) == kept
+
+
+def test_patch_style_insert_remove_reports_only_real_moves():
+    # Shape of test_agent_post_blocks' patch save (#112): only the heading moved.
+    from copy import deepcopy
+    p=G['valid'][0]['canonical']['blocks'][0]
+    def para(n, text): return {**deepcopy(p),'id':'00000000-0000-0000-0000-%012d'%n,'runs':[{'text':text,'marks':[]}]}
+    heading, red, plain, tail, new = para(1,'h'), para(2,'r'), para(3,'p'), para(4,'t'), para(5,'n')
+    base={'format':'post-blocks','version':1,'blocks':[heading,red,plain,tail]}
+    revised={**plain,'runs':[{'text':'p2','marks':[]}]}
+    candidate={**base,'blocks':[red,new,revised,tail,heading]}
+    assert format_changes(base,candidate)==[
+        {'baseBlockId':None,'candidateBlockId':new['id'],'kind':'added','changedProperties':['structure']},
+        {'baseBlockId':plain['id'],'candidateBlockId':plain['id'],'kind':'format-only','changedProperties':['runs']},
+        {'baseBlockId':heading['id'],'candidateBlockId':heading['id'],'kind':'moved','changedProperties':['position']},
+    ]
+
+
+def test_reparented_position_keeps_index_comparison():
+    from copy import deepcopy
+    p=G['valid'][0]['canonical']['blocks'][0]
+    def para(n): return {**deepcopy(p),'id':'00000000-0000-0000-0000-%012d'%n,'runs':[{'text':str(n),'marks':[]}]}
+    q={'id':'00000000-0000-0000-0000-000000000009','type':'quote','blocks':[para(1),para(2)]}
+    base={'format':'post-blocks','version':1,'blocks':[q]}
+    candidate={**base,'blocks':[para(2),{**q,'blocks':[para(1)]}]}
+    change=next(c for c in format_changes(base,candidate) if c['candidateBlockId']==para(2)['id'])
+    assert (change['kind'],change['changedProperties'])==('layout',['parent','position'])
+
+
 def test_equal_projection_reparent_reports_layout():
     from copy import deepcopy
     p=G['valid'][0]['input']['blocks'][0]
@@ -75,7 +111,8 @@ def test_exact_ids_reserved_before_duplicate_fallback():
     candidate={**base,'blocks':[new,original]}
     changes=format_changes(base,candidate)
     assert any(c['candidateBlockId']==new['id'] and c['kind']=='added' for c in changes)
-    assert len([c for c in changes if c['baseBlockId']==original['id']])==1
+    # Matched by its exact ID, never removed; the insertion before it is not a move (#112).
+    assert [c for c in changes if c['baseBlockId']==original['id']]==[]
     base={**base,'blocks':[original,new]}
     other={**deepcopy(original),'id':'00000000-0000-0000-0000-000000000888'}
     assert format_changes(base,{**base,'blocks':[other]})[0]['kind']=='ambiguous'

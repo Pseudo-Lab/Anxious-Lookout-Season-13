@@ -7,7 +7,7 @@ import { Node as PMNode } from "@tiptap/pm/model";
 import { blockExtensions, resizedWeights } from "@/components/blocks/editor/schema";
 import { fromEditor, toEditor, type EditorNode } from "./adapter";
 import { BLOCK_LIMITS, canonicalBytes, isAllowedLink, parseBlockDocument } from "./document";
-import { formatChanges, formattingChanges, hasVisibleContent, imageIds, textProjection } from "./projection";
+import { formatChanges, formattingChanges, hasVisibleContent, imageIds, keptOrder, textProjection } from "./projection";
 import { CONTRACT_REVISION, type BlockDocument } from "./types";
 
 interface Golden {
@@ -210,7 +210,8 @@ describe("links and visible content", () => {
     const a = para([{ text: "A", marks: [] }]);
     const b = para([{ text: "B", marks: [] }]);
     const changes = formatChanges(canonical(doc([a, b])), canonical(doc([b, a])));
-    expect(changes.map((c) => c.kind)).toEqual(["moved", "moved"]);
+    // #112: 맞바꾸면 candidate에서 뒤에 온 블록(a)만 순서 이동이다
+    expect(changes.map((c) => [c.kind, c.candidateBlockId])).toEqual([["moved", a.id]]);
   });
 });
 
@@ -321,5 +322,21 @@ describe("table column resize buttons (#36 review round4 M3)", () => {
   it("only stops when every column is at its bound", () => {
     expect(resizedWeights([1000, 1], 0, 1)).toEqual([1000, 1]);
     expect(resizedWeights([1, 1000], 0, -1)).toEqual([1, 1000]);
+  });
+});
+
+// #112 backend `kept_order`와 같은 동률 규칙: 최장 증가 부분열 중 앞선 index를 남긴다
+describe("keptOrder", () => {
+  it.each([
+    [[], []],
+    [[0, 1, 2], [0, 1, 2]],
+    [[1, 0], [0]],
+    [[2, 0, 1], [1, 2]],
+    [[1, 2, 0], [0, 1]],
+    [[3, 0, 1, 2], [1, 2, 3]],
+    [[0, 3, 1, 2], [0, 2, 3]],
+    [[2, 3, 0, 1], [0, 1]],
+  ])("%j keeps %j", (values, kept) => {
+    expect([...keptOrder(values)].sort((a, b) => a - b)).toEqual(kept);
   });
 });

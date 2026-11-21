@@ -74,6 +74,26 @@ v1.1-capable image; no lossless rollback to #32 after such writes is promised.
 PM accepted this forward-only constraint. Deploy matching API/editor/public
 renderer together; a cached old client failing the gate must reload.
 
+## Sibling order in formatDiff (#112)
+
+This changes diff output only; the document format, `contractVersion` and the
+`X-Post-Contract-Revision: 1.1` write gate stay unchanged. Proposals saved earlier
+keep the `formatChanges` computed at save time.
+
+- Matching (exact ID first, then type+text fallback) and `parent` are unchanged.
+- Group the matched pairs that are not reparented by base parent ID and child field
+  (`blocks`, `items`, `rows`, `cells`, `columns`). Within a group, keep a longest
+  common subsequence of base and candidate order; only the blocks outside it get
+  `position`. Added, removed and reparented blocks are not part of the sequence,
+  so inserting or removing a block never moves its untouched siblings.
+- Ties: among longest subsequences keep the one whose candidate positions are
+  lexicographically smallest (earlier candidate blocks stay). Swapping two
+  adjacent blocks therefore reports only the one that comes later in the candidate.
+- A reparented block keeps `parent`, plus `position` when its index differs.
+- Kind precedence is unchanged (`ambiguous`, `layout`, `moved`, `format-only`), so a
+  shifted block whose formatting changed is `format-only` without `position`, and a
+  non-reparented `layout`/`ambiguous` entry carries `position` only for a real move.
+
 ## Consuming fixtures
 
 - `valid`: input, expected canonical output, exact text projection, sorted structural

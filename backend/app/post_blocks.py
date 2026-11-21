@@ -1,4 +1,5 @@
 """Canonical post blocks, bounded semantic validation and deterministic text/diffs."""
+from bisect import bisect_left
 from collections import Counter, defaultdict
 from copy import deepcopy
 import hashlib
@@ -182,6 +183,27 @@ def project_node(node):
 def text_projection(document): return '\n\n'.join(project_node(n) for n in document['blocks'])
 
 
+def kept_order(values):
+    """Indices of a longest strictly increasing subsequence of distinct values.
+
+    Among the longest ones, returns the lexicographically smallest index set,
+    i.e. earlier candidate positions stay in place (post-blocks-v1, #112).
+    """
+    # longest[i]: length of the longest increasing run starting at i.
+    longest = [0]*len(values); tails = []
+    for i in range(len(values)-1, -1, -1):
+        # Reverse scan: increasing to the right == decreasing to the left.
+        k = bisect_left(tails, -values[i])
+        if k == len(tails): tails.append(-values[i])
+        else: tails[k] = -values[i]
+        longest[i] = k+1
+    kept, need, last = set(), max(longest, default=0), None
+    for i, value in enumerate(values):
+        if need and longest[i] == need and (last is None or value > last):
+            kept.add(i); need -= 1; last = value
+    return kept
+
+
 def format_changes(base, candidate):
     left, right = list(nodes(base)), list(nodes(candidate))
     by_id = {n['id']:n for n in left}; used = set(); changes = []
@@ -213,6 +235,19 @@ def format_changes(base, candidate):
         if old is not None:
             used.add(old['id'])
             matched_ids[node['id']] = old['id']
+    # Siblings that stayed under the same (matched) parent and field keep the
+    # longest common subsequence of base and candidate order; only the rest
+    # moved. Insertions, removals and reparented nodes never shift others (#112).
+    siblings = defaultdict(list)
+    for node, old, _ in pairs:
+        if old is None: continue
+        old_location, new_location = old_locations[old['id']], new_locations[node['id']]
+        if old_location[:2] == (matched_ids.get(new_location[0], new_location[0]), new_location[1]):
+            siblings[old_location[:2]].append((new_location[2], old_location[2], node['id']))
+    reordered = set()
+    for group in siblings.values():
+        group.sort(); kept = kept_order([old_index for _, old_index, _ in group])
+        reordered.update(identity for i, (_, _, identity) in enumerate(group) if i not in kept)
     # Compare relationships in the matched base-ID space, including fallback
     # parents whose UUID changed only because conversion used a new seed.
     for node, old, ambiguous in pairs:
@@ -223,7 +258,7 @@ def format_changes(base, candidate):
         old_location, new_location = old_locations[old['id']], new_locations[node['id']]
         new_parent = matched_ids.get(new_location[0], new_location[0])
         reparented = old_location[:2] != (new_parent, new_location[1])
-        moved = old_location[2] != new_location[2]
+        moved = old_location[2] != new_location[2] if reparented else node['id'] in reordered
         if reparented: keys.append('parent')
         if moved: keys.append('position')
         if keys or moved or ambiguous:
