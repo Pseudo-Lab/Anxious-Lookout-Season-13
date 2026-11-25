@@ -157,10 +157,20 @@ class Rollout:
         """One pass. Returns (owner, outcome, reason) lines; reason is a fixed code or None."""
         if self.settings.fingerprint is None:
             return []
+        try:
+            return self._run()
+        except Exception:
+            # 3rd re-review blocker 2: a pass that could not read its target or owners (Service.reconcile
+            # logs it and reuses this Rollout) observed nobody, so every canary streak ends here.
+            self.streak.clear()
+            raise
+
+    def _run(self):
         self.target = self.store.install(self.settings.fingerprint)
         views = self.store.owners(self.target.target_id)
         self.rows_now = {}  # owner -> the row as last written in this pass (slot accounting, review major)
         self.slots = sum(1 for view in views if view.row is not None and occupies(view.row.phase, view.row.reason))
+        self.protected = set()  # owners whose binding a superseded target's pending restart still protects
         lines = self.finish_previous({view.owner: view for view in views})
         # Allowance A: while a superseded target's own stop is open, this target starts nothing.
         self.previous_open = any(outcome in {'cutting', 'draining', 'restarting'} for _, kind, outcome in lines if kind == 'rollout_previous')
@@ -205,16 +215,21 @@ class Rollout:
                 if view is None:
                     self.store.set_row(old_target, owner, 'failed', canary=False, reason='superseded')
                     continue
-                if row.phase == 'restarting':
+                if row.phase in {'restarting', 'blocked'}:
                     if view.pod_uid is not None or view.phase in {Phase.STOPPED, Phase.FAILED}:
                         # The restart produced its Pod (on the old binding), or there is nothing left to wait for.
                         self.store.set_row(old_target, owner, 'failed', canary=False, reason='superseded')
                         lines.append((owner, 'rollout_previous', 'previous_finished'))
-                    elif self.elapsed(row.since) > 2 * self.settings.canary_seconds:
-                        self.store.set_row(old_target, owner, 'blocked', canary=False, reason='restart_timeout')
-                        lines.append((owner, 'rollout_previous', 'previous_blocked'))
-                    else:
+                    elif row.phase == 'restarting' and self.elapsed(row.since) <= 2 * self.settings.canary_seconds:
                         lines.append((owner, 'rollout_previous', 'restarting'))
+                    else:
+                        # 3rd re-review blocker 1: a restart that takes too long no longer holds the other owners
+                        # back, but its generation is still pending on the old binding: that one owner's binding
+                        # stays protected (no move, before_create included) until it has a Pod or stops.
+                        if row.phase == 'restarting':
+                            self.store.set_row(old_target, owner, 'blocked', canary=False, reason='restart_timeout')
+                        self.protected.add(owner)
+                        lines.append((owner, 'rollout_previous', 'protected'))
                     continue
                 if view.phase == Phase.STOPPING or (view.stop_id is not None and view.stop_id == row.stop_id):
                     if row.phase == 'cutting' and not view.stop_receipt:
@@ -280,6 +295,8 @@ class Rollout:
     def allowed(self, view, canary):
         if self.previous_open:
             return False  # Allowance A: a superseded target's stop is still open.
+        if view.owner in self.protected:
+            return False  # A superseded target's restart of this owner is still pending.
         state = self.target.state
         return state in {'rolling', 'complete'} or (state == 'canary' and view.owner == canary)
 
@@ -494,8 +511,10 @@ class Rollout:
             target = self.store.current()
             if target is None or target.state not in {'canary', 'rolling', 'complete'}:
                 return False
-            if self.store.carried(target.target_id):
-                return False  # Allowance A: a superseded target's stop is still open.
+            carried = self.store.carried(target.target_id)
+            if any(row.phase in {'cutting', 'draining', 'restarting'} or carried_owner == owner
+                   for _, carried_owner, row in carried):
+                return False  # Allowance A: a superseded target's work is open, or still protects this owner.
             canary = target.state == 'canary'
             if canary and self.store.canary_owner(target.target_id) != owner:
                 return False
@@ -602,7 +621,8 @@ class SqlStore:
         with self.engine.begin() as db:
             rows = db.execute(text('''SELECT o.target_id, o.owner_id, o.phase, o.since, o.canary, o.stop_id, o.reason
                 FROM runner_rollout.owners o JOIN runner_rollout.targets t ON t.target_id=o.target_id
-                WHERE t.state='superseded' AND t.target_id<>:target AND o.phase IN ('cutting','draining','restarting')
+                WHERE t.state='superseded' AND t.target_id<>:target
+                AND (o.phase IN ('cutting','draining','restarting') OR (o.phase='blocked' AND o.reason='restart_timeout'))
                 AND coalesce(o.reason,'')<>:external ORDER BY o.owner_id, o.target_id'''),
                 {'target': target_id, 'external': EXTERNAL}).mappings().all()
         return [(row['target_id'], row['owner_id'], Row(row['phase'], row['since'], row['canary'], row['stop_id'], row['reason']))

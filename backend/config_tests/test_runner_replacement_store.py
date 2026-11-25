@@ -69,6 +69,12 @@ def test_install_supersedes_without_copying_and_skips_canary_for_a_completed_fin
     observer.set_row(first.target_id, owner, 'restarting', canary=False)  # PM 11-25: restarts are carried too.
     (_, _, row), = observer.carried(second.target_id)
     assert row.phase == 'restarting'
+    # A timed-out restart still protects its owner's binding until the generation ends (3rd re-review).
+    observer.set_row(first.target_id, owner, 'blocked', canary=False, reason='restart_timeout')
+    (_, _, row), = observer.carried(second.target_id)
+    assert (row.phase, row.reason) == ('blocked', 'restart_timeout')
+    observer.set_row(first.target_id, owner, 'blocked', canary=False, reason='turn_not_settled')
+    assert observer.carried(second.target_id) == []  # Other blocked rows are not carried.
     observer.set_row(first.target_id, owner, 'failed', canary=False, reason='superseded')
     assert observer.carried(second.target_id) == []
     observer.set_state(second, 'rolling')

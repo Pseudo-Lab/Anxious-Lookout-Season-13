@@ -55,7 +55,9 @@ class Store:
 
     def carried(self, target_id):
         return [(t, o, row) for (t, o), row in sorted(self.old_rows.items(), key=lambda item: (str(item[0][1]), str(item[0][0])))
-                if t != target_id and row.phase in {'cutting', 'draining', 'restarting'} and row.reason != 'external_stop']
+                if t != target_id and (row.phase in {'cutting', 'draining', 'restarting'}
+                                       or (row.phase, row.reason) == ('blocked', 'restart_timeout'))
+                and row.reason != 'external_stop']
 
     def current(self):
         return self.target
@@ -904,3 +906,65 @@ def test_rr2_canary_time_counts_only_from_selection():
     assert outcomes(rolled.run())[b] == 'verified' and store.target.state == 'canary'
     clock.advance(1)
     assert outcomes(rolled.run())[b] == 'canary_passed'
+
+
+@pytest.mark.parametrize('when', ['already_pending', 'requested_at_release'])
+def test_rr3_a_timed_out_previous_restart_still_protects_that_owners_binding(when):
+    """3rd re-review blocker 1 / PM 11-25: the restart timeout frees the other owners only; the timed-out
+    owner's binding stays protected until its restart generation ends (Pod created, or stopped)."""
+    a, b = sorted(uuid4() for _ in range(2))
+    clock, store, cluster, rollout = setup([running(a), running(b)], 'rolling', turn_deadline=60, canary_seconds=60)
+    store.sessions.add(a)
+    if when == 'already_pending':
+        old = store.target.target_id
+        store.views[a] = replace(store.views[a], phase=Phase.PREPARING, pod_uid=None)
+        cluster.pods.pop(a)
+        store.rows[a] = Row('restarting', clock(), False)  # The old target's restart, before the switch.
+    else:
+        cluster.idle_owners.add(a)
+        assert outcomes(rollout.run())[a] == 'draining'
+        release(store, cluster, a)
+    other = fingerprint('registry.invalid/runner@sha256:'+'c'*64, [])  # A third image: a's binding would move.
+    store.completed.add(fingerprint_sha(other))  # Known good: the new target starts rolling, no canary holds a.
+    rolled = Rollout(store, cluster, Settings(other, turn_deadline=60, canary_seconds=60), clock)
+    lines = rolled.run()
+    assert (a, 'rollout_previous', 'restarting') in lines and store.views[a].phase == Phase.PREPARING
+    clock.advance(121)  # Past 2 x canarySeconds: the restart timed out.
+    cluster.idle_owners.add(b)
+    lines = rolled.run()
+    assert (a, 'rollout_previous', 'protected') in lines
+    assert store.views[a].image == OLD and ('move', a) not in store.calls and rolled.before_create(a) is False
+    assert outcomes(lines)[a] == 'held'  # The other owners are free again ...
+    assert any(c[:2] == ('stop', b) for c in store.calls) or outcomes(lines)[b] in {'waiting_turn', 'draining'}
+    clock.advance(60)
+    lines = rolled.run()
+    assert (a, 'rollout_previous', 'protected') in lines and store.views[a].image == OLD
+    uid = uuid4()  # ... and once the old generation has its Pod, a is an ordinary owner of the new target.
+    store.views[a] = replace(store.views[a], phase=Phase.UNREACHABLE, pod_uid=uid)
+    cluster.pods[a] = pod(uid, OLD, created=clock())
+    lines = rolled.run()
+    # No longer protected: an ordinary owner of the new target (its Pod runs the old image).
+    assert (a, 'rollout_previous', 'previous_finished') in lines and a not in rolled.protected
+    assert store.target.state == 'rolling' and outcomes(lines)[a] in {'waiting_turn', 'waiting_slot'}
+
+
+@pytest.mark.parametrize('failing', ['install', 'owners'])
+def test_rr4_a_pass_that_cannot_read_its_target_or_owners_ends_the_canary_streak(failing):
+    """3rd re-review blocker 2 / PM 11-25: such a pass is uncertain; Service.reconcile reuses the Rollout,
+    so the streak must not survive it."""
+    a = uuid4()
+    clock, store, cluster, rollout = setup([running(a, NEW)], 'canary', canary_seconds=60)
+    cluster.pods[a] = pod(store.views[a].pod_uid, NEW, created=clock())
+    assert outcomes(rollout.run())[a] == 'verified'
+    clock.advance(30)
+    original = getattr(store, failing)
+    setattr(store, failing, lambda *args: (_ for _ in ()).throw(OSError('database timeout')))
+    with pytest.raises(OSError):
+        rollout.run()
+    setattr(store, failing, original)
+    clock.advance(30)  # 60 s after the first healthy read: it would have passed.
+    assert outcomes(rollout.run())[a] == 'verified' and store.target.state == 'canary'
+    clock.advance(59)
+    assert outcomes(rollout.run())[a] == 'verified'
+    clock.advance(1)
+    assert outcomes(rollout.run())[a] == 'canary_passed'
