@@ -80,7 +80,9 @@ are unchanged.
   neither watched nor counted pending. So such a stop never halts the target, and it does not send a
   completed target back to `rolling` (its `completed_at` stays). A runner that crashed is still a halt
   (`runner_terminated`) while the target is watched, also when the controller has already recorded the
-  crash and deleted the Pod: a crash leaves a terminal receipt, not a drain receipt.
+  crash and requested the Pod's DELETE while the Pod is still seen: a crash leaves a terminal receipt, not
+  a drain receipt. Once a crashed Pod's object is gone, the owner reads `pod_missing` (pending, not a
+  halt) until the release.
 - **Halted:** no new stop and no new move. Stops already recorded still finish; such owners
   restart on their unchanged binding and are recorded `failed:halted`.
 
