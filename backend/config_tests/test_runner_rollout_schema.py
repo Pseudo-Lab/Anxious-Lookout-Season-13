@@ -25,10 +25,20 @@ DB = Path('/source/db')
 @pytest.fixture(autouse=True)
 def rollout_schema(binding_schema, research_schema, admin):
     migrate()
+    install_grants(admin)
+
+
+def install_grants(admin):
+    """Reapply the reviewed grant files every time: roles are cluster-wide and survive a dropped schema,
+    while table grants do not (review note: a role that already exists skipped its grants)."""
     with admin.begin() as db:
-        if not db.execute(text("SELECT 1 FROM pg_roles WHERE rolname='anxious_runner_observer'")).first():
-            db.connection.driver_connection.execute((DB/'016_runner_observer_grants.sql').read_text())
-        db.connection.driver_connection.execute((DB/'101_runner_rollout_grants.sql').read_text())
+        for name in ('016_runner_controller_grants.sql', '016_runner_observer_grants.sql',
+                     '061_runner_controller_grants.sql', '101_runner_rollout_grants.sql'):
+            sql = (DB/name).read_text()
+            for role in ('anxious_runner_controller', 'anxious_runner_observer'):
+                if db.execute(text('SELECT 1 FROM pg_roles WHERE rolname=:role'), {'role': role}).first():
+                    sql = sql.replace('CREATE ROLE '+role+' NOLOGIN;', '')
+            db.connection.driver_connection.execute(sql)
 
 
 def publish(admin, state):
@@ -157,6 +167,76 @@ def test_move_takes_the_registry_owner_lock(admin, owner, t0):
     assert move(admin, owner, value)['image'] == NEW_IMAGE  # Free again once the holder ends.
 
 
+@pytest.mark.parametrize('legacy', ['no-stop-row', 'empty-proof', 'older-generation-proof'])
+def test_stopped_owner_without_a_proof_of_this_generation_is_refused_by_the_function(admin, owner, t0, legacy):
+    """Review blocker 1: the database itself requires the completed stop proof (design §1: legacy owners stay
+    blocked). The function is called directly, without the Python predicate."""
+    value = stopped(admin, owner, t0)
+    with admin.begin() as db:
+        if legacy == 'no-stop-row':
+            db.execute(text('DELETE FROM runner_termination.stops'))
+        elif legacy == 'empty-proof':
+            db.execute(text("UPDATE runner_termination.stops SET proof='{}'::jsonb"))
+        else:  # The only proof belongs to a generation that is not the registry's current one.
+            db.execute(text('UPDATE runner_termination.stops SET generation=generation+1'))
+    with pytest.raises(DBAPIError):
+        move(admin, owner, value)
+    assert plan(admin) == value
+
+
+@pytest.mark.parametrize('level', ['REPEATABLE READ', 'SERIALIZABLE'])
+def test_move_refuses_snapshot_isolation(admin, owner, t0, level):
+    """Review blocker 2: a snapshot taken before the owner lock could miss a committed reserve."""
+    value = stopped(admin, owner, t0)
+    with admin.connect() as db:
+        db.execute(text('SET TRANSACTION ISOLATION LEVEL '+level))
+        db.execute(text('SET LOCAL ROLE anxious_runner_observer'))
+        with pytest.raises(DBAPIError):
+            db.execute(text('SELECT runner_rollout.move_image(:owner,:state,CAST(:old AS jsonb),:image)'),
+                       {'owner': owner, 'state': value['state'], 'old': json.dumps(value), 'image': NEW_IMAGE})
+        db.rollback()
+    assert plan(admin) == value
+
+
+def test_a_reserve_committed_during_the_move_transaction_is_seen(admin, owner, t0):
+    """READ COMMITTED: the reserve commits after the move transaction began; the move's statements still
+    read it (after the owner lock) and refuse."""
+    state, _ = enter(admin, owner, uuid4(), t0)
+    value = publish(admin, state)
+    with admin.connect() as db:
+        db.execute(text('SET LOCAL ROLE anxious_runner_observer'))
+        db.execute(text('SELECT count(*) FROM runner_runtime.outbox')).scalar_one()  # Statement before the reserve.
+        with admin.begin() as other:  # Controller.reserve's effect: the create permission of this generation.
+            other.execute(text("UPDATE runner_runtime.outbox SET settled=true WHERE owner_id=:owner"), {'owner': owner})
+        with pytest.raises(DBAPIError) as refused:
+            db.execute(text('SELECT runner_rollout.move_image(:owner,:state,CAST(:old AS jsonb),:image)'),
+                       {'owner': owner, 'state': value['state'], 'old': json.dumps(value), 'image': NEW_IMAGE})
+        assert refused.value.orig.sqlstate == '23514'
+        db.rollback()
+    assert plan(admin) == value
+
+
+def test_only_one_current_target(admin):
+    with pytest.raises(DBAPIError):
+        with admin.begin() as db:
+            for state in ('canary', 'rolling'):
+                db.execute(text('''INSERT INTO runner_rollout.targets(target_id,fingerprint,fingerprint_sha,state)
+                    VALUES(gen_random_uuid(),'{}'::jsonb,:sha,:state)'''), {'sha': 'c'*64, 'state': state})
+
+
+def test_migration_refuses_a_non_superuser_administrator(admin, monkeypatch):
+    name, password = 'rollout_admin_'+uuid4().hex[:8], uuid4().hex
+    with admin.begin() as db:
+        db.execute(text('CREATE ROLE '+name+" LOGIN CREATEROLE PASSWORD '"+password+"'"))
+    try:
+        monkeypatch.setenv('ADMIN_DATABASE_URL', admin.url.set(username=name, password=password).render_as_string(hide_password=False))
+        with pytest.raises(Refused):
+            migrate()
+    finally:
+        with admin.begin() as db:
+            db.execute(text('DROP ROLE '+name))
+
+
 def test_waiting_owner_moves_before_its_create_permission(admin, owner, t0):
     state, _ = enter(admin, owner, uuid4(), t0)
     value = publish(admin, state)
@@ -186,6 +266,13 @@ def test_api_cannot_call_the_move_or_read_rollout_state(admin, owner, t0):
        RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
        BEGIN UPDATE runner_bindings.bindings SET plan = p_old WHERE owner_id = p_owner; RETURN p_old; END $$""",
     'CREATE FUNCTION runner_rollout.extra() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$',
+    # Review major 1: a different uniqueness expression keeps the contract's columns [null].
+    """DROP INDEX runner_rollout.targets_one_current;
+       CREATE UNIQUE INDEX targets_one_current ON runner_rollout.targets ((state)) WHERE state<>'superseded'""",
+    # Review major 2: ownership drift or membership in the owner gives direct writes.
+    'ALTER TABLE runner_bindings.bindings OWNER TO anxious_runner_observer',
+    'GRANT postgres TO anxious_runner_observer',
+    'GRANT UPDATE ON runner_bindings.bindings TO anxious_runner_controller',
 ])
 def test_validation_refuses_any_other_write_path(admin, drift):
     with admin.connect() as db:

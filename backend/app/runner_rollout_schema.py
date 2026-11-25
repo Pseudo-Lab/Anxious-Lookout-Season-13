@@ -20,6 +20,14 @@ FUNCTION = 'runner_rollout.move_image(uuid,uuid,jsonb,text)'
 DDL = Path(__file__).resolve().parent.parent/'db/101_runner_rollout.sql'
 CONTRACT = Path(__file__).resolve().parent.parent/'db/101_runner_rollout_contract.json'
 FOREIGN_KEYS = {'owners_target_id_fkey', 'owners_owner_id_fkey'}
+# The contract JSON records an expression index only as columns [null]; compare the definitions.
+INDEXES = {
+    'owners_pkey': 'CREATE UNIQUE INDEX owners_pkey ON runner_rollout.owners USING btree (target_id, owner_id)',
+    'targets_one_current': "CREATE UNIQUE INDEX targets_one_current ON runner_rollout.targets USING btree ((true)) WHERE (state <> 'superseded'::text)",
+    'targets_pkey': 'CREATE UNIQUE INDEX targets_pkey ON runner_rollout.targets USING btree (target_id)',
+}
+# Application roles and the binding writes each may hold (effective: grants, ownership, membership).
+BINDING_WRITES = {'anxious_api': set(), 'anxious_runner_observer': set(), 'anxious_runner_controller': {'INSERT'}}
 
 
 def installed(db):
@@ -75,6 +83,8 @@ def validate(db):
     require(scalar("""SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid=i.indrelid
         JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='runner_rollout'
         AND (NOT i.indisvalid OR NOT i.indisready OR NOT i.indimmediate)""") == 0)
+    require(dict(db.execute(text("SELECT indexname, indexdef FROM pg_indexes WHERE schemaname='runner_rollout'")).all())
+            == INDEXES)
     validate_writer(db)
 
 
@@ -115,3 +125,20 @@ def validate_writer(db):
         WHERE n.nspname='runner_bindings' AND c.relname='bindings' AND g.privilege_type='UPDATE'
         AND g.grantee<>c.relowner""")).scalars().all()
     require(set(updaters) == {WRITER})
+    # The table owner above is excluded from the grant list, so check the application roles' effective
+    # rights directly: has_*_privilege counts ownership and inherited membership, so an ownership drift to
+    # (or a membership in) the owner shows up here. A role that is not installed has no rights.
+    installed_roles = set(db.execute(text('SELECT rolname FROM pg_roles WHERE rolname = ANY(:roles)'),
+                                     {'roles': sorted(BINDING_WRITES)}).scalars())
+    for role in sorted(installed_roles):
+        for privilege in ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'):
+            granted = db.execute(text('SELECT has_table_privilege(:role,:t,:p)'),
+                                 {'role': role, 't': bindings, 'p': privilege}).scalar_one()
+            require(granted == (privilege in BINDING_WRITES[role]))
+        for column in ('owner_id', 'state_id', 'namespace', 'namespace_uid', 'plan', 'published_at'):
+            require(not db.execute(text("SELECT has_column_privilege(:role,:t,:c,'UPDATE')"),
+                                   {'role': role, 't': bindings, 'c': column}).scalar_one())
+        require(not db.execute(text("""SELECT pg_has_role(:role, c.relowner, 'USAGE') FROM pg_class c
+            JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='runner_bindings' AND c.relname='bindings'"""),
+            {'role': role}).scalar_one())
+        require(not db.execute(text("SELECT pg_has_role(:role, :writer, 'USAGE')"), {'role': role, 'writer': WRITER}).scalar_one())

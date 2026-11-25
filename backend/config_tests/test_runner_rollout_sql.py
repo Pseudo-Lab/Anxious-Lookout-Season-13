@@ -23,6 +23,11 @@ def test_move_image_writes_only_the_image_of_one_bound_plan():
     assert re.findall(r'SET (.*?) WHERE', body) == ["plan = jsonb_set(b.plan, '{image}', to_jsonb(p_image), false)"]
     assert 'b.plan = p_old' in body and 'b.owner_id = p_owner' in body and 'b.state_id = p_state' in body
     assert 'r.pod_uid IS NULL' in body and 'o.settled' in body
+    # Review blocker 1: a stopped owner needs the completed, non-empty stop proof of its current generation.
+    assert ("s.generation = r.generation AND s.completed_at IS NOT NULL AND jsonb_typeof(s.proof) = 'object' "
+            "AND s.proof <> '{}'::jsonb") in body
+    # Review blocker 2: snapshot isolation is refused before anything else.
+    assert body.index("current_setting('transaction_isolation') <> 'read committed'") < body.index('IF p_owner IS NULL')
     # The registry owner lock is taken before the check-and-update (same key as Registry._lock; the
     # disposable-DB test compares the two keys).
     lock = body.index('pg_catalog.pg_advisory_xact_lock(')

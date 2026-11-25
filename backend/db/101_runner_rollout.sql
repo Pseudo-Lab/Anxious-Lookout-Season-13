@@ -4,15 +4,17 @@
 -- Binding plans stay immutable except `image` (PM decision D3, enforced here, not only in Python):
 -- no role but anxious_runner_binding_writer may UPDATE runner_bindings.bindings, and that NOLOGIN role
 -- only owns move_image(), which rewrites `image` alone, by compare-and-swap on the whole old plan, and
--- only while the owner has no Pod and no create permission in its current generation.
+-- only while the owner has no Pod and no create permission in its current generation; a stopped owner
+-- also needs the completed stop proof of that generation (a legacy stop without one stays blocked).
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anxious_runner_binding_writer') THEN
     CREATE ROLE anxious_runner_binding_writer NOLOGIN;
   END IF;
 END $$;
-GRANT USAGE ON SCHEMA runner_runtime, runner_bindings TO anxious_runner_binding_writer;
+GRANT USAGE ON SCHEMA runner_runtime, runner_bindings, runner_termination TO anxious_runner_binding_writer;
 GRANT SELECT(owner_id,state_id,phase,generation,pod_uid) ON runner_runtime.registry TO anxious_runner_binding_writer;
 GRANT SELECT(owner_id,state_id,generation,kind,settled) ON runner_runtime.outbox TO anxious_runner_binding_writer;
+GRANT SELECT(owner_id,state_id,generation,completed_at,proof) ON runner_termination.stops TO anxious_runner_binding_writer;
 GRANT SELECT(owner_id,state_id,plan), UPDATE(plan) ON runner_bindings.bindings TO anxious_runner_binding_writer;
 
 CREATE SCHEMA runner_rollout;
@@ -51,6 +53,11 @@ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg
 DECLARE
   moved jsonb;
 BEGIN
+  -- Each statement below must read rows committed before it ran, after the owner lock: under
+  -- REPEATABLE READ/SERIALIZABLE the snapshot predates the lock and could miss a committed reserve.
+  IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'binding image move requires READ COMMITTED' USING ERRCODE = 'check_violation';
+  END IF;
   IF p_owner IS NULL OR p_state IS NULL OR p_old IS NULL OR jsonb_typeof(p_old) IS DISTINCT FROM 'object'
      OR jsonb_typeof(p_old->'image') IS DISTINCT FROM 'string'
      OR p_image IS NULL OR p_image !~ '^[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}$' OR p_old->>'image' = p_image THEN
@@ -65,7 +72,12 @@ BEGIN
    WHERE b.owner_id = p_owner AND b.state_id = p_state AND b.plan = p_old
      AND EXISTS (SELECT 1 FROM runner_runtime.registry r
                   WHERE r.owner_id = p_owner AND r.state_id = p_state AND r.pod_uid IS NULL
-                    AND (r.phase = 'idle_stopped'
+                    AND ((r.phase = 'idle_stopped'
+                          -- Stopped by a proved stop of this generation; a legacy stop has no proof.
+                          AND EXISTS (SELECT 1 FROM runner_termination.stops s
+                                       WHERE s.owner_id = r.owner_id AND s.state_id = r.state_id
+                                         AND s.generation = r.generation AND s.completed_at IS NOT NULL
+                                         AND jsonb_typeof(s.proof) = 'object' AND s.proof <> '{}'::jsonb))
                          -- Waiting for a Pod: only before the create permission of this generation.
                          OR (r.phase IN ('provisioning','capacity_wait')
                              AND NOT EXISTS (SELECT 1 FROM runner_runtime.outbox o

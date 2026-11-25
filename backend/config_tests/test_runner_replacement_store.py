@@ -25,7 +25,6 @@ T = fingerprint(NEW_IMAGE, [])
 @pytest.fixture
 def observer(admin):
     with admin.begin() as db:
-        db.connection.driver_connection.execute((DB/'061_runner_controller_grants.sql').read_text())
         db.execute(text('TRUNCATE runner_rollout.owners, runner_rollout.targets'))
     engine = create_engine(admin.url, hide_parameters=True)
 
