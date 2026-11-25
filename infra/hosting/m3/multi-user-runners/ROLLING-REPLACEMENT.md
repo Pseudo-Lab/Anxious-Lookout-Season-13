@@ -134,11 +134,18 @@ that step D starts replacing every owner not on `runnerImage`.
 
 **Pre-application check (read-only, node-local; run with the user's approval):** every owner's
 `control/data/operator-account` equals the account the broker supplies (`BROKER_ACCOUNT_ID`).
-Compare by hash; never print the values. On the development VM, owners that still held the
-provisioning placeholder refused every supply with `/health` `policy_refused`: the runner checks the
-envelope's account against that file (`runner/service_access.py`). That happened on any image, and a
-rollout moved their bindings without noticing. Such an owner fails at its next start, and as a canary
-it halts the rollout (`runner_unavailable`).
+Compare by hash; never print the values.
+
+Why: in `access-service` mode the runner refuses a broker envelope whose account is not that file's
+value (`ServiceAccessAuth.install`, `runner/service_access.py`). It answers `/health` `policy_refused`
+and native does not start. The check is in the runner code itself, not in one image: it is present
+in the issue97 runner source and in this release. So it applies to every owner and every image built
+from that code.
+
+Observed once on the development VM: five synthetic owners still held a provisioning placeholder in
+that file. One of them (…5802) was started on the issue97 runner image after a rollout had moved its
+binding and stayed `policy_refused`. The other four were not started. Code says they would refuse
+the same way. As a canary such an owner halts the rollout (`runner_unavailable`).
 
 ## 5. Changing the runner image (or a runner flag) with rolling replacement on
 
@@ -167,22 +174,32 @@ it halts the rollout (`runner_unavailable`).
    canary's own stop is still in flight restarts that owner on its old binding (`failed:halted`).
 5. After `rolling`: owners move or are replaced one by one; `complete` when every owner is on the
    target, `blocked` owners listed by reason.
-6. **Halt or rollback:** `rollout halt` stops new replacements. To roll back, put the previous
-   `runnerImage` back and apply as in step 3; a fingerprint that once completed rolls without a
-   canary. `rollout resume` continues a halted target the operator judged sound.
+6. **Halt or rollback:** `rollout halt` stops new replacements.
+
+   To roll back, return to the previous **fingerprint**, the runner image together with the rollout
+   flags. Put back every value the change touched: `runnerImage`, and the `stream` / `research`
+   flags if they changed too. A flag-only change is rolled back by its flags alone. Then apply as in
+   step 3.
+
+   If that fingerprint has a target with `completed_at` in its history, the new target starts at
+   `rolling` without a canary (`SqlStore.install`, `ops/runner_replacement.py`). Otherwise it starts
+   at `canary`.
+
+   `rollout resume` continues a halted target the operator judged sound.
 7. **After `complete` (operator check, PM 11-25):** for a set period, for example the first working
    day, watch the owners that start for the first time on the new target:
    - their runner `/health`: available, with no reason such as `policy_refused`;
    - the controller log.
 
-   If one is unhealthy because of the image, apply the rollback values (step 6). The previous
-   fingerprint completed, so it rolls back without a canary.
+   If one is unhealthy because of the image or a flag, apply the rollback values (step 6, every
+   value the change touched). A previous fingerprint that completed rolls back without a canary.
 
 ### Limits of rolling replacement (no automatic cover)
 
 - **A stopped owner that moved is not checked on the new image until its next start.** The canary
-  proves one owner's real start only. Stopped owners move at once once `rolling` starts, and nothing
-  starts them.
+  checks the `/health` of one owner's Pod on the target fingerprint. That need not be a new start:
+  on the development VM (G3) an already running Pod of the same fingerprint passed it. Stopped owners
+  move at once once `rolling` starts, and nothing starts them.
 - **No automatic halt after `complete`.** The controller watches target Pods (terminated runner,
   image pull, unavailable `/health`) only while the target is `canary` or `rolling`. An owner that
   starts after `complete` and is unhealthy halts nothing. Step 7 is the manual cover; extending the
