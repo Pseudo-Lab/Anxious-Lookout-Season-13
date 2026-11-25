@@ -220,7 +220,8 @@ the same way. As a canary such an owner halts the rollout (`runner_unavailable`)
    - check both Deployments' values against the render.
 
    For example, a rollback that turns `research` off but applies only the controller leaves the api
-   issuing research grants.
+   issuing research grants. A `stream.enable`-only change is put back on the api only, as in step 3's
+   exception: no target, no runner Pod.
 
    If that fingerprint has a target with `completed_at` in its history, the new target starts at
    `rolling` without a canary (`SqlStore.install`, `ops/runner_replacement.py`). Otherwise it starts
@@ -260,8 +261,7 @@ the same way. As a canary such an owner halts the rollout (`runner_unavailable`)
       to the rolled-back image.
 
    This is not specific to rolling replacement. A runner Pod started on an image that cannot be
-   pulled stays `Pending` whether or not rollout is on. (Stopping such Pods automatically is a
-   follow-up candidate outside #101.)
+   pulled stays `Pending` whether or not rollout is on.
 7. **After `complete` (operator check, PM 11-25; a second look beside the automatic halt below):**
    for a set period, for example the first working day, watch the owners that start for the first
    time on the new target:
@@ -395,3 +395,89 @@ lines, Pod UIDs/images, conversation end states.
 8. Controller restart in the middle of a replacement: the rollout continues from the database.
    Include a replacement of the controller right after a deadline stop committed: the owner's row
    is already `cutting`, and the new controller resends the interrupt within 120 s.
+
+### Results on the development VM (2026-11-25)
+
+**Setup:**
+- The runtime is 60070c9.
+- Six owners: …0048 and …5801–…5805.
+- PM ran each step after review cleared it, and review judged each part from the logs and their SHA-256 (kept with the
+  #101 records).
+- Three model turns in total.
+
+1. **Passed** (gates G3 and G4).
+   - The first target completed 156.7 s after the controller patch.
+   - The 15 s samples never caught `rolling`. The evidence is:
+     - the canary owner's `rollout` `canary_passed` line;
+     - the five `moved` binding rows;
+     - the final `complete`.
+   - In G4, a stopped owner whose binding had moved started its next Pod on the target image.
+2. **Passed** (G4).
+   - The running owner was stopped cleanly between turns.
+   - It re-entered logged in on the target image, with its conversation intact.
+   - The target became `complete`.
+3. **Passed** (G5, with `turnDeadlineSeconds` 240).
+   - **Long turn:**
+     - The cut stop was requested 242.3 s after the owner started `waiting_turn`.
+     - The last normal runner sample of that request was 7.2 s before the request.
+     - The same Pod's v1 drain receipt and proof completed the stop in 1.1 s.
+     - The conversation ended `failed`/`codex_runner_lost`, and the owner re-entered on the new image.
+   - **Idle runner with a `running` database row:**
+     - 16 samples showed the runner idle while the row was `running`.
+     - The stop was requested 275.0 s after `waiting_turn` and completed by v1 drain receipt and proof.
+     - The row ended `failed`/`codex_runner_lost`.
+   - The target became `complete`, with no halt.
+4. **Passed** (G7 and G7b).
+   - **G7, unpullable digest as canary:**
+     - The canary's Pod stayed `Pending` on the pull failure, and the target became `halted` (`image_pull`).
+     - A non-canary owner that re-entered during the canary started on its old binding.
+     - No binding moved after the halt (every owner's binding was recorded before and after).
+   - **G7 rollback by values:**
+     - The new target started at `rolling`.
+     - The operator deleted the canary's `Pending` Pod with the UID and resourceVersion preconditions (section 5,
+       step 6). A `podAbsent` receipt and proof released it.
+     - The target became `complete`.
+   - **G7b, after `complete`:** an owner whose runner could not start halted the target (`runner_unavailable`) in the
+     same pass. After the restore and `rollout resume`, the same target completed again.
+   - **During `rolling`:** a stop with a v1 drain receipt for its Pod was read as `stopping`, not a halt.
+5. **Passed with `stream.text`** (G8).
+   - A new target {same image, `RUNNER_STREAM_TEXT`} was created.
+   - The canary's old Pod drained (v1). Its new Pod ran the same image with the flag.
+   - No binding image changed, and the target became `complete`.
+   - **Before the next change, wait for `complete` again:** a target Pod that starts after `complete` sends the target
+     back to `rolling` until it is read healthy. A controller apply that requires `complete` refused in that window.
+   - `research_grant_omitted` has no VM evidence (above).
+6. **Not run on the VM; substitute evidence** (G10).
+   - The VM has no host inputs, so no new owner can be prepared there.
+   - The renderer refuses a `controller-inputs.json` image that differs from `RUNNER_TARGET_IMAGE`
+     (`ops/runner_rollout.py` `preflight`). The VM's controller render showed both equal to the target image.
+     `ops/user_runner_prepare.py` prepares a new owner's plan with that image.
+   - `before_create` moves a waiting owner to the target before its first Pod (unit tests in
+     `config_tests/test_runner_replacement.py`).
+   - **Limit:** a real new owner's provisioning and first Pod were not checked on the VM. Check them after the first
+     production #101 apply.
+7. **Passed** (G9, api runtime update).
+   - The update ran while an owner's turn was running and its chat stream was open.
+   - The stream ended (EOF) during the update. A new connection received its first frame 2.04 s later.
+   - 30 conversation reads, 5 s apart, all returned 200.
+   - The turn's result arrived through the new api (`idle` with the answer; the database row `completed`).
+   - The runner Pod and the target were untouched.
+   - **What read the stream:** the gate's own SSE client, which reconnects like the page (1 s, with `Last-Event-ID`).
+     It was not a browser and went through no proxy.
+   - The page's `conversation_refresh_write` count needs a browser and was not measured.
+   - **The first api apply:**
+     - Of 123 samples about 1 s apart, 10 were 503.
+     - 11.0 s passed between the first and the last 503, and 7.0 s within the longest run of 503s.
+     - Every sample after the recovery was 200.
+     - The responding Pod was not recorded, so alternation between the old and new Pod is an inference.
+     - This one run does not validate section 8's bound.
+8. **Unit evidence and VM continuity** (G6).
+   - **Restart right after a deadline stop:** not caught on the VM. The deadline stop closed in 1.1 s, which left no
+     window to restart the controller before the interrupt. The unit test
+     `test_b2_a_cut_survives_a_controller_restart_and_resends_the_interrupts` covers the takeover and the resent
+     interrupt.
+   - **Restart during a replacement:** on the VM, two controller runtime replacements continued the same target from
+     the database.
+
+**Final state** (G12): the api and the runner-controller run the 60070c9 runtime. The target {issue97 runner,
+`RUNNER_STREAM_TEXT`} is `complete`, and all six bindings are on it. The VM was left in this state.
