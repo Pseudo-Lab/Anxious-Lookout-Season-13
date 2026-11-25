@@ -20,10 +20,14 @@ Each 30 s pass (after the stop steps, before creation):
 | No Pod, binding on another image | The binding moves to the target image at once (`runner_rollout.move_image`: image only, compare-and-swap, only with no Pod and no create permission; a stopped owner also needs the completed stop proof of its generation). Not during the canary, except the canary owner |
 | Waiting for its first Pod of a generation (new owner, re-entry) | Moves just before creation, so its Pod starts on the target. During the canary only the canary owner moves; another owner starts on its current binding and is replaced once rolling (a new owner is prepared with `controller-inputs.json` `image`, the target, either way) |
 | Pod on another fingerprint | `waiting_turn`: nothing is stopped while a turn runs. Once its runner reports idle for 60 s and the database holds no running conversation, a stop intent is recorded (`draining`) and the existing stop path runs: drain receipt, graceful UID DELETE, 404 proof, release. After release the binding moves and, while the owner still has a live login session, the owner re-enters at once (`restarting` → `verified`); otherwise its next start uses the new image (`moved`) |
-| Turn still running after `turnDeadlineSeconds` (default 1800) — also when the runner reports idle but the database still holds a `running` conversation | `cutting`: the stop intent fences new turns and the running turn gets the runner's ordinary interrupt (the #90 Stop). The conversation ends `interrupted` (API read first) or `failed`/`codex_runner_lost` (closed at the drain receipt, #114). If no drain receipt follows within 120 s: `blocked:turn_not_settled` (the slot is freed; operator R2 if needed) |
-| `runner_failed` owner | `blocked:runner_failed`, never moved |
+| Turn still running after `turnDeadlineSeconds` (default 1800) — also when the runner reports idle but the database still holds a `running` conversation, and when the runner's idle evidence cannot be read (`idle_unknown` until then) | `cutting`: the stop intent and the `cutting` row commit together; the stop fences new turns and the running turn gets the runner's ordinary interrupt (the #90 Stop), resent every pass (also after a controller restart) until the drain receipt or 120 s. The conversation ends `interrupted` (API read first) or `failed`/`codex_runner_lost` (closed at the drain receipt, #114). If no drain receipt follows within 120 s: `blocked:turn_not_settled` (kept while that stop stays open, without a slot; operator R2 if needed) |
+| A stop someone else opened (idle stop, logout, operator) | Followed to release as `draining` with reason `external_stop`; it holds no replacement slot |
+| Stop carried over from an earlier target, owner not the canary | The stop finishes; during the canary the owner restarts on its unchanged binding (`blocked:awaiting_canary`) and is replaced once rolling |
+| `runner_failed` owner, or a stopped owner without the completed stop proof of its generation (legacy) | `blocked:runner_failed` / `blocked:no_stop_proof`, never moved, never the canary |
+| Any stop or move | Its transaction locks the target row (as `rollout halt`/`resume` do) and rechecks that the target is current and not halted and, during the canary, that this owner is the canary; otherwise nothing is recorded (`held`) |
 
-At most `maxParallel` (default 1, max 3) owners are in `cutting`/`draining`/`restarting` at once.
+At most `maxParallel` (default 1, max 3) of the rollout's own replacements are in
+`cutting`/`draining`/`restarting` at once (followed `external_stop`s do not count).
 The rollout never deletes a Pod, writes a receipt or releases; #61 R1/R2 and the #114 release path
 are unchanged.
 
@@ -32,10 +36,15 @@ are unchanged.
 `canary` → `rolling` → `complete`; `halted`; `superseded` (a newer target replaced it).
 
 - **canary:** one owner (the first of `canaryOwners` that needs work, else the first running owner,
-  else the first stopped owner). It passes only after its new Pod has stayed healthy
-  (`/health` available, no reason) for the whole `canarySeconds` window (default 600) after the
-  first healthy check (PM condition 1). A target fingerprint that once reached `complete` (a
-  rollback) starts in `rolling`.
+  else the first stopped owner; never a blocked/failed owner or one without its stop proof). It
+  passes only after `canarySeconds` (default 600) of **consecutive** healthy checks (`/health`
+  available, no reason) of the **same** canary Pod (PM condition 1, 11-25 criterion). An account
+  reason (`auth_*`, `not_configured`), an unreadable health, a Pod not Running or a newer Pod breaks
+  the streak (`restarting:canary_unconfirmed`): neither pass nor halt; the next healthy check starts
+  it again. `rollout resume` is the operator's only explicit pass. A target fingerprint that once
+  reached `complete` (a rollback) starts in `rolling`.
+- **complete** needs every owner settled: a target Pod still starting or with unreadable health keeps
+  the target `rolling` and watched (a pull failure still halts after 120 s).
 - **Automatic halt** (reason in `rollout status`): any Pod already on the target fingerprint, in
   `canary` or `rolling`, with
   - `runner_terminated`: the runner container ended or the Pod `Failed`;
@@ -123,12 +132,15 @@ that step D starts replacing every owner not on `runnerImage`.
 4. Watch `rollout status` and the controller log through the canary window. Canary checklist:
    - the canary Pod's image is the new digest and its `/health` is available;
    - API log lines `conversation_refresh_write` (#90 polling fallback) and `research_grant_omitted`
-     during the window — a rise means the stream or the grant path regressed: `rollout halt`;
+     during the window — a rise means the stream or the grant path regressed: `rollout halt`.
+     Compare `conversation_refresh_write` only for a canary turn with `stream.enable` on (with the
+     stream off every read is a polling refresh);
    - no `rollout_halted` line;
    - **one real turn** (PM condition 1), sent during the window as the canary owner — preferably the
      test owner named in `canaryOwners`, logged in so its runner restarts at once (a stopped canary
-     starts when that owner opens the runner). Check that the turn ends normally, that the chat
-     stream delivers its first event, and, with `research.enable` on, that a research tool call
+     starts when that owner opens the runner). Check that the turn ends normally; with
+     `stream.enable` on, that the chat stream delivers its first event (with it off, that the result
+     arrives by polling, as before #90); and, with `research.enable` on, that a research tool call
      works (no `research_grant_omitted` line for it). If any of these fails: `rollout halt`.
 
    The canary passes on its own when `canarySeconds` ends. Choose a window long enough for the
@@ -180,7 +192,16 @@ Running runners keep their image; only new Pods use a new render. Every release 
 
 - **C1 Pod manifest:** api and controller N accept a Pod rendered by N−1 (as #62 legacy callback
   and the #90 flag subsets do in `KubePods._pod`). The N−1 variant may be removed only in a later
-  release, after a rollout reached `complete`.
+  release, and only when all of these hold (read-only): `rollout status` is `complete` with no
+  `blocked`/`failed` owner, and no live runner Pod still carries the N−1 render — list every runner
+  Pod's image and rollout flag env and compare them with the target fingerprint:
+
+  ```sh
+  kubectl -n codex-runner get pods -l anxious.io/managed=user-runner \
+    -o jsonpath='{range .items[*]}{.metadata.name} {.spec.containers[?(@.name=="runner")].image} {.spec.containers[?(@.name=="runner")].env[*].name}{"\n"}{end}'
+  ```
+
+  A blocked owner's Pod keeps its old render until it is resolved.
 - **C2 runner HTTP:** api N talks to runner images N−1 and N; health fields and receipt versions
   are only added; an endpoint the api uses is not removed while an older image still runs.
 - **C3 database:** expand-only migrations in a no-freeze release.
@@ -210,9 +231,13 @@ lines, Pod UIDs/images, conversation end states.
 2. A running owner is replaced between turns; it restarts while logged in; its conversation is
    intact.
 3. A turn longer than the deadline (set `turnDeadlineSeconds` low) is interrupted; the conversation
-   ends `interrupted` or `failed`/`codex_runner_lost`; the owner restarts on the new image.
+   ends `interrupted` or `failed`/`codex_runner_lost`; the owner restarts on the new image. Also the
+   case of a runner that reports idle while the database still holds a `running` conversation: it
+   waits until the deadline, then `cutting`, and the drain receipt closes the row.
 4. A broken image (unpullable digest or a runner that exits) as canary: `halted` with the reason;
-   no other owner moved; rollback by values.
+   no other owner moved; rollback by values. Also: a non-canary existing owner that re-enters during
+   the canary starts on its old binding; record every owner's binding image before and after the
+   halt (no move after it).
 5. Flag-only change (`stream.text` or `research.enable`): Pods are replaced without a binding move;
    `research_grant_omitted` lines only before the replacement.
 6. A new owner is prepared and starts on the target image.
@@ -221,3 +246,5 @@ lines, Pod UIDs/images, conversation end states.
    back to polling (`conversation_refresh_write` count), any error shown, and whether the running
    turn's result arrived.
 8. Controller restart in the middle of a replacement: the rollout continues from the database.
+   Include a replacement of the controller right after a deadline stop committed: the owner's row
+   is already `cutting`, and the new controller resends the interrupt within 120 s.

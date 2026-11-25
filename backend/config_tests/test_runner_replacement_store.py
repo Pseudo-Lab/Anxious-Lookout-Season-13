@@ -22,6 +22,14 @@ DB = Path('/source/db')
 T = fingerprint(NEW_IMAGE, [])
 
 
+def rolling(observer):
+    """The current target for T, in `rolling` (store writes are gated on an active target, review blocker 5)."""
+    target = observer.install(T)
+    if target.state == 'canary':
+        target = observer.set_state(target, 'rolling')
+    return target.target_id
+
+
 @pytest.fixture
 def observer(admin):
     with admin.begin() as db:
@@ -87,13 +95,13 @@ def test_owner_views_and_row_since(admin, owner, t0, observer):
 
 def test_observer_moves_stopped_and_waiting_owners_only(admin, owner, t0, observer):
     value = stopped(admin, owner, t0)
-    assert observer.move(owner, NEW_IMAGE) is True and plan(admin)['image'] == NEW_IMAGE
-    assert observer.move(owner, NEW_IMAGE) is False
+    assert observer.move(owner, NEW_IMAGE, target_id=rolling(observer), canary=False) is True and plan(admin)['image'] == NEW_IMAGE
+    assert observer.move(owner, NEW_IMAGE, target_id=rolling(observer), canary=False) is False
     with admin.begin() as db:  # An open entry intent is not a stopped-owner state for the shared predicate.
         db.execute(text("INSERT INTO runner_termination.entries(owner_id,key,state_id,generation,session_hash) VALUES(:o,:k,:s,1,:h)"),
                    {'o': owner, 'k': uuid4(), 's': value['state'], 'h': login(admin, owner)})
     with pytest.raises(Refused):
-        observer.move(owner, value['image'])
+        observer.move(owner, value['image'], target_id=rolling(observer), canary=False)
     assert plan(admin)['image'] == NEW_IMAGE
 
 
@@ -101,7 +109,7 @@ def test_ready_owner_is_never_moved(admin, owner, t0, observer):
     state = ready(admin, owner, t0)
     value = publish(admin, state)
     with pytest.raises(Exception):
-        observer.move(owner, NEW_IMAGE)
+        observer.move(owner, NEW_IMAGE, target_id=rolling(observer), canary=False)
     assert plan(admin) == value
 
 
@@ -111,11 +119,11 @@ def test_between_turns_stop_waits_for_running_conversations(admin, owner, t0, ob
     with admin.begin() as db:
         db.execute(text("""INSERT INTO research.conversations(owner_id,title,state,request_id)
             VALUES(:o,'busy','running',gen_random_uuid())"""), {'o': owner})
-    assert observer.stop_between_turns(owner) is None
+    assert observer.stop_between_turns(rolling(observer), owner, canary=False) is None
     with admin.begin() as db:
         assert stop_for(db, Registry(db).read(owner)) is None
         db.execute(text("UPDATE research.conversations SET state='idle'"))
-    stop = observer.stop_between_turns(owner)
+    stop = observer.stop_between_turns(rolling(observer), owner, canary=False)
     with admin.begin() as db:
         assert stop_for(db, Registry(db).read(owner))['stop_id'] == stop
 
@@ -126,7 +134,7 @@ def test_deadline_stop_returns_the_running_turns(admin, owner, t0, observer):
     with admin.begin() as db:
         conversation = db.execute(text("""INSERT INTO research.conversations(owner_id,title,state,request_id)
             VALUES(:o,'busy','running',gen_random_uuid()) RETURNING id, request_id"""), {'o': owner}).one()
-    stop, turns = observer.stop_for_cut(owner)
+    stop, turns = observer.stop_for_cut(rolling(observer), owner, canary=False)
     assert turns == [tuple(conversation)]
     with admin.begin() as db:
         assert stop_for(db, Registry(db).read(owner))['stop_id'] == stop
@@ -164,3 +172,68 @@ def test_canary_owner_is_the_current_unblocked_canary(admin, owner, t0, observer
     assert observer.canary_owner(target.target_id) == owner
     observer.set_row(target.target_id, owner, 'blocked', canary=True, reason='turn_not_settled')
     assert observer.canary_owner(target.target_id) is None  # Rollout.choose_canary picks another.
+
+
+def test_stop_rows_commit_with_their_stops(admin, owner, t0, observer):
+    state = ready(admin, owner, t0)
+    publish(admin, state)
+    target = rolling(observer)
+    stop = observer.stop_between_turns(target, owner, canary=False)
+    view, = observer.owners(target)
+    assert (view.row.phase, view.row.stop_id, view.stop_id) == ('draining', stop, stop)
+
+
+def test_cut_row_commits_with_its_stop(admin, owner, t0, observer):
+    state = ready(admin, owner, t0)
+    publish(admin, state)
+    target = rolling(observer)
+    stop, turns = observer.stop_for_cut(target, owner, canary=False)
+    view, = observer.owners(target)
+    assert (view.row.phase, view.row.stop_id) == ('cutting', stop) and turns == [] == observer.running_turns(owner)
+
+
+@pytest.mark.parametrize('case', ['halted', 'superseded', 'canary-not-canary', 'canary-other-canary'])
+def test_stops_and_moves_recheck_the_target_in_their_transaction(admin, owner, t0, observer, case):
+    """Review blocker 5: an operator command (or a newer target) committed after the pass read its target."""
+    from ops.runner_replacement import TargetChanged
+    state = ready(admin, owner, t0)
+    publish(admin, state)
+    target = observer.install(T)
+    if case == 'halted':
+        observer.set_state(target, 'halted', 'operator')
+    elif case == 'superseded':
+        observer.install(fingerprint(NEW_IMAGE, ['RUNNER_RESEARCH_API_ENABLE']))
+    elif case == 'canary-other-canary':
+        other = uuid4()
+        with admin.begin() as db:
+            db.execute(text("INSERT INTO auth.accounts(id,github_id,login,role,is_approved) VALUES(:id,'777','other','editor',true)"), {'id': other})
+        enter(admin, other, uuid4(), t0)
+        observer.set_row(target.target_id, other, 'waiting_turn', canary=True)
+    canary = case == 'canary-other-canary'
+    for call in (lambda: observer.stop_between_turns(target.target_id, owner, canary=canary),
+                 lambda: observer.stop_for_cut(target.target_id, owner, canary=canary),
+                 lambda: observer.move(owner, NEW_IMAGE, target_id=target.target_id, canary=canary)):
+        with pytest.raises(TargetChanged):
+            call()
+    with admin.begin() as db:
+        assert stop_for(db, Registry(db).read(owner)) is None
+
+
+def test_owners_reads_every_page_and_the_stop_proof(admin, owner, t0, observer):
+    """Review major 4: no owner is left unevaluated by a page limit."""
+    owners = [owner]
+    for number in range(2):
+        other = uuid4()
+        with admin.begin() as db:
+            db.execute(text("INSERT INTO auth.accounts(id,github_id,login,role,is_approved) VALUES(:id,:gh,'o','editor',true)"),
+                       {'id': other, 'gh': str(800 + number)})
+        owners.append(other)
+    for each in owners:
+        stopped(admin, each, t0)
+    observer.PAGE = 2
+    target = rolling(observer)
+    views = observer.owners(target)
+    assert sorted(view.owner for view in views) == sorted(owners) and all(view.proved for view in views)
+    with admin.begin() as db:
+        db.execute(text('DELETE FROM runner_termination.stops WHERE owner_id=:o'), {'o': owner})
+    assert {view.owner: view.proved for view in observer.owners(target)}[owner] is False

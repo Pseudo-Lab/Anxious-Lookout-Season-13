@@ -36,9 +36,19 @@ TURN_GRACE_SECONDS = 60   # The runner has been idle this long before a between-
 SETTLE_SECONDS = 120      # After an interrupt, the drain receipt is expected within this.
 PULL_SECONDS = 120        # A target Pod still failing to pull its image after this halts.
 RESTART_KEYS = UUID('5f0d7a52-6a3e-4a55-9a0b-101000000001')  # uuid5 namespace for re-entry keys
-# Outcomes that leave an owner with nothing to do for this target.
-SETTLED = {'converged', 'verified', 'moved', 'blocked', 'failed', 'inconclusive', 'starting', 'health_unreachable',
-           'canary_passed'}
+# Outcomes that leave an owner with nothing to do for this target. A starting target Pod or one whose
+# health could not be read is not settled: it is still watched for pull failures and health (review blocker 4).
+SETTLED = {'converged', 'verified', 'moved', 'blocked', 'failed', 'inconclusive', 'canary_passed'}
+EXTERNAL = 'external_stop'  # A followed stop someone else opened: it holds no replacement slot.
+
+
+def occupies(phase, reason):
+    """A replacement in flight that counts against maxParallel."""
+    return phase in SLOT_PHASES and reason != EXTERNAL
+
+
+class TargetChanged(Refused):
+    """The target's state or canary changed under the owner's stop or move (an operator command)."""
 
 
 class Halt(Exception):
@@ -106,6 +116,7 @@ class View:
     stop_id: UUID | None = None        # open stop of the current generation
     stop_receipt: bool = False
     row: Row | None = None
+    proved: bool = True                 # a completed stop proof exists for the current generation
 
 
 def health_class(health):
@@ -143,10 +154,10 @@ class Rollout:
             return []
         self.target = self.store.install(self.settings.fingerprint)
         views = self.store.owners(self.target.target_id)
-        self.slots = sum(1 for view in views if view.row is not None and view.row.phase in SLOT_PHASES)
+        self.slots = sum(1 for view in views if view.row is not None and occupies(view.row.phase, view.row.reason))
         canary = self.choose_canary(views) if self.target.state == 'canary' else None
         lines, pending = [], False
-        for view in sorted(views, key=lambda v: (v.owner != canary, v.row is None or v.row.phase not in SLOT_PHASES, v.owner)):
+        for view in sorted(views, key=lambda v: (v.owner != canary, v.row is None or not occupies(v.row.phase, v.row.reason), v.owner)):
             try:
                 outcome = self.advance(view, canary)
             except Halt as halt:
@@ -155,8 +166,9 @@ class Rollout:
                     lines.append((view.owner, 'rollout_halted', halt.reason))
                 pending = True
                 continue
+            except TargetChanged:
+                outcome = 'held'  # An operator command (halt) committed in between; the next pass rereads.
             except Exception as failure:
-                outcome = 'stuck'
                 lines.append((view.owner, 'rollout', 'stuck:'+(getattr(failure, 'reason', None) or type(failure).__name__)))
                 pending = True
                 continue
@@ -180,13 +192,20 @@ class Rollout:
         current = [v.owner for v in views if v.row is not None and v.row.canary and v.row.phase not in {'blocked', 'failed'}]
         if current:
             return current[0]
+        def eligible(view):
+            # Never an owner already blocked or failed for this target, nor a stopped owner whose binding
+            # can never move (no stop proof): the canary would wait forever (review major 3).
+            return (view.row is None or view.row.phase not in {'blocked', 'failed'}) and not (
+                view.pod_uid is None and view.phase == Phase.STOPPED and not view.proved)
         def needs(view):
             return view.image != T['image'] or view.pod_uid is not None
         by_owner = {view.owner: view for view in views}
-        configured = [owner for owner in self.settings.canary_owners if owner in by_owner and needs(by_owner[owner])]
+        configured = [owner for owner in self.settings.canary_owners
+                      if owner in by_owner and needs(by_owner[owner]) and eligible(by_owner[owner])]
         running = [v.owner for v in views if v.pod_uid is not None and v.phase in {Phase.READY, Phase.UNREACHABLE}
-                   and v.stop_id is None and (v.row is None or v.row.phase not in {'blocked', 'failed'})]
-        stopped = [v.owner for v in views if v.pod_uid is None and v.image != T['image'] and v.phase == Phase.STOPPED]
+                   and v.stop_id is None and eligible(v)]
+        stopped = [v.owner for v in views if v.pod_uid is None and v.image != T['image'] and v.phase == Phase.STOPPED
+                   and eligible(v)]
         for owner in configured + running + stopped:
             return owner
         return None
@@ -196,9 +215,9 @@ class Rollout:
         return state in {'rolling', 'complete'} or (state == 'canary' and view.owner == canary)
 
     def set(self, view, phase, *, canary, stop_id=None, reason=None):
-        old = view.row.phase if view.row is not None else None
+        old = view.row
         self.store.set_row(self.target.target_id, view.owner, phase, canary=canary, stop_id=stop_id, reason=reason)
-        self.slots += (phase in SLOT_PHASES) - (old in SLOT_PHASES)
+        self.slots += occupies(phase, reason) - (old is not None and occupies(old.phase, old.reason))
         return phase
 
     def elapsed(self, since):
@@ -208,6 +227,8 @@ class Rollout:
     def advance(self, view, canary):
         T = self.settings.fingerprint
         row, is_canary = view.row, view.owner == canary
+        if row is not None and row.phase == 'blocked' and row.stop_id is not None and view.stop_id == row.stop_id:
+            return 'blocked'  # Review major 2: the same unsettled stop stays blocked, and holds no slot.
         obj = self.cluster.pod(view) if view.pod_uid is not None else None
         if obj is not None and obj['metadata'].get('uid') != str(view.pod_uid):
             return 'pod_uid_mismatch'  # Never act on a replaced object; Service.step reports it.
@@ -231,14 +252,19 @@ class Rollout:
             return 'pod_missing'  # Service.step takes the dead-runner path.
         if view.image == T['image']:
             return 'converged'
-        if view.phase == Phase.FAILED:
-            if view.row is None or view.row.phase != 'blocked':
-                self.set(view, 'blocked', canary=is_canary, reason='runner_failed')
+        if view.phase == Phase.FAILED or (view.phase == Phase.STOPPED and not view.proved):
+            # Permanent until an operator acts: a failed runner, or a legacy stop without the proof the
+            # binding move requires (review major 3). Recorded once; never a canary.
+            reason = 'runner_failed' if view.phase == Phase.FAILED else 'no_stop_proof'
+            if view.row is None or (view.row.phase, view.row.reason) != ('blocked', reason):
+                self.set(view, 'blocked', canary=False, reason=reason)
             return 'blocked'
         if not self.allowed(view, canary) or view.phase not in {Phase.STOPPED, Phase.PREPARING, Phase.WAITING}:
             return 'held'
         try:
-            moved = self.store.move(view.owner, T['image'])
+            moved = self.store.move(view.owner, T['image'], target_id=self.target.target_id, canary=is_canary)
+        except TargetChanged:
+            raise
         except Exception:
             return 'not_movable'  # A create permission is out, or a stop is still open: next pass.
         if moved:
@@ -250,8 +276,9 @@ class Rollout:
         if not self.allowed(view, canary):
             return 'held'
         if view.stop_id is not None:
-            # A stop is already open (idle stop, logout, operator): follow it instead of opening another.
-            return self.set(view, 'draining', canary=is_canary, stop_id=view.stop_id)
+            # A stop opened by someone else (idle stop, logout, operator): follow it to release, without a
+            # replacement slot (review major 2).
+            return self.set(view, 'draining', canary=is_canary, stop_id=view.stop_id, reason=EXTERNAL)
         if row is None or row.phase != 'waiting_turn':
             self.set(view, 'waiting_turn', canary=is_canary)
             row = Row('waiting_turn', self.now(), is_canary)
@@ -259,40 +286,58 @@ class Rollout:
             return 'waiting_slot'
         if (obj.get('status') or {}).get('phase') != 'Running':
             return 'waiting_turn'
-        if self.cluster.idle(view, obj, TURN_GRACE_SECONDS):
-            stop_id = self.store.stop_between_turns(view.owner)
+        try:
+            idle = self.cluster.idle(view, obj, TURN_GRACE_SECONDS)
+        except Exception:
+            # Review major 1: no idle evidence (timeout, refusal). This Pod's UID was just matched, so the
+            # deadline below still applies; before it, wait.
+            idle = None
+        if idle:
+            stop_id = self.store.stop_between_turns(self.target.target_id, view.owner, canary=is_canary)
             if stop_id is not None:
                 return self.set(view, 'draining', canary=is_canary, stop_id=stop_id)
             # The database still holds a running conversation the runner no longer has: wait, but only
             # until the deadline below (PM 11-25: the deadline applies whether or not the runner is idle;
             # the drain receipt's close_dead_work closes such a conversation, #114).
         if self.elapsed(row.since) < self.settings.turn_deadline:
-            return 'waiting_turn'
-        # D1 deadline: fence new turns, then interrupt the running ones; the drain follows when they settle.
-        stop_id, turns = self.store.stop_for_cut(view.owner)
+            return 'waiting_turn' if idle is not None else 'idle_unknown'
+        # D1 deadline: the stop and the `cutting` row commit together (review blocker 2), so a controller
+        # restarted right after still knows this stop is a cut and resends the interrupts (after_stop).
+        stop_id, turns = self.store.stop_for_cut(self.target.target_id, view.owner, canary=is_canary)
         self.set(view, 'cutting', canary=is_canary, stop_id=stop_id)
+        self.interrupt(view, obj, turns)
+        return 'cutting'
+
+    def interrupt(self, view, obj, turns):
         for session, request in turns:
             try:
                 self.cluster.interrupt(view, obj, session, request)
             except Exception:
-                pass  # The settle timeout below reports a turn that does not end.
-        return 'cutting'
+                pass  # The settle timeout in after_stop reports a turn that does not end.
 
     def after_stop(self, view, obj, canary, is_canary):
         T, row = self.settings.fingerprint, view.row
         if view.phase == Phase.STOPPING or (view.stop_id is not None and view.stop_id == row.stop_id):
             # Our stop is still open: Service.step drains, deletes and releases.
-            if (row.phase == 'cutting' and obj is not None and not view.stop_receipt
-                    and self.elapsed(row.since) > SETTLE_SECONDS):
-                return self.set(view, 'blocked', canary=is_canary, reason='turn_not_settled')
+            if row.phase == 'cutting' and obj is not None and not view.stop_receipt:
+                if self.elapsed(row.since) > SETTLE_SECONDS:
+                    return self.set(view, 'blocked', canary=is_canary, stop_id=row.stop_id, reason='turn_not_settled')
+                # Within the settle window, resend the interrupts each pass (review blocker 2: also after a
+                # controller restart). Interrupting a turn that already ends is a no-op for the runner.
+                self.interrupt(view, obj, self.store.running_turns(view.owner))
             return row.phase
         if view.pod_uid is not None:
             # Released and already running again, not on the target (a target Pod went to observe()).
             return self.replace(view, obj, canary, is_canary) if obj is not None else 'pod_missing'
         halted = self.target.state == 'halted'
-        if not halted and view.image != T['image']:
+        # Review blocker 1: a stop carried over from an earlier target finishes, but the move to this target
+        # obeys this target's stage like any other move (only the canary during the canary).
+        may_move = not halted and self.allowed(view, canary)
+        if may_move and view.image != T['image']:
             try:
-                self.store.move(view.owner, T['image'])
+                self.store.move(view.owner, T['image'], target_id=self.target.target_id, canary=is_canary)
+            except TargetChanged:
+                raise
             except Exception:
                 return self.set(view, 'blocked', canary=is_canary, reason='not_movable')
         if view.phase in {Phase.PREPARING, Phase.WAITING}:
@@ -302,11 +347,15 @@ class Rollout:
             restarted = self.store.restart(view.owner, key)
         if halted:
             return self.set(view, 'failed', canary=is_canary, reason='halted')
+        if not may_move:
+            # Restarted on its unchanged binding; it is replaced once this target is rolling.
+            return self.set(view, 'blocked', canary=False, reason='awaiting_canary')
         return self.set(view, 'restarting' if restarted else 'moved', canary=is_canary)
 
     def observe(self, view, obj, is_canary):
         """A Pod already on the target fingerprint."""
         row, watching = view.row, self.target.state in {'canary', 'rolling'}
+        canary_window = is_canary and self.target.state == 'canary'
         if watching and self.cluster.terminal(obj) is not None:
             raise Halt('runner_terminated')
         born = created_at(obj)
@@ -314,21 +363,23 @@ class Rollout:
         if watching and pull_failed(obj) and age >= PULL_SECONDS:
             raise Halt('image_pull')
         if (obj.get('status') or {}).get('phase') != 'Running':
-            return 'starting'
-        canary_window = is_canary and self.target.state == 'canary'
+            return self.unconfirmed(view, is_canary, canary_window, 'starting')
         if not (canary_window or (row is not None and row.phase == 'restarting') or age < self.settings.canary_seconds):
             return 'converged'
         try:
             health = self.cluster.health(view, obj)
         except Exception:
-            return 'health_unreachable'
+            return self.unconfirmed(view, is_canary, canary_window, 'health_unreachable')
         kind = health_class(health)
         if kind == 'bad':
             if watching:
                 raise Halt('runner_unavailable')
             return 'converged'
         if kind == 'inconclusive':
-            return 'inconclusive'
+            return self.unconfirmed(view, is_canary, canary_window, 'inconclusive')
+        if canary_window and row is not None and row.phase == 'verified' and born is not None and born > row.since:
+            # A newer canary Pod than the healthy streak started on: the streak belongs to another Pod UID.
+            return self.unconfirmed(view, is_canary, canary_window, 'canary_pod_changed')
         if row is None or row.phase != 'verified':
             self.set(view, 'verified', canary=is_canary)
             row = Row('verified', self.now(), is_canary)
@@ -336,6 +387,15 @@ class Rollout:
             self.target = self.store.set_state(self.target, 'rolling')
             return 'canary_passed'
         return 'verified'
+
+    def unconfirmed(self, view, is_canary, canary_window, outcome):
+        """PM 11-25 (blocker 3): the canary passes only on canarySeconds of consecutive healthy checks of the
+        same Pod. Any other observation breaks the streak: neither pass nor halt; the next healthy check
+        starts it again. `rollout resume` is the operator's explicit pass."""
+        row = view.row
+        if canary_window and row is not None and row.phase == 'verified':
+            self.set(view, 'restarting', canary=is_canary, reason='canary_unconfirmed')
+        return outcome
 
     # Controller hooks -------------------------------------------------------
     def before_create(self, owner):
@@ -349,9 +409,10 @@ class Rollout:
             target = self.store.current()
             if target is None or target.state not in {'canary', 'rolling', 'complete'}:
                 return False
-            if target.state == 'canary' and self.store.canary_owner(target.target_id) != owner:
+            canary = target.state == 'canary'
+            if canary and self.store.canary_owner(target.target_id) != owner:
                 return False
-            return self.store.move(owner, self.settings.fingerprint['image'])
+            return self.store.move(owner, self.settings.fingerprint['image'], target_id=target.target_id, canary=canary)
         except Exception:
             return False  # Not movable (a create permission is out) or unreadable: create as bound.
 
@@ -421,22 +482,36 @@ class SqlStore:
                              {'target': target}).mappings().one()
             return self._target(row)
 
+    PAGE = 500
+
     def owners(self, target_id):
-        with self.engine.begin() as db:
-            rows = db.execute(text('''SELECT r.owner_id, r.state_id, r.phase, r.pod_uid, b.plan->>'image' AS image,
-                    s.stop_id, s.receipt IS NOT NULL AS receipt,
-                    o.phase AS row_phase, o.since, o.canary, o.stop_id AS row_stop, o.reason
-                FROM runner_bindings.bindings b
-                JOIN runner_runtime.registry r ON r.owner_id=b.owner_id AND r.state_id=b.state_id
-                LEFT JOIN runner_termination.stops s ON s.owner_id=r.owner_id AND s.state_id=r.state_id
-                    AND s.generation=r.generation AND s.completed_at IS NULL
-                LEFT JOIN runner_rollout.owners o ON o.target_id=:target AND o.owner_id=r.owner_id
-                ORDER BY r.owner_id LIMIT 500'''), {'target': target_id}).mappings().all()
-        return [View(row['owner_id'], row['state_id'], Phase(row['phase']), row['pod_uid'], row['image'],
-                     row['stop_id'], bool(row['receipt']),
-                     None if row['row_phase'] is None else Row(row['row_phase'], row['since'], row['canary'],
-                                                               row['row_stop'], row['reason']))
-                for row in rows]
+        """Every owner with a published binding, read in owner_id pages (review major 4: a fixed LIMIT
+        left owners unevaluated while the target completed)."""
+        views, after = [], None
+        while True:
+            with self.engine.begin() as db:
+                rows = db.execute(text('''SELECT r.owner_id, r.state_id, r.phase, r.pod_uid, b.plan->>'image' AS image,
+                        s.stop_id, s.receipt IS NOT NULL AS receipt,
+                        EXISTS (SELECT 1 FROM runner_termination.stops p WHERE p.owner_id=r.owner_id
+                            AND p.state_id=r.state_id AND p.generation=r.generation AND p.completed_at IS NOT NULL
+                            AND jsonb_typeof(p.proof)='object' AND p.proof<>'{}'::jsonb) AS proved,
+                        o.phase AS row_phase, o.since, o.canary, o.stop_id AS row_stop, o.reason
+                    FROM runner_bindings.bindings b
+                    JOIN runner_runtime.registry r ON r.owner_id=b.owner_id AND r.state_id=b.state_id
+                    LEFT JOIN runner_termination.stops s ON s.owner_id=r.owner_id AND s.state_id=r.state_id
+                        AND s.generation=r.generation AND s.completed_at IS NULL
+                    LEFT JOIN runner_rollout.owners o ON o.target_id=:target AND o.owner_id=r.owner_id
+                    WHERE CAST(:after AS uuid) IS NULL OR r.owner_id > CAST(:after AS uuid)
+                    ORDER BY r.owner_id LIMIT :limit'''), {'target': target_id, 'after': after, 'limit': self.PAGE}).mappings().all()
+            views += [View(row['owner_id'], row['state_id'], Phase(row['phase']), row['pod_uid'], row['image'],
+                           row['stop_id'], bool(row['receipt']),
+                           None if row['row_phase'] is None else Row(row['row_phase'], row['since'], row['canary'],
+                                                                     row['row_stop'], row['reason']),
+                           bool(row['proved']))
+                      for row in rows]
+            if len(rows) < self.PAGE:
+                return views
+            after = rows[-1]['owner_id']
 
     def canary_owner(self, target_id):
         """The target's current canary, as Rollout.choose_canary keeps it (not blocked/failed), or None."""
@@ -451,16 +526,35 @@ class SqlStore:
                 WHERE target_id=:target GROUP BY phase, reason ORDER BY phase, reason'''), {'target': target_id}).all()
         return {phase+(':'+reason if reason else ''): n for phase, reason, n in rows}
 
+    @staticmethod
+    def _set_row(db, target_id, owner, phase, *, canary, stop_id=None, reason=None):
+        db.execute(text('''INSERT INTO runner_rollout.owners(target_id,owner_id,phase,canary,stop_id,since,reason)
+            VALUES(:target,:owner,:phase,:canary,:stop,now(),:reason)
+            ON CONFLICT(target_id,owner_id) DO UPDATE SET phase=EXCLUDED.phase,
+                canary=runner_rollout.owners.canary OR EXCLUDED.canary,
+                stop_id=coalesce(EXCLUDED.stop_id, runner_rollout.owners.stop_id), reason=EXCLUDED.reason,
+                since=CASE WHEN runner_rollout.owners.phase=EXCLUDED.phase THEN runner_rollout.owners.since
+                           ELSE EXCLUDED.since END'''),
+            {'target': target_id, 'owner': owner, 'phase': phase, 'canary': canary, 'stop': stop_id, 'reason': reason})
+
     def set_row(self, target_id, owner, phase, *, canary, stop_id=None, reason=None):
         with self.engine.begin() as db:
-            db.execute(text('''INSERT INTO runner_rollout.owners(target_id,owner_id,phase,canary,stop_id,since,reason)
-                VALUES(:target,:owner,:phase,:canary,:stop,now(),:reason)
-                ON CONFLICT(target_id,owner_id) DO UPDATE SET phase=EXCLUDED.phase,
-                    canary=runner_rollout.owners.canary OR EXCLUDED.canary,
-                    stop_id=coalesce(EXCLUDED.stop_id, runner_rollout.owners.stop_id), reason=EXCLUDED.reason,
-                    since=CASE WHEN runner_rollout.owners.phase=EXCLUDED.phase THEN runner_rollout.owners.since
-                               ELSE EXCLUDED.since END'''),
-                {'target': target_id, 'owner': owner, 'phase': phase, 'canary': canary, 'stop': stop_id, 'reason': reason})
+            self._set_row(db, target_id, owner, phase, canary=canary, stop_id=stop_id, reason=reason)
+
+    @staticmethod
+    def _gate(db, target_id, owner, canary):
+        """Review blocker 5: inside the stop or move transaction, lock the target row (set_state, i.e. an
+        operator halt/resume, updates it, so the two serialize) and recheck that this target is still the
+        current, unhalted one and that, during the canary, this owner is the only canary."""
+        state = db.execute(text('SELECT state FROM runner_rollout.targets WHERE target_id=:target FOR UPDATE'),
+                           {'target': target_id}).scalar_one_or_none()
+        if state not in {'canary', 'rolling', 'complete'}:
+            raise TargetChanged('rollout_target_changed')
+        if state == 'canary':
+            other = db.execute(text('''SELECT 1 FROM runner_rollout.owners WHERE target_id=:target AND canary
+                AND phase NOT IN ('blocked','failed') AND owner_id<>:owner'''), {'target': target_id, 'owner': owner}).first()
+            if not canary or other is not None:
+                raise TargetChanged('rollout_target_changed')
 
     def set_state(self, target, state, reason=None, owner=None):
         """Compare-and-swap on the current state; a concurrent operator command wins."""
@@ -475,14 +569,15 @@ class SqlStore:
                                  {'target': target.target_id}).mappings().one()
             return self._target(row)
 
-    def move(self, owner, image):
+    def move(self, owner, image, *, target_id, canary):
         from app.runner_image_move import move
         with self.engine.begin() as db:
+            self._gate(db, target_id, owner, canary)  # Target row before the owner lock.
             return move(db, owner, image)
 
-    def stop_between_turns(self, owner):
-        """Record the stop only while the database holds no running conversation (rows before the owner
-        lock, #114). Returns the stop id, or None while a conversation is still running."""
+    def stop_between_turns(self, target_id, owner, *, canary):
+        """Record the stop, and this owner's `draining` row with it, only while the database holds no running
+        conversation (rows before the owner lock, #114). Returns the stop id, or None while one is running."""
         from app.runner_termination_control import request_stop, no_pending_work
         from app.runner_registry import Registry
         from ops.runner_controller_service import lock_running, running_conversations
@@ -490,22 +585,35 @@ class SqlStore:
             lock_running(db, owner)
             if running_conversations(db, owner):
                 return None
+            self._gate(db, target_id, owner, canary)
             state = Registry(db)._current(owner)
             require(state.pod_uid is not None)
             no_pending_work(db, state)
-            return request_stop(db, owner)['stop_id']
+            stop = request_stop(db, owner)['stop_id']
+            self._set_row(db, target_id, owner, 'draining', canary=canary, stop_id=stop)
+            return stop
 
-    def stop_for_cut(self, owner):
-        """D1 deadline: the stop fences new turns; the running ones are returned to be interrupted."""
+    def stop_for_cut(self, target_id, owner, *, canary):
+        """D1 deadline: the stop fences new turns and commits together with this owner's `cutting` row
+        (review blocker 2); the running turns are returned to be interrupted."""
         from app.runner_termination_control import request_stop
         from ops.runner_controller_service import lock_running
         with self.engine.begin() as db:
             lock_running(db, owner)
-            stop = request_stop(db, owner)
-            turns = db.execute(text("""SELECT id, request_id FROM research.conversations
-                WHERE owner_id=:owner AND state='running' AND request_id IS NOT NULL ORDER BY id"""),
-                {'owner': owner}).all()
-            return stop['stop_id'], [(row[0], row[1]) for row in turns]
+            self._gate(db, target_id, owner, canary)
+            stop = request_stop(db, owner)['stop_id']
+            self._set_row(db, target_id, owner, 'cutting', canary=canary, stop_id=stop)
+            return stop, self._running_turns(db, owner)
+
+    @staticmethod
+    def _running_turns(db, owner):
+        rows = db.execute(text("""SELECT id, request_id FROM research.conversations
+            WHERE owner_id=:owner AND state='running' AND request_id IS NOT NULL ORDER BY id"""), {'owner': owner}).all()
+        return [(row[0], row[1]) for row in rows]
+
+    def running_turns(self, owner):
+        with self.engine.begin() as db:
+            return self._running_turns(db, owner)
 
     def restart(self, owner, key):
         """Re-enter a replaced owner who still has a live login session (decision D1)."""

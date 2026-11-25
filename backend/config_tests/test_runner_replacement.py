@@ -6,7 +6,7 @@ from uuid import UUID, uuid4, uuid5
 import pytest
 
 from app.runner_image_move import fingerprint, fingerprint_sha, pod_fingerprint, target_from_env
-from ops.runner_replacement import (Rollout, Settings, Target, Row, View, Halt, health_class, load_settings,
+from ops.runner_replacement import (Rollout, Settings, Target, Row, View, Halt, TargetChanged, health_class, load_settings,
                                     RESTART_KEYS, SETTLE_SECONDS, PULL_SECONDS)
 from runner.lifecycle import Phase, Refused
 
@@ -40,6 +40,7 @@ class Store:
         self.target = Target(uuid4(), T, state)
         self.rows, self.calls = {}, []
         self.unmovable, self.running_db, self.sessions = set(), set(), set()
+        self.before_stop, self.crash_after_cut, self.turns = None, False, [(uuid4(), uuid4())]
 
     def install(self, value):
         assert value == T
@@ -66,27 +67,47 @@ class Store:
         self.target = Target(target.target_id, target.fingerprint, state, reason, owner)
         return self.target
 
-    def move(self, owner, image):
+    def gate(self, target_id, owner, canary):
+        """SqlStore._gate: the current target is still active and, in the canary, this owner is the only canary."""
+        state = self.target.state if target_id == self.target.target_id else 'superseded'
+        others = [o for o, row in self.rows.items() if row.canary and row.phase not in {'blocked', 'failed'} and o != owner]
+        if state not in {'canary', 'rolling', 'complete'} or (state == 'canary' and (not canary or others)):
+            self.calls.append(('gate_refused', owner))
+            raise TargetChanged('rollout_target_changed')
+
+    def move(self, owner, image, *, target_id, canary):
         self.calls.append(('move', owner))
+        self.gate(target_id, owner, canary)
         if owner in self.unmovable:
             raise Refused('not movable')
         view = self.views[owner]
         self.views[owner] = replace(view, image=image)
         return view.image != image
 
-    def stop_between_turns(self, owner):
+    def stop_between_turns(self, target_id, owner, *, canary):
         self.calls.append(('stop', owner))
+        if self.before_stop is not None:
+            self.before_stop()  # A concurrent operator command committing in between.
         if owner in self.running_db:
             return None
+        self.gate(target_id, owner, canary)
         stop = uuid4()
         self.views[owner] = replace(self.views[owner], stop_id=stop)
+        self.set_row(target_id, owner, 'draining', canary=canary, stop_id=stop)  # Same transaction as the stop.
         return stop
 
-    def stop_for_cut(self, owner):
+    def stop_for_cut(self, target_id, owner, *, canary):
         self.calls.append(('cut', owner))
+        self.gate(target_id, owner, canary)
         stop = uuid4()
         self.views[owner] = replace(self.views[owner], stop_id=stop)
-        return stop, [(uuid4(), uuid4())]
+        self.set_row(target_id, owner, 'cutting', canary=canary, stop_id=stop)  # Same transaction as the stop.
+        if self.crash_after_cut:
+            raise RuntimeError('controller stopped right after the commit')
+        return stop, list(self.turns)
+
+    def running_turns(self, owner):
+        return list(self.turns)
 
     def restart(self, owner, key):
         self.calls.append(('restart', owner, key))
@@ -422,3 +443,128 @@ def test_before_create_moves_only_the_canary_owner_during_the_canary():
     assert rollout.before_create(canary) is True and store.views[canary].image == NEW
     store.set_state(store.target, 'rolling')
     assert rollout.before_create(other) is True and store.views[other].image == NEW
+
+
+# Full review of d8616be (request-changes): each reproduced case ------------------------------------------------
+
+def test_b1_a_carried_stop_of_a_non_canary_owner_does_not_move_during_the_canary():
+    canary, other = sorted(uuid4() for _ in range(2))
+    clock, store, cluster, rollout = setup([running(canary), stopped(other)], 'canary', canary_owners=(canary,))
+    store.rows[other] = Row('draining', clock(), False, uuid4())  # Carried over from the previous target.
+    store.sessions.add(other)
+    lines = outcomes(rollout.run())
+    assert lines[other] == 'blocked' and store.rows[other].reason == 'awaiting_canary'
+    assert store.views[other].image == OLD and ('move', other) not in store.calls
+    assert [c[:2] for c in store.calls if c[0] == 'restart'] == [('restart', other)]  # On its unchanged binding.
+    assert store.rows[canary].canary and store.rows[canary].phase == 'waiting_turn'
+
+
+def test_b2_a_cut_survives_a_controller_restart_and_resends_the_interrupts():
+    a = uuid4()
+    clock, store, cluster, rollout = setup([running(a)], 'rolling', turn_deadline=60)
+    rollout.run(); clock.advance(60)
+    store.crash_after_cut = True
+    lines = rollout.run()
+    assert any(kind == 'rollout' and str(reason).startswith('stuck:') for _, kind, reason in lines)
+    assert store.rows[a].phase == 'cutting' and store.rows[a].stop_id == store.views[a].stop_id  # Committed together.
+    assert cluster.interrupts == []
+    store.crash_after_cut = False
+    restarted = Rollout(store, cluster, Settings(T, turn_deadline=60), clock)  # A new controller process.
+    assert outcomes(restarted.run())[a] == 'cutting' and len(cluster.interrupts) == 1
+    clock.advance(30)
+    assert outcomes(restarted.run())[a] == 'cutting' and len(cluster.interrupts) == 2  # Bounded retries...
+    clock.advance(SETTLE_SECONDS)
+    assert outcomes(restarted.run())[a] == 'blocked' and len(cluster.interrupts) == 2  # ...until the settle window.
+
+
+@pytest.mark.parametrize('break_with', ['inconclusive', 'unreachable', 'new_pod'])
+def test_b3_the_canary_window_needs_consecutive_healthy_checks_of_the_same_pod(break_with):
+    a = uuid4()
+    clock, store, cluster, rollout = setup([running(a, NEW)], 'canary', canary_seconds=600)
+    cluster.pods[a] = pod(store.views[a].pod_uid, NEW, created=clock())
+    clock.advance(1)
+    assert outcomes(rollout.run())[a] == 'verified'
+    clock.advance(300)
+    if break_with == 'inconclusive':
+        cluster.health_of[a] = {'available': False, 'reason': 'auth_expired'}
+    elif break_with == 'unreachable':
+        cluster.health = lambda view, obj: (_ for _ in ()).throw(OSError('timeout'))
+    else:
+        uid = uuid4()
+        store.views[a] = replace(store.views[a], pod_uid=uid)
+        cluster.pods[a] = pod(uid, NEW, created=clock())
+    broken = outcomes(rollout.run())[a]
+    assert broken in {'inconclusive', 'health_unreachable', 'canary_pod_changed'} and store.target.state == 'canary'
+    assert store.rows[a].phase == 'restarting' and store.rows[a].reason == 'canary_unconfirmed'
+    cluster.health_of.pop(a, None)
+    cluster.health = Cluster.health.__get__(cluster)
+    clock.advance(1)
+    assert outcomes(rollout.run())[a] == 'verified'  # The streak starts again here.
+    clock.advance(599)
+    assert outcomes(rollout.run())[a] == 'verified' and store.target.state == 'canary'
+    clock.advance(1)
+    # Passed; the only owner is on the target, so the target also completes in this pass.
+    assert outcomes(rollout.run())[a] == 'canary_passed' and store.target.state == 'complete'
+
+
+def test_b4_a_starting_target_pod_keeps_the_rollout_watching_until_its_pull_failure_halts():
+    a = uuid4()
+    clock, store, cluster, rollout = setup([running(a, NEW)], 'rolling')
+    cluster.pods[a] = pod(store.views[a].pod_uid, NEW, phase='Pending', waiting='ImagePullBackOff', created=clock())
+    assert outcomes(rollout.run())[a] == 'starting' and store.target.state == 'rolling'  # Not complete.
+    clock.advance(PULL_SECONDS)
+    assert (a, 'rollout_halted', 'image_pull') in rollout.run() and store.target.state == 'halted'
+
+
+def test_b5_an_operator_halt_during_the_idle_check_records_no_stop():
+    a = uuid4()
+    clock, store, cluster, rollout = setup([running(a)], 'rolling')
+    cluster.idle_owners.add(a)
+    store.before_stop = lambda: store.set_state(store.target, 'halted', 'operator')
+    assert outcomes(rollout.run())[a] == 'held'
+    assert store.views[a].stop_id is None and ('gate_refused', a) in store.calls
+
+
+def test_b5_a_move_after_an_operator_halt_is_refused_in_its_transaction():
+    a = uuid4()
+    clock, store, cluster, rollout = setup([stopped(a)], 'rolling')
+    original = store.owners
+    def owners_then_halt(target_id):
+        views = original(target_id)
+        store.target = Target(store.target.target_id, T, 'halted', 'operator')  # Committed after the read.
+        return views
+    store.owners = owners_then_halt
+    assert outcomes(rollout.run())[a] == 'held' and store.views[a].image == OLD
+
+
+def test_m1_no_idle_evidence_still_reaches_the_deadline():
+    a = uuid4()
+    clock, store, cluster, rollout = setup([running(a)], 'rolling', turn_deadline=60)
+    cluster.idle = lambda view, obj, seconds: (_ for _ in ()).throw(OSError('timeout'))
+    assert outcomes(rollout.run())[a] == 'idle_unknown'
+    clock.advance(60)
+    assert outcomes(rollout.run())[a] == 'cutting' and ('cut', a) in store.calls
+
+
+def test_m2_followed_and_blocked_stops_hold_no_slot():
+    a, b, c = sorted(uuid4() for _ in range(3))
+    clock, store, cluster, rollout = setup([replace(running(a), stop_id=uuid4()), replace(running(b), stop_id=uuid4()),
+                                            running(c)], 'rolling', max_parallel=1)
+    cluster.idle_owners.add(c)
+    lines = outcomes(rollout.run())
+    assert lines[a] == lines[b] == 'draining' and store.rows[a].reason == store.rows[b].reason == 'external_stop'
+    assert lines[c] == 'draining' and rollout.slots == 1  # The one replacement slot is c's.
+    # A blocked unsettled stop keeps its block on the next pass instead of draining again.
+    stop = uuid4()
+    store.views[a] = replace(store.views[a], stop_id=stop)
+    store.rows[a] = Row('blocked', clock(), False, stop, 'turn_not_settled')
+    assert outcomes(rollout.run())[a] == 'blocked' and store.rows[a].phase == 'blocked'
+
+
+def test_m3_a_stopped_owner_without_proof_is_blocked_and_never_the_canary():
+    legacy, other = sorted(uuid4() for _ in range(2))
+    clock, store, cluster, rollout = setup([replace(stopped(legacy), proved=False), stopped(other)], 'canary')
+    lines = outcomes(rollout.run())
+    assert lines[legacy] == 'blocked' and store.rows[legacy].reason == 'no_stop_proof' and not store.rows[legacy].canary
+    assert ('move', legacy) not in store.calls
+    assert lines[other] == 'moved' and store.rows[other].canary
