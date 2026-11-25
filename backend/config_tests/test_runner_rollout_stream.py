@@ -48,7 +48,8 @@ def test_the_controller_render_without_stream_is_unchanged(values, baseline, map
     files, _, controller = rendered(values, baseline, maps)
     deployment, = [i for i in json.loads(files['resources.json'])['items']
                    if i['kind'] == 'Deployment' and i['metadata']['name'] == 'runner-controller']
-    names = [e['name'] for e in deployment['spec']['template']['spec']['containers'][0]['env']]
+    names = [e['name'] for e in deployment['spec']['template']['spec']['containers'][0]['env']
+             if e['name'] not in rollout.RESEARCH_KEYS + rollout.ROLLOUT_KEYS]  # #101 keys follow; see test_runner_rollout_research
     assert controller == {} and names[-2:] == ['CONTROLLER_DATABASE_URL_FILE', 'OBSERVER_DATABASE_URL_FILE']
 
 

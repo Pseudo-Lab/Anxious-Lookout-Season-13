@@ -14,5 +14,6 @@
   "maxPods": 3,
   "idleSeconds": 1800,
   "nativeSizeGiB": 5,
-  "controlSizeGiB": 1
+  "controlSizeGiB": 1,
+  "research": {"enable": false}
 }

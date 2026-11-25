@@ -15,15 +15,23 @@ CONFIG = '/etc/anxious-lookout/issue16'
 BIN = '/usr/local/lib/anxious-lookout/issue16'
 NS = 'codex-runner'
 KEYS = {'version', 'runtimeImage', 'runnerImage', 'provisionerImageId', 'postImagesStorageClass', 'api', 'hostApi',
-        'namespaceUid', 'podCIDR', 'node', 'providerAccountId', 'allowlist', 'maxPods', 'idleSeconds', 'nativeSizeGiB', 'controlSizeGiB'}
+        'namespaceUid', 'podCIDR', 'node', 'providerAccountId', 'allowlist', 'maxPods', 'idleSeconds', 'nativeSizeGiB', 'controlSizeGiB',
+        'research'}
 # #94 (9): the #90 stream flags. Optional; absent = every flag off. The renderer owns these keys on both the api and
 # runner-controller Deployments (an inherited value is dropped), so an apply can neither lose a flag on the controller
 # nor leave the two disagreeing. Only "true" keys are written: with every flag off the render is as before #94.
-OPTIONAL = {'stream'}
+OPTIONAL = {'stream', 'rollout'}
 STREAM = {'enable', 'text', 'trace'}
 STREAM_OPTIONAL = {'retired'}  # #95 B1: the retired-literal switch; absent = false (inputs written before #95 still render)
 API_STREAM_KEYS = ('RESEARCH_STREAM_ENABLE', 'CODEX_RUNNER_STREAM_TEXT', 'CODEX_RUNNER_STREAM_TRACE', 'STREAM_TRACE',
                    'CODEX_RUNNER_STREAM_RETIRED')
+# #101 (7): the research flag, required (an absent key must not silently turn an inherited "true" off). The
+# renderer owns both keys on the api and the runner key on the runner-controller, written as exact "true"/"false".
+RESEARCH_KEYS = ('RESEARCH_AGENT_API_ENABLE', 'CODEX_RUNNER_RESEARCH_API_ENABLE')
+# #101 (1): rolling runner replacement. Optional; present (even {}) = the controller's target is runnerImage.
+ROLLOUT = {'maxParallel': ('ROLLOUT_MAX_PARALLEL', 1, 3), 'turnDeadlineSeconds': ('ROLLOUT_TURN_DEADLINE_SECONDS', 60, 86400),
+           'canarySeconds': ('ROLLOUT_CANARY_SECONDS', 60, 86400)}
+ROLLOUT_KEYS = ('RUNNER_TARGET_IMAGE', 'ROLLOUT_CANARY_OWNERS') + tuple(name for name, _, _ in ROLLOUT.values())
 IMAGE = r'[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}'
 
 
@@ -55,6 +63,17 @@ def checked(v):
     if 'stream' in v:
         require(type(v['stream']) is dict and STREAM <= set(v['stream']) <= STREAM | STREAM_OPTIONAL
                 and all(type(value) is bool for value in v['stream'].values()))
+    require(type(v['research']) is dict and set(v['research']) == {'enable'} and type(v['research']['enable']) is bool)
+    if 'rollout' in v:
+        settings = v['rollout']
+        require(type(settings) is dict and set(settings) <= set(ROLLOUT) | {'canaryOwners'})
+        for key, (_, low, high) in ROLLOUT.items():
+            if key in settings:
+                require(type(settings[key]) is int and low <= settings[key] <= high)
+        owners = settings.get('canaryOwners', [])
+        require(type(owners) is list and len(owners) <= 20 and len(set(owners)) == len(owners))
+        for owner in owners:
+            canonical_uuid(owner)
     sc = v['postImagesStorageClass']
     require(type(sc) is str and len(sc) <= 253 and all(
         re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in sc.split('.')))
@@ -111,6 +130,28 @@ def stream_env(v, role):
     return {name: 'true' for name, key in pairs if flags[key]}
 
 
+def research_env(v, role):
+    """#101 (7): the research flag of the api (its grant issuing and the runner render it verifies) or of the
+    runner-controller (the runner Pods it creates), from the one `research.enable` input."""
+    value = 'true' if v['research']['enable'] else 'false'
+    if role == 'api':
+        return {name: value for name in RESEARCH_KEYS}
+    require(role == 'controller')
+    return {'CODEX_RUNNER_RESEARCH_API_ENABLE': value}
+
+
+def rollout_env(v):
+    """#101 (1): the runner-controller's rolling-replacement target and settings ({} without `rollout`)."""
+    if 'rollout' not in v:
+        return {}
+    settings = v['rollout']
+    env = {'RUNNER_TARGET_IMAGE': v['runnerImage']}
+    env.update({name: str(settings[key]) for key, (name, _, _) in ROLLOUT.items() if key in settings})
+    if settings.get('canaryOwners'):
+        env['ROLLOUT_CANARY_OWNERS'] = ','.join(settings['canaryOwners'])
+    return env
+
+
 INIT = '''import os
 from pathlib import Path
 from runner.auth import private_directory, read_private
@@ -161,7 +202,9 @@ def deployment(v, baseline, configmaps=()):
     env['POST_IMAGE_ROOT'] = '/var/lib/posts/images/data'
     env['CODEX_USER_RUNNER_POOL_CONFIG_FILE'] = '/run/pool-private/private/pool.json'
     env.update(stream_env(v, 'api'))  # #94 (9): an inherited stream key is dropped below; the input decides
-    api['env'] = [e for e in inherited.values() if e['name'] not in retired | set(env) | set(API_STREAM_KEYS)
+    env.update(research_env(v, 'api'))  # #101 (7): likewise for the research flag
+    owned = set(API_STREAM_KEYS) | set(RESEARCH_KEYS) | set(ROLLOUT_KEYS)
+    api['env'] = [e for e in inherited.values() if e['name'] not in retired | set(env) | owned
                   and not e['name'].startswith('CODEX_PERSONAL_')]
     api['env'] += [{'name': k, 'value': val} for k, val in env.items()]
     api['image'], api['imagePullPolicy'] = v['runtimeImage'], 'Never'
@@ -230,7 +273,8 @@ def controller(v):
     env = {**environment(v), 'RUNNER_NAMESPACE': NS, 'RUNNER_NAMESPACE_UID': v['namespaceUid'],
            'RUNNER_POD_CIDR': v['podCIDR'], 'RUNNER_NODE_NAME': v['node'],
            'CONTROLLER_DATABASE_URL_FILE': '/run/runner-db/controller-url',
-           'OBSERVER_DATABASE_URL_FILE': '/run/runner-db/observer-url', **stream_env(v, 'controller')}
+           'OBSERVER_DATABASE_URL_FILE': '/run/runner-db/observer-url', **stream_env(v, 'controller'),
+           **research_env(v, 'controller'), **rollout_env(v)}  # #101
     labels = {'app': 'runner-controller'}
     items.append({'apiVersion': 'apps/v1', 'kind': 'Deployment',
         'metadata': {'name': 'runner-controller', 'namespace': CONTROL_NS, 'labels': labels},
@@ -371,6 +415,16 @@ def preflight(files, v):
     container, = controllers[0]['spec']['template']['spec']['containers']
     require({e['name']: e.get('value') for e in container['env'] if e['name'] in API_STREAM_KEYS}
             == stream_env(v, 'controller'))
+    # #101 (7): the research flag on both Deployments is exactly the input's, the runner key equal on both.
+    pick = lambda env, names: {e['name']: e.get('value') for e in env if e['name'] in names}
+    require(pick(api['env'], RESEARCH_KEYS) == research_env(v, 'api'))
+    require(pick(container['env'], RESEARCH_KEYS) == research_env(v, 'controller'))
+    require(pick(api['env'], ('CODEX_RUNNER_RESEARCH_API_ENABLE',)) == pick(container['env'], ('CODEX_RUNNER_RESEARCH_API_ENABLE',)))
+    # #101 (1): the controller's target is the image new owners are prepared with (host inputs.json), so a
+    # binding move can never leave new owners on the previous image again (11-18 observation).
+    require(pick(container['env'], ROLLOUT_KEYS) == rollout_env(v) and not pick(api['env'], ROLLOUT_KEYS))
+    target = rollout_env(v).get('RUNNER_TARGET_IMAGE')
+    require(target is None or json.loads(files['controller-inputs.json'])['image'] == target)
 
 
 def render(v, baseline, templates, configmaps=()):
@@ -454,6 +508,8 @@ def main():
         # #94 (9): what this render does to streaming, before anyone applies it (absent input = all off).
         stream = {key: bool((values.get('stream') or {}).get(key)) for key in sorted(STREAM | STREAM_OPTIONAL)}
         print(json.dumps({'stream': stream, 'streamInput': 'stream' in values}, sort_keys=True), flush=True)
+        # #101: the research flag and the rolling-replacement target this render applies.
+        print(json.dumps({'research': values['research']['enable'], 'rollout': rollout_env(values)}, sort_keys=True), flush=True)
     except Exception:
         p.exit(1, 'Rollout render refused; values and credentials are not printed\n')
     print('PASS offline rollout validation; no deployment or service changes')
