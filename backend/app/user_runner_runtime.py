@@ -35,6 +35,24 @@ def plan_from(value):
                 value['callback'], value['serviceAccount'])
 
 
+RESEARCH_FLAG = 'RUNNER_RESEARCH_API_ENABLE'
+
+
+def without_unsupported_grant(method, path, body, obj):
+    """#101 decision D2: a turn's research grant goes only to a runner Pod rendered with the research flag.
+
+    A Pod created before the flag was turned on refuses any grant with policy_refused, failing the whole
+    turn. `obj` is the live Pod this very call is bound to (its UID was just checked), so the turn is sent
+    without the grant instead; the caller revokes the issued credential. Returns (body, omitted)."""
+    if method != 'POST' or not path.endswith('/turn') or type(body) is not dict or 'researchGrant' not in body:
+        return body, False
+    containers = [c for c in obj['spec']['containers'] if c.get('name') == 'runner']
+    require(len(containers) == 1)
+    if any(item.get('name') == RESEARCH_FLAG and item.get('value') == 'true' for item in containers[0].get('env') or []):
+        return body, False
+    return {key: value for key, value in body.items() if key != 'researchGrant'}, True
+
+
 class Runtime:
     def __init__(self, engine, pods, plan, transport_token, namespace_uid, pod_cidr, max_pods, *, idle_seconds=1800):
         self.limits = RunnerLimits(max_pods, idle_seconds)
@@ -135,9 +153,12 @@ class BoundRunner:
             address = ipaddress.ip_address(obj['status']['podIP'])
             require(address in runtime.network and not address.is_loopback and not address.is_link_local)
             host = '['+str(address)+']' if address.version == 6 else str(address)
+            body, omitted = without_unsupported_grant(method, path, body, obj)
             from .conversations import Runner
             result = Runner('http://'+host+':8080', runtime.token, self.owner, str(state.state_id)).call(method, path, body)
             require(result.get('podUid') == str(state.pod_uid))
+            if omitted:
+                result = {**result, 'researchGrantOmitted': True}
             if path.endswith('/research-authorize'):
                 # This generation is trusted transport evidence from the locked
                 # registry, bound to the live authenticated Pod UID, not input
