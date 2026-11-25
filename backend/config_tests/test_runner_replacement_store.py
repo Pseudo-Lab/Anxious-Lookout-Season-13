@@ -45,11 +45,11 @@ def observer(admin):
     engine.dispose()
 
 
-def test_install_supersedes_carries_in_flight_rows_and_skips_canary_for_a_completed_fingerprint(admin, owner, t0, observer):
+def test_install_supersedes_without_copying_and_skips_canary_for_a_completed_fingerprint(admin, owner, t0, observer):
     enter(admin, owner, uuid4(), t0)  # owners.owner_id references the registry.
     first = observer.install(T)
     assert first.state == 'canary' and observer.install(T) == first
-    stop = uuid4()
+    stop, external = uuid4(), uuid4()
     observer.set_row(first.target_id, owner, 'draining', canary=True, stop_id=stop)
     observer.set_state(first, 'rolling')
     other = fingerprint(NEW_IMAGE, ['RUNNER_RESEARCH_API_ENABLE'])
@@ -57,10 +57,17 @@ def test_install_supersedes_carries_in_flight_rows_and_skips_canary_for_a_comple
     assert second.state == 'canary' and second.target_id != first.target_id
     with admin.begin() as db:
         states = dict(db.execute(text('SELECT target_id, state FROM runner_rollout.targets')).all())
-        carried = db.execute(text('SELECT phase, canary, stop_id FROM runner_rollout.owners WHERE target_id=:t'),
-                             {'t': second.target_id}).one()
+        copied = db.execute(text('SELECT count(*) FROM runner_rollout.owners WHERE target_id=:t'),
+                            {'t': second.target_id}).scalar_one()
     assert states == {first.target_id: 'superseded', second.target_id: 'canary'}
-    assert tuple(carried) == ('draining', False, stop)  # In flight continues; the canary is chosen again.
+    # PM 11-25 allowance A: nothing is copied; the old target's own open stop is reported by carried().
+    assert copied == 0
+    (old_target, carried_owner, row), = observer.carried(second.target_id)
+    assert (old_target, carried_owner, row.phase, row.stop_id) == (first.target_id, owner, 'draining', stop)
+    observer.set_row(first.target_id, owner, 'draining', canary=False, stop_id=external, reason='external_stop')
+    assert observer.carried(second.target_id) == []  # A followed stop is not the old target's own.
+    observer.set_row(first.target_id, owner, 'failed', canary=False, reason='superseded')
+    assert observer.carried(second.target_id) == []
     observer.set_state(second, 'rolling')
     done = observer.set_state(observer.current(), 'complete')
     assert done.state == 'complete'

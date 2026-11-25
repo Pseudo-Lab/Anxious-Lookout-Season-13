@@ -22,7 +22,8 @@ Each 30 s pass (after the stop steps, before creation):
 | Pod on another fingerprint | `waiting_turn`: nothing is stopped while a turn runs. Once its runner reports idle for 60 s and the database holds no running conversation, a stop intent is recorded (`draining`) and the existing stop path runs: drain receipt, graceful UID DELETE, 404 proof, release. After release the binding moves and, while the owner still has a live login session, the owner re-enters at once (`restarting` → `verified`); otherwise its next start uses the new image (`moved`) |
 | Turn still running after `turnDeadlineSeconds` (default 1800) — also when the runner reports idle but the database still holds a `running` conversation, and when the runner's idle evidence cannot be read (`idle_unknown` until then) | `cutting`: the stop intent and the `cutting` row commit together; the stop fences new turns and the running turn gets the runner's ordinary interrupt (the #90 Stop), resent every pass (also after a controller restart) until the drain receipt or 120 s. The conversation ends `interrupted` (API read first) or `failed`/`codex_runner_lost` (closed at the drain receipt, #114). If no drain receipt follows within 120 s: `blocked:turn_not_settled` (kept while that stop stays open, without a slot; operator R2 if needed) |
 | A stop someone else opened (idle stop, logout, operator) | Followed to release as `draining` with reason `external_stop`; it holds no replacement slot |
-| Stop carried over from an earlier target, owner not the canary | The stop finishes; during the canary the owner restarts on its unchanged binding (`blocked:awaiting_canary`) and is replaced once rolling |
+| A new target (an image change or a rollback) while the previous target still has its own stop or cut open | Nothing is copied to the new target. The old stop finishes under the old target first: a cut keeps getting its interrupts within the settle window; after release the owner restarts on its unchanged binding and the old row closes as `failed:superseded` (an unsettled cut becomes `blocked:turn_not_settled` there, operator R2). Until then the new target chooses no canary and records no stop or move (`rollout_previous` log lines; PM 11-25 allowance A). `rollout halt` and the halt watching of target Pods keep working. A rollback may thus start one turn (at most the deadline) later |
+| Observation of a target Pod | Tied to the observed Pod UID, in the controller's memory: a Pod whose health was never read healthy is never counted as converged, whatever its age; the canary streak counts only consecutive healthy reads of one Pod UID, and any other pass (Pod missing, lookup error, another UID, not healthy) ends it. A controller restart starts these counts again (PM 11-25 allowance B: when unsure, hold; completion may wait, and an account reason such as `auth_revoked` keeps the target `rolling`) |
 | `runner_failed` owner, or a stopped owner without the completed stop proof of its generation (legacy) | `blocked:runner_failed` / `blocked:no_stop_proof`, never moved, never the canary |
 | Any stop or move | Its transaction locks the target row (as `rollout halt`/`resume` do) and rechecks that the target is current and not halted and, during the canary, that this owner is the canary; otherwise nothing is recorded (`held`) |
 
@@ -39,12 +40,14 @@ are unchanged.
   else the first stopped owner; never a blocked/failed owner or one without its stop proof). It
   passes only after `canarySeconds` (default 600) of **consecutive** healthy checks (`/health`
   available, no reason) of the **same** canary Pod (PM condition 1, 11-25 criterion). An account
-  reason (`auth_*`, `not_configured`), an unreadable health, a Pod not Running or a newer Pod breaks
-  the streak (`restarting:canary_unconfirmed`): neither pass nor halt; the next healthy check starts
-  it again. `rollout resume` is the operator's only explicit pass. A target fingerprint that once
-  reached `complete` (a rollback) starts in `rolling`.
-- **complete** needs every owner settled: a target Pod still starting or with unreadable health keeps
-  the target `rolling` and watched (a pull failure still halts after 120 s).
+  reason (`auth_*`, `not_configured`), an unreadable health, a Pod not Running or missing, a lookup
+  error or another Pod UID breaks the streak (shown as `restarting:canary_unconfirmed`): neither pass
+  nor halt; the next healthy check starts it again. The streak lives in the controller's memory, so a
+  controller restart also starts it again. `rollout resume` is the operator's only explicit pass. A
+  target fingerprint that once reached `complete` (a rollback) starts in `rolling`.
+- **complete** needs every owner settled: a target Pod still starting, with unreadable health, or
+  never read healthy by this controller keeps the target `rolling` and watched (a pull failure still
+  halts after 120 s).
 - **Automatic halt** (reason in `rollout status`): any Pod already on the target fingerprint, in
   `canary` or `rolling`, with
   - `runner_terminated`: the runner container ended or the Pod `Failed`;
@@ -183,7 +186,7 @@ Applying values without `rollout` restarts the controller without a target:
   owners after their release; removing the key does neither. To leave the database saying it was
   stopped on purpose, run `rollout halt` first, then remove the key.
 - Turning it back on with the same image and flags continues the same target where it stopped; a
-  different fingerprint supersedes it (in-flight rows are carried over).
+  different fingerprint supersedes it, and its own open stops finish first (section 1).
 - From then on, image changes follow section 6 again.
 
 ## 8. Replacing api, runner-controller and web without a freeze (request 6)
@@ -194,11 +197,17 @@ Running runners keep their image; only new Pods use a new render. Every release 
   and the #90 flag subsets do in `KubePods._pod`). The N−1 variant may be removed only in a later
   release, and only when all of these hold (read-only): `rollout status` is `complete` with no
   `blocked`/`failed` owner, and no live runner Pod still carries the N−1 render — list every runner
-  Pod's image and rollout flag env and compare them with the target fingerprint:
+  Pod's image and each rollout flag with its value, and compare them with the target fingerprint (a flag
+  counts only with the exact value `true`; `-` means absent):
 
   ```sh
-  kubectl -n codex-runner get pods -l anxious.io/managed=user-runner \
-    -o jsonpath='{range .items[*]}{.metadata.name} {.spec.containers[?(@.name=="runner")].image} {.spec.containers[?(@.name=="runner")].env[*].name}{"\n"}{end}'
+  kubectl -n codex-runner get pods -l anxious.io/managed=user-runner -o json | python3 -I -c '
+  import json, sys
+  FLAGS = ("RUNNER_STREAM_TEXT", "STREAM_TRACE", "STREAM_RETIRED", "RUNNER_RESEARCH_API_ENABLE")
+  for pod in json.load(sys.stdin)["items"]:
+      runner, = [c for c in pod["spec"]["containers"] if c["name"] == "runner"]
+      env = {e["name"]: e.get("value") for e in runner.get("env", [])}
+      print(pod["metadata"]["name"], runner["image"], " ".join(k + "=" + str(env.get(k, "-")) for k in FLAGS))'
   ```
 
   A blocked owner's Pod keeps its old render until it is resolved.
