@@ -55,7 +55,7 @@ class Store:
 
     def carried(self, target_id):
         return [(t, o, row) for (t, o), row in sorted(self.old_rows.items(), key=lambda item: (str(item[0][1]), str(item[0][0])))
-                if t != target_id and row.phase in {'cutting', 'draining'} and row.reason != 'external_stop']
+                if t != target_id and row.phase in {'cutting', 'draining', 'restarting'} and row.reason != 'external_stop']
 
     def current(self):
         return self.target
@@ -130,8 +130,13 @@ class Store:
         return list(self.turns)
 
     def restart(self, owner, key):
+        """SqlStore.restart: a logged-in stopped owner re-enters (Registry.enter -> provisioning)."""
         self.calls.append(('restart', owner, key))
-        return owner in self.sessions
+        if owner not in self.sessions:
+            return False
+        if self.views[owner].phase == Phase.STOPPED:
+            self.views[owner] = replace(self.views[owner], phase=Phase.PREPARING)
+        return True
 
 
 class Cluster:
@@ -648,8 +653,13 @@ def test_rb3_a_rollback_finishes_the_previous_targets_open_cut_first():
     release(store, cluster, a)
     store.sessions.add(a)
     lines = rolled.run()
-    assert (a, 'rollout_previous', 'previous_finished') in lines
+    # The restart of the old target holds the rollback until it has its Pod (PM 11-25: A includes restarts).
+    assert (a, 'rollout_previous', 'restarting') in lines
     assert [c[:2] for c in store.calls if c[0] == 'restart'] == [('restart', a)] and store.views[a].image == OLD
+    uid = uuid4()
+    store.views[a] = replace(store.views[a], phase=Phase.UNREACHABLE, pod_uid=uid)
+    cluster.pods[a] = pod(uid, OLD, created=clock())
+    assert (a, 'rollout_previous', 'previous_finished') in rolled.run()
 
 
 def test_r_major_an_owner_changing_twice_in_one_pass_keeps_the_slot_count():
@@ -681,6 +691,7 @@ def test_scenario_mixed_passes_keep_the_invariants():
     opened = {}  # owner -> stop id opened by the rollout and not released
     seen = {'waiting_slot': 0, 'cut': 0, 'gated': 0, 'canary_passed': None, 'previous_finished': 0}
     health_log = []  # (time, owner, uid, healthy) for every health read of the canary candidate
+    selected = {}  # owner -> time of the pass in which it became this target's canary
 
     original_stop, original_cut = store.stop_between_turns, store.stop_for_cut
     def stop_between_turns(target_id, owner, *, canary):
@@ -755,7 +766,8 @@ def test_scenario_mixed_passes_keep_the_invariants():
                 seen['previous_finished'] += 1
             if outcome == 'canary_passed':                                                         # I4
                 uid = str(store.views[owner].pod_uid)  # The cluster serves metadata.uid as a string.
-                reads = [entry for entry in health_log if entry[1] == owner]
+                # Only reads after this owner became the selected canary count (PM 11-25 on allowance B).
+                reads = [entry for entry in health_log if entry[1] == owner and entry[0] >= selected[owner]]
                 streak = []
                 for entry in reads:
                     streak = streak + [entry] if entry[3] and entry[2] == uid else []
@@ -792,16 +804,22 @@ def test_scenario_mixed_passes_keep_the_invariants():
                 store.set_state(store.target, 'rolling')
         else:
             before = len(cluster.interrupts)
+            target = store.target.target_id
             lines = rollout.run()
             flapping.clear()
-            gated = any(kind == 'rollout_previous' and outcome in {'cutting', 'draining'} for _, kind, outcome in lines)
+            for owner, row in store.rows.items():
+                if row.canary and (target, owner) not in selected:
+                    selected[(target, owner)] = clock()
+                    selected[owner] = clock()
+            gated = any(kind == 'rollout_previous' and outcome in {'cutting', 'draining', 'restarting'}
+                        for _, kind, outcome in lines)
             check(lines, before, gated)
             if not rolled_back and store.rows.get(c) is not None and store.rows[c].phase == 'cutting':
                 back = fingerprint(OLD, [])  # Roll back to the image c (and the others not yet replaced) run.
                 store.completed.add(fingerprint_sha(back))
                 rollout = Rollout(store, cluster, Settings(back, **settings), clock)
                 rolled_back, plan = True, list(after_cut)
-    assert seen['canary_passed'] is not None and seen['waiting_slot'] and seen['cut'] and seen['gated']
+    assert seen['canary_passed'] is not None and seen['waiting_slot'] and seen['cut'] and seen['gated'], seen
     assert seen['previous_finished'] and rolled_back
 
 
@@ -832,3 +850,57 @@ def test_our_open_stop_is_handled_before_the_pods_fingerprint():
     cluster.pods[a] = pod(store.views[a].pod_uid, NEW, created=clock())  # Already on the target.
     assert outcomes(rollout.run())[a] == 'cutting' and len(cluster.interrupts) == 1
     assert store.rows[a].phase == 'cutting'
+
+
+def test_rr1_the_previous_targets_restart_holds_the_binding_and_the_new_target():
+    """2nd re-review blocker 1 / PM 11-25: allowance A includes restarts. Until the old target's restart has
+    its Pod, the new target neither moves that owner's binding nor opens a stop elsewhere."""
+    a, b = sorted(uuid4() for _ in range(2))
+    clock, store, cluster, rollout = setup([running(a), running(b)], 'rolling', turn_deadline=60)
+    store.sessions.add(a)
+    cluster.idle_owners.add(a)
+    assert outcomes(rollout.run())[a] == 'draining'
+    release(store, cluster, a)
+    other = fingerprint(OLD, ['RUNNER_RESEARCH_API_ENABLE'])  # A new target: neither a's nor b's fingerprint.
+    rolled = Rollout(store, cluster, Settings(other, turn_deadline=60), clock)
+    cluster.idle_owners.add(b)
+    lines = rolled.run()
+    assert (a, 'rollout_previous', 'restarting') in lines and store.views[a].phase == Phase.PREPARING
+    assert rolled.before_create(a) is False and store.views[a].image == OLD
+    assert ('stop', b) not in store.calls
+    clock.advance(30)
+    lines = rolled.run()
+    assert (a, 'rollout_previous', 'restarting') in lines and ('stop', b) not in store.calls
+    uid = uuid4()  # Service.ensure: the restart gets its Pod on the unchanged binding.
+    store.views[a] = replace(store.views[a], phase=Phase.UNREACHABLE, pod_uid=uid)
+    cluster.pods[a] = pod(uid, OLD, created=clock())
+    lines = rolled.run()
+    assert (a, 'rollout_previous', 'previous_finished') in lines
+    assert store.target.state == 'canary' and any(c[0] == 'stop' for c in store.calls[-3:])  # Now it starts.
+
+
+def test_rr2_canary_time_counts_only_from_selection():
+    """2nd re-review blocker 2 / PM 11-25: healthy reads of an owner before it is the selected canary (here
+    while a previous target's cut holds the new target back) never count toward canarySeconds."""
+    a, b = sorted(uuid4() for _ in range(2))
+    NEW2 = 'registry.invalid/runner@sha256:'+'c'*64
+    clock, store, cluster, rollout = setup([running(a), running(b, NEW2)], 'rolling', turn_deadline=60)
+    rollout.run(); clock.advance(60)
+    assert outcomes(rollout.run())[a] == 'cutting'
+    second = fingerprint(NEW2, [])  # b already runs it.
+    rolled = Rollout(store, cluster, Settings(second, turn_deadline=60, canary_seconds=200, canary_owners=(b,)), clock)
+    cluster.pods[b] = pod(store.views[b].pod_uid, NEW2, created=clock())  # Young: health-read every pass.
+    for _ in range(2):  # 110 s of healthy reads of b, inside a's settle window.
+        clock.advance(55)
+        lines = rolled.run()
+        assert (a, 'rollout_previous', 'cutting') in lines and outcomes(lines)[b] == 'verified'
+        assert store.target.state == 'canary' and not (store.rows.get(b) and store.rows[b].canary)
+    release(store, cluster, a)  # Not logged in: no restart; the old target's stop is over.
+    clock.advance(1)
+    lines = rolled.run()
+    assert (a, 'rollout_previous', 'previous_finished') in lines
+    assert store.rows[b].canary and outcomes(lines)[b] == 'verified' and store.target.state == 'canary'  # Not passed.
+    clock.advance(199)  # 310 s after the first pre-selection read, 199 s after selection.
+    assert outcomes(rolled.run())[b] == 'verified' and store.target.state == 'canary'
+    clock.advance(1)
+    assert outcomes(rolled.run())[b] == 'canary_passed'

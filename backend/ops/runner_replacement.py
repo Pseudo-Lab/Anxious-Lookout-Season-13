@@ -163,7 +163,7 @@ class Rollout:
         self.slots = sum(1 for view in views if view.row is not None and occupies(view.row.phase, view.row.reason))
         lines = self.finish_previous({view.owner: view for view in views})
         # Allowance A: while a superseded target's own stop is open, this target starts nothing.
-        self.previous_open = any(outcome in {'cutting', 'draining'} for _, kind, outcome in lines if kind == 'rollout_previous')
+        self.previous_open = any(outcome in {'cutting', 'draining', 'restarting'} for _, kind, outcome in lines if kind == 'rollout_previous')
         canary = self.choose_canary(views) if self.target.state == 'canary' and not self.previous_open else None
         pending = self.previous_open
         for view in sorted(views, key=lambda v: (v.owner != canary, v.row is None or not occupies(v.row.phase, v.row.reason), v.owner)):
@@ -183,7 +183,7 @@ class Rollout:
                 lines.append((view.owner, 'rollout', 'stuck:'+(getattr(failure, 'reason', None) or type(failure).__name__)))
                 pending = True
                 continue
-            if outcome not in {'verified', 'canary_passed'}:
+            if outcome not in {'verified', 'canary_passed'} or view.owner != canary:
                 self.streak.pop(view.owner, None)  # Pod missing, UID changed, not healthy: the streak ends.
             pending = pending or outcome not in SETTLED
             lines.append((view.owner, 'rollout', outcome))
@@ -191,17 +191,30 @@ class Rollout:
         return lines
 
     def finish_previous(self, views):
-        """Allowance A: stops and cuts that a superseded target opened finish under that target first. A cut
-        keeps receiving its interrupts within the settle window; after release the owner restarts on its
-        unchanged binding (no move for any target) and the old row is closed (`failed:superseded`). A cut
-        that does not settle is `blocked:turn_not_settled` under the old target (operator R2) and no longer
-        holds the new target back; its open stop is then followed as an `external_stop`."""
+        """Allowance A: stops, cuts and restarts that a superseded target opened finish under that target
+        first. A cut keeps receiving its interrupts within the settle window; after release the owner
+        restarts on its unchanged binding (no move for any target), and that restart is itself held under
+        the old target (`restarting`) until the owner has a Pod again, stopped, or the restart timed out
+        (review 2nd re-review blocker 1). Only then is the old row closed (`failed:superseded`). A cut that
+        does not settle is `blocked:turn_not_settled` under the old target (operator R2) and no longer holds
+        the new target back; its open stop is then followed as an `external_stop`."""
         lines = []
         for old_target, owner, row in self.store.carried(self.target.target_id):
             view = views.get(owner)
             try:
                 if view is None:
                     self.store.set_row(old_target, owner, 'failed', canary=False, reason='superseded')
+                    continue
+                if row.phase == 'restarting':
+                    if view.pod_uid is not None or view.phase in {Phase.STOPPED, Phase.FAILED}:
+                        # The restart produced its Pod (on the old binding), or there is nothing left to wait for.
+                        self.store.set_row(old_target, owner, 'failed', canary=False, reason='superseded')
+                        lines.append((owner, 'rollout_previous', 'previous_finished'))
+                    elif self.elapsed(row.since) > 2 * self.settings.canary_seconds:
+                        self.store.set_row(old_target, owner, 'blocked', canary=False, reason='restart_timeout')
+                        lines.append((owner, 'rollout_previous', 'previous_blocked'))
+                    else:
+                        lines.append((owner, 'rollout_previous', 'restarting'))
                     continue
                 if view.phase == Phase.STOPPING or (view.stop_id is not None and view.stop_id == row.stop_id):
                     if row.phase == 'cutting' and not view.stop_receipt:
@@ -215,9 +228,15 @@ class Rollout:
                             self.interrupt(view, obj, self.store.running_turns(owner))
                     lines.append((owner, 'rollout_previous', row.phase))
                     continue
+                restarting = view.pod_uid is None and view.phase in {Phase.PREPARING, Phase.WAITING}  # Own entry.
                 if view.phase == Phase.STOPPED and view.pod_uid is None:
                     key = uuid5(RESTART_KEYS, '%s:%s:%s' % (old_target, owner, row.stop_id))
-                    self.store.restart(owner, key)
+                    restarting = self.store.restart(owner, key)
+                if restarting:
+                    # Hold the new target until this restart has its Pod (on the unchanged binding).
+                    self.store.set_row(old_target, owner, 'restarting', canary=False)
+                    lines.append((owner, 'rollout_previous', 'restarting'))
+                    continue
                 self.store.set_row(old_target, owner, 'failed', canary=False, reason='superseded')
                 lines.append((owner, 'rollout_previous', 'previous_finished'))
             except Exception as failure:
@@ -437,14 +456,19 @@ class Rollout:
         if kind == 'inconclusive':
             return self.unconfirmed(view, is_canary, canary_window, 'inconclusive')
         self.confirmed.add(uid)
-        # Review blocker 1: the streak belongs to the observed Pod UID; any other pass outcome for this
-        # owner (no Pod, lookup error, another UID, not healthy) has already ended it in run().
+        if row is None or row.phase != 'verified' or (is_canary and not row.canary):
+            # Shown in `rollout status`; the pass uses the streak. An owner already `verified` before it was
+            # selected still gets its canary flag written (canary_owner/before_create read it).
+            self.set(view, 'verified', canary=is_canary)
+        if not canary_window:
+            return 'verified'  # Healthy reads before this owner is the selected canary never count (PM 11-25).
+        # The streak belongs to the observed Pod UID and to passes where this owner is the selected canary;
+        # any other pass outcome for this owner (no Pod, lookup error, another UID, not healthy, not the
+        # canary) has already ended it in run().
         streak = self.streak.get(view.owner)
         if streak is None or streak[0] != uid:
             streak = self.streak[view.owner] = (uid, self.now())
-        if row is None or row.phase != 'verified':
-            self.set(view, 'verified', canary=is_canary)  # Shown in `rollout status`; the pass uses the streak.
-        if canary_window and self.elapsed(streak[1]) >= self.settings.canary_seconds:
+        if self.elapsed(streak[1]) >= self.settings.canary_seconds:
             self.target = self.store.set_state(self.target, 'rolling')
             return 'canary_passed'
         return 'verified'
@@ -573,12 +597,12 @@ class SqlStore:
             after = rows[-1]['owner_id']
 
     def carried(self, target_id):
-        """Stops and cuts that superseded targets opened themselves and have not finished (allowance A).
-        Followed `external_stop`s are not theirs."""
+        """Stops, cuts and restarts that superseded targets opened themselves and have not finished
+        (allowance A, PM 11-25: restarts included). Followed `external_stop`s are not theirs."""
         with self.engine.begin() as db:
             rows = db.execute(text('''SELECT o.target_id, o.owner_id, o.phase, o.since, o.canary, o.stop_id, o.reason
                 FROM runner_rollout.owners o JOIN runner_rollout.targets t ON t.target_id=o.target_id
-                WHERE t.state='superseded' AND t.target_id<>:target AND o.phase IN ('cutting','draining')
+                WHERE t.state='superseded' AND t.target_id<>:target AND o.phase IN ('cutting','draining','restarting')
                 AND coalesce(o.reason,'')<>:external ORDER BY o.owner_id, o.target_id'''),
                 {'target': target_id, 'external': EXTERNAL}).mappings().all()
         return [(row['target_id'], row['owner_id'], Row(row['phase'], row['since'], row['canary'], row['stop_id'], row['reason']))

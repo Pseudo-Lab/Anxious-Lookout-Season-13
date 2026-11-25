@@ -66,6 +66,9 @@ def test_install_supersedes_without_copying_and_skips_canary_for_a_completed_fin
     assert (old_target, carried_owner, row.phase, row.stop_id) == (first.target_id, owner, 'draining', stop)
     observer.set_row(first.target_id, owner, 'draining', canary=False, stop_id=external, reason='external_stop')
     assert observer.carried(second.target_id) == []  # A followed stop is not the old target's own.
+    observer.set_row(first.target_id, owner, 'restarting', canary=False)  # PM 11-25: restarts are carried too.
+    (_, _, row), = observer.carried(second.target_id)
+    assert row.phase == 'restarting'
     observer.set_row(first.target_id, owner, 'failed', canary=False, reason='superseded')
     assert observer.carried(second.target_id) == []
     observer.set_state(second, 'rolling')
