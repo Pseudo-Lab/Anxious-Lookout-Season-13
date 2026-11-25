@@ -380,38 +380,48 @@ def test_complete_and_back_to_rolling():
     assert outcomes(rollout.run())[a] == 'not_movable' and store.target.state == 'rolling'
 
 
-def post_complete_unhealthy_start(first):
-    """A target Pod starts after `complete` and is unhealthy; `first` is what the first pass sees."""
+def post_complete_one_bad_read(first):
+    """A target Pod starts after `complete`; its /health reads bad exactly once, then healthy (review 8366d0c).
+    `first` is what the first pass sees: the Pod already Running (the bad read is that pass), or still starting
+    (the bad read is the next pass). Returns the owner, the outcome of a starting first pass, the lines of the pass
+    with the bad read, the target after it, and the target after two more passes with healthy reads."""
     a = uuid4()
     clock, store, cluster, rollout = setup([running(a, NEW)], 'complete')
-    phase = 'Running' if first == 'running' else 'Pending'
-    cluster.pods[a] = pod(store.views[a].pod_uid, NEW, phase=phase, created=clock())
+    started = None
+    if first == 'starting':
+        cluster.pods[a] = pod(store.views[a].pod_uid, NEW, phase='Pending', created=clock())
+        started = (outcomes(rollout.run())[a], store.target.state)
+        clock.advance(30)
+    cluster.pods[a] = pod(store.views[a].pod_uid, NEW, created=clock() - timedelta(seconds=30 if started else 0))
     cluster.health_of[a] = {'available': False, 'reason': 'policy_refused'}
-    first_outcome = outcomes(rollout.run())[a]
-    after_first = store.target.state
-    cluster.pods[a] = pod(store.views[a].pod_uid, NEW, created=clock())  # Running by the next pass
-    clock.advance(30)
-    lines = rollout.run()
-    return a, first_outcome, after_first, lines, store.target
+    bad_lines = rollout.run()
+    after_bad = store.target
+    cluster.health_of[a] = {'available': True, 'reason': None}
+    for _ in range(2):
+        clock.advance(30)
+        rollout.run()
+    return a, started, bad_lines, after_bad, store.target
 
 
-@pytest.mark.parametrize('first, outcome', [('running', 'unhealthy'), ('starting', 'starting')])
-def test_an_unhealthy_start_after_complete_halts_whatever_the_first_pass_saw(first, outcome):
-    """PM 11-25 (A; dev VM G3 target halted by …5802's policy_refused start): (a) first seen Running and unhealthy,
-    (b) first seen starting: both go back to rolling, then halt for runner_unavailable with that owner."""
-    a, first_outcome, after_first, lines, target = post_complete_unhealthy_start(first)
-    assert first_outcome == outcome and after_first == 'rolling'
-    assert (a, 'rollout_halted', 'runner_unavailable') in lines
-    assert (target.state, target.reason, target.reason_owner) == ('halted', 'runner_unavailable', a)
+@pytest.mark.parametrize('first', ['running', 'starting'])
+def test_one_bad_read_after_complete_halts_in_that_pass_whatever_the_first_pass_saw(first):
+    """PM 11-25 (A; dev VM G3 target halted by …5802's policy_refused start) and review 8366d0c: the pass with the
+    bad read halts (runner_unavailable, that owner), and healthy reads after it do not undo the halt."""
+    a, started, bad_lines, after_bad, end = post_complete_one_bad_read(first)
+    if first == 'starting':
+        assert started == ('starting', 'rolling')  # Not confirmed yet: watched again (allowance B).
+    assert (a, 'rollout_halted', 'runner_unavailable') in bad_lines
+    assert (after_bad.state, after_bad.reason, after_bad.reason_owner) == ('halted', 'runner_unavailable', a)
+    assert (end.state, end.reason, end.reason_owner) == ('halted', 'runner_unavailable', a)
 
 
 def test_both_post_complete_paths_end_the_same():
     ends = []
     for first in ('running', 'starting'):
-        a, _, _, lines, target = post_complete_unhealthy_start(first)
-        ends.append((target.state, target.reason, target.reason_owner == a,
-                     [kind for owner, kind, _ in lines if owner == a]))
-    assert ends[0] == ends[1] == ('halted', 'runner_unavailable', True, ['rollout_halted'])
+        a, _, bad_lines, after_bad, end = post_complete_one_bad_read(first)
+        ends.append((after_bad.state, after_bad.reason, after_bad.reason_owner == a, end.state,
+                     [kind for owner, kind, _ in bad_lines if owner == a]))
+    assert ends[0] == ends[1] == ('halted', 'runner_unavailable', True, 'halted', ['rollout_halted'])
 
 
 @pytest.mark.parametrize('health, state', [({'available': True, 'reason': None}, 'complete'),

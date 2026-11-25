@@ -183,7 +183,7 @@ class Rollout:
                 outcome = self.advance(view, canary)
             except Halt as halt:
                 self.streak.pop(view.owner, None)
-                if self.target.state in {'canary', 'rolling'}:
+                if self.target.state in {'canary', 'rolling', 'complete'}:  # complete: observe()'s bad read (PM A)
                     self.target = self.store.set_state(self.target, 'halted', halt.reason, view.owner)
                     lines.append((view.owner, 'rollout_halted', halt.reason))
                 pending = True
@@ -479,11 +479,11 @@ class Rollout:
             return self.unconfirmed(view, is_canary, canary_window, 'health_unreachable')
         kind = health_class(health)
         if kind == 'bad':
-            if watching:
+            # PM 11-25 (A, dev VM G4) and review 8366d0c: a bad read of an unconfirmed target Pod after `complete`
+            # halts in this same pass, like in canary/rolling, so one bad read halts whatever the first pass saw.
+            if watching or self.target.state == 'complete':
                 raise Halt('runner_unavailable')
-            # PM 11-25 (A, dev VM G4): an unconfirmed target Pod that is unhealthy after `complete` is not settled:
-            # the target goes back to `rolling` and the next pass halts it, as when it was first seen starting.
-            return 'unhealthy'
+            return 'converged'  # A halted target: nothing more to stop.
         if kind == 'inconclusive':
             return self.unconfirmed(view, is_canary, canary_window, 'inconclusive')
         self.confirmed.add(uid)

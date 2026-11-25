@@ -55,8 +55,13 @@ are unchanged.
 - **complete** needs every owner settled: a target Pod still starting, with unreadable health, or
   never read healthy by this controller keeps the target `rolling` and watched (a pull failure still
   halts after 120 s). This also holds **after** `complete`: a target Pod that starts later and is not
-  yet read healthy turns the target back to `rolling`. An unhealthy one (`/health` bad) then halts it
-  (`runner_unavailable`), whether the first pass saw it starting or already running (PM 11-25).
+  yet read healthy is watched again (a starting one turns the target back to `rolling`).
+
+  **One bad read halts (PM 11-25), in every stage alike.** A single `/health` bad of an unconfirmed
+  target Pod halts the target in that same pass (`runner_unavailable`, that owner named). This applies
+  in `canary`, in `rolling`, and after `complete` (`complete` → `halted` directly). It does not matter
+  whether the Pod was first seen starting or already running. The target stays halted even if the
+  runner recovers; the operator checks the cause and runs `rollout resume` or rolls back.
 - **Automatic halt** (reason in `rollout status`): any Pod already on the target fingerprint, in
   `canary` or `rolling`, with
   - `runner_terminated`: the runner container ended or the Pod `Failed`;
@@ -224,11 +229,12 @@ the same way. As a canary such an owner halts the rollout (`runner_unavailable`)
   checks the `/health` of one owner's Pod on the target fingerprint. That need not be a new start:
   on the development VM (G3) an already running Pod of the same fingerprint passed it. Stopped owners
   move at once once `rolling` starts, and nothing starts them.
-- **After `complete`, a new unhealthy start halts the target (PM 11-25).** An owner that starts on the
-  target fingerprint after `complete` is watched until its first healthy read. If its `/health` is
-  bad, the target goes back to `rolling` and then `halted` (`runner_unavailable`, that owner named),
-  also when the cause is not the image. On the development VM, an owner whose `operator-account` was
-  a placeholder halted the completed G3 target this way.
+- **After `complete`, one bad read of a new start halts the target (PM 11-25).** An owner that starts
+  on the target fingerprint after `complete` is watched until its first healthy read. A single bad
+  `/health` read halts the target in that pass (`runner_unavailable`, that owner named), also when
+  the cause is not the image, and also when the runner recovers afterwards: the target stays
+  `halted`. On the development VM, an owner whose `operator-account` was a placeholder halted the
+  completed G3 target this way.
   - Halted means no further moves or replacements for that target; running turns are not affected.
     A new target (the next image or a rollback) supersedes it as usual.
   - Find the cause, then `rollout resume` (a cause outside the image, now fixed) or roll back (step 6).
