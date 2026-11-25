@@ -138,7 +138,32 @@ def validate_writer(db):
         for column in ('owner_id', 'state_id', 'namespace', 'namespace_uid', 'plan', 'published_at'):
             require(not db.execute(text("SELECT has_column_privilege(:role,:t,:c,'UPDATE')"),
                                    {'role': role, 't': bindings, 'c': column}).scalar_one())
-        require(not db.execute(text("""SELECT pg_has_role(:role, c.relowner, 'USAGE') FROM pg_class c
-            JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='runner_bindings' AND c.relname='bindings'"""),
-            {'role': role}).scalar_one())
-        require(not db.execute(text("SELECT pg_has_role(:role, :writer, 'USAGE')"), {'role': role, 'writer': WRITER}).scalar_one())
+    validate_owner(db)
+
+
+def validate_owner(db):
+    """#101 review (major, round 2): the bindings table belongs to an approved administrator (a superuser,
+    as ops.runner_rollout_migrate requires), and no login or capability role reaches the owner, the writer,
+    a superuser, or any UPDATE/DELETE/TRUNCATE right on bindings, through any membership: 'MEMBER' counts
+    direct and indirect membership whether its privileges are inherited or need SET ROLE, and every role a
+    principal can become is checked for its own effective rights."""
+    owner_is_superuser = db.execute(text("""SELECT r.rolsuper FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        JOIN pg_roles r ON r.oid=c.relowner WHERE n.nspname='runner_bindings' AND c.relname='bindings'""")).scalar_one()
+    require(owner_is_superuser is True)
+    reaching = db.execute(text("""
+        WITH principals AS (
+            SELECT oid FROM pg_roles WHERE (rolcanlogin AND NOT rolsuper)
+                OR rolname IN ('anxious_api','anxious_runner_observer','anxious_runner_controller')),
+        reach AS (
+            SELECT p.oid AS principal, r.oid AS role, r.rolname, r.rolsuper FROM principals p
+            JOIN pg_roles r ON r.oid = p.oid OR pg_has_role(p.oid, r.oid, 'MEMBER')),
+        bindings AS (
+            SELECT c.oid, c.relowner FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='runner_bindings' AND c.relname='bindings')
+        SELECT reach.principal::regrole::text, reach.rolname FROM reach, bindings b
+        WHERE reach.rolsuper OR reach.role = b.relowner OR reach.rolname = :writer
+           OR has_table_privilege(reach.role, b.oid, 'UPDATE') OR has_table_privilege(reach.role, b.oid, 'DELETE')
+           OR has_table_privilege(reach.role, b.oid, 'TRUNCATE')
+           OR EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = b.oid AND a.attnum > 0 AND NOT a.attisdropped
+                      AND has_column_privilege(reach.role, b.oid, a.attnum, 'UPDATE'))"""), {'writer': WRITER}).all()
+    require(reaching == [])

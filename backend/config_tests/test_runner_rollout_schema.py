@@ -16,7 +16,6 @@ from runner.lifecycle import Refused
 from config_tests.test_runner_registry import schema, admin, owner, t0, enter, ready
 from config_tests.test_runner_bindings import binding_schema, plan_value
 from config_tests.test_user_runner_http import research_schema
-from config_tests.test_runner_termination_control import drained
 
 NEW_IMAGE = 'registry.invalid/runner@sha256:'+'b'*64
 DB = Path('/source/db')
@@ -31,14 +30,11 @@ def rollout_schema(binding_schema, research_schema, admin):
 def install_grants(admin):
     """Reapply the reviewed grant files every time: roles are cluster-wide and survive a dropped schema,
     while table grants do not (review note: a role that already exists skipped its grants)."""
+    from config_tests.runner_grants import install_grant_file
     with admin.begin() as db:
         for name in ('016_runner_controller_grants.sql', '016_runner_observer_grants.sql',
                      '061_runner_controller_grants.sql', '101_runner_rollout_grants.sql'):
-            sql = (DB/name).read_text()
-            for role in ('anxious_runner_controller', 'anxious_runner_observer'):
-                if db.execute(text('SELECT 1 FROM pg_roles WHERE rolname=:role'), {'role': role}).first():
-                    sql = sql.replace('CREATE ROLE '+role+' NOLOGIN;', '')
-            db.connection.driver_connection.execute(sql)
+            install_grant_file(db, name)
 
 
 def publish(admin, state):
@@ -49,11 +45,33 @@ def publish(admin, state):
 
 
 def stopped(admin, owner, t0):
-    """idle_stopped with a completed stop: the state a running owner reaches after its drain and release."""
-    state, stop, proof = drained(admin, owner, t0)
+    """idle_stopped with a completed stop, reached the production way (#101 review): entry, the controller's
+    reservation (settles the ensure), the bound Pod, its drain receipt, node anchor and release."""
+    from datetime import datetime, timezone
+    from app.runner_controller import Controller
+    from app.runner_registry import Registry
+    from app.runner_termination_control import accept_drain, drain_body, request_stop
+    from runner.lifecycle import Fence
+    state, _ = enter(admin, owner, uuid4(), t0)
+    ticket = Controller(admin, None, lambda: t0, max_pods=1000).reserve(Fence.of(state))
+    assert ticket.create
+    with admin.begin() as db:
+        state = Registry(db).observe(Fence.of(Registry(db).read(owner)), pod_uid=uuid4(), ready=True,
+                                     active_requests=0, ambiguous=False, verified=True, now=t0)
     value = publish(admin, state)
     with admin.begin() as db:
+        stop = request_stop(db, owner)
+        accept_drain(db, owner, stop['stop_id'], {**drain_body(stop), 'version': 1, 'clean': True})
+        node, boot = uuid4(), uuid4()
+        db.execute(text("UPDATE runner_termination.stops SET node_name='node',node_uid=:node,boot_id=:boot WHERE stop_id=:stop"),
+                   {'node': node, 'boot': boot, 'stop': stop['stop_id']})
+    proof = {'podUid': str(state.pod_uid), 'nodeName': 'node', 'nodeUid': str(node), 'bootId': str(boot),
+             'verifiedAt': datetime.now(timezone.utc).isoformat()}
+    with admin.begin() as db:
         release(db, owner, stop['stop_id'], proof, allow_entry=False)
+    with admin.begin() as db:  # Nothing left unsettled: the Python stopped-owner predicate accepts this.
+        assert not db.execute(text('SELECT 1 FROM runner_runtime.outbox WHERE owner_id=:owner AND NOT settled'),
+                              {'owner': owner}).first()
     return value
 
 
@@ -273,6 +291,12 @@ def test_api_cannot_call_the_move_or_read_rollout_state(admin, owner, t0):
     'ALTER TABLE runner_bindings.bindings OWNER TO anxious_runner_observer',
     'GRANT postgres TO anxious_runner_observer',
     'GRANT UPDATE ON runner_bindings.bindings TO anxious_runner_controller',
+    # Review round 2: ownership moved to a separate deployment login, a SET-only membership in the owner,
+    # and a login that reaches a predefined write-all role.
+    'CREATE ROLE rollout_drift_owner LOGIN; ALTER TABLE runner_bindings.bindings OWNER TO rollout_drift_owner',
+    'GRANT postgres TO anxious_runner_observer WITH INHERIT FALSE',
+    'CREATE ROLE rollout_drift_login LOGIN; GRANT pg_write_all_data TO rollout_drift_login',
+    'CREATE ROLE rollout_drift_setter LOGIN; GRANT anxious_runner_binding_writer TO rollout_drift_setter WITH INHERIT FALSE',
 ])
 def test_validation_refuses_any_other_write_path(admin, drift):
     with admin.connect() as db:
