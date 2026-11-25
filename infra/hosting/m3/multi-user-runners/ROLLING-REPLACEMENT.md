@@ -233,12 +233,17 @@ the same way. As a canary such an owner halts the rollout (`runner_unavailable`)
    Pod. The target stays `rolling`. **That owner cannot use a runner until the operator acts** (the
    other owners are not affected: after the halt nobody else moved). The operator:
    1. applies the rollback values (as above);
-   2. checks `rollout status`: the new target is `rolling` and that owner's row is `waiting_turn`;
-   3. reads the owner's runner Pod: its UID equals the registry's pod, its image is the broken digest,
-      and it is `Pending` with `ErrImagePull`/`ImagePullBackOff`;
-   4. deletes that Pod by its UID, e.g. `kubectl delete --raw /api/v1/namespaces/<ns>/pods/<name> -f -`
-      with the body `{"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": "<uid>"}}`
-      (a different UID is refused);
+   2. checks `rollout status` for the new target's id, fingerprint (the rolled-back image) and state
+      `rolling` (status only counts owners). That owner's own state comes from the controller log
+      (`<owner>` `rollout` `waiting_turn` lines) or its `runner_rollout.owners` row for that target;
+   3. reads the owner's runner Pod in the runner namespace: its name is the owner's, its UID equals the
+      registry's pod, its image is the broken digest, and it is `Pending` with
+      `ErrImagePull`/`ImagePullBackOff`;
+   4. deletes that Pod with that UID as the precondition, e.g. `kubectl delete --raw
+      /api/v1/namespaces/<ns>/pods/<name> -f -` with the body `{"apiVersion": "v1", "kind":
+      "DeleteOptions", "preconditions": {"uid": "<uid>"}}` (the controller's own deletes use the same
+      precondition). A Pod of that name with another UID is refused; then stop, re-read, and do not
+      retry blindly. If any read in steps 2–3 does not match, do not delete;
    5. checks `rollout status` until `complete`. The controller treats the vanished Pod like any vanished
       runner (terminal receipt `podAbsent`, proof, release), and the rollout then moves the owner back
       to the rolled-back image.
@@ -361,7 +366,8 @@ lines, Pod UIDs/images, conversation end states.
    case of a runner that reports idle while the database still holds a `running` conversation: it
    waits until the deadline, then `cutting`, and the drain receipt closes the row.
 4. A broken image (unpullable digest or a runner that exits) as canary: `halted` with the reason;
-   no other owner moved; rollback by values. Also: a non-canary existing owner that re-enters during
+   no other owner moved; rollback by values (for an unpullable digest, with the operator step for the
+   canary's `Pending` Pod in section 5, step 6). Also: a non-canary existing owner that re-enters during
    the canary starts on its old binding; record every owner's binding image before and after the
    halt (no move after it).
 5. Flag-only change (`stream.text` or `research.enable`): Pods are replaced without a binding move;
