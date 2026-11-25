@@ -39,6 +39,7 @@ from app.runner_termination_control import (accept_drain, accept_operator, accep
 from app.runner_termination_schema import validate as validate_termination
 from ops.runner_one_shot import request
 from ops.runner_provision_worker import allowed
+from ops.runner_replacement import Rollout, SqlStore, load_settings
 from runner.lifecycle import Fence, Phase, Refused, require
 
 TERMINAL_PHASES = {'Failed', 'Succeeded'}
@@ -158,13 +159,75 @@ class NodeEvidence:
                 'bootId': str(UUID(node['status']['nodeInfo']['bootID']))}
 
 
+class CheckedPods:
+    """#101: the PodPort for one ensure, whose create re-reads the binding image just before the POST.
+
+    Pool.bound resolved the plan before Controller.ensure took the registry owner lock. create_once runs
+    inside that locked transaction, and runner_rollout.move_image takes the same lock, so a binding read
+    here on a fresh connection is the one in force until the create commits: a plan resolved before a
+    move is refused instead of creating a Pod whose image no longer matches its binding."""
+    def __init__(self, pods, engine, plan):
+        self.pods, self.engine, self.plan = pods, engine, plan
+
+    def lookup(self, identity):
+        return self.pods.lookup(identity)
+
+    def create_once(self, identity):
+        with self.engine.connect() as db:
+            image = db.execute(text("SELECT plan->>'image' FROM runner_bindings.bindings WHERE owner_id=:owner"),
+                               {'owner': identity.owner}).scalar_one_or_none()
+        if image != self.plan.image:
+            raise Refused('Binding image changed before creation')
+        return self.pods.create_once(identity)
+
+
+class RolloutCluster:
+    """#101: the cluster side of a rollout pass, through the same observer pool and runner client."""
+    def __init__(self, service):
+        self.service = service
+
+    @contextmanager
+    def bound(self, view):
+        with self.service.observer_pool.bound(view.owner) as runtime:
+            runtime.namespace()
+            yield runtime
+
+    def pod(self, view):
+        with self.bound(view) as runtime:
+            return self.service.pod(runtime)
+
+    def terminal(self, obj):
+        return terminal_evidence(obj)
+
+    def _runner(self, runtime, view, obj):
+        return self.service.runner(self.service.address(runtime, obj), runtime.token, view.owner, str(view.state_id))
+
+    def health(self, view, obj):
+        with self.bound(view) as runtime:
+            health = self._runner(runtime, view, obj).call('GET', '/health', None)
+        require(health.get('podUid') == obj['metadata']['uid'])
+        return health
+
+    def idle(self, view, obj, seconds):
+        with self.bound(view) as runtime:
+            evidence = self._runner(runtime, view, obj).call('POST', '/lifecycle/idle', {'idleSeconds': seconds})
+        expected = {'ownerId': str(view.owner), 'stateId': str(view.state_id), 'podUid': obj['metadata']['uid']}
+        require(evidence in ({**expected, 'idle': True}, {**expected, 'idle': False}))
+        return evidence['idle']
+
+    def interrupt(self, view, obj, session, request):
+        with self.bound(view) as runtime:
+            self._runner(runtime, view, obj).call('POST', '/sessions/'+str(session)+'/interrupt', {'requestId': str(request)})
+
+
 class Service:
     def __init__(self, controller_engine, observer_engine, controller_pool, observer_pool, node,
-                 *, runner=Runner, now=clock):
+                 *, runner=Runner, now=clock, rollout=None):
         self.controller_engine, self.observer_engine = controller_engine, observer_engine
         self.controller_pool, self.observer_pool = controller_pool, observer_pool
         self.node, self.runner, self.now = node, runner, now
         self.not_idle = {}  # owner -> first time its runner refused idle with no running conversation
+        self.rollout = rollout  # #101 ops.runner_replacement.Rollout, or None without a target
 
     # Creation -------------------------------------------------------------
     def waiting(self):
@@ -178,11 +241,22 @@ class Service:
 
     def ensure(self, owner):
         require(allowed(owner))
+        rollout = getattr(self, 'rollout', None)  # Services built without __init__ (tests) have none.
+        if rollout is not None:
+            rollout.before_create(owner)  # #101: a waiting owner moves to the target before its plan is read.
         with self.controller_pool.bound(owner) as runtime:
             runtime.namespace()
             with self.controller_engine.begin() as db:
                 state = Registry(db)._current(owner)
-            return Controller(self.controller_engine, runtime.pods, self.now,
+                # Before any reservation: a plan resolved ahead of a move waits for the next pass. The
+                # locked recheck in CheckedPods only meets a mover running concurrently with this process
+                # (an operator tool); it then refuses after the reservation, which is fail-closed.
+                image = db.execute(text("SELECT plan->>'image' FROM runner_bindings.bindings WHERE owner_id=:owner"),
+                                   {'owner': owner}).scalar_one_or_none()
+            if image != runtime.plan.image:
+                raise Stuck('binding_moved')
+            pods = CheckedPods(runtime.pods, self.controller_engine, runtime.plan)
+            return Controller(self.controller_engine, pods, self.now,
                               max_pods=load_limits().max_pods).ensure(Fence.of(state))
 
     # Stopping -------------------------------------------------------------
@@ -455,15 +529,37 @@ class Service:
                 outcomes.append((owner, 'reconciliation_required', reason_of(failure)))
             else:
                 outcomes.append((owner, 'running', outcome) if outcome in WAITING else (owner, outcome, None))
+        rollout = getattr(self, 'rollout', None)  # Services built without __init__ (tests) have none.
+        if rollout is not None:
+            # #101: after the stop steps (a release this pass is seen) and before creation (a re-entered
+            # owner moves first). A failing pass never blocks stops or creation.
+            try:
+                outcomes += [line for line in rollout.run() if line[2] != 'converged']
+            except Exception as failure:
+                outcomes.append((None, 'rollout', 'stuck:'+reason_of(failure)))
         for owner in self.waiting():
             if not allowed(owner):
                 continue
             try:
                 self.ensure(owner)
                 outcomes.append((owner, 'ensured', None))
+                ok = True
             except Exception as failure:
                 outcomes.append((owner, 'reconciliation_required', 'ensure:'+reason_of(failure)))
+                ok = reason_of(failure) == 'binding_moved'  # A retried pass, not a failed creation.
+            if rollout is not None and rollout.settings.fingerprint is not None:
+                try:
+                    halted = rollout.ensure_result(owner, ok, self.binding_image(owner) == rollout.settings.fingerprint['image'])
+                except Exception:
+                    halted = None  # Bookkeeping only; the next pass counts again.
+                if halted is not None:
+                    outcomes.append((owner, 'rollout_halted', halted))
         return outcomes
+
+    def binding_image(self, owner):
+        with self.controller_engine.begin() as db:
+            return db.execute(text("SELECT plan->>'image' FROM runner_bindings.bindings WHERE owner_id=:owner"),
+                              {'owner': owner}).scalar_one_or_none()
 
 
 class Wake:
@@ -526,7 +622,34 @@ def build():
     observer_engine = create_engine(secret('OBSERVER_DATABASE_URL'), hide_parameters=True)
     service = Service(controller_engine, observer_engine, Pool(controller_engine, config), Pool(observer_engine, config),
                       NodeEvidence(os.environ['RUNNER_NODE_NAME']))
+    # #101: invalid rollout settings, or a target without the reviewed rollout schema, refuse startup.
+    settings = load_settings()
+    if settings.fingerprint is not None:
+        store = SqlStore(observer_engine)
+        store.validate()
+        service.rollout = Rollout(store, RolloutCluster(service), settings, clock)
     return service, config, sa
+
+
+def rollout_command(service, action):
+    """`rollout status|halt|resume` (#101). halt: canary/rolling -> halted (reason `operator`); resume:
+    halted or canary -> rolling (the operator accepts the canary). Returns (rc, report)."""
+    store = service.rollout.store if service.rollout is not None else SqlStore(service.observer_engine)
+    target = store.current()
+    if target is None:
+        return 3, {'stage': 'rollout', 'result': 'refused', 'code': 'no_target'}
+    wanted = {'halt': ({'canary', 'rolling'}, 'halted', 'operator'), 'resume': ({'halted', 'canary'}, 'rolling', None)}
+    if action in wanted:
+        allowed_from, state, reason = wanted[action]
+        if target.state not in allowed_from:
+            return 3, {'stage': 'rollout', 'result': 'refused', 'code': 'state', 'state': target.state}
+        changed = store.set_state(target, state, reason)
+        if changed.state != state:
+            return 3, {'stage': 'rollout', 'result': 'refused', 'code': 'state_changed', 'state': changed.state}
+        target = changed
+    return 0, {'stage': 'rollout', 'action': action, 'targetId': str(target.target_id), 'state': target.state,
+               'reason': target.reason, 'reasonOwner': None if target.reason_owner is None else str(target.reason_owner),
+               'fingerprint': target.fingerprint, 'owners': store.counts(target.target_id)}
 
 
 def serve():
@@ -552,7 +675,7 @@ def serve():
 
 
 def log_line(owner, outcome, reason):
-    line = {'owner': str(owner), 'stage': 'controller', 'result': outcome}
+    line = {'owner': None if owner is None else str(owner), 'stage': 'controller', 'result': outcome}
     if reason is not None:
         line['reason'] = reason
     return line
@@ -571,9 +694,19 @@ def main(argv=None, *, factory=build):
     reclaim.add_argument('--owner', type=UUID, required=True)
     reclaim.add_argument('--pod-uid', type=UUID, required=True)
     reclaim.add_argument('--runner-available', action='store_true')
+    rollout = commands.add_parser('rollout')  # #101: rc 0 done, 3 refused, 1 any other failure.
+    rollout.add_argument('action', choices=('status', 'halt', 'resume'))
     args = parser.parse_args(argv)
     if args.command is None:
         return serve()
+    if args.command == 'rollout':
+        try:
+            rc, report = rollout_command(factory()[0], args.action)
+        except Exception:
+            print(json.dumps({'stage': 'rollout', 'result': 'failed', 'error': 'unexpected error; status is read-only and safe to repeat'}), flush=True)
+            return 1
+        print(json.dumps(report, sort_keys=True, default=str), flush=True)
+        return rc
     try:
         result = factory()[0].reclaim(args.owner, args.pod_uid, runner_available=args.runner_available)
     except Refusal as refusal:

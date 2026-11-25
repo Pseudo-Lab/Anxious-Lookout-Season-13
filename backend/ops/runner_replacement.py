@@ -342,13 +342,13 @@ class Rollout:
         Halted rollouts do not move."""
         if self.settings.fingerprint is None:
             return False
-        target = self.store.current()
-        if target is None or target.state not in {'canary', 'rolling', 'complete'}:
-            return False
         try:
+            target = self.store.current()
+            if target is None or target.state not in {'canary', 'rolling', 'complete'}:
+                return False
             return self.store.move(owner, self.settings.fingerprint['image'])
         except Exception:
-            return False
+            return False  # Not movable (a create permission is out) or unreadable: create as bound.
 
     def ensure_result(self, owner, ok, image_is_target):
         """Three ensure failures in a row for an owner bound to the target image halt the rollout."""
@@ -432,6 +432,13 @@ class SqlStore:
                      None if row['row_phase'] is None else Row(row['row_phase'], row['since'], row['canary'],
                                                                row['row_stop'], row['reason']))
                 for row in rows]
+
+    def counts(self, target_id):
+        """Owners of this target by phase, and the reasons of blocked/failed ones (operator status)."""
+        with self.engine.begin() as db:
+            rows = db.execute(text('''SELECT phase, coalesce(reason, '') AS reason, count(*) AS n FROM runner_rollout.owners
+                WHERE target_id=:target GROUP BY phase, reason ORDER BY phase, reason'''), {'target': target_id}).all()
+        return {phase+(':'+reason if reason else ''): n for phase, reason, n in rows}
 
     def set_row(self, target_id, owner, phase, *, canary, stop_id=None, reason=None):
         with self.engine.begin() as db:
