@@ -271,14 +271,24 @@ class Rollout:
 
     def choose_canary(self, views):
         T = self.settings.fingerprint
-        current = [v.owner for v in views if v.row is not None and v.row.canary and v.row.phase not in {'blocked', 'failed'}]
+        for view in views:
+            if (view.owner in self.protected and view.row is not None and view.row.canary
+                    and view.row.phase not in {'blocked', 'failed'}):
+                # A canary whose binding a superseded target's restart now protects cannot proceed: it stops
+                # being the canary (blocked rows are skipped by canary_owner and the transaction gate).
+                self.set(view, 'blocked', canary=False, reason='awaiting_previous')
+        current = [v.owner for v in views if v.row is not None and v.row.canary and v.owner not in self.protected
+                   and (self.rows_now.get(v.owner) or v.row).phase not in {'blocked', 'failed'}]
         if current:
             return current[0]
         def eligible(view):
             # Never an owner already blocked or failed for this target, nor a stopped owner whose binding
-            # can never move (no stop proof): the canary would wait forever (review major 3).
+            # can never move (no stop proof): the canary would wait forever (review major 3); nor an owner
+            # whose binding a superseded target's restart still protects (4th re-review): the protection
+            # holds that owner only, the canary moves on to the next candidate.
             return (view.row is None or view.row.phase not in {'blocked', 'failed'}) and not (
-                view.pod_uid is None and view.phase == Phase.STOPPED and not view.proved)
+                view.pod_uid is None and view.phase == Phase.STOPPED and not view.proved) and (
+                view.owner not in self.protected)
         def needs(view):
             return view.image != T['image'] or view.pod_uid is not None
         by_owner = {view.owner: view for view in views}

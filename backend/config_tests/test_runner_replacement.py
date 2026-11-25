@@ -968,3 +968,42 @@ def test_rr4_a_pass_that_cannot_read_its_target_or_owners_ends_the_canary_streak
     assert outcomes(rollout.run())[a] == 'verified'
     clock.advance(1)
     assert outcomes(rollout.run())[a] == 'canary_passed'
+
+
+def test_rr5_a_protected_configured_canary_is_skipped_for_the_next_candidate():
+    """4th re-review blocker / PM 11-25: the protection holds that owner only. With canaryOwners=[A, B] and
+    A's previous restart timed out (protected), a new target in its canary stage proceeds with B while A's
+    binding stays as it is."""
+    a, b = sorted(uuid4() for _ in range(2))
+    clock, store, cluster, rollout = setup([running(a), running(b)], 'rolling', canary_seconds=60)
+    store.views[a] = replace(store.views[a], phase=Phase.PREPARING, pod_uid=None)
+    cluster.pods.pop(a)
+    store.rows[a] = Row('restarting', clock(), False)  # The old target's restart of a.
+    third = fingerprint('registry.invalid/runner@sha256:'+'c'*64, [])  # A new target, not known: canary stage.
+    rolled = Rollout(store, cluster, Settings(third, canary_seconds=60, canary_owners=(a, b)), clock)
+    cluster.idle_owners.add(b)
+    assert (a, 'rollout_previous', 'restarting') in rolled.run() and store.target.state == 'canary'
+    clock.advance(121)
+    for _ in range(3):
+        lines = rolled.run()
+        assert (a, 'rollout_previous', 'protected') in lines
+        assert store.views[a].image == OLD and ('move', a) not in store.calls and rolled.before_create(a) is False
+        assert not (store.rows.get(a) and store.rows[a].canary)
+        clock.advance(30)
+    assert store.rows[b].canary and any(c[:2] == ('stop', b) for c in store.calls)  # B is the canary and proceeds.
+    assert store.rows[b].phase == 'draining'
+
+
+def test_rr5_a_canary_that_becomes_protected_steps_aside():
+    a, b = sorted(uuid4() for _ in range(2))
+    clock, store, cluster, rollout = setup([running(a), running(b)], 'canary', canary_owners=(a, b))
+    store.views[a] = replace(store.views[a], phase=Phase.PREPARING, pod_uid=None)
+    cluster.pods.pop(a)
+    store.rows[a] = Row('waiting_turn', clock(), True)  # a was this target's canary ...
+    old = uuid4()
+    store.old_rows[(old, a)] = Row('blocked', clock(), False, None, 'restart_timeout')  # ... then protected.
+    cluster.idle_owners.add(b)
+    lines = rollout.run()
+    assert (a, 'rollout_previous', 'protected') in lines
+    assert (store.rows[a].phase, store.rows[a].reason) == ('blocked', 'awaiting_previous')
+    assert store.canary_owner(store.target.target_id) == b and store.rows[b].phase == 'draining'

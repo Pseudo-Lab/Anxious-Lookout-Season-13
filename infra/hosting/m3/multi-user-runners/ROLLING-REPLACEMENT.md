@@ -37,7 +37,9 @@ are unchanged.
 `canary` → `rolling` → `complete`; `halted`; `superseded` (a newer target replaced it).
 
 - **canary:** one owner (the first of `canaryOwners` that needs work, else the first running owner,
-  else the first stopped owner; never a blocked/failed owner or one without its stop proof). It
+  else the first stopped owner; never a blocked/failed owner, one without its stop proof, or one whose
+  binding a superseded target's restart still protects — the next candidate is chosen instead, and a
+  canary that becomes protected steps aside as `blocked:awaiting_previous`). It
   passes only after `canarySeconds` (default 600) of **consecutive** healthy checks (`/health`
   available, no reason) of the **same** canary Pod (PM condition 1, 11-25 criterion). An account
   reason (`auth_*`, `not_configured`), an unreadable health, a Pod not Running or missing, a lookup
