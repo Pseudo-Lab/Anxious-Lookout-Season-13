@@ -124,7 +124,17 @@ that step D starts replacing every owner not on `runnerImage`.
    - the canary Pod's image is the new digest and its `/health` is available;
    - API log lines `conversation_refresh_write` (#90 polling fallback) and `research_grant_omitted`
      during the window — a rise means the stream or the grant path regressed: `rollout halt`;
-   - no `rollout_halted` line.
+   - no `rollout_halted` line;
+   - **one real turn** (PM condition 1), sent during the window as the canary owner — preferably the
+     test owner named in `canaryOwners`, logged in so its runner restarts at once (a stopped canary
+     starts when that owner opens the runner). Check that the turn ends normally, that the chat
+     stream delivers its first event, and, with `research.enable` on, that a research tool call
+     works (no `research_grant_omitted` line for it). If any of these fails: `rollout halt`.
+
+   The canary passes on its own when `canarySeconds` ends. Choose a window long enough for the
+   turn; if the check cannot finish in time, run `rollout halt` first and `rollout resume` once the
+   turn passed. Halt only after the canary Pod already runs on the new image: a halt while the
+   canary's own stop is still in flight restarts that owner on its old binding (`failed:halted`).
 5. After `rolling`: owners move or are replaced one by one; `complete` when every owner is on the
    target, `blocked` owners listed by reason.
 6. **Halt or rollback:** `rollout halt` stops new replacements. To roll back, put the previous
