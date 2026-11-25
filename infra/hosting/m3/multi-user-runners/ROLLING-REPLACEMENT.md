@@ -67,7 +67,8 @@ are unchanged.
 - **Automatic halt** (reason in `rollout status`): any Pod already on the target fingerprint, in
   `canary` or `rolling`, with
   - `runner_terminated`: the runner container ended or the Pod `Failed`;
-  - `image_pull`: `ErrImagePull`/`ImagePullBackOff`/`InvalidImageName` for 120 s;
+  - `image_pull`: `ErrImagePull`/`ImagePullBackOff`/`InvalidImageName` for 120 s (the rollback then
+    needs one operator step for the canary's `Pending` Pod: section 5, step 6);
   - `runner_unavailable`: `/health` unavailable for a reason that is not about the account or the
     provider (`auth_*`, `not_configured`, `not_enabled_for_account`, `budget_exhausted`,
     `provider_rate_limited`, and `unavailable` of a runner that is stopping, are inconclusive, not a halt),
@@ -225,6 +226,26 @@ the same way. As a canary such an owner halts the rollout (`runner_unavailable`)
    at `canary`.
 
    `rollout resume` continues a halted target the operator judged sound.
+
+   **After an `image_pull` halt (PM 11-25):** the rollback alone does not finish. The canary owner is
+   bound to the broken image and its Pod stays `Pending` (`ImagePullBackOff`): the new target waits for
+   it between turns, but a runner that never started has no turns, and no stop path acts on a `Pending`
+   Pod. The target stays `rolling`. **That owner cannot use a runner until the operator acts** (the
+   other owners are not affected: after the halt nobody else moved). The operator:
+   1. applies the rollback values (as above);
+   2. checks `rollout status`: the new target is `rolling` and that owner's row is `waiting_turn`;
+   3. reads the owner's runner Pod: its UID equals the registry's pod, its image is the broken digest,
+      and it is `Pending` with `ErrImagePull`/`ImagePullBackOff`;
+   4. deletes that Pod by its UID, e.g. `kubectl delete --raw /api/v1/namespaces/<ns>/pods/<name> -f -`
+      with the body `{"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": "<uid>"}}`
+      (a different UID is refused);
+   5. checks `rollout status` until `complete`. The controller treats the vanished Pod like any vanished
+      runner (terminal receipt `podAbsent`, proof, release), and the rollout then moves the owner back
+      to the rolled-back image.
+
+   This is not specific to rolling replacement. A runner Pod started on an image that cannot be
+   pulled stays `Pending` whether or not rollout is on. (Stopping such Pods automatically is a
+   follow-up candidate outside #101.)
 7. **After `complete` (operator check, PM 11-25; a second look beside the automatic halt below):**
    for a set period, for example the first working day, watch the owners that start for the first
    time on the new target:
