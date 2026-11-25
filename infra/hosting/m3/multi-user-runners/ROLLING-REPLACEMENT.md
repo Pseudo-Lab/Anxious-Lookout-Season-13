@@ -61,7 +61,9 @@ are unchanged.
   target Pod halts the target in that same pass (`runner_unavailable`, that owner named). This applies
   in `canary`, in `rolling`, and after `complete` (`complete` → `halted` directly). It does not matter
   whether the Pod was first seen starting or already running. The target stays halted even if the
-  runner recovers; the operator checks the cause and runs `rollout resume` or rolls back.
+  runner recovers; the operator checks the cause and runs `rollout resume` or rolls back. After
+  `complete` the rule covers unconfirmed Pods only: a Pod this controller already read healthy does
+  not halt a completed target on a later bad read.
 - **Automatic halt** (reason in `rollout status`): any Pod already on the target fingerprint, in
   `canary` or `rolling`, with
   - `runner_terminated`: the runner container ended or the Pod `Failed`;

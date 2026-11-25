@@ -440,6 +440,20 @@ def test_a_healthy_or_inconclusive_start_after_complete_never_halts(health, stat
     assert store.target.state == state and store.target.reason is None
 
 
+def test_a_confirmed_pod_read_bad_after_complete_does_not_halt():
+    """Review ff121fe: the after-complete halt is for unconfirmed UIDs only. A target Pod this controller already read
+    healthy, read bad 30 s later (still inside canarySeconds, so its health is read again), keeps the target complete."""
+    a = uuid4()
+    clock, store, cluster, rollout = setup([running(a, NEW)], 'complete', canary_seconds=120)
+    cluster.pods[a] = pod(store.views[a].pod_uid, NEW, created=clock())
+    assert outcomes(rollout.run())[a] == 'verified' and store.target.state == 'complete'
+    clock.advance(30)
+    cluster.health_of[a] = {'available': False, 'reason': 'policy_refused'}
+    lines = rollout.run()
+    assert not any(kind == 'rollout_halted' for _, kind, _ in lines)
+    assert outcomes(lines)[a] == 'converged' and store.target.state == 'complete' and store.target.reason is None
+
+
 def test_runner_failed_owner_is_blocked_not_moved():
     a = uuid4()
     view = replace(stopped(a), phase=Phase.FAILED)

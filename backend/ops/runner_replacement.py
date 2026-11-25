@@ -479,11 +479,12 @@ class Rollout:
             return self.unconfirmed(view, is_canary, canary_window, 'health_unreachable')
         kind = health_class(health)
         if kind == 'bad':
-            # PM 11-25 (A, dev VM G4) and review 8366d0c: a bad read of an unconfirmed target Pod after `complete`
+            # PM 11-25 (A, dev VM G4) and review 8366d0c: a bad read of an UNCONFIRMED target Pod after `complete`
             # halts in this same pass, like in canary/rolling, so one bad read halts whatever the first pass saw.
-            if watching or self.target.state == 'complete':
+            # Review ff121fe: a UID this controller already read healthy is out of that rule after `complete`.
+            if watching or (self.target.state == 'complete' and uid not in self.confirmed):
                 raise Halt('runner_unavailable')
-            return 'converged'  # A halted target: nothing more to stop.
+            return 'converged'  # A halted target, or a confirmed Pod after complete: nothing to stop.
         if kind == 'inconclusive':
             return self.unconfirmed(view, is_canary, canary_window, 'inconclusive')
         self.confirmed.add(uid)
