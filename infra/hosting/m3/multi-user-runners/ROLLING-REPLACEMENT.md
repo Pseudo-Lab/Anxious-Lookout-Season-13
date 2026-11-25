@@ -399,7 +399,8 @@ lines, Pod UIDs/images, conversation end states.
 ### Results on the development VM (2026-11-25)
 
 **Setup:**
-- The runtime is 60070c9.
+- The final api and controller runtime is 60070c9. Earlier parts also ran 10f9de9 (api) and 56c2805
+  (controller).
 - Six owners: …0048 and …5801–…5805.
 - PM ran each step after review cleared it, and review judged each part from the logs and their SHA-256 (kept with the
   #101 records).
@@ -437,8 +438,11 @@ lines, Pod UIDs/images, conversation end states.
      - The operator deleted the canary's `Pending` Pod with the UID and resourceVersion preconditions (section 5,
        step 6). A `podAbsent` receipt and proof released it.
      - The target became `complete`.
-   - **G7b, after `complete`:** an owner whose runner could not start halted the target (`runner_unavailable`) in the
-     same pass. After the restore and `rollout resume`, the same target completed again.
+   - **G7b, after `complete`:** an owner whose runner could not start (`policy_refused`) took the same target from
+     `complete` through `rolling` to `halted` (`runner_unavailable`), with one halt. After the restore and
+     `rollout resume`, the same target was `complete` again. The VM did not show whether the halt came in the same
+     pass as the first bad read. The unit test
+     `test_one_bad_read_after_complete_halts_in_that_pass_whatever_the_first_pass_saw` covers that.
    - **During `rolling`:** a stop with a v1 drain receipt for its Pod was read as `stopping`, not a halt.
 5. **Passed with `stream.text`** (G8).
    - A new target {same image, `RUNNER_STREAM_TEXT`} was created.
@@ -474,10 +478,13 @@ lines, Pod UIDs/images, conversation end states.
 8. **Unit evidence and VM continuity** (G6).
    - **Restart right after a deadline stop:** not caught on the VM. The deadline stop closed in 1.1 s, which left no
      window to restart the controller before the interrupt. The unit test
-     `test_b2_a_cut_survives_a_controller_restart_and_resends_the_interrupts` covers the takeover and the resent
-     interrupt.
-   - **Restart during a replacement:** on the VM, two controller runtime replacements continued the same target from
-     the database.
+     `test_b2_a_cut_survives_a_controller_restart_and_resends_the_interrupts` covers both the takeover of an open cut
+     and the resent interrupt.
+   - **The target across a controller replacement (VM):** the target was kept, read from the database. The VM did
+     not replace the controller during an owner's replacement.
+     - In part H, the controller's runtime was replaced while the target was `halted`. After a manual `rollout resume`,
+       the same target completed.
+     - In part J, the target was already `complete` and kept its id and state across the replacement.
 
 **Final state** (G12): the api and the runner-controller run the 60070c9 runtime. The target {issue97 runner,
 `RUNNER_STREAM_TEXT`} is `complete`, and all six bindings are on it. The VM was left in this state.
