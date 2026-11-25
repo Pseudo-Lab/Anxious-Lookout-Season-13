@@ -104,7 +104,8 @@ def test_owner_views_and_row_since(admin, owner, t0, observer):
     first = observer.owners(target.target_id)[0].row
     observer.set_row(target.target_id, owner, 'waiting_turn', canary=False)
     again = observer.owners(target.target_id)[0].row
-    assert again.since == first.since and again.canary  # Same phase keeps since; canary sticks.
+    # Same phase keeps since; the canary flag is the one written (5th re-review: never sticky).
+    assert again.since == first.since and first.canary and not again.canary
     observer.set_row(target.target_id, owner, 'blocked', canary=False, reason='runner_failed')
     assert observer.owners(target.target_id)[0].row.phase == 'blocked'
 
@@ -253,3 +254,22 @@ def test_owners_reads_every_page_and_the_stop_proof(admin, owner, t0, observer):
     with admin.begin() as db:
         db.execute(text('DELETE FROM runner_termination.stops WHERE owner_id=:o'), {'o': owner})
     assert {view.owner: view.proved for view in observer.owners(target)}[owner] is False
+
+
+def test_the_database_refuses_a_second_active_canary(admin, owner, t0, observer):
+    """PM 11-25 (5th re-review): owners_one_active_canary. A stepped-aside (blocked) canary does not count."""
+    from sqlalchemy.exc import IntegrityError
+    other = uuid4()
+    with admin.begin() as db:
+        db.execute(text("INSERT INTO auth.accounts(id,github_id,login,role,is_approved) VALUES(:id,'999','o','editor',true)"), {'id': other})
+    enter(admin, owner, uuid4(), t0)
+    enter(admin, other, uuid4(), t0)
+    target = observer.install(T)
+    observer.set_row(target.target_id, owner, 'waiting_turn', canary=True)
+    with pytest.raises(IntegrityError):
+        observer.set_row(target.target_id, other, 'waiting_turn', canary=True)
+    observer.set_row(target.target_id, owner, 'blocked', canary=False, reason='awaiting_previous')
+    observer.set_row(target.target_id, other, 'waiting_turn', canary=True)
+    assert observer.canary_owner(target.target_id) == other
+    observer.set_row(target.target_id, owner, 'verified', canary=False)  # A later observation of the old one.
+    assert observer.canary_owner(target.target_id) == other

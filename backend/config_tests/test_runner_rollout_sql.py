@@ -63,3 +63,13 @@ def test_observer_rollout_grants_hold_no_binding_privilege():
     assert all('runner_bindings' not in statement for statement in grants)
     assert all(statement.endswith(' TO anxious_runner_observer') for statement in grants)
     assert 'GRANT EXECUTE ON FUNCTION runner_rollout.move_image(uuid,uuid,jsonb,text) TO anxious_runner_observer' in grants
+
+
+def test_at_most_one_active_canary_per_target_is_a_database_constraint():
+    """PM 11-25 (5th re-review): structural, not only careful transitions."""
+    ddl = ' '.join(re.sub(r'--[^\n]*', '', (DB/'101_runner_rollout.sql').read_text()).split())
+    assert ("CREATE UNIQUE INDEX owners_one_active_canary ON runner_rollout.owners (target_id) "
+            "WHERE canary AND phase NOT IN ('blocked','failed');") in ddl
+    # Row writes take the canary flag as given: a stepped-aside owner is never re-designated by a later write.
+    source = (DB.parent/'ops/runner_replacement.py').read_text()
+    assert 'canary=EXCLUDED.canary,' in source and 'OR EXCLUDED.canary' not in source

@@ -64,7 +64,15 @@
         "referred_table": "targets"
       }
     ],
-    "indexes": {},
+    "indexes": {
+      "owners_one_active_canary": {
+        "columns": [
+          "target_id"
+        ],
+        "unique": true,
+        "where": "(canary AND (phase <> ALL (ARRAY['blocked'::text, 'failed'::text])))"
+      }
+    },
     "primary": [
       "target_id",
       "owner_id"

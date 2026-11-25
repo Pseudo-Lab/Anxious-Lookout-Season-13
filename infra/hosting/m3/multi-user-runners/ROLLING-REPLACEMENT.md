@@ -39,7 +39,9 @@ are unchanged.
 - **canary:** one owner (the first of `canaryOwners` that needs work, else the first running owner,
   else the first stopped owner; never a blocked/failed owner, one without its stop proof, or one whose
   binding a superseded target's restart still protects — the next candidate is chosen instead, and a
-  canary that becomes protected steps aside as `blocked:awaiting_previous`). It
+  canary that becomes protected steps aside as `blocked:awaiting_previous`). A target has at most one
+  active canary, enforced by the database (unique index `owners_one_active_canary`); a stepped-aside
+  owner becomes the canary again only by being selected, never by a later observation. It
   passes only after `canarySeconds` (default 600) of **consecutive** healthy checks (`/health`
   available, no reason) of the **same** canary Pod (PM condition 1, 11-25 criterion). An account
   reason (`auth_*`, `not_configured`), an unreadable health, a Pod not Running or missing, a lookup

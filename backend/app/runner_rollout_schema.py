@@ -22,6 +22,7 @@ CONTRACT = Path(__file__).resolve().parent.parent/'db/101_runner_rollout_contrac
 FOREIGN_KEYS = {'owners_target_id_fkey', 'owners_owner_id_fkey'}
 # The contract JSON records an expression index only as columns [null]; compare the definitions.
 INDEXES = {
+    'owners_one_active_canary': "CREATE UNIQUE INDEX owners_one_active_canary ON runner_rollout.owners USING btree (target_id) WHERE (canary AND (phase <> ALL (ARRAY['blocked'::text, 'failed'::text])))",
     'owners_pkey': 'CREATE UNIQUE INDEX owners_pkey ON runner_rollout.owners USING btree (target_id, owner_id)',
     'targets_one_current': "CREATE UNIQUE INDEX targets_one_current ON runner_rollout.targets USING btree ((true)) WHERE (state <> 'superseded'::text)",
     'targets_pkey': 'CREATE UNIQUE INDEX targets_pkey ON runner_rollout.targets USING btree (target_id)',

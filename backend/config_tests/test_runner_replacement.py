@@ -41,7 +41,7 @@ class Store:
         self.rows, self.calls = {}, []
         self.unmovable, self.running_db, self.sessions = set(), set(), set()
         self.before_stop, self.crash_after_cut, self.turns = None, False, [(uuid4(), uuid4())]
-        self.old_rows, self.completed = {}, set()
+        self.old_rows, self.completed, self.trace = {}, set(), []  # trace: canary_owner() after each row write
 
     def install(self, value):
         """SqlStore.install: a new fingerprint supersedes the target; nothing is copied (allowance A)."""
@@ -73,13 +73,18 @@ class Store:
     def set_row(self, target_id, owner, phase, *, canary, stop_id=None, reason=None):
         if target_id != self.target.target_id:
             old = self.old_rows.get((target_id, owner))
-            self.old_rows[(target_id, owner)] = Row(phase, self.clock(), bool(old and old.canary) or canary,
+            self.old_rows[(target_id, owner)] = Row(phase, self.clock(), canary,
                                                      stop_id or (old.stop_id if old else None), reason)
             return
         old = self.rows.get(owner)
         since = old.since if old is not None and old.phase == phase else self.clock()
-        self.rows[owner] = Row(phase, since, bool(old and old.canary) or canary,
-                               stop_id or (old.stop_id if old else None), reason)
+        row = Row(phase, since, canary, stop_id or (old.stop_id if old else None), reason)
+        # The owners_one_active_canary unique index: a write that would make a second active canary fails.
+        active = [o for o, r in {**self.rows, owner: row}.items() if r.canary and r.phase not in {'blocked', 'failed'}]
+        if len(active) > 1:
+            raise RuntimeError('unique violation: owners_one_active_canary')
+        self.rows[owner] = row
+        self.trace.append(self.canary_owner(target_id))
 
     def set_state(self, target, state, reason=None, owner=None):
         if target.target_id != self.target.target_id or target.state != self.target.state:
@@ -807,8 +812,26 @@ def test_scenario_mixed_passes_keep_the_invariants():
         else:
             before = len(cluster.interrupts)
             target = store.target.target_id
+            before_owner = store.canary_owner(target)
+            store.trace.clear()
             lines = rollout.run()
             flapping.clear()
+            # I5 (PM 11-25): at most one active canary — the fake store refuses a second one like the
+            # owners_one_active_canary index, so any attempt shows as a `stuck` line.
+            assert not any(str(reason).startswith('stuck:RuntimeError') for _, _, reason in lines)
+            active = [o for o, r in store.rows.items() if r.canary and r.phase not in {'blocked', 'failed'}]
+            assert len(active) <= 1
+            # I6: canary_owner() changes in a pass only through selection (None -> the pass's canary) or a
+            # step-aside (the old canary's row is blocked/failed now), never directly from one owner to another.
+            if store.target.target_id == target:
+                for previous, current in zip([before_owner] + store.trace, store.trace):
+                    if previous == current:
+                        continue
+                    assert previous is None or current is None, (previous, current)
+                    if current is not None:
+                        assert current == rollout.canary
+                    else:
+                        assert store.rows[previous].phase in {'blocked', 'failed'}
             for owner, row in store.rows.items():
                 if row.canary and (target, owner) not in selected:
                     selected[(target, owner)] = clock()
@@ -1007,3 +1030,30 @@ def test_rr5_a_canary_that_becomes_protected_steps_aside():
     assert (a, 'rollout_previous', 'protected') in lines
     assert (store.rows[a].phase, store.rows[a].reason) == ('blocked', 'awaiting_previous')
     assert store.canary_owner(store.target.target_id) == b and store.rows[b].phase == 'draining'
+
+
+def test_rr6_a_stepped_aside_canary_never_becomes_the_canary_again_by_observation():
+    """5th re-review blocker / PM 11-25: A stepped aside (blocked:awaiting_previous) while B became the canary
+    and is draining; A's late restart then comes up on the target. A's healthy observation must not revive
+    its canary designation: one active canary (B), and canary_owner() stays B over the following passes."""
+    a, b = sorted(uuid4() for _ in range(2))
+    clock, store, cluster, rollout = setup([running(a), running(b)], 'canary', canary_owners=(a, b))
+    store.views[a] = replace(store.views[a], phase=Phase.PREPARING, pod_uid=None)
+    cluster.pods.pop(a)
+    store.rows[a] = Row('waiting_turn', clock(), True)
+    old = uuid4()
+    store.old_rows[(old, a)] = Row('blocked', clock(), False, None, 'restart_timeout')
+    cluster.idle_owners.add(b)
+    rollout.run()
+    assert (store.rows[a].phase, store.rows[a].reason) == ('blocked', 'awaiting_previous')
+    assert store.canary_owner(store.target.target_id) == b and store.rows[b].phase == 'draining'
+    uid = uuid4()  # A's late restart comes up, on the target image.
+    store.views[a] = replace(store.views[a], phase=Phase.UNREACHABLE, pod_uid=uid, image=NEW)
+    cluster.pods[a] = pod(uid, NEW, created=clock())
+    for _ in range(3):
+        clock.advance(30)
+        lines = rollout.run()
+        assert not any(str(reason).startswith('stuck:') for _, _, reason in lines)
+        assert outcomes(lines)[a] == 'verified' and not store.rows[a].canary
+        assert store.canary_owner(store.target.target_id) == b
+        assert [o for o, r in store.rows.items() if r.canary and r.phase not in {'blocked', 'failed'}] == [b]

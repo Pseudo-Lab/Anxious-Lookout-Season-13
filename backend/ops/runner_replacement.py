@@ -151,6 +151,7 @@ class Rollout:
         # every count again (more waiting, never an early pass):
         self.streak = {}        # owner -> (Pod UID, start of its consecutive healthy checks)
         self.confirmed = set()  # Pod UIDs whose /health was read healthy at least once
+        self.canary = None
 
     # Pass -----------------------------------------------------------------
     def run(self):
@@ -175,6 +176,7 @@ class Rollout:
         # Allowance A: while a superseded target's own stop is open, this target starts nothing.
         self.previous_open = any(outcome in {'cutting', 'draining', 'restarting'} for _, kind, outcome in lines if kind == 'rollout_previous')
         canary = self.choose_canary(views) if self.target.state == 'canary' and not self.previous_open else None
+        self.canary = canary  # This pass's selected canary (the only owner written with canary=True).
         pending = self.previous_open
         for view in sorted(views, key=lambda v: (v.owner != canary, v.row is None or not occupies(v.row.phase, v.row.reason), v.owner)):
             try:
@@ -315,7 +317,7 @@ class Rollout:
         old = self.rows_now.get(view.owner, view.row)
         self.store.set_row(self.target.target_id, view.owner, phase, canary=canary, stop_id=stop_id, reason=reason)
         self.slots += occupies(phase, reason) - (old is not None and occupies(old.phase, old.reason))
-        self.rows_now[view.owner] = Row(phase, self.now(), canary or bool(old and old.canary),
+        self.rows_now[view.owner] = Row(phase, self.now(), canary,
                                         stop_id or (old.stop_id if old else None), reason)
         return phase
 
@@ -656,7 +658,7 @@ class SqlStore:
         db.execute(text('''INSERT INTO runner_rollout.owners(target_id,owner_id,phase,canary,stop_id,since,reason)
             VALUES(:target,:owner,:phase,:canary,:stop,now(),:reason)
             ON CONFLICT(target_id,owner_id) DO UPDATE SET phase=EXCLUDED.phase,
-                canary=runner_rollout.owners.canary OR EXCLUDED.canary,
+                canary=EXCLUDED.canary,  -- The canary as of the pass that wrote it (5th re-review: never sticky).
                 stop_id=coalesce(EXCLUDED.stop_id, runner_rollout.owners.stop_id), reason=EXCLUDED.reason,
                 since=CASE WHEN runner_rollout.owners.phase=EXCLUDED.phase THEN runner_rollout.owners.since
                            ELSE EXCLUDED.since END'''),

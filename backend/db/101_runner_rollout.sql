@@ -46,6 +46,10 @@ CREATE TABLE runner_rollout.owners (
   PRIMARY KEY(target_id,owner_id),
   CHECK(phase NOT IN ('blocked','failed') OR reason IS NOT NULL)
 );
+-- At most one active canary per target (PM 11-25, structural): a stepped-aside (blocked/failed) row
+-- never counts, and no write can make a second owner the active canary.
+CREATE UNIQUE INDEX owners_one_active_canary ON runner_rollout.owners (target_id)
+  WHERE canary AND phase NOT IN ('blocked','failed');
 REVOKE ALL ON ALL TABLES IN SCHEMA runner_rollout FROM PUBLIC;
 
 CREATE FUNCTION runner_rollout.move_image(p_owner uuid, p_state uuid, p_old jsonb, p_image text)
