@@ -129,6 +129,34 @@ def test_move_refuses_unsafe_input_or_state(admin, owner, t0, damage):
     assert plan(admin) == value
 
 
+def test_move_takes_the_registry_owner_lock(admin, owner, t0):
+    """The function's lock key equals Registry._lock's, so a transaction holding the owner lock (entry,
+    reserve, bind, stop, release) blocks the move until it commits."""
+    from app.runner_registry import Registry
+    import hashlib
+    expected = int.from_bytes(hashlib.sha256(('runner-registry-v1:'+str(owner)).encode()).digest()[:8], 'big', signed=True)
+    with admin.begin() as db:
+        computed = db.execute(text("""SELECT ('x' || substr(encode(sha256(convert_to('runner-registry-v1:' || CAST(:owner AS uuid)::text,
+            'UTF8')), 'hex'), 1, 16))::bit(64)::bigint"""), {'owner': owner}).scalar_one()
+    assert computed == expected
+    value = stopped(admin, owner, t0)
+    holder = admin.connect()
+    transaction = holder.begin()
+    try:
+        Registry(holder)._current(owner)  # Holds the owner lock until rollback.
+        with pytest.raises(DBAPIError):
+            with admin.begin() as db:
+                db.execute(text("SET LOCAL lock_timeout='1s'"))
+                db.execute(text('SET LOCAL ROLE anxious_runner_observer'))
+                db.execute(text('SELECT runner_rollout.move_image(:owner,:state,CAST(:old AS jsonb),:image)'),
+                           {'owner': owner, 'state': value['state'], 'old': json.dumps(value), 'image': NEW_IMAGE})
+    finally:
+        transaction.rollback()
+        holder.close()
+    assert plan(admin) == value
+    assert move(admin, owner, value)['image'] == NEW_IMAGE  # Free again once the holder ends.
+
+
 def test_waiting_owner_moves_before_its_create_permission(admin, owner, t0):
     state, _ = enter(admin, owner, uuid4(), t0)
     value = publish(admin, state)

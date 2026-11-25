@@ -23,6 +23,13 @@ def test_move_image_writes_only_the_image_of_one_bound_plan():
     assert re.findall(r'SET (.*?) WHERE', body) == ["plan = jsonb_set(b.plan, '{image}', to_jsonb(p_image), false)"]
     assert 'b.plan = p_old' in body and 'b.owner_id = p_owner' in body and 'b.state_id = p_state' in body
     assert 'r.pod_uid IS NULL' in body and 'o.settled' in body
+    # The registry owner lock is taken before the check-and-update (same key as Registry._lock; the
+    # disposable-DB test compares the two keys).
+    lock = body.index('pg_catalog.pg_advisory_xact_lock(')
+    assert lock < body.index('UPDATE runner_bindings.bindings')
+    assert "'runner-registry-v1:' || p_owner::text" in body and '1, 16))::bit(64)::bigint' in body
+    registry = (DB.parent/'app/runner_registry.py').read_text()
+    assert "('runner-registry-v1:' + str(owner)).encode()).digest()[:8], 'big', signed=True" in registry
     for forbidden in ('DELETE', 'INSERT', 'EXECUTE ', 'format(', 'TRUNCATE'):
         assert forbidden not in body
 

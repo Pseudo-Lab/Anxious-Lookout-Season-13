@@ -56,6 +56,11 @@ BEGIN
      OR p_image IS NULL OR p_image !~ '^[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}$' OR p_old->>'image' = p_image THEN
     RAISE EXCEPTION 'binding image move refused' USING ERRCODE = 'check_violation';
   END IF;
+  -- The registry owner lock (app.runner_registry.Registry._lock: the first 8 bytes of
+  -- sha256('runner-registry-v1:<owner>') as a signed bigint). Every registry transition takes it, so
+  -- the Pod/create-permission check below and the UPDATE see no concurrent entry, reserve or bind.
+  PERFORM pg_catalog.pg_advisory_xact_lock(('x' || substr(encode(sha256(convert_to(
+    'runner-registry-v1:' || p_owner::text, 'UTF8')), 'hex'), 1, 16))::bit(64)::bigint);
   UPDATE runner_bindings.bindings b SET plan = jsonb_set(b.plan, '{image}', to_jsonb(p_image), false)
    WHERE b.owner_id = p_owner AND b.state_id = p_state AND b.plan = p_old
      AND EXISTS (SELECT 1 FROM runner_runtime.registry r
