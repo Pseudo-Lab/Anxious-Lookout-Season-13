@@ -48,6 +48,10 @@ class Store:
     def current(self):
         return self.target
 
+    def canary_owner(self, target_id):
+        current = sorted(owner for owner, row in self.rows.items() if row.canary and row.phase not in {'blocked', 'failed'})
+        return current[0] if current else None
+
     def owners(self, target_id):
         assert target_id == self.target.target_id
         return [replace(view, row=self.rows.get(owner)) for owner, view in sorted(self.views.items())]
@@ -337,7 +341,7 @@ def test_configured_canary_owner_goes_first():
 
 def test_before_create_moves_only_when_not_halted():
     a = uuid4()
-    clock, store, cluster, rollout = setup([replace(stopped(a), phase=Phase.PREPARING)], 'canary')
+    clock, store, cluster, rollout = setup([replace(stopped(a), phase=Phase.PREPARING)], 'rolling')  # canary: see test_before_create_moves_only_the_canary_owner_during_the_canary
     assert rollout.before_create(a) is True and store.views[a].image == NEW
     store.views[a] = replace(store.views[a], image=OLD)
     store.set_state(store.target, 'halted', 'operator')
@@ -390,3 +394,31 @@ def test_default_settings(monkeypatch):
     monkeypatch.setenv('RUNNER_TARGET_IMAGE', NEW)
     settings = load_settings()
     assert (settings.max_parallel, settings.turn_deadline, settings.canary_seconds, settings.canary_owners) == (1, 1800, 600, ())
+
+
+def test_deadline_applies_while_the_runner_is_idle_but_a_conversation_stays_running():
+    """PM 11-25: a runner that reports idle while the database still holds a `running` conversation is not
+    waited on forever; past the deadline the cut path records the stop (the drain closes the row, #114)."""
+    a = uuid4()
+    clock, store, cluster, rollout = setup([running(a)], 'rolling', turn_deadline=1800)
+    cluster.idle_owners.add(a)
+    store.running_db.add(a)
+    assert outcomes(rollout.run())[a] == 'waiting_turn'
+    clock.advance(1799)
+    assert outcomes(rollout.run())[a] == 'waiting_turn' and ('cut', a) not in store.calls
+    clock.advance(1)
+    assert outcomes(rollout.run())[a] == 'cutting' and ('cut', a) in store.calls
+    assert store.rows[a].stop_id == store.views[a].stop_id
+
+
+def test_before_create_moves_only_the_canary_owner_during_the_canary():
+    """PM 11-25: in the canary stage another waiting owner starts on its current binding."""
+    canary, other = sorted(uuid4() for _ in range(2))
+    waiting = lambda owner: replace(stopped(owner), phase=Phase.PREPARING)
+    clock, store, cluster, rollout = setup([waiting(canary), waiting(other)], 'canary')
+    assert rollout.before_create(other) is False and store.views[other].image == OLD  # No canary chosen yet.
+    store.set_row(store.target.target_id, canary, 'waiting_turn', canary=True)
+    assert rollout.before_create(other) is False and store.views[other].image == OLD
+    assert rollout.before_create(canary) is True and store.views[canary].image == NEW
+    store.set_state(store.target, 'rolling')
+    assert rollout.before_create(other) is True and store.views[other].image == NEW

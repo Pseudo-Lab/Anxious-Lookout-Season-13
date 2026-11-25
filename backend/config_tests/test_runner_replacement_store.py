@@ -154,3 +154,13 @@ def test_restart_respects_the_runner_allowlist(admin, owner, t0, observer, monke
     stopped(admin, owner, t0)
     login(admin, owner)
     assert observer.restart(owner, uuid4()) is False and read(admin, owner).phase == Phase.STOPPED
+
+
+def test_canary_owner_is_the_current_unblocked_canary(admin, owner, t0, observer):
+    enter(admin, owner, uuid4(), t0)
+    target = observer.install(T)
+    assert observer.canary_owner(target.target_id) is None
+    observer.set_row(target.target_id, owner, 'waiting_turn', canary=True)
+    assert observer.canary_owner(target.target_id) == owner
+    observer.set_row(target.target_id, owner, 'blocked', canary=True, reason='turn_not_settled')
+    assert observer.canary_owner(target.target_id) is None  # Rollout.choose_canary picks another.

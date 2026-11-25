@@ -263,7 +263,9 @@ class Rollout:
             stop_id = self.store.stop_between_turns(view.owner)
             if stop_id is not None:
                 return self.set(view, 'draining', canary=is_canary, stop_id=stop_id)
-            return 'waiting_turn'  # The database still holds a running conversation.
+            # The database still holds a running conversation the runner no longer has: wait, but only
+            # until the deadline below (PM 11-25: the deadline applies whether or not the runner is idle;
+            # the drain receipt's close_dead_work closes such a conversation, #114).
         if self.elapsed(row.since) < self.settings.turn_deadline:
             return 'waiting_turn'
         # D1 deadline: fence new turns, then interrupt the running ones; the drain follows when they settle.
@@ -339,12 +341,15 @@ class Rollout:
     def before_create(self, owner):
         """Service.ensure calls this before it resolves the binding: an owner waiting for its first Pod
         of a generation moves to the target first (also covers new owners, PM 11-18 observation).
-        Halted rollouts do not move."""
+        Halted rollouts do not move; during the canary only the canary owner moves (PM 11-25), the others
+        start on their current binding and are replaced once rolling."""
         if self.settings.fingerprint is None:
             return False
         try:
             target = self.store.current()
             if target is None or target.state not in {'canary', 'rolling', 'complete'}:
+                return False
+            if target.state == 'canary' and self.store.canary_owner(target.target_id) != owner:
                 return False
             return self.store.move(owner, self.settings.fingerprint['image'])
         except Exception:
@@ -432,6 +437,12 @@ class SqlStore:
                      None if row['row_phase'] is None else Row(row['row_phase'], row['since'], row['canary'],
                                                                row['row_stop'], row['reason']))
                 for row in rows]
+
+    def canary_owner(self, target_id):
+        """The target's current canary, as Rollout.choose_canary keeps it (not blocked/failed), or None."""
+        with self.engine.begin() as db:
+            return db.execute(text('''SELECT owner_id FROM runner_rollout.owners WHERE target_id=:target AND canary
+                AND phase NOT IN ('blocked','failed') ORDER BY owner_id LIMIT 1'''), {'target': target_id}).scalar_one_or_none()
 
     def counts(self, target_id):
         """Owners of this target by phase, and the reasons of blocked/failed ones (operator status)."""
