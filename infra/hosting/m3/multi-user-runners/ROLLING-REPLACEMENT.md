@@ -67,8 +67,9 @@ are unchanged.
 - **Automatic halt** (reason in `rollout status`): any Pod already on the target fingerprint, in
   `canary` or `rolling`, with
   - `runner_terminated`: the runner container ended or the Pod `Failed`;
-  - `image_pull`: `ErrImagePull`/`ImagePullBackOff`/`InvalidImageName` for 120 s (the rollback then
-    needs one operator step for the canary's `Pending` Pod: section 5, step 6);
+  - `image_pull`: `ErrImagePull`/`ImagePullBackOff`/`InvalidImageName`/`ErrImageNeverPull` for 120 s
+    (the rollback then needs an operator step for each `Pending` Pod of the failed fingerprint: section 5,
+    step 6);
   - `runner_unavailable`: `/health` unavailable for a reason that is not about the account or the
     provider (`auth_*`, `not_configured`, `not_enabled_for_account`, `budget_exhausted`,
     `provider_rate_limited`, and `unavailable` of a runner that is stopping, are inconclusive, not a halt),
@@ -227,24 +228,34 @@ the same way. As a canary such an owner halts the rollout (`runner_unavailable`)
 
    `rollout resume` continues a halted target the operator judged sound.
 
-   **After an `image_pull` halt (PM 11-25):** the rollback alone does not finish. The canary owner is
-   bound to the broken image and its Pod stays `Pending` (`ImagePullBackOff`): the new target waits for
-   it between turns, but a runner that never started has no turns, and no stop path acts on a `Pending`
-   Pod. The target stays `rolling`. **That owner cannot use a runner until the operator acts** (the
-   other owners are not affected: after the halt nobody else moved). The operator:
+   **After an `image_pull` halt (PM 11-25):** the rollback alone does not finish while a runner Pod of the
+   failed fingerprint is `Pending` with a pull failure (`ErrImagePull`, `ImagePullBackOff`,
+   `InvalidImageName` or `ErrImageNeverPull`). The halt names one such owner (`reasonOwner`); there can be
+   more. During the canary only the canary owner can have one. During `rolling`, every owner the rollout
+   already moved or replaced onto the failed fingerprint and that started before the halt can have
+   one. The new target waits for each such Pod between turns, but a runner that never started has no
+   turns, and no stop path acts on a `Pending` Pod. **Those owners cannot use a runner until the
+   operator acts.** The others are not affected: nobody moves after the halt, and an owner bound to
+   the failed image without a Pod is moved back by the rollback itself. The new target starts at
+   `rolling` when the rolled-back fingerprint has a completed target in its history, otherwise at
+   `canary` (above), and it does not complete while such a Pod remains. (Development VM gate G7 is the
+   canary case: one owner, the rollback target `rolling`.) The operator:
    1. applies the rollback values (as above);
-   2. checks `rollout status` for the new target's id, fingerprint (the rolled-back image) and state
-      `rolling` (status only counts owners). That owner's own state comes from the controller log
-      (`<owner>` `rollout` `waiting_turn` lines) or its `runner_rollout.owners` row for that target;
-   3. reads the owner's runner Pod in the runner namespace: its name is the owner's, its UID equals the
-      registry's pod, its image is the broken digest, and it is `Pending` with
-      `ErrImagePull`/`ImagePullBackOff`;
-   4. deletes that Pod with that UID as the precondition, e.g. `kubectl delete --raw
-      /api/v1/namespaces/<ns>/pods/<name> -f -` with the body `{"apiVersion": "v1", "kind":
-      "DeleteOptions", "preconditions": {"uid": "<uid>"}}` (the controller's own deletes use the same
-      precondition). A Pod of that name with another UID is refused; then stop, re-read, and do not
-      retry blindly. If any read in steps 2–3 does not match, do not delete;
-   5. checks `rollout status` until `complete`. The controller treats the vanished Pod like any vanished
+   2. checks `rollout status` for the new target's id, fingerprint (the rolled-back one) and state
+      (status only counts owners). Each owner's own state comes from the controller log (`<owner>`
+      `rollout` `waiting_turn` lines) or its `runner_rollout.owners` row for that target;
+   3. for each owner with such a Pod (start with the halt's `reasonOwner`): reads its runner Pod in the
+      runner namespace. Its name is the owner's, its UID equals the registry's pod, its runner image and
+      flags are the failed fingerprint, it is `Pending` with one of the pull failures above, and it is not
+      being deleted. Note its `metadata.resourceVersion`;
+   4. deletes that Pod with that UID **and** resourceVersion as the preconditions, e.g. `kubectl delete
+      --raw /api/v1/namespaces/<ns>/pods/<name> -f -` with the body `{"apiVersion": "v1", "kind":
+      "DeleteOptions", "preconditions": {"uid": "<uid>", "resourceVersion": "<resourceVersion>"}}`. The
+      controller's own deletes use the UID precondition. Another Pod of that name, or the same Pod after
+      any change (for example, the image became pullable and the runner is now running), is refused.
+      Then stop and read again, and do not retry blindly. If any read in steps 2–3 does not match, do not
+      delete;
+   5. checks `rollout status` until `complete`. The controller treats a vanished Pod like any vanished
       runner (terminal receipt `podAbsent`, proof, release), and the rollout then moves the owner back
       to the rolled-back image.
 
@@ -366,8 +377,8 @@ lines, Pod UIDs/images, conversation end states.
    case of a runner that reports idle while the database still holds a `running` conversation: it
    waits until the deadline, then `cutting`, and the drain receipt closes the row.
 4. A broken image (unpullable digest or a runner that exits) as canary: `halted` with the reason;
-   no other owner moved; rollback by values (for an unpullable digest, with the operator step for the
-   canary's `Pending` Pod in section 5, step 6). Also: a non-canary existing owner that re-enters during
+   no other owner moved; rollback by values (for an unpullable digest, with the operator step for each
+   `Pending` Pod of the failed fingerprint in section 5, step 6; here the canary's). Also: a non-canary existing owner that re-enters during
    the canary starts on its old binding; record every owner's binding image before and after the
    halt (no move after it).
 5. Flag-only change (`stream.text` or `research.enable`): Pods are replaced without a binding move;
