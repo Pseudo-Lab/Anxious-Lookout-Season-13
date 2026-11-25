@@ -382,7 +382,11 @@ lines, Pod UIDs/images, conversation end states.
    the canary starts on its old binding; record every owner's binding image before and after the
    halt (no move after it).
 5. Flag-only change (`stream.text` or `research.enable`): Pods are replaced without a binding move;
-   `research_grant_omitted` lines only before the replacement.
+   `research_grant_omitted` lines only before the replacement. On the development VM this is checked with
+   `stream.text`. `research.enable` makes the api require a public HTTPS origin on port 443
+   (`app/research.py`), and the VM has none. So the `research_grant_omitted` part (a turn to a Pod without
+   the flag goes without its grant, the grant is revoked and `runner_flag_absent` is logged) has no VM
+   evidence; the unit and synthetic HTTP/DB tests cover it.
 6. A new owner is prepared and starts on the target image.
 7. api rolling update with active runners and an open chat stream (SSE). Record the user-visible
    effect (PM condition 3): whether the stream dropped, when it reconnected, whether the page fell
