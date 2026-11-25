@@ -481,7 +481,9 @@ class Rollout:
         if kind == 'bad':
             if watching:
                 raise Halt('runner_unavailable')
-            return 'converged'
+            # PM 11-25 (A, dev VM G4): an unconfirmed target Pod that is unhealthy after `complete` is not settled:
+            # the target goes back to `rolling` and the next pass halts it, as when it was first seen starting.
+            return 'unhealthy'
         if kind == 'inconclusive':
             return self.unconfirmed(view, is_canary, canary_window, 'inconclusive')
         self.confirmed.add(uid)

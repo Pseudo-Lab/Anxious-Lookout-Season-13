@@ -380,6 +380,56 @@ def test_complete_and_back_to_rolling():
     assert outcomes(rollout.run())[a] == 'not_movable' and store.target.state == 'rolling'
 
 
+def post_complete_unhealthy_start(first):
+    """A target Pod starts after `complete` and is unhealthy; `first` is what the first pass sees."""
+    a = uuid4()
+    clock, store, cluster, rollout = setup([running(a, NEW)], 'complete')
+    phase = 'Running' if first == 'running' else 'Pending'
+    cluster.pods[a] = pod(store.views[a].pod_uid, NEW, phase=phase, created=clock())
+    cluster.health_of[a] = {'available': False, 'reason': 'policy_refused'}
+    first_outcome = outcomes(rollout.run())[a]
+    after_first = store.target.state
+    cluster.pods[a] = pod(store.views[a].pod_uid, NEW, created=clock())  # Running by the next pass
+    clock.advance(30)
+    lines = rollout.run()
+    return a, first_outcome, after_first, lines, store.target
+
+
+@pytest.mark.parametrize('first, outcome', [('running', 'unhealthy'), ('starting', 'starting')])
+def test_an_unhealthy_start_after_complete_halts_whatever_the_first_pass_saw(first, outcome):
+    """PM 11-25 (A; dev VM G3 target halted by …5802's policy_refused start): (a) first seen Running and unhealthy,
+    (b) first seen starting: both go back to rolling, then halt for runner_unavailable with that owner."""
+    a, first_outcome, after_first, lines, target = post_complete_unhealthy_start(first)
+    assert first_outcome == outcome and after_first == 'rolling'
+    assert (a, 'rollout_halted', 'runner_unavailable') in lines
+    assert (target.state, target.reason, target.reason_owner) == ('halted', 'runner_unavailable', a)
+
+
+def test_both_post_complete_paths_end_the_same():
+    ends = []
+    for first in ('running', 'starting'):
+        a, _, _, lines, target = post_complete_unhealthy_start(first)
+        ends.append((target.state, target.reason, target.reason_owner == a,
+                     [kind for owner, kind, _ in lines if owner == a]))
+    assert ends[0] == ends[1] == ('halted', 'runner_unavailable', True, ['rollout_halted'])
+
+
+@pytest.mark.parametrize('health, state', [({'available': True, 'reason': None}, 'complete'),
+                                           ({'available': False, 'reason': 'auth_revoked'}, 'rolling')])
+def test_a_healthy_or_inconclusive_start_after_complete_never_halts(health, state):
+    """Review 11-25: only `bad` halts. A healthy new target Pod is verified and the target stays complete; an account
+    reason stays inconclusive (watched, not settled) and never halts."""
+    a = uuid4()
+    clock, store, cluster, rollout = setup([running(a, NEW)], 'complete')
+    cluster.pods[a] = pod(store.views[a].pod_uid, NEW, created=clock())
+    cluster.health_of[a] = health
+    for _ in range(3):
+        lines = rollout.run()
+        clock.advance(30)
+        assert not any(kind == 'rollout_halted' for _, kind, _ in lines)
+    assert store.target.state == state and store.target.reason is None
+
+
 def test_runner_failed_owner_is_blocked_not_moved():
     a = uuid4()
     view = replace(stopped(a), phase=Phase.FAILED)

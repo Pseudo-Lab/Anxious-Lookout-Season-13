@@ -54,7 +54,9 @@ are unchanged.
   target fingerprint that once reached `complete` (a rollback) starts in `rolling`.
 - **complete** needs every owner settled: a target Pod still starting, with unreadable health, or
   never read healthy by this controller keeps the target `rolling` and watched (a pull failure still
-  halts after 120 s).
+  halts after 120 s). This also holds **after** `complete`: a target Pod that starts later and is not
+  yet read healthy turns the target back to `rolling`. An unhealthy one (`/health` bad) then halts it
+  (`runner_unavailable`), whether the first pass saw it starting or already running (PM 11-25).
 - **Automatic halt** (reason in `rollout status`): any Pod already on the target fingerprint, in
   `canary` or `rolling`, with
   - `runner_terminated`: the runner container ended or the Pod `Failed`;
@@ -206,24 +208,31 @@ the same way. As a canary such an owner halts the rollout (`runner_unavailable`)
    at `canary`.
 
    `rollout resume` continues a halted target the operator judged sound.
-7. **After `complete` (operator check, PM 11-25):** for a set period, for example the first working
-   day, watch the owners that start for the first time on the new target:
+7. **After `complete` (operator check, PM 11-25; a second look beside the automatic halt below):**
+   for a set period, for example the first working day, watch the owners that start for the first
+   time on the new target:
    - their runner `/health`: available, with no reason such as `policy_refused`;
-   - the controller log.
+   - `rollout status` (a `halted` target);
+   - the controller log (`rollout_halted`).
 
    If one is unhealthy because of the image or a flag, apply the rollback values (step 6, every
    value the change touched). A previous fingerprint that completed rolls back without a canary.
 
-### Limits of rolling replacement (no automatic cover)
+### Limits of rolling replacement, and the halt after `complete`
 
 - **A stopped owner that moved is not checked on the new image until its next start.** The canary
   checks the `/health` of one owner's Pod on the target fingerprint. That need not be a new start:
   on the development VM (G3) an already running Pod of the same fingerprint passed it. Stopped owners
   move at once once `rolling` starts, and nothing starts them.
-- **No automatic halt after `complete`.** The controller watches target Pods (terminated runner,
-  image pull, unavailable `/health`) only while the target is `canary` or `rolling`. An owner that
-  starts after `complete` and is unhealthy halts nothing. Step 7 is the manual cover; extending the
-  watch is out of #101's scope.
+- **After `complete`, a new unhealthy start halts the target (PM 11-25).** An owner that starts on the
+  target fingerprint after `complete` is watched until its first healthy read. If its `/health` is
+  bad, the target goes back to `rolling` and then `halted` (`runner_unavailable`, that owner named),
+  also when the cause is not the image. On the development VM, an owner whose `operator-account` was
+  a placeholder halted the completed G3 target this way.
+  - Halted means no further moves or replacements for that target; running turns are not affected.
+    A new target (the next image or a rollback) supersedes it as usual.
+  - Find the cause, then `rollout resume` (a cause outside the image, now fixed) or roll back (step 6).
+  - Healthy starts and inconclusive account reasons do not halt.
 
 ## 6. Changing the runner image with rolling replacement off
 
