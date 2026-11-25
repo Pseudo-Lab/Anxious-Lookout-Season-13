@@ -154,6 +154,20 @@ the same way. As a canary such an owner halts the rollout (`runner_unavailable`)
    target and `controller-inputs.json` `image`.
 3. Apply the runner-controller Deployment and install the host inputs by the existing procedure.
    The controller restarts (Recreate, seconds) and records the new target (`canary`).
+
+   **If a `stream` or `research` value changed, apply the api Deployment from the same render too.**
+   The renderer writes those flags on the api as well (`stream_env(v, 'api')`, `research_env(v, 'api')`
+   in `ops/runner_rollout.py`):
+   - the api renders and verifies runner Pods with them;
+   - `RESEARCH_AGENT_API_ENABLE` switches the api's own research grants;
+   - `RESEARCH_STREAM_ENABLE` switches its `/events`.
+
+   Apply the api first (RollingUpdate), then the controller (section 8's order). *Read-only:* both
+   Deployments' rendered keys equal the render (`kubectl get deploy … -o json`: `RESEARCH_*`,
+   `CODEX_RUNNER_*`, `STREAM_TRACE`, `RUNNER_TARGET_IMAGE`).
+
+   `stream.enable` alone is api-only: it changes `RESEARCH_STREAM_ENABLE` on the api and nothing in
+   the runner fingerprint. So it creates no new target and replaces no Pod. Apply the api only.
 4. Watch `rollout status` and the controller log through the canary window. Canary checklist:
    - the canary Pod's image is the new digest and its `/health` is available;
    - API log lines `conversation_refresh_write` (#90 polling fallback) and `research_grant_omitted`
@@ -179,7 +193,13 @@ the same way. As a canary such an owner halts the rollout (`runner_unavailable`)
    To roll back, return to the previous **fingerprint**, the runner image together with the rollout
    flags. Put back every value the change touched: `runnerImage`, and the `stream` / `research`
    flags if they changed too. A flag-only change is rolled back by its flags alone. Then apply as in
-   step 3.
+   step 3:
+   - **the api Deployment too** whenever a `stream` or `research` value is put back (api first,
+     then the controller);
+   - check both Deployments' values against the render.
+
+   For example, a rollback that turns `research` off but applies only the controller leaves the api
+   issuing research grants.
 
    If that fingerprint has a target with `completed_at` in its history, the new target starts at
    `rolling` without a canary (`SqlStore.install`, `ops/runner_replacement.py`). Otherwise it starts
