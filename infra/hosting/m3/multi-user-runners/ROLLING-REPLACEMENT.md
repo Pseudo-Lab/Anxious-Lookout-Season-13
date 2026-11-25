@@ -73,6 +73,14 @@ are unchanged.
     `provider_rate_limited`, and `unavailable` of a runner that is stopping, are inconclusive, not a halt),
     including a native that never started;
   - `ensure_failed`: three failed creations in a row for an owner bound to the target image.
+
+  **A normally stopped Pod is not a halt reason (PM 11-25 decision B).** An idle stop, a logout or any
+  other normal stop drains the runner (a drain receipt for that Pod) and only then deletes the Pod. While
+  that Pod terminates, and after it is gone until the release, the owner shows `rollout … stopping` and is
+  neither watched nor counted pending. So such a stop never halts the target, and it does not send a
+  completed target back to `rolling` (its `completed_at` stays). A runner that crashed is still a halt
+  (`runner_terminated`) while the target is watched, also when the controller has already recorded the
+  crash and deleted the Pod: a crash leaves a terminal receipt, not a drain receipt.
 - **Halted:** no new stop and no new move. Stops already recorded still finish; such owners
   restart on their unchanged binding and are recorded `failed:halted`.
 

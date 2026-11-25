@@ -39,7 +39,9 @@ RESTART_KEYS = UUID('5f0d7a52-6a3e-4a55-9a0b-101000000001')  # uuid5 namespace f
 # Outcomes that leave an owner with nothing to do for this target. A starting target Pod, one whose health
 # could not be read, or one never confirmed healthy (an account reason) is not settled: it is still watched
 # (review blocker 4; PM 11-25 allowance B: when unsure, hold; completion may wait).
-SETTLED = {'converged', 'verified', 'moved', 'blocked', 'failed', 'canary_passed'}
+# `stopping` (PM 11-25 decision B): a target Pod that its own normal stop drained, or that is gone after it; the
+# stop path finishes it, and a fresh Pod is watched again.
+SETTLED = {'converged', 'verified', 'moved', 'blocked', 'failed', 'canary_passed', 'stopping'}
 EXTERNAL = 'external_stop'  # A followed stop someone else opened: it holds no replacement slot.
 
 
@@ -118,6 +120,9 @@ class View:
     stop_receipt: bool = False
     row: Row | None = None
     proved: bool = True                 # a completed stop proof exists for the current generation
+    # The Pod UID of the open stop when its receipt is a normal drain (version 1) of that same Pod; None otherwise
+    # (no receipt yet, a terminal/unavailable/operator receipt, or another Pod).
+    drained_pod: UUID | None = None
 
 
 def health_class(health):
@@ -338,6 +343,8 @@ class Rollout:
         if row is not None and row.phase in {'cutting', 'draining'} and (
                 view.phase == Phase.STOPPING or (view.stop_id is not None and view.stop_id == row.stop_id)):
             return self.after_stop(view, obj, canary, is_canary)  # Our open stop first, whatever the Pod runs.
+        if self.normally_stopped(view, obj, live):
+            return 'stopping'
         if live == T:
             return self.observe(view, obj, is_canary)
         if row is not None and row.phase in {'cutting', 'draining'}:
@@ -349,6 +356,21 @@ class Rollout:
         if obj is None:
             return self.without_pod(view, canary, is_canary)
         return self.replace(view, obj, canary, is_canary)
+
+    def normally_stopped(self, view, obj, live):
+        """PM 11-25 decision B: an idle stop, logout or any other normal stop drains the runner (receipt version 1)
+        and only then deletes its Pod, so the runner's exit and the Pod's disappearance are that stop's own
+        effects, not a failure: such a target Pod is neither watched nor a halt reason. The evidence is the open
+        stop of the current generation holding a drain receipt for this very Pod UID. A crash keeps its terminal
+        receipt (version 2), so a dead Pod is still watched and halts, also once it is being deleted (review). Only
+        a target Pod counts: one with the target fingerprint, or, once gone, an owner already bound to the target
+        image (as without_pod() would count it after the release). Stops the rollout opened itself went to
+        after_stop() before this."""
+        if view.pod_uid is None or view.drained_pod != view.pod_uid:
+            return False
+        if obj is not None:
+            return live == self.settings.fingerprint
+        return view.image == self.settings.fingerprint['image']
 
     def without_pod(self, view, canary, is_canary):
         T = self.settings.fingerprint
@@ -609,6 +631,8 @@ class SqlStore:
             with self.engine.begin() as db:
                 rows = db.execute(text('''SELECT r.owner_id, r.state_id, r.phase, r.pod_uid, b.plan->>'image' AS image,
                         s.stop_id, s.receipt IS NOT NULL AS receipt,
+                        CASE WHEN s.receipt->>'version'='1' AND s.receipt->>'podUid'=s.pod_uid::text
+                             THEN s.pod_uid END AS drained_pod,
                         EXISTS (SELECT 1 FROM runner_termination.stops p WHERE p.owner_id=r.owner_id
                             AND p.state_id=r.state_id AND p.generation=r.generation AND p.completed_at IS NOT NULL
                             AND jsonb_typeof(p.proof)='object' AND p.proof<>'{}'::jsonb) AS proved,
@@ -624,7 +648,7 @@ class SqlStore:
                            row['stop_id'], bool(row['receipt']),
                            None if row['row_phase'] is None else Row(row['row_phase'], row['since'], row['canary'],
                                                                      row['row_stop'], row['reason']),
-                           bool(row['proved']))
+                           bool(row['proved']), row['drained_pod'])
                       for row in rows]
             if len(rows) < self.PAGE:
                 return views

@@ -1131,3 +1131,112 @@ def test_rr6_a_stepped_aside_canary_never_becomes_the_canary_again_by_observatio
         assert outcomes(lines)[a] == 'verified' and not store.rows[a].canary
         assert store.canary_owner(store.target.target_id) == b
         assert [o for o, r in store.rows.items() if r.canary and r.phase not in {'blocked', 'failed'}] == [b]
+
+
+# PM 11-25 decision B (idle-stop false halt) ------------------------------------------------------------------
+def confirmed_target_pod(state):
+    """Owner a stopped on the target, owner b running a target Pod this controller already read healthy."""
+    a, b = sorted(uuid4() for _ in range(2))
+    clock, store, cluster, rollout = setup([stopped(a, NEW), running(b, NEW)], 'rolling')
+    cluster.pods[b] = pod(store.views[b].pod_uid, NEW, created=clock() - timedelta(hours=1))
+    assert outcomes(rollout.run()) == {a: 'converged', b: 'verified'} and store.target.state == 'complete'
+    if state == 'rolling':
+        store.target = store.set_state(store.target, 'rolling')
+    return a, b, clock, store, cluster, rollout
+
+
+def stop_open(store, owner, receipt):
+    """An open stop of the current generation for the owner's Pod: no receipt yet, a normal drain receipt
+    (version 1, this Pod), a terminal receipt (version 2: the controller saw the crash first), or a drain receipt
+    of another Pod UID."""
+    view = store.views[owner]
+    drained = {'drain': view.pod_uid, 'other': uuid4()}.get(receipt)
+    store.views[owner] = replace(view, phase=Phase.STOPPING, stop_id=uuid4(), stop_receipt=receipt is not None,
+                                 drained_pod=drained)
+
+
+def deleting(obj, phase='Running'):
+    """The Pod after the stop's DELETE: deletionTimestamp set, its runner container terminated."""
+    obj = dict(obj, metadata=dict(obj['metadata'], deletionTimestamp='2026-11-25T09:00:00Z'), dead=True)
+    obj['status'] = dict(obj['status'], phase=phase)
+    return obj
+
+
+@pytest.mark.parametrize('state, phase', [('rolling', 'Running'), ('rolling', 'Failed'), ('complete', 'Running'),
+                                          ('complete', 'Failed')])
+def test_a_normally_stopped_target_pod_is_neither_watched_nor_a_halt(state, phase):
+    """PM 11-25 B: an idle stop drained the runner (receipt version 1 for this Pod) and deleted the Pod; passes that
+    see it terminating (runner terminated, phase Running or Failed) count it `stopping`: no halt while rolling, and
+    after complete the target stays complete (no rolling flap) however many passes see it."""
+    a, b, clock, store, cluster, rollout = confirmed_target_pod(state)
+    target = store.target
+    stop_open(store, b, 'drain')
+    cluster.pods[b] = deleting(cluster.pods[b], phase)
+    for _ in range(3):
+        lines = rollout.run()
+        assert outcomes(lines)[b] == 'stopping'
+        assert not any(kind == 'rollout_halted' for _, kind, _ in lines)
+        clock.advance(10)
+    assert store.target.reason is None
+    if state == 'complete':
+        assert store.target is target  # never left complete, so completed_at is not rewritten
+
+
+def test_a_normally_stopped_target_pod_gone_before_its_release_keeps_complete():
+    """VM 07:38 (part I): the Pod is gone, the registry still names it until the release. With the drain receipt
+    it is `stopping`, so the target stays complete (no pod_missing -> rolling -> complete flap), and after the
+    release the owner is `converged`."""
+    a, b, clock, store, cluster, rollout = confirmed_target_pod('complete')
+    target = store.target
+    stop_open(store, b, 'drain')
+    cluster.pods.pop(b)
+    assert outcomes(rollout.run())[b] == 'stopping' and store.target is target
+    release(store, cluster, b)
+    assert outcomes(rollout.run())[b] == 'converged' and store.target is target
+
+
+@pytest.mark.parametrize('receipt', [None, 'terminal', 'other'])
+def test_a_crash_is_still_a_halt_while_watching_even_once_deleted(receipt):
+    """Review 11-25 (control): the controller can see the crash first, open the stop, record the terminal receipt
+    and DELETE in one step, so the rollout pass sees the dead Pod already being deleted. Without a normal drain
+    receipt for this Pod (none yet, a terminal one, or one for another Pod UID) the watching target halts."""
+    a, b, clock, store, cluster, rollout = confirmed_target_pod('rolling')
+    stop_open(store, b, receipt)
+    cluster.pods[b] = deleting(cluster.pods[b])
+    lines = rollout.run()
+    assert (b, 'rollout_halted', 'runner_terminated') in lines
+    assert store.target.state == 'halted' and store.target.reason == 'runner_terminated'
+
+
+def test_a_crash_before_deletion_still_halts_while_watching():
+    a, b, clock, store, cluster, rollout = confirmed_target_pod('rolling')
+    stop_open(store, b, 'terminal')
+    cluster.pods[b] = dict(cluster.pods[b], dead=True)
+    assert (b, 'rollout_halted', 'runner_terminated') in rollout.run()
+
+
+def test_a_normal_stop_of_a_pod_off_the_target_is_not_counted_stopping():
+    """Review 11-25: only a target Pod counts. An owner still on the old fingerprint whose drained Pod is
+    terminating goes to replace() (its stop followed as an external stop), and once gone it stays pending until
+    it moves; the target never completes early."""
+    a, b = sorted(uuid4() for _ in range(2))
+    clock, store, cluster, rollout = setup([stopped(a, NEW), running(b)], 'rolling')
+    stop_open(store, b, 'drain')
+    cluster.pods[b] = deleting(pod(store.views[b].pod_uid, OLD))
+    lines = rollout.run()
+    assert outcomes(lines)[b] == 'draining' and store.rows[b].reason == 'external_stop'
+    assert store.target.state == 'rolling'
+    cluster.pods.pop(b)
+    assert outcomes(rollout.run())[b] != 'stopping' and store.target.state == 'rolling'
+
+
+def test_a_stop_the_rollout_opened_is_followed_by_after_stop_not_counted_stopping():
+    """Review 11-25: a stop the rollout opened itself (its `draining` row) is never `stopping`: after_stop() keeps
+    following it, so the replacement is not counted done early."""
+    a, b = sorted(uuid4() for _ in range(2))
+    clock, store, cluster, rollout = setup([stopped(a, NEW), running(b, NEW)], 'rolling')
+    stop_open(store, b, 'drain')
+    store.rows[b] = Row('draining', clock(), False, store.views[b].stop_id, None)
+    store.views[b] = replace(store.views[b], row=store.rows[b])
+    cluster.pods[b] = deleting(cluster.pods[b])
+    assert outcomes(rollout.run())[b] == 'draining'
