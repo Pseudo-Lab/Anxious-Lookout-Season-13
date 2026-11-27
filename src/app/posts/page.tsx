@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import PublicPostFeed from "@/components/posts/PublicPostFeed";
+import PostBrowser from "@/components/posts/PostBrowser";
 
 export const metadata: Metadata = {
   title: "전체 글",
@@ -16,7 +16,7 @@ export default function AllPostsPage() {
           모든 태그 보기 →
         </Link>
       </div>
-      <PublicPostFeed showTotal />
+      <PostBrowser />
     </>
   );
 }

@@ -642,7 +642,7 @@ async function dropFirstSend(p) {
   // 발행: 미리보기의 문서 제목 공개 안내 → 발행 → 익명 조회(문서 본문 비공개)
   const pub = main.getByRole("region", { name: "발행" });
   await pub.getByRole("button", { name: "발행 미리보기" }).click();
-  check("IP3. preview warns linked document title becomes public", await appears(pub.getByText("함께 공개되는 문서 제목 (1)")));
+  check("IP3. preview lists based-on documents (#119 F4)", await appears(pub.getByText("바탕이 된 참고 문서 (1)")));
   check("IP3. W3: preview lists public material title + URL", await appears(pub.getByText("글 바탕 자료 — https://example.com/offline-source")));
   await pub.getByRole("button", { name: "이 버전 발행" }).click();
   check("IP3. published", await appears(pub.getByText("발행했습니다", { exact: false })));

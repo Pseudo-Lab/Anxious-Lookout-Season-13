@@ -745,8 +745,8 @@ check("WP6. not published yet", await appears(pub.getByText("발행하지 않은
 const v1Id = p1.latestVersion.id;
 await pub.getByLabel("발행할 버전").selectOption(v1Id);
 await pub.getByRole("button", { name: "발행 미리보기" }).click();
-check("WP6. preview warns linked document title becomes public", await appears(pub.getByText("함께 공개되는 문서 제목 (1)")));
-check("WP6. preview marks private document as title only", await appears(pub.getByText(/바탕 문서 A — 제목만 표시/)));
+check("WP6. preview lists based-on documents (#119 F4)", await appears(pub.getByText("바탕이 된 참고 문서 (1)")));
+check("WP6. preview marks private document hidden from readers", await appears(pub.getByText(/바탕 문서 A — 독자에게 숨김/)));
 check("WP6. W3: preview lists 2 public materials (title + URL only)", await appears(pub.getByText("함께 공개되는 자료 (2)")));
 check("WP6. page preview renders the article", await appears(pub.locator("article h1", { hasText: "첫 글" })));
 await pub.getByRole("button", { name: "이 버전 발행" }).click();
@@ -776,6 +776,26 @@ check("WP6. status shows published v1 not latest", await appears(pub.getByText("
   );
   // #119 F4: 공개되지 않은 바탕 문서는 독자에게 보이지 않는다(제목도)
   check("WP6. public page hides private based-on document (#119 F4)", !text.includes("바탕 문서 A") && !text.includes("문서 A 본문 비밀 문장") && (await anon.getByRole("link", { name: "바탕 문서 A" }).count()) === 0);
+  // #119 F4: 바탕 문서를 나중에 공개하면 공개 글에 링크로 나타나고, 공개를 철회하면 다시 숨는다(공개 응답도 같다).
+  {
+    const pubDocsOf = async () => (await (await anon.request.get(U(`/api/public/posts/${slug1}`))).json()).documents.map((d) => d.title);
+    check("WP6f. private: public API omits document", JSON.stringify(await pubDocsOf()) === "[]");
+    const pvA = await api.get(`/research/documents/${docA.id}/publication-preview`);
+    const pubA = await api.send("POST", `/research/documents/${docA.id}/publications`, { versionId: pvA.versionId, expectedVersion: pvA.expectedVersion, previewToken: pvA.previewToken });
+    check("WP6f. setup: document published", pubA.status === 201, String(pubA.status));
+    await anon.reload();
+    await anon.locator("article h1").first().waitFor();
+    const link = anon.locator("main").getByRole("link", { name: "바탕 문서 A" });
+    check("WP6f. published: reader sees link to path-style public document", (await appears(link)) && (await link.getAttribute("href")) === `${BASE}/public/document/${docA.id}/`);
+    check("WP6f. published: public API lists document", JSON.stringify(await pubDocsOf()) === JSON.stringify(["바탕 문서 A"]));
+    const docNow = await api.get(`/research/documents/${docA.id}`);
+    const revoke = await api.send("DELETE", `/research/documents/${docA.id}/publication`, { expectedVersion: docNow.version });
+    check("WP6f. setup: document withdrawn", revoke.status === 200, String(revoke.status));
+    await anon.reload();
+    await anon.locator("article h1").first().waitFor();
+    check("WP6f. withdrawn: reader no longer sees document", !(await anon.locator("main").innerText()).includes("바탕 문서 A"));
+    check("WP6f. withdrawn: public API omits document", JSON.stringify(await pubDocsOf()) === "[]");
+  }
   await anon.locator("article .prose img").first().waitFor().catch(() => {});
   const pubImgs = await anon.locator("article img").evaluateAll((els) => els.map((e) => [e.getAttribute("src"), e.naturalWidth]));
   check("WP6. public page: one own body image (no cover, #44), loads anonymously", pubImgs.length === 1 && pubImgs.every(([src, w]) => src === `${BASE}/api/media/post-images/${IMG}` && w > 0), JSON.stringify(pubImgs));

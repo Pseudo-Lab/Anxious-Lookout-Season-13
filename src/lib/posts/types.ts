@@ -91,6 +91,8 @@ export interface PostPublicationRef {
   publishedAt: string;
   updatedAt?: string;
   slug: string;
+  // #119 F4(issue119 §F4 작성자용): 발행본의 바탕 문서 전부(비공개 포함). 이전 API에는 없다.
+  documents?: { id: string; title: string; public: boolean; publicUrl: string | null }[];
 }
 
 export interface Post {

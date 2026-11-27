@@ -130,7 +130,7 @@ function postView(p, withContent = true) {
     updatedAt: p.updatedAt,
     author: { login: p.authorLogin },
     latestVersion: versionView(p, latest(p), withContent),
-    publication: p.publication && { id: p.publication.id, versionId: p.publication.versionId, publishedAt: p.publication.publishedAt, updatedAt: p.publication.updatedAt ?? p.publication.publishedAt, slug: p.slug },
+    publication: p.publication && { id: p.publication.id, versionId: p.publication.versionId, publishedAt: p.publication.publishedAt, updatedAt: p.publication.updatedAt ?? p.publication.publishedAt, slug: p.slug, documents: authorDocuments(p) },
   };
 }
 function draftView(d, withContent = true) {
@@ -140,6 +140,29 @@ function draftView(d, withContent = true) {
   return out;
 }
 const imageUrl = (id) => `${BASE}/api/media/post-images/${id}`;
+
+// #119 F4(issue119 §F4): 발행본의 바탕 문서는 지금 공개 중인 문서만 독자에게 보낸다(제목·ID 포함 항목 자체를 뺀다).
+// 문서 공개 상태는 연구 모의 API가 가지므로 글 API를 부를 때 넘겨 준 조회기(docs)를 기억해 둔다.
+let docLookup = null;
+const remember = (docs) => {
+  if (docs?.get) docLookup = docs;
+};
+const liveDoc = (owner, id) => (owner && docLookup ? docLookup.get(owner, id) : null);
+const publicUrlOf = (id) => `${BASE}/public/document/?id=${id}`;
+function readerDocuments(p) {
+  return p.publication.documents.flatMap((d) => {
+    const cur = liveDoc(p.owner, d.id);
+    return cur?.published ? [{ id: d.id, title: cur.title, publicUrl: publicUrlOf(d.id) }] : [];
+  });
+}
+function authorDocuments(p) {
+  return p.publication.documents.map((d) => {
+    const cur = liveDoc(p.owner, d.id);
+    const pub = !!cur?.published;
+    return { id: d.id, title: cur?.title ?? d.title, public: pub, publicUrl: pub ? publicUrlOf(d.id) : null };
+  });
+}
+
 function publicView(p, withContent = true) {
   const pub = p.publication;
   const v = p.versions.find((x) => x.id === pub.versionId);
@@ -158,7 +181,7 @@ function publicView(p, withContent = true) {
     publishedAt: pub.publishedAt,
     // #80: 이전 발행본(updatedAt 없음)은 publishedAt으로 채운다(backend public_value와 같다)
     updatedAt: pub.updatedAt ?? pub.publishedAt,
-    documents: pub.documents.map((d) => ({ ...d })),
+    documents: readerDocuments(p),
     materials: (pub.materials ?? []).map((m) => ({ ...m })),
   };
   if (!withContent) delete out.content;
@@ -197,20 +220,53 @@ const published = () =>
     .sort((a, b) => (releasedAt(a) < releasedAt(b) ? 1 : releasedAt(a) > releasedAt(b) ? -1 : 0));
 
 /** GET /public/posts·/public/posts/{slug}·/public/post-tags. 해당 없으면 null. */
-export function handlePublicPosts(path, url) {
+export function handlePublicPosts(path, url, docs) {
+  remember(docs);
   if (path === "/public/posts") {
     const tag = url.searchParams.get("tag");
     const q = url.searchParams.get("q");
+    const author = url.searchParams.get("author");
     let list = published().map((p) => publicView(p, false));
     if (tag !== null) list = list.filter((p) => p.tags.includes(tag));
-    if (q) list = list.filter((p) => p.title.includes(q));
-    return ok(200, page(list, url));
+    // #119 A7(issue119 §A7): 제목 또는 본문 텍스트, 대소문자 무시. author는 login 정확 일치. total은 cursor 무관.
+    if (q) {
+      const needle = q.toLowerCase();
+      list = list.filter((p) => p.title.toLowerCase().includes(needle) || p.textProjection.toLowerCase().includes(needle));
+    }
+    if (author) list = list.filter((p) => p.author.login === author);
+    return ok(200, { ...page(list, url), total: list.length });
   }
   if (path === "/public/post-tags") {
     const counts = new Map();
     for (const p of published()) for (const t of publicView(p, false).tags) counts.set(t, (counts.get(t) ?? 0) + 1);
-    const list = [...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([tag, count]) => ({ tag, count }));
+    const q = url.searchParams.get("q")?.toLowerCase();
+    const list = [...counts]
+      .filter(([tag]) => !q || tag.toLowerCase().includes(q))
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([tag, count]) => ({ tag, count }));
     return ok(200, page(list, url));
+  }
+  if (path === "/public/post-authors") {
+    const counts = new Map();
+    for (const p of published()) if (p.publication.authorLogin) counts.set(p.publication.authorLogin, (counts.get(p.publication.authorLogin) ?? 0) + 1);
+    return ok(200, { items: [...counts].sort(([a], [b]) => (a < b ? -1 : 1)).map(([login, count]) => ({ login, count })) });
+  }
+  // #119 F2(issue119 §F2): 이전·다음(최초 발행 순)과 같은 태그 글(최대 5, 최신순)
+  const rel = /^\/public\/posts\/([^/]+)\/related$/.exec(path);
+  if (rel) {
+    const slug = decodeURIComponent(rel[1]);
+    const all = published();
+    const self = all.find((x) => x.slug === slug);
+    if (!self) return notFound();
+    const ref = (p) => {
+      const v = publicView(p, false);
+      return { slug: v.slug, title: v.title, publishedAt: v.publishedAt, tags: v.tags, author: v.author };
+    };
+    const byFirst = [...all].sort((a, b) => (a.publication.publishedAt < b.publication.publishedAt ? -1 : a.publication.publishedAt > b.publication.publishedAt ? 1 : 0));
+    const i = byFirst.indexOf(self);
+    const tags = new Set(publicView(self, false).tags);
+    const sameTag = all.filter((p) => p !== self && publicView(p, false).tags.some((t) => tags.has(t))).slice(0, 5).map(ref);
+    return ok(200, { previous: i > 0 ? ref(byFirst[i - 1]) : null, next: i < byFirst.length - 1 ? ref(byFirst[i + 1]) : null, sameTag });
   }
   const m = /^\/public\/posts\/([^/]+)$/.exec(path);
   if (m) {
@@ -233,7 +289,7 @@ const byUpdated = (a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.upd
 function previewOf(owner, p, v, docs) {
   const documents = v.documentIds.map((id) => {
     const d = docs.get(owner, id);
-    return { id, title: d?.title ?? "", publicUrl: d?.published ? `${BASE}/public/document/?id=${id}` : null };
+    return { id, title: d?.title ?? "", publicUrl: d?.published ? publicUrlOf(id) : null };
   });
   const imgs = imageIdsOf(v).map((id) => ({ id, url: imageUrl(id) }));
   const mats = v.materialIds.map((id) => docs.material(owner, id));
@@ -252,6 +308,7 @@ function previewOf(owner, p, v, docs) {
 
 /** GET 소유자 경로. 해당 없으면 null. docs: { get(owner,id), list(owner) } */
 export function handlePostRead(owner, path, url, docs) {
+  remember(docs);
   let m;
   if (path === "/research/posts") {
     const q = url.searchParams.get("q") ?? "";
@@ -320,6 +377,7 @@ export function handlePostRead(owner, path, url, docs) {
 
 /** 변경 경로. 해당 없으면 null. user: 현재 계정(login). */
 export function handlePostMutation(owner, method, path, b, user, docs) {
+  remember(docs);
   let m;
   if (method === "POST" && path === "/research/post-drafts") {
     const fields = textFields(b, false);

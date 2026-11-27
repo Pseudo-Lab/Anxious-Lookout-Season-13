@@ -1215,7 +1215,7 @@ export async function handleResearch(req, res, path, url, session) {
   }
   if (path.startsWith("/public/")) {
     if (req.method !== "GET") return send(res, 405, { error: { code: "method_not_allowed", message: "Method not allowed" } });
-    const post = handlePublicPosts(path, url);
+    const post = handlePublicPosts(path, url, postDocs);
     if (post) return send(res, post.status, post.body);
     // 실제 계약: 공개는 문서 보관과 독립적이다(보관해도 철회 전까지 공개 유지).
     const published = [...items.values()].filter((i) => i.type === "document" && i.publication);

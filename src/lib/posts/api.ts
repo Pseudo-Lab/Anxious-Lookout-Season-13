@@ -207,6 +207,15 @@ function parsePost(v: unknown): Post | null {
     if (!isObj(p) || !isId(p.id) || !isId(p.versionId) || !isStr(p.publishedAt) || !optTime(p.updatedAt) || !isStr(p.slug)) return null;
     publication = { id: p.id, versionId: p.versionId, publishedAt: p.publishedAt, slug: p.slug };
     if (isStr(p.updatedAt)) publication.updatedAt = p.updatedAt;
+    if (p.documents !== undefined) {
+      const docs = parseAll(p.documents, (d) =>
+        isObj(d) && isId(d.id) && isStr(d.title) && typeof d.public === "boolean" && (d.publicUrl === null || isStr(d.publicUrl))
+          ? { id: d.id, title: d.title, public: d.public, publicUrl: d.publicUrl }
+          : null
+      );
+      if (!docs) return null;
+      publication.documents = docs;
+    }
   }
   return {
     id: v.id,
@@ -437,19 +446,87 @@ function parseUnpublish(v: unknown): { id: string; version: number } | null {
 
 // ---- 공개 (비로그인 조회) ----
 
-export const listPublicPosts = (cursor?: string | null, opts: { tag?: string; limit?: number } = {}) =>
+export interface PublicPostFilter {
+  tag?: string;
+  // #119 A7(issue119 §A7): 제목·본문 부분 일치, 작성자 login 정확 일치
+  q?: string;
+  author?: string;
+  limit?: number;
+}
+
+export const listPublicPosts = (cursor?: string | null, opts: PublicPostFilter = {}) =>
   fetchJson(
     apiUrl(
       `/public/posts${listQuery(cursor, {
         ...(opts.tag !== undefined ? { tag: opts.tag } : {}),
+        ...(opts.q ? { q: opts.q } : {}),
+        ...(opts.author ? { author: opts.author } : {}),
         ...(opts.limit !== undefined ? { limit: String(opts.limit) } : {}),
       })}`
     ),
     parsePage(parsePublicPost)
   );
 export const getPublicPost = (slug: string) => fetchJson(apiUrl(`/public/posts/${enc(slug)}`), parsePublicPostDetail);
-export const listPostTags = (cursor?: string | null) =>
-  fetchJson(apiUrl(`/public/post-tags${listQuery(cursor, { limit: "100" })}`), parsePage(parseTag));
+/** q(#119 O10, issue119 §A7): 태그 부분 일치(대소문자 무시). 자동 완성용. */
+export const listPostTags = (cursor?: string | null, q?: string) =>
+  fetchJson(apiUrl(`/public/post-tags${listQuery(cursor, { limit: "100", ...(q ? { q } : {}) })}`), parsePage(parseTag));
+
+export interface PostAuthor {
+  login: string;
+  count: number;
+}
+
+function parseAuthors(v: unknown): PostAuthor[] | null {
+  if (!isObj(v) || !Array.isArray(v.items)) return null;
+  const out: PostAuthor[] = [];
+  for (const a of v.items) {
+    if (!isObj(a) || !isStr(a.login) || !isInt(a.count)) return null;
+    out.push({ login: a.login, count: a.count });
+  }
+  return out;
+}
+
+/** #119 A7: 발행 중인 글이 있는 작성자(login 순, 페이지 없음). */
+export const listPostAuthors = () => fetchJson(apiUrl("/public/post-authors"), parseAuthors);
+
+export interface PostRef {
+  slug: string;
+  title: string;
+  publishedAt: string;
+  tags: string[];
+  author: { login: string | null; name: string };
+}
+
+function parsePostRef(v: unknown): PostRef | null {
+  if (!isObj(v) || !isStr(v.slug) || !isStr(v.title) || !isStr(v.publishedAt) || !isStrList(v.tags) || !isObj(v.author)) return null;
+  const login = v.author.login;
+  if (login !== null && login !== undefined && !isStr(login)) return null;
+  return {
+    slug: v.slug,
+    title: v.title,
+    publishedAt: v.publishedAt,
+    tags: v.tags,
+    author: { login: isStr(login) ? login : null, name: isStr(v.author.name) ? v.author.name : "" },
+  };
+}
+
+export interface RelatedPosts {
+  previous: PostRef | null;
+  next: PostRef | null;
+  sameTag: PostRef[];
+}
+
+function parseRelated(v: unknown): RelatedPosts | null {
+  if (!isObj(v)) return null;
+  const previous = v.previous === null ? null : parsePostRef(v.previous);
+  const next = v.next === null ? null : parsePostRef(v.next);
+  const sameTag = parseAll(v.sameTag, parsePostRef);
+  if ((v.previous !== null && !previous) || (v.next !== null && !next) || !sameTag) return null;
+  return { previous, next, sameTag };
+}
+
+/** #119 F2(issue119 §F2): 이전·다음 글(최초 발행 순)과 같은 태그의 글(최대 5). */
+export const getRelatedPosts = (slug: string) => fetchJson(apiUrl(`/public/posts/${enc(slug)}/related`), parseRelated);
 
 // ---- 내 글 ----
 

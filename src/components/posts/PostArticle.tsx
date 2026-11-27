@@ -1,6 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import type { PublicPost } from "@/lib/posts/types";
+import { publicDocumentPath } from "@/lib/routes";
 import BlockRenderer from "@/components/blocks/BlockRenderer";
 import { formatDate, longDate, revisedDate } from "@/lib/posts/format";
 import { safeHref } from "@/components/research/SafeMarkdown";
@@ -26,9 +28,10 @@ function BasedOn({ documents, viewerIsAuthor }: { documents: ArticleData["docume
         {shown.map((d) => (
           <li key={d.id}>
             {d.publicUrl ? (
-              <a href={d.publicUrl} className="text-indigo-600 hover:text-indigo-800">
+              // 서버 publicUrl은 예전 ?id= 형식이라 같은 문서의 경로형 주소로 바로 간다(#119 B2)
+              <Link href={publicDocumentPath(d.id)} className="text-indigo-600 hover:text-indigo-800">
                 {d.title || "(제목 없음)"}
-              </a>
+              </Link>
             ) : (
               <span className="text-stone-900">
                 {d.title || "(제목 없음)"}{" "}
