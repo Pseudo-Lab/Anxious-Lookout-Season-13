@@ -670,7 +670,8 @@ F5: {
   await H.main.getByLabel("본문 이미지 파일").setInputFiles({ name: "왼쪽.png", mimeType: "image/png", buffer: PNG });
   await H.editor.locator("figure[data-type=post-image] img").first().waitFor({ timeout: 10000 }).catch(() => {});
   await H.blocks();
-  if (!(await reach(page, "F5. right column", H.editor.locator(".pb-column").nth(1)))) break F5;
+  // 왼쪽 이미지로 단 높이가 커지면 단 중앙이 화면 밖일 수 있다(서식 더보기 줄로 편집기도 내려갔다). 오른쪽 단의 첫 문단을 누른다.
+  if (!(await reach(page, "F5. right column", H.editor.locator(".pb-column").nth(1).locator("p").first()))) break F5;
   await page.keyboard.type("right");
   // 도구 막대 버튼은 파일 선택 창을 열고, 고른 파일을 본문 커서 위치(오른쪽 단)에 넣는다
   const [chooser] = await Promise.all([page.waitForEvent("filechooser", { timeout: 10000 }), H.tb.getByRole("button", { name: "이미지 올리기" }).click()]);
