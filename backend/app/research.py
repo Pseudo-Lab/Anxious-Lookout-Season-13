@@ -438,13 +438,13 @@ class Store:
         self.db.flush()
         return {"id": str(row.id), "archived": True, "version": row.version}
 
-    def items(self, kind, limit=30, cursor=None, archived=False):
-        query = select(Item).where(Item.owner_id == self.owner, Item.kind == kind, Item.archived == archived)
-        rows = self.db.scalars(page_query(query, Item, limit, cursor)).all()
-        counts = self.relation_counts([row.id for row in rows[:limit]])
+    def items(self, kind, limit=30, cursor=None, archived=False, q=None, sort="updated"):
+        from .research_listing import page
+        rows, following, total = page(self.db, self.owner, kind, limit, cursor, archived, q, sort)
+        counts = self.relation_counts([row.id for row, _ in rows])
         return {"items": [{**self.serialize_item(row, content=False), "relationCount": counts.get(row.id, 0)}
-                          for row in rows[:limit]],
-                "nextCursor": encode_cursor(rows[limit - 1]) if len(rows) > limit else None}
+                          for row, _ in rows],
+                "nextCursor": following, "total": total}
 
     def active_relations(self):
         """Owner's active relations whose endpoints are both active (the visible graph)."""
@@ -721,9 +721,10 @@ def register_research(app, sessions, settings, current_session, error):
         return response(result, code)
 
     def item_routes(kind):
-        def list_items(request: Request, limit: int = 30, cursor: str | None = None, archived: bool = False):
+        def list_items(request: Request, limit: int = 30, cursor: str | None = None, archived: bool = False,
+                       q: str | None = None, sort: str = "updated"):
             with authorized(request) as store:
-                return response(store.items(kind, limit, cursor, archived))
+                return response(store.items(kind, limit, cursor, archived, q, sort))
 
         def detail(identity: uuid.UUID, request: Request):
             with authorized(request) as store:
