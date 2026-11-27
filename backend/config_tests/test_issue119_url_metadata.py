@@ -195,6 +195,46 @@ def test_body_read_stops_at_one_mebibyte():
     assert len(html) == um.MAX_BYTES and html.startswith('<title>t</title>')
 
 
+def test_a_lookup_still_queued_at_the_deadline_never_runs():
+    """review r2: with every resolver thread busy, the expired lookup is cancelled instead of running later."""
+    import threading
+    release, started = threading.Event(), threading.Barrier(um.CONCURRENT + 1)
+    def busy():
+        started.wait(); release.wait(5)
+    blockers = [um.RESOLVER.submit(busy) for _ in range(um.CONCURRENT)]
+    started.wait(2)
+    calls = []
+    def lookup(host, port, type=None):
+        calls.append(host)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (PUBLIC4, port))]
+    try:
+        assert refusal(lambda: um.resolve('queued.example', 443, lookup, timeout=0.05))[0] == 'url_not_allowed'
+    finally:
+        release.set()
+    for blocker in blockers:
+        blocker.result(2)
+    um.RESOLVER.submit(lambda: None).result(2)  # the pool has drained everything still queued
+    assert calls == []
+    assert um.resolve('next.example', 443, lookup, timeout=2) == PUBLIC4 and calls == ['next.example']
+
+
+def test_a_lookup_already_running_at_the_deadline_finishes_and_its_result_is_discarded():
+    """The OS lookup in progress cannot be interrupted; the caller is refused and the late answer is not used."""
+    import threading
+    entered, release = threading.Event(), threading.Event()
+    def slow(host, port, type=None):
+        entered.set(); release.wait(5)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (PUBLIC4, port))]
+    try:
+        assert refusal(lambda: um.resolve('slow.example', 443, slow, timeout=0.05))[0] == 'url_not_allowed'
+        assert entered.is_set()
+    finally:
+        release.set()
+    um.RESOLVER.submit(lambda: None).result(2)
+    fast = lookup_of({'fast.example': [PUBLIC4]})
+    assert um.resolve('fast.example', 443, fast, timeout=2) == PUBLIC4
+
+
 def test_total_deadline_stops_further_hops():
     """A later hop whose name lookup starts after the deadline gets the unified address refusal (PM: same answer)."""
     times = iter([0.0, 1.0, 1.0, 6.0, 6.0, 6.0])

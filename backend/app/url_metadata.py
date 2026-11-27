@@ -102,9 +102,16 @@ def resolve(host, port, lookup=socket.getaddrinfo, timeout=TOTAL_SECONDS):
     getaddrinfo has no timeout of its own, so it runs on a small pool and is waited for at most `timeout`."""
     if timeout <= 0:  # the deadline passed before this hop's lookup: same answer as a lookup that timed out
         refuse_address()
+    future = RESOLVER.submit(lookup, host, port, type=socket.SOCK_STREAM)
     try:
-        infos = RESOLVER.submit(lookup, host, port, type=socket.SOCK_STREAM).result(timeout=timeout)
-    except (socket.gaierror, UnicodeError, OSError, FutureTimeout):
+        infos = future.result(timeout=timeout)
+    except FutureTimeout:
+        # review r2: a lookup still queued behind busy resolver threads is dropped, so an abandoned request never
+        # runs later in front of the next one. One already running in getaddrinfo cannot be interrupted; it ends on
+        # its own and its result is discarded.
+        future.cancel()
+        refuse_address()
+    except (socket.gaierror, UnicodeError, OSError):
         refuse_address()
     addresses = [info[4][0].split("%", 1)[0] for info in infos]
     if not addresses or not all(public_address(address) for address in addresses):
