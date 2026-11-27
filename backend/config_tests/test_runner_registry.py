@@ -279,7 +279,12 @@ def test_capacity_wait_and_current_fences_do_not_extend_activity(admin, owner, t
 
 
 def test_fresh_explicit_migration_keeps_existing_account_and_auth_grants(admin, owner, t0):
-    with admin.begin() as db: db.execute(text('DROP SCHEMA runner_runtime CASCADE'))
+    with admin.begin() as db:
+        # Drop the schemas that reference the registry whole first: a CASCADE from runner_runtime alone
+        # would leave them without their foreign keys, and later suites in the same database would find
+        # them installed but refused by their validators. Their fixtures reinstall them.
+        db.execute(text('DROP SCHEMA IF EXISTS runner_rollout, runner_termination, runner_bindings CASCADE'))
+        db.execute(text('DROP SCHEMA runner_runtime CASCADE'))
     migrate()
     with admin.begin() as db:
         validate(db)

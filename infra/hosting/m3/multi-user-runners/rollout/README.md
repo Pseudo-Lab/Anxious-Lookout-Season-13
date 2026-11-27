@@ -418,6 +418,16 @@ Rendered objects (`resources.json`):
 
 The host controller role loses all Pod verbs except GET.
 
+### Rolling runner replacement (#101)
+
+With values `rollout`, runner-controller replaces runner Pods owner by owner when `runnerImage` or a
+runner flag changes, and new owners start on the target image. Installation (`ops.runner_rollout_migrate`,
+`backend/db/101_runner_rollout_grants.sql` after 061), values `research` (required from #101) and
+`rollout`, turning it on and off, the operator `rollout status|halt|resume` command and the no-freeze
+release order: `../ROLLING-REPLACEMENT.md`. Without `rollout`, image changes still use the freeze
+procedure, and values `runnerImage` must be rendered so that host `controller-inputs.json` matches
+the moved bindings.
+
 ### Blocked runners (#61 R1, R2; user decision 2026-11-01)
 
 A runner Pod can be Running while its runner can do no work. Which path frees it depends on

@@ -179,8 +179,8 @@ def test_observer_capability_can_release_and_reenter_without_auth_mutation(admin
     token = login(admin,owner)
     with admin.begin() as db:
         queue_entry(db,owner,uuid4(),token)
-        if not db.execute(text("SELECT 1 FROM pg_roles WHERE rolname='anxious_runner_observer'")).first():
-            db.connection.driver_connection.execute(Path('/source/db/016_runner_observer_grants.sql').read_text())
+        from config_tests.runner_grants import install_grant_file
+        install_grant_file(db, '016_runner_observer_grants.sql')  # Every time (#101 review).
     with admin.begin() as db:
         db.execute(text('SET LOCAL ROLE anxious_runner_observer'))
         assert release(db,owner,stop['stop_id'],proof,allow_entry=True).phase == Phase.PREPARING

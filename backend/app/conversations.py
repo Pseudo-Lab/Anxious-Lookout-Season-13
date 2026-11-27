@@ -47,6 +47,30 @@ class ToolRequest(Input):
     arguments: dict
 
 
+def record_omitted_grant(sessions, owner, identity, request_id):
+    """#101 D2: the runner Pod had no research flag, so the turn went without its research grant
+    (user_runner_runtime.without_unsupported_grant). A fixed reason in the log (PM condition 2) and the
+    issued credential is revoked. Never fails the accepted turn: the token only ever left in the payload
+    that was not sent."""
+    log = logging.getLogger("uvicorn.error")
+    log.info("research_grant_omitted %s", json.dumps({"reason": "runner_flag_absent"}))
+    try:
+        with sessions.begin() as db:
+            row = db.scalar(select(Conversation).where(Conversation.id == identity, Conversation.owner_id == owner).with_for_update())
+            if row is not None and row.request_id == request_id:
+                credentials.revoke(row)
+    except Exception:
+        log.warning("research_grant_omitted %s", json.dumps({"reason": "revoke_failed"}))
+
+
+def submit_turn(sessions, runner, owner, identity, request_id, payload):
+    """Send one turn; a transport that had to leave out the research grant says so (#101 D2)."""
+    accepted = runner.submit(identity, payload)
+    if isinstance(accepted, dict) and accepted.get("researchGrantOmitted") is True:
+        record_omitted_grant(sessions, owner, identity, request_id)
+    return accepted
+
+
 class Runner:
     """Trusted mapping selected using the service account, never a client URL."""
     def __init__(self, url, token, owner, state_id=None):
@@ -531,7 +555,7 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                     payload["expectedThreadId"] = row.native_record["nativeThreadId"]
             runner = runner_for(owner)
             submitting = True
-            runner.submit(identity, payload)
+            submit_turn(sessions, runner, owner, identity, request_id, payload)
         except Exception as exc:
             with sessions.begin() as db:
                 row = db.scalar(select(Conversation).where(Conversation.id == identity, Conversation.owner_id == owner).with_for_update())

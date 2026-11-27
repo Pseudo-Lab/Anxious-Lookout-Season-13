@@ -12,9 +12,9 @@ from uuid import UUID
 from sqlalchemy import text
 from app.runner_bindings import validate, decode
 from app.runner_registry import Registry
-from app.runner_termination_control import no_pending_work
+from app.runner_image_move import stopped_movable
 from app.runner_termination_schema import validate as validate_termination
-from runner.lifecycle import Fence, Phase, require
+from runner.lifecycle import Fence, require
 
 
 def plan_digest(plan):
@@ -26,20 +26,8 @@ def upgrade(db, fence, expected_plan_digest, new_image, *, apply=False):
     registry = Registry(db)
     registry._eligible(fence.owner)
     state = registry._current(fence.owner)
-    require(Fence.of(state) == fence and state.phase == Phase.STOPPED and state.pod_uid is None
-            and not state.ambiguous and state.active_requests == 0)
-    no_pending_work(db,state)
-    # Old settled ensure receipts are history; no new creator may remain queued.
-    require(not db.execute(text('SELECT 1 FROM runner_runtime.outbox WHERE owner_id=:owner AND NOT settled'),
-                           {'owner':state.owner}).first())
-    require(not db.execute(text('SELECT 1 FROM runner_termination.stops WHERE owner_id=:owner AND completed_at IS NULL'),
-                           {'owner':state.owner}).first())
-    require(not db.execute(text('SELECT 1 FROM runner_termination.entries WHERE owner_id=:owner AND consumed_at IS NULL'),
-                           {'owner':state.owner}).first())
-    proof = db.execute(text('''SELECT proof FROM runner_termination.stops WHERE owner_id=:owner
-        AND state_id=:state AND generation=:generation AND completed_at IS NOT NULL'''),
-        {'owner':state.owner,'state':state.state_id,'generation':state.generation}).scalar_one_or_none()
-    require(type(proof) is dict and bool(proof))
+    require(Fence.of(state) == fence)
+    stopped_movable(db,state)  # #101: the same stopped-owner preconditions as the controller's move.
     row = db.execute(text('SELECT * FROM runner_bindings.bindings WHERE owner_id=:owner FOR UPDATE'),
                      {'owner':state.owner}).mappings().one()
     old = row['plan']

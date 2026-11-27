@@ -1,0 +1,154 @@
+{
+  "owners": {
+    "checks": {
+      "owners_check": "(phase <> ALL (ARRAY['blocked'::text, 'failed'::text])) OR reason IS NOT NULL",
+      "owners_phase_check": "phase = ANY (ARRAY['waiting_turn'::text, 'cutting'::text, 'draining'::text, 'moved'::text, 'restarting'::text, 'verified'::text, 'blocked'::text, 'failed'::text])",
+      "owners_reason_check": "reason IS NULL OR reason ~ '^[a-z0-9_:]{1,63}$'::text"
+    },
+    "columns": {
+      "canary": [
+        "BOOLEAN",
+        false,
+        "false"
+      ],
+      "owner_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "phase": [
+        "TEXT",
+        false,
+        null
+      ],
+      "reason": [
+        "TEXT",
+        true,
+        null
+      ],
+      "since": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "stop_id": [
+        "UUID",
+        true,
+        null
+      ],
+      "target_id": [
+        "UUID",
+        false,
+        null
+      ]
+    },
+    "foreign": [
+      {
+        "constrained_columns": [
+          "owner_id"
+        ],
+        "referred_columns": [
+          "owner_id"
+        ],
+        "referred_schema": "runner_runtime",
+        "referred_table": "registry"
+      },
+      {
+        "constrained_columns": [
+          "target_id"
+        ],
+        "referred_columns": [
+          "target_id"
+        ],
+        "referred_schema": "runner_rollout",
+        "referred_table": "targets"
+      }
+    ],
+    "indexes": {
+      "owners_one_active_canary": {
+        "columns": [
+          "target_id"
+        ],
+        "unique": true,
+        "where": "(canary AND (phase <> ALL (ARRAY['blocked'::text, 'failed'::text])))"
+      }
+    },
+    "primary": [
+      "target_id",
+      "owner_id"
+    ],
+    "unique": {}
+  },
+  "targets": {
+    "checks": {
+      "targets_check": "(state = 'halted'::text) = (reason IS NOT NULL)",
+      "targets_check1": "reason_owner IS NULL OR reason IS NOT NULL",
+      "targets_check2": "state <> 'complete'::text OR completed_at IS NOT NULL",
+      "targets_fingerprint_check": "jsonb_typeof(fingerprint) = 'object'::text",
+      "targets_fingerprint_sha_check": "fingerprint_sha ~ '^[0-9a-f]{64}$'::text",
+      "targets_reason_check": "reason IS NULL OR reason ~ '^[a-z0-9_:]{1,63}$'::text",
+      "targets_state_check": "state = ANY (ARRAY['canary'::text, 'rolling'::text, 'complete'::text, 'halted'::text, 'superseded'::text])"
+    },
+    "columns": {
+      "completed_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        true,
+        null
+      ],
+      "created_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ],
+      "fingerprint": [
+        "JSONB",
+        false,
+        null
+      ],
+      "fingerprint_sha": [
+        "TEXT",
+        false,
+        null
+      ],
+      "reason": [
+        "TEXT",
+        true,
+        null
+      ],
+      "reason_owner": [
+        "UUID",
+        true,
+        null
+      ],
+      "state": [
+        "TEXT",
+        false,
+        null
+      ],
+      "target_id": [
+        "UUID",
+        false,
+        null
+      ],
+      "updated_at": [
+        "TIMESTAMP WITH TIME ZONE",
+        false,
+        "now()"
+      ]
+    },
+    "foreign": [],
+    "indexes": {
+      "targets_one_current": {
+        "columns": [
+          null
+        ],
+        "unique": true,
+        "where": "(state <> 'superseded'::text)"
+      }
+    },
+    "primary": [
+      "target_id"
+    ],
+    "unique": {}
+  }
+}
