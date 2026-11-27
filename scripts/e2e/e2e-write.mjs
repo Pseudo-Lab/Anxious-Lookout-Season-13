@@ -257,7 +257,8 @@ check(
   check("WP3. #109: meta line is version and updated time only", await appears(meta));
   const metaText = (await meta.first().textContent()) ?? "";
   check("WP3. #109: meta line has no address or created time", !metaText.includes("주소") && !metaText.includes("작성"), metaText);
-  check("WP3. #109: unpublished post shows no public address", (await main.getByText(`/posts/${slug1}/`, { exact: false }).count()) === 0 && (await main.getByRole("link", { name: "공개 글 보기" }).count()) === 0);
+  // #119 O7(#109을 대체): 발행 전에는 발행할 때 나갈 주소를 글자로만 보이고 보기 링크는 없다(메타 줄은 그대로)
+  check("O7. unpublished post shows the address it will publish to (text, no link)", (await appears(main.getByText(`발행하면 이 주소로 공개됩니다: /posts/${slug1}/`, { exact: false }))) && (await main.getByRole("link", { name: "공개 글 보기" }).count()) === 0);
 }
 
 // WP3b. 리뷰 F1: 업로드를 기다리는 동안 바꾼 제목·본문·메타를 업로드 완료가 되돌리지 않는다. 그동안 저장·버리기는 잠긴다.

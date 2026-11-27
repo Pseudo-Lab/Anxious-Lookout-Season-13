@@ -1,6 +1,8 @@
 "use client";
 
-import { useId, useState } from "react";
+import { useDeferredValue, useId, useState } from "react";
+import { listPostTags } from "@/lib/posts/api";
+import { useLoad } from "@/lib/research/hooks";
 import { inputClass } from "@/components/research/ItemForms";
 
 export const TAG_MAX = 20;
@@ -11,6 +13,13 @@ export default function TagInput({ tags, onChange, readOnly }: { tags: string[];
   const id = useId();
   const [text, setText] = useState("");
   const [note, setNote] = useState<string | null>(null);
+  // #119 O10(D10): 입력한 글자로 이미 쓰인 태그를 제안한다(대소문자 규칙은 그대로라 같은 태그를 고르면 흩어지지 않는다).
+  const listId = `${id}-suggestions`;
+  const query = useDeferredValue(text.trim().slice(0, 50));
+  const suggest = useLoad(`post-tag-suggest:${query}`, () =>
+    query ? listPostTags(null, query) : Promise.resolve({ ok: true as const, status: 200, data: { items: [], nextCursor: null } })
+  );
+  const suggestions = (suggest.result?.ok ? suggest.result.data.items : []).filter((t) => !tags.includes(t.tag)).slice(0, 10);
 
   function add(raw: string) {
     const parts = raw.split(",").map((t) => t.trim()).filter(Boolean);
@@ -52,10 +61,14 @@ export default function TagInput({ tags, onChange, readOnly }: { tags: string[];
           id={id}
           value={text}
           readOnly={readOnly}
+          list={listId}
+          autoComplete="off"
           onChange={(e) => {
             setNote(null);
             const v = e.target.value;
             if (v.includes(",")) add(v);
+            // 제안 목록에서 고르면 바로 태그로 넣는다(입력 이벤트 종류로 구분: 고르기는 insertReplacementText이거나 종류가 없다)
+            else if (suggestions.some((t) => t.tag === v) && (e.nativeEvent as InputEvent).inputType !== "insertText" && (e.nativeEvent as InputEvent).inputType !== "deleteContentBackward") add(v);
             else setText(v);
           }}
           onKeyDown={(e) => {
@@ -68,8 +81,15 @@ export default function TagInput({ tags, onChange, readOnly }: { tags: string[];
           placeholder={tags.length ? "" : "예: AI, 논문리뷰 (Enter 또는 쉼표로 추가)"}
           className={`${inputClass} min-w-32 flex-1 border-0 px-1 py-0.5 focus:ring-0`}
         />
+        <datalist id={listId}>
+          {suggestions.map((t) => (
+            <option key={t.tag} value={t.tag}>
+              {t.tag} (글 {t.count}편)
+            </option>
+          ))}
+        </datalist>
       </div>
-      <span className="mt-1 block text-xs text-stone-500">{note ?? `최대 ${TAG_MAX}개, 각 ${TAG_LEN}자까지. 태그 페이지는 저장한 글자 그대로(대소문자 포함) 모읍니다.`}</span>
+      <span className="mt-1 block text-xs text-stone-500">{note ?? `최대 ${TAG_MAX}개, 각 ${TAG_LEN}자까지. 이미 쓰인 태그가 제안되면 그것을 고르세요(대소문자가 다르면 다른 태그가 됩니다).`}</span>
     </div>
   );
 }

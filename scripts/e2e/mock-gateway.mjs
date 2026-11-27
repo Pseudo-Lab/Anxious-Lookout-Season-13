@@ -134,6 +134,7 @@ async function api(req, res, path, url) {
 
 // 관리자 API(계약: Administrator membership). 승인된 admin만, 자기/admin 변경·admin 지정 403, 변경 시 대상 session 폐기.
 const adminIdem = new Map();
+const audit = [];
 const accountView = (u) => ({
   accountId: u.accountId,
   githubId: u.githubId,
@@ -149,7 +150,23 @@ async function handleAdmin(req, res, path, url) {
   if (!s) return err(res, 401, "unauthenticated", "Authentication required");
   if (!(s.user.isApproved && s.user.role === "admin")) return err(res, 403, "forbidden", "Admin only");
   if (req.method === "GET" && path === "/admin/accounts") {
-    const list = [...users.values()].map(accountView);
+    // #119 L1·L5(issue119 §L1): approved·role·q(login 부분 일치, 대소문자 무시) 필터와 total
+    const approved = url.searchParams.get("approved");
+    const role = url.searchParams.get("role");
+    const q = url.searchParams.get("q")?.toLowerCase();
+    const list = [...users.values()]
+      .filter((u) => approved === null || String(u.isApproved) === approved)
+      .filter((u) => !role || u.role === role)
+      .filter((u) => !q || u.login.toLowerCase().includes(q))
+      .map(accountView);
+    const limit = Number(url.searchParams.get("limit") ?? 30);
+    const start = Number(url.searchParams.get("cursor") ?? 0);
+    return json(res, 200, { items: list.slice(start, start + limit), nextCursor: start + limit < list.length ? String(start + limit) : null, total: list.length });
+  }
+  // #119 L3(issue119 §L3): 감사 기록(최신순)
+  if (req.method === "GET" && path === "/admin/audit") {
+    const accountId = url.searchParams.get("accountId");
+    const list = audit.filter((e) => !accountId || e.account.accountId === accountId).slice().reverse();
     const limit = Number(url.searchParams.get("limit") ?? 30);
     const start = Number(url.searchParams.get("cursor") ?? 0);
     return json(res, 200, { items: list.slice(start, start + limit), nextCursor: start + limit < list.length ? String(start + limit) : null });
@@ -175,6 +192,15 @@ async function handleAdmin(req, res, path, url) {
   else if (b.expectedVersion !== target.updatedAt) [status, body] = [409, { error: { code: "conflict", message: "Version conflict" } }];
   else if (typeof b.reason !== "string" || !b.reason.trim()) [status, body] = [422, { error: { code: "validation_error", message: "reason required" } }];
   else {
+    audit.push({
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      actor: { kind: "account", accountId: s.user.accountId, login: s.user.login },
+      account: { accountId: target.accountId, login: target.login, githubId: target.githubId },
+      reason: b.reason.trim(),
+      before: { role: target.role, isApproved: target.isApproved },
+      after: { role: b.role, isApproved: !!b.isApproved },
+    });
     target.role = b.role;
     target.isApproved = !!b.isApproved;
     target.updatedAt = new Date(Date.now() + 1).toISOString();

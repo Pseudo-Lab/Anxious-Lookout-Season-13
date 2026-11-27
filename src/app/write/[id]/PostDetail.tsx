@@ -35,7 +35,12 @@ function DeletePost({ post, onDeleted }: { post: Post; onDeleted: () => void }) 
   }
   return (
     <>
-      <button onClick={() => void remove()} disabled={busy} className="text-sm text-stone-500 hover:text-red-700 disabled:opacity-50">
+      {/* #119 O5: 파괴적 동작은 붉은 테두리로 구분하고 '내용 수정'과 떨어뜨린다(오른쪽 끝) */}
+      <button
+        onClick={() => void remove()}
+        disabled={busy}
+        className="rounded-lg border border-red-200 px-3 py-1 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50"
+      >
         삭제
       </button>
       {failure && <ErrorNotice failure={failure} prefix="삭제하지 못했습니다." describe={postErrorMessage} />}
@@ -44,6 +49,23 @@ function DeletePost({ post, onDeleted }: { post: Post; onDeleted: () => void }) 
 }
 
 const LIST_HREF = "/write/";
+
+function PublicAddress({ slug, published }: { slug: string; published: boolean }) {
+  const path = `/posts/${encodeURIComponent(slug)}/`;
+  return published ? (
+    <p className="text-xs text-stone-600">
+      공개 주소:{" "}
+      <Link href={path} className="font-medium text-indigo-600 hover:text-indigo-800">
+        공개 글 보기
+      </Link>{" "}
+      <span className="font-mono">{path}</span>
+    </p>
+  ) : (
+    <p className="text-xs text-stone-600">
+      발행하면 이 주소로 공개됩니다: <span className="font-mono">{path}</span>
+    </p>
+  );
+}
 
 const versionMeta = (v: PostVersion) => (
   <p className="text-xs text-stone-500">
@@ -111,8 +133,10 @@ export default function PostDetail({ id }: { id: string }) {
         <p className="text-xs text-stone-500">
           v{v.number} · 수정 {formatDateTime(p.updatedAt)}
         </p>
+        {/* #119 O7: 공개 주소. 발행 중이면 보기 링크, 아니면 발행할 때 나갈 주소(편집 중에는 숨긴다, #37) */}
+        {!p.archived && !editing && v.slug && <PublicAddress slug={v.slug} published={!!p.publication} />}
         {!p.archived && !editing && (
-          <div className="flex gap-4 pt-1">
+          <div className="flex flex-wrap items-center justify-between gap-4 pt-1">
             <button onClick={() => void openEditor()} disabled={opening} className="text-sm font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50">
               {activeDraft ? "초안 이어서 편집" : "내용 수정"}
             </button>

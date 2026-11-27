@@ -120,10 +120,14 @@ export default function MaterialLinks({
           </button>
         )}
       </div>
-      <p className="text-xs text-stone-500">
-        문서를 연결하면 그 문서가 가리키는 자료가 자동으로 담깁니다. 자료를 직접 추가하거나 뺄 수도 있습니다. 발행하면 자료의 <strong>제목과 원본 주소</strong>만
-        공개되고 자료 본문·메모는 공개되지 않습니다.
-      </p>
+      {/* #119 O6: 안내는 도움말 뒤로 */}
+      <details className="text-xs text-stone-600">
+        <summary className="cursor-pointer select-none">도움말</summary>
+        <p className="mt-1">
+          문서를 연결하면 그 문서가 가리키는 자료가 자동으로 담깁니다. 자료를 직접 추가하거나 뺄 수도 있습니다. 발행하면 자료의 <strong>제목과 원본 주소</strong>만
+          공개되고 자료 본문·메모는 공개되지 않습니다.
+        </p>
+      </details>
       {notice}
       {adding && !readOnly && <Search selected={ids} onAdd={onAdd} />}
       {ids.length > 0 && (

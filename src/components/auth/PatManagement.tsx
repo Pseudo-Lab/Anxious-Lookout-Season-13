@@ -3,7 +3,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { flushSync } from "react-dom";
 import { useAuth } from "@/hooks/useAuth";
-import { issuePat, listPats, revokePat, patStatus, patFailureMessage, type IssuedPat, type PatInput } from "@/lib/auth/pats";
+import { issuePat, listPats, revokePat, patStatus, patFailureMessage, PAT_ACCESS_LABELS, type IssuedPat, type PatAccess, type PatInput } from "@/lib/auth/pats";
 import { isUncertain, uuidV4 } from "@/lib/research/idempotency";
 import { usePagedList } from "@/lib/research/usePagedList";
 import { formatDateTime } from "@/lib/research/format";
@@ -40,6 +40,7 @@ export default function PatManagement() {
   const list = usePagedList(`pats:${tick}`, listPats);
   const [name, setName] = useState("");
   const [expiryDays, setExpiryDays] = useState("30");
+  const [access, setAccess] = useState<PatAccess>("read");
   const [issued, setIssued] = useState<IssuedPat | null>(null);
   // name/expiry/key만 메모리에 둔다. 응답의 token은 요청이나 브라우저 storage에 넣지 않는다.
   const [pending, setPending] = useState<{ key: string; body: PatInput; uncertain: boolean } | null>(null);
@@ -97,7 +98,7 @@ export default function PatManagement() {
     if (!name.trim() || name.trim().length > 80 || !Number.isInteger(days) || days < 1 || days > 90) {
       setFailure("이름은 1–80자, 만료 기간은 1–90일로 입력하세요."); return;
     }
-    void submit({ key: uuidV4(), body: { name: name.trim(), expiryDays: days }, uncertain: false });
+    void submit({ key: uuidV4(), body: { name: name.trim(), expiryDays: days, access }, uncertain: false });
   }
   async function revoke(id: string) {
     if (busyRef.current || !csrfToken) return;
@@ -131,6 +132,21 @@ export default function PatManagement() {
           <input id={`${formId}-expiry`} type="number" min={1} max={90} step={1} value={expiryDays} onChange={(event) => setExpiryDays(event.target.value)} required readOnly={locked} aria-describedby={`${formId}-expiry-hint`} className={`${inputClass} mt-1`} />
           <p id={`${formId}-expiry-hint`} className="mt-1 text-xs text-stone-600">1–90일. 기본 30일이며, 지나면 자동으로 쓸 수 없게 됩니다.</p>
         </div>
+        {/* #119 M2(D7): 권한 범위. 기본은 좁은 쪽(읽기 전용) */}
+        <fieldset className="space-y-1">
+          <legend className="text-sm text-stone-900">권한</legend>
+          {(["read", "write"] as const).map((v) => (
+            <label key={v} className="flex items-start gap-2 text-sm text-stone-900">
+              <input type="radio" name={`${formId}-access`} value={v} checked={access === v} onChange={() => setAccess(v)} disabled={locked} className="mt-1" />
+              <span>
+                {PAT_ACCESS_LABELS[v]}
+                <span className="block text-xs text-stone-600">
+                  {v === "read" ? "내 자료·문서·글을 읽기만 합니다. 저장·수정 요청은 거절됩니다." : "읽기와 함께 자료·문서 저장, 글 초안 저장을 할 수 있습니다."}
+                </span>
+              </span>
+            </label>
+          ))}
+        </fieldset>
         <button type="submit" disabled={locked || !user?.isApproved || !csrfToken} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{busy && pending ? "발급 결과 확인 중..." : "API 토큰 발급"}</button>
       </form>
 
@@ -169,7 +185,7 @@ export default function PatManagement() {
             const state = patStatus(pat, now);
             return (
               <li key={pat.id} className="space-y-2 rounded-xl p-4 text-sm ring-1 ring-stone-200">
-                <div className="flex flex-wrap items-baseline justify-between gap-2"><span className="break-all font-medium text-stone-900">{pat.name}</span><span className="text-xs text-stone-500">{state === "revoked" ? "폐기됨" : state === "expired" ? "만료됨" : "활성"}</span></div>
+                <div className="flex flex-wrap items-baseline justify-between gap-2"><span className="break-all font-medium text-stone-900">{pat.name}</span><span className="flex items-center gap-2 text-xs text-stone-500"><span className={`rounded-full px-2 py-0.5 font-medium ${pat.access === "read" ? "bg-stone-100 text-stone-700" : "bg-indigo-50 text-indigo-700"}`}>{PAT_ACCESS_LABELS[pat.access]}</span>{state === "revoked" ? "폐기됨" : state === "expired" ? "만료됨" : "활성"}</span></div>
                 <p className="text-xs text-stone-500">발급 {formatDateTime(pat.issuedAt)} · 만료 {formatDateTime(pat.expiresAt)}</p>
                 <p className="text-xs text-stone-500">마지막 사용: {pat.lastUsedAt ? formatDateTime(pat.lastUsedAt) : "아직 사용하지 않음"}</p>
                 {pat.revokedAt && <p className="text-xs text-stone-500">폐기 {formatDateTime(pat.revokedAt)}</p>}

@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { EditorContent, useEditor, useEditorState, type Editor, type JSONContent } from "@tiptap/react";
 import { uploadPostImage } from "@/lib/posts/api";
 import { postErrorMessage } from "@/lib/posts/errors";
 import { useMutation } from "@/lib/research/hooks";
 import { uuidV4 } from "@/lib/research/idempotency";
 import { TextSelection } from "@tiptap/pm/state";
-import { CODE_LANGUAGES, FONT_SIZES, type Align } from "@/lib/blocks/types";
+import { CODE_LANGUAGES, type Align } from "@/lib/blocks/types";
 import { textColorStyle } from "@/lib/blocks/userColor";
 import { blockExtensions, isAllowedLink, youtubeIdFrom } from "./schema";
 import { EmbedWithView, PostImageWithView } from "./nodeViews";
@@ -26,7 +26,16 @@ const REJECT_TEXT: Record<string, string> = {
   size: "표는 100행×20열까지 만들 수 있습니다.",
 };
 
-const COLORS = ["#1C1917", "#DC2626", "#EA580C", "#CA8A04", "#16A34A", "#2563EB", "#7C3AED", "#DB2777"];
+// #119 O4: 어두운 배경에서 보이지 않는 색(거의 검정 #1C1917)은 고를 수 없다(이미 쓴 글자는 그대로 그린다). 버튼 이름은 색 이름이다.
+const COLORS: { hex: string; name: string }[] = [
+  { hex: "#DC2626", name: "빨강" },
+  { hex: "#EA580C", name: "주황" },
+  { hex: "#CA8A04", name: "노랑" },
+  { hex: "#16A34A", name: "초록" },
+  { hex: "#2563EB", name: "파랑" },
+  { hex: "#7C3AED", name: "보라" },
+  { hex: "#DB2777", name: "분홍" },
+];
 const CELL_BACKGROUNDS = ["#FEF3C7", "#DCFCE7", "#DBEAFE", "#F3E8FF", "#F5F5F4"];
 const COLUMN_PRESETS: { label: string; widths: number[] }[] = [
   { label: "1:1", widths: [1, 1] },
@@ -58,10 +67,12 @@ function Btn({ label, onClick, active, disabled, children }: { label: string; on
 const Sep = () => <span aria-hidden className="mx-1 h-5 w-px bg-stone-200" />;
 
 /**
- * 글자 서식(굵게·기울임·밑줄·취소선·코드·링크·글자 색·글자 크기). 고정 툴바와 선택 툴바(F1)가 같은 버튼을 쓴다.
+ * 글자 서식(굵게·기울임·밑줄·취소선·코드·링크·글자 색). 고정 툴바와 선택 툴바(F1)가 같은 버튼을 쓴다.
  * 코드 블록 안에서는 서식을 쓸 수 없고, 이미지·영상 설명에는 링크를 걸 수 없다(계약).
+ * #119 O3: 글자 크기(pt) 선택은 없앴다(제목 2·3·4를 쓴다). 이미 크기가 있는 글은 그대로 그린다(D5).
+ * part: 고정 툴바는 자주 쓰는 것(primary: 굵게·기울임·링크)과 더보기(more)로 나눠 그린다. 선택 툴바는 전부(all).
  */
-function FormatButtons({ editor, compact }: { editor: Editor; compact?: boolean }) {
+function FormatButtons({ editor, compact, part = "all" }: { editor: Editor; compact?: boolean; part?: "all" | "primary" | "more" }) {
   const s = useEditorState({
     editor,
     selector: ({ editor: e }) => ({
@@ -73,11 +84,9 @@ function FormatButtons({ editor, compact }: { editor: Editor; compact?: boolean 
       link: e.isActive("link"),
       inCode: e.isActive("codeBlock"),
       inCaption: e.isActive("postImage") || e.isActive("embed"),
-      fontSize: (e.getAttributes("textStyle").fontSize as number | null | undefined) ?? null,
     }),
   });
   const c = () => editor.chain().focus();
-  const sizeByPointer = useRef(false);
   function setLink() {
     if (s.link) {
       c().unsetLink().run();
@@ -92,48 +101,25 @@ function FormatButtons({ editor, compact }: { editor: Editor; compact?: boolean 
     c().setLink({ href: url.trim() }).run();
   }
   const off = s.inCode;
-  return (
+  const primary = (
     <>
       <Btn label="굵게" active={s.bold} disabled={off} onClick={() => c().toggleBold().run()}><b>B</b></Btn>
       <Btn label="기울임" active={s.italic} disabled={off} onClick={() => c().toggleItalic().run()}><i>I</i></Btn>
+      <Btn label={s.link ? "링크 해제" : "링크"} active={s.link} disabled={off || s.inCaption} onClick={setLink}>🔗</Btn>
+    </>
+  );
+  const more = (
+    <>
       <Btn label="밑줄" active={s.underline} disabled={off} onClick={() => c().toggleUnderline().run()}><u>U</u></Btn>
       <Btn label="취소선" active={s.strike} disabled={off} onClick={() => c().toggleStrike().run()}><s>S</s></Btn>
       <Btn label="인라인 코드" active={s.code} disabled={off} onClick={() => c().toggleCode().run()}><code>{"<>"}</code></Btn>
-      <Btn label={s.link ? "링크 해제" : "링크"} active={s.link} disabled={off || s.inCaption} onClick={setLink}>🔗</Btn>
-      <select
-        aria-label="글자 크기"
-        value={s.fontSize ?? ""}
-        disabled={off}
-        // 목록에 포커스가 가도 편집기 선택은 state에 남아 크기는 그 선택에 바로 적용된다.
-        // 키보드로 고르는 동안(WebKit은 방향키마다 change)은 포커스를 목록에 두고, Enter·Escape로 끝낼 때 편집기로 돌아간다(리뷰 full round6).
-        // 마우스로 목록을 열어 고른 경우만 고르자마자 편집기로 돌아간다.
-        onPointerDown={() => (sizeByPointer.current = true)}
-        onKeyDown={() => (sizeByPointer.current = false)}
-        // 확정·취소 키를 뗄 때 편집기로 돌아간다(누를 때 막으면 열린 목록의 선택 확정까지 막힐 수 있다)
-        onKeyUp={(e) => {
-          if (e.key === "Enter" || e.key === "Escape") editor.commands.focus();
-        }}
-        onChange={(e) => {
-          const chain = sizeByPointer.current ? c() : editor.chain();
-          sizeByPointer.current = false;
-          if (e.target.value) chain.setTextSize(Number(e.target.value)).run();
-          else chain.unsetTextSize().run();
-        }}
-        className="rounded border border-stone-300 px-1 py-1 text-sm"
-      >
-        <option value="">크기 기본</option>
-        {FONT_SIZES.map((pt) => (
-          <option key={pt} value={pt}>
-            {pt}pt
-          </option>
-        ))}
-      </select>
       <span className="flex items-center gap-0.5 px-1" role="group" aria-label="글자 색">
-        {(compact ? COLORS.slice(0, 5) : COLORS).map((hex) => (
+        {(compact ? COLORS.slice(0, 5) : COLORS).map(({ hex, name }) => (
           <button
             key={hex}
             type="button"
-            aria-label={`글자 색 ${hex}`}
+            aria-label={`글자 색 ${name}`}
+            title={name}
             disabled={off}
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => c().setTextColor(hex).run()}
@@ -144,6 +130,14 @@ function FormatButtons({ editor, compact }: { editor: Editor; compact?: boolean 
         ))}
         <Btn label="글자 색 지우기" disabled={off} onClick={() => c().unsetTextColor().run()}>⌀</Btn>
       </span>
+    </>
+  );
+  if (part === "primary") return primary;
+  if (part === "more") return more;
+  return (
+    <>
+      {primary}
+      {more}
     </>
   );
 }
@@ -264,6 +258,8 @@ function Toolbar({ editor, onPickImage, uploading }: { editor: Editor; onPickIma
     }),
   });
   const c = () => editor.chain().focus();
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreId = useId();
 
   function setBlock(v: string) {
     if (v === "p") c().setParagraph().run();
@@ -306,44 +302,59 @@ function Toolbar({ editor, onPickImage, uploading }: { editor: Editor; onPickIma
         </select>
       )}
       <Sep />
-      <FormatButtons editor={editor} />
-      <Sep />
-      {(["left", "center", "right"] as Align[]).map((a) => (
-        <Btn key={a} label={`${ALIGN_TEXT[a]} 정렬`} active={s.align === a} onClick={() => setAlign(a)}>
-          {a === "left" ? "⇤" : a === "center" ? "↔" : "⇥"}
-        </Btn>
-      ))}
+      <FormatButtons editor={editor} part="primary" />
       <Sep />
       <Btn label="글머리 목록" active={s.bullet} disabled={s.inCell} onClick={() => c().toggleBulletList().run()}>•</Btn>
       <Btn label="번호 목록" active={s.ordered} disabled={s.inCell} onClick={() => c().toggleOrderedList().run()}>1.</Btn>
-      <Btn label="들여쓰기" disabled={!(s.bullet || s.ordered)} onClick={() => c().sinkListItem("listItem").run()}>→</Btn>
-      <Btn label="내어쓰기" disabled={!(s.bullet || s.ordered)} onClick={() => c().liftListItem("listItem").run()}>←</Btn>
+      <Btn label="인용" active={s.quote} disabled={s.inCell} onClick={() => c().toggleBlockquote().run()}>❝</Btn>
       {/* #80 F2: 코드 블록은 블록 종류 목록에도 있지만 찾기 어려워 따로 둔다(인라인 코드 버튼과 다르다) */}
       <Btn label="코드 블록" active={s.block === "code"} disabled={s.inCell} onClick={() => c().toggleCodeBlock({ language: "plain" }).run()}>
         <span className="font-mono text-xs">{"{ }"}</span> 코드 블록
       </Btn>
-      <Btn label="인용" active={s.quote} disabled={s.inCell} onClick={() => c().toggleBlockquote().run()}>❝</Btn>
-      <Btn label="구분선" disabled={s.inCell} onClick={() => c().setHorizontalRule().run()}>—</Btn>
-      <Sep />
       {/* #44: 이미지 패널을 없앴으므로 이미지 넣기는 이 버튼(파일 선택 → 업로드 → 커서 위치)·붙여넣기·끌어놓기로 한다 */}
       <Btn label="이미지 올리기" disabled={uploading || s.inCell} onClick={onPickImage}>🖼 이미지</Btn>
-      <Btn label="YouTube 영상" disabled={s.inCell} onClick={insertYouTube}>▶</Btn>
-      <Btn label="표 넣기" disabled={s.inTable || s.inColumns} onClick={() => c().insertTableAfterBlock({ rows: 3, cols: 3, withHeaderRow: true }).run()}>▦</Btn>
-      {!s.inColumns && !s.inTable && (
-        <select aria-label="단 나누기" value="" onChange={(e) => c().insertColumns(COLUMN_PRESETS[Number(e.target.value)].widths).run()} className="rounded border border-stone-300 px-1 py-1 text-sm">
-          <option value="" disabled>단 나누기</option>
-          {COLUMN_PRESETS.map((p, i) => (
-            <option key={p.label} value={i}>
-              {p.label}
-            </option>
-          ))}
-        </select>
-      )}
       <Sep />
-      <Btn label="블록 위로" onClick={() => c().moveBlock(-1).run()}>↑</Btn>
-      <Btn label="블록 아래로" onClick={() => c().moveBlock(1).run()}>↓</Btn>
       <Btn label="되돌리기" disabled={!s.canUndo} onClick={() => c().undo().run()}>↶</Btn>
       <Btn label="다시 하기" disabled={!s.canRedo} onClick={() => c().redo().run()}>↷</Btn>
+      {/* #119 O2: 자주 쓰는 것만 펼치고 나머지는 더보기 */}
+      <button
+        type="button"
+        aria-expanded={moreOpen}
+        aria-controls={moreId}
+        onClick={() => setMoreOpen((v) => !v)}
+        className="ml-auto rounded px-2 py-1 text-xs font-medium text-stone-700 hover:bg-stone-100"
+      >
+        <span className="sr-only">서식 </span>더보기 {moreOpen ? "▴" : "▾"}
+      </button>
+      <div id={moreId} role="group" aria-label="서식 더보기" hidden={!moreOpen} className="flex w-full flex-wrap items-center gap-0.5 border-t border-stone-100 pt-1">
+        <FormatButtons editor={editor} part="more" />
+        <Sep />
+        {(["left", "center", "right"] as Align[]).map((a) => (
+          <Btn key={a} label={`${ALIGN_TEXT[a]} 정렬`} active={s.align === a} onClick={() => setAlign(a)}>
+            {a === "left" ? "⇤" : a === "center" ? "↔" : "⇥"}
+          </Btn>
+        ))}
+        <Sep />
+        <Btn label="들여쓰기" disabled={!(s.bullet || s.ordered)} onClick={() => c().sinkListItem("listItem").run()}>→</Btn>
+        <Btn label="내어쓰기" disabled={!(s.bullet || s.ordered)} onClick={() => c().liftListItem("listItem").run()}>←</Btn>
+        <Btn label="구분선" disabled={s.inCell} onClick={() => c().setHorizontalRule().run()}>—</Btn>
+        <Sep />
+        <Btn label="YouTube 영상" disabled={s.inCell} onClick={insertYouTube}>▶</Btn>
+        <Btn label="표 넣기" disabled={s.inTable || s.inColumns} onClick={() => c().insertTableAfterBlock({ rows: 3, cols: 3, withHeaderRow: true }).run()}>▦</Btn>
+        {!s.inColumns && !s.inTable && (
+          <select aria-label="단 나누기" value="" onChange={(e) => c().insertColumns(COLUMN_PRESETS[Number(e.target.value)].widths).run()} className="rounded border border-stone-300 px-1 py-1 text-sm">
+            <option value="" disabled>단 나누기</option>
+            {COLUMN_PRESETS.map((p, i) => (
+              <option key={p.label} value={i}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        )}
+        <Sep />
+        <Btn label="블록 위로" onClick={() => c().moveBlock(-1).run()}>↑</Btn>
+        <Btn label="블록 아래로" onClick={() => c().moveBlock(1).run()}>↓</Btn>
+      </div>
       {s.inTable && (
         <div role="group" aria-label="표" className="flex w-full flex-wrap items-center gap-0.5 border-t border-stone-100 pt-1 text-xs">
           <span className="px-1 text-stone-500">표</span>

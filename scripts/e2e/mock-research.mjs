@@ -685,6 +685,18 @@ function handleMutation(owner, method, path, b, user) {
     doc.version++;
     return ok(201, snapshot(doc));
   }
+  // #119 K3(issue119 §K3): 출처 URL 서지정보. 저장하지 않는다. 주소에 blocked/off가 있으면 각각 422 url_not_allowed·503 not_ready.
+  if (method === "POST" && path === "/research/url-metadata") {
+    if (Object.keys(b).some((k) => k !== "url") || typeof b.url !== "string") return fail(422, "validation_error", "Invalid");
+    if (b.url.includes("blocked")) return fail(422, "url_not_allowed", "URL not allowed");
+    if (b.url.includes("off")) return fail(503, "not_ready", "Switched off");
+    return ok(200, {
+      url: b.url,
+      title: "모의 페이지 제목",
+      siteName: "Example",
+      bibliography: { type: "webpage", title: "모의 페이지 제목", "container-title": "Example", issued: { "date-parts": [[2026, 11, 18]] }, author: [{ family: "Kim", given: "Minji" }] },
+    });
+  }
   if (method === "POST" && path === "/research/sessions") {
     if (typeof b.title !== "string" || !b.title.trim()) return fail(422, "validation_error", "Invalid", { fields: [{ path: "body.title", message: "required" }] });
     const at = now();

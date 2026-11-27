@@ -40,7 +40,9 @@ await page.route(/\/api\/research\/pats(?:\/[^/?]+)?(?:\?.*)?$/, async (route) =
   assert.equal(request.method(), "POST");
   const key = request.headers()["idempotency-key"];
   const body = request.postDataJSON();
-  assert.deepEqual(Object.keys(body).sort(), ["expiryDays", "name"]);
+  // #119 M2: access(read|write)를 보낸다. 예전 scope 필드는 보내지 않는다.
+  assert.deepEqual(Object.keys(body).sort(), ["access", "expiryDays", "name"]);
+  assert.ok(["read", "write"].includes(body.access));
   posts.push({ key, body });
   const previous = attempts.get(key);
   if (previous) {
@@ -51,7 +53,7 @@ await page.route(/\/api\/research\/pats(?:\/[^/?]+)?(?:\?.*)?$/, async (route) =
     }
     return route.fulfill({ status: 200, json: { credential: safe(previous.record), token: null, secretAvailable: false, replayed: true } });
   }
-  const record = { id: crypto.randomUUID(), name: body.name, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + body.expiryDays * 86400000).toISOString(), revokedAt: null, lastUsedAt: null };
+  const record = { id: crypto.randomUUID(), name: body.name, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + body.expiryDays * 86400000).toISOString(), revokedAt: null, lastUsedAt: null, access: body.access };
   records.unshift(record);
   attempts.set(key, { record, body, retries: 0 });
   lastSecret = `rpat1.${record.id}.${"a".repeat(43)}`;
@@ -73,7 +75,10 @@ try {
   await main.getByText("발급한 API 토큰이 없습니다.").waitFor();
   assert.equal(await main.getByLabel("API 주소", { exact: true }).inputValue(), `${ORIGIN}${BASE}/api/research/agent/v1`);
   assert.equal(await main.getByLabel("llm.md 주소", { exact: true }).inputValue(), `${ORIGIN}${BASE}/api/research/llm.md`);
-  assert.equal(await main.getByLabel("권한", { exact: true }).count(), 0);
+  // #119 M2(D7): 권한 범위를 고른다. 기본은 읽기 전용(좁은 쪽)
+  assert.equal(await main.getByRole("group", { name: "권한" }).count(), 1);
+  assert.equal(await main.getByRole("radio", { name: /^읽기 전용/ }).isChecked(), true);
+  assert.equal(await main.getByRole("radio", { name: /^읽기\+저장/ }).isChecked(), false);
   await main.getByRole("button", { name: "API 주소 복사", exact: true }).click();
   await main.getByRole("button", { name: "llm.md 주소 복사", exact: true }).click();
   assert.equal(await page.evaluate(() => window.__patCopyCount), 2);
@@ -84,7 +89,7 @@ try {
   await value.waitFor();
   assert.equal(await value.inputValue(), lastSecret);
   const firstSecret = lastSecret;
-  assert.deepEqual(posts[0].body, { name: "Desktop", expiryDays: 7 });
+  assert.deepEqual(posts[0].body, { name: "Desktop", expiryDays: 7, access: "read" });
   await assertNoStoredSecret(firstSecret);
   await main.getByRole("button", { name: "토큰 복사", exact: true }).click();
   await main.getByRole("region", { name: "발급한 토큰 값" }).getByText("복사했습니다.", { exact: true }).waitFor();
@@ -95,14 +100,16 @@ try {
   await page.reload();
   const list = main.getByRole("region", { name: "API 토큰 목록" });
   await list.getByText("Desktop", { exact: true }).waitFor();
+  assert.ok((await list.getByRole("listitem").filter({ hasText: "Desktop" }).innerText()).includes("읽기 전용"));
   assert.ok(!(await page.content()).includes(firstSecret));
   await assertNoStoredSecret(firstSecret);
   records[0].lastUsedAt = new Date().toISOString();
   await main.getByRole("button", { name: "목록 새로 불러오기" }).click();
   await list.getByText("Desktop", { exact: true }).waitFor();
   assert.ok(!(await list.innerText()).includes("아직 사용하지 않음"));
-  await list.getByRole("button", { name: "토큰 폐기", exact: true }).click();
-  await list.getByRole("button", { name: "폐기 확인" }).click();
+  // #119 M3: 폐기 버튼 이름에 토큰 이름이 들어간다
+  await list.getByRole("button", { name: "토큰 폐기: Desktop", exact: true }).click();
+  await list.getByRole("button", { name: "폐기 확인: Desktop", exact: true }).click();
   await list.getByText("폐기됨", { exact: true }).waitFor();
   assert.equal(deletes, 1);
   console.log("PASS F5: first-only memory value/copy, no storage or URL, list has last use and immediate revoke; base-path downloads");
@@ -163,8 +170,8 @@ try {
   await main.getByText("승인 후 발급할 수 있습니다.", { exact: false }).waitFor();
   assert.equal(await main.getByRole("button", { name: "API 토큰 발급", exact: true }).isDisabled(), true);
   await list.getByText("Commenter", { exact: true }).waitFor();
-  await list.getByRole("button", { name: "토큰 폐기", exact: true }).click();
-  await list.getByRole("button", { name: "폐기 확인" }).click();
+  await list.getByRole("button", { name: "토큰 폐기: Commenter", exact: true }).click();
+  await list.getByRole("button", { name: "폐기 확인: Commenter", exact: true }).click();
   await list.getByText("폐기됨", { exact: true }).waitFor();
   console.log("PASS F5: commenter issue with effective public scope, approval loss disables issue but preserves list/revoke");
   assert.deepEqual(errors, []);

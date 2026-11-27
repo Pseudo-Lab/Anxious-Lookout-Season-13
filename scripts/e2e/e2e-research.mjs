@@ -102,6 +102,28 @@ const unsafe = [
   "",
   "![외부 이미지](https://tracker.invalid/pixel.png)",
 ].join("\n");
+// #119 K3·K1·K5: 출처에서 빈 칸만 채운다(쓴 값은 그대로), 서지정보는 처음엔 접혀 있다가 채우면 펼쳐진다. UTC 안내 없음.
+await page.goto(U("/research/material/new/"));
+{
+  const bib = main.locator("details").filter({ has: page.getByText("서지정보 (선택)", { exact: true }) });
+  check("K1. bibliography collapsed on a new material", !(await bib.evaluate((d) => d.open)));
+  check("K5. no UTC storage note", !(await main.innerText()).includes("UTC"));
+  await main.getByLabel("출처 URL").fill("https://example.com/meta");
+  await main.getByLabel("내용").fill("직접 쓴 내용");
+  await main.getByRole("button", { name: "출처에서 제목·서지정보 채우기" }).click();
+  await main.getByText(/채웠습니다: /).waitFor();
+  check("K3. title filled from source", (await main.getByLabel("제목").inputValue()) === "모의 페이지 제목");
+  check("K3. bibliography opened and filled", (await bib.evaluate((d) => d.open)) && (await main.getByLabel("게재처").inputValue()) === "Example" && (await main.getByLabel("서지 종류").inputValue()) === "webpage");
+  check("K2. webpage type hides ISBN/ISSN", (await main.getByLabel("ISBN").count()) === 0 && (await main.getByLabel("ISSN").count()) === 0);
+  check("K3. typed content untouched", (await main.getByLabel("내용").inputValue()) === "직접 쓴 내용");
+  await main.getByLabel("제목").fill("내가 고친 제목");
+  await main.getByRole("button", { name: "출처에서 제목·서지정보 채우기" }).click();
+  await main.getByText(/새로 채울 빈 칸이 없습니다|채웠습니다/).waitFor();
+  check("K3. existing values are not overwritten", (await main.getByLabel("제목").inputValue()) === "내가 고친 제목");
+  await main.getByLabel("출처 URL").fill("https://blocked.example/x");
+  await main.getByRole("button", { name: "출처에서 제목·서지정보 채우기" }).click();
+  check("K3. guard error explained", await appears(main.getByText("이 주소는 가져올 수 없습니다", { exact: false })));
+}
 await page.goto(U("/research/material/new/"));
 await main.getByLabel("제목").fill("자료 A");
 await main.getByLabel("출처 URL").fill("https://example.com/a");
@@ -1613,6 +1635,10 @@ let docEUrl;
   await row.getByRole("button", { name: "적용" }).click();
   check("R21. grant applied with re-login notice", await appears(row.getByText("대상 사용자는 다시 로그인해야 합니다")));
   check("R21. row shows editor", (await row.innerText()).includes("편집자") && (await row.innerText()).includes("승인됨"));
+  // #119 L3·L4: 감사 기록에 사유가 남고, 이름은 GitHub 프로필 링크다(숫자 ID는 보이지 않는다)
+  await am.getByText("감사 기록", { exact: true }).click();
+  check("R21. audit log shows the change with reason", await appears(am.getByText("사유: M3 편집자 지정 확인")));
+  check("R21. login links to GitHub profile", (await row.getByRole("link", { name: new RegExp(tMe.user.login) }).getAttribute("href")) === `https://github.com/${encodeURIComponent(tMe.user.login)}` && !(await row.innerText()).includes(`GitHub ${tMe.user.githubId}`));
   check("R21. target session revoked", (await target.page.request.get(U("/api/auth/me"))).status() === 401);
   await setMock(`as=${tMe.user.accountId}`);
   await login(target.page);

@@ -104,6 +104,8 @@ const report = (bad) => bad.slice(0, 4).map((b) => `${b.target} ${b.ratio} ${b.f
 // ---- slice 3: 편집기 화면(#36 새 UI 포함)과 D-38-1 사용자 색 ----
 // 편집기 도구 막대의 글자색 8종·칸 배경 5종(BlockEditor COLORS·CELL_BACKGROUNDS)
 const COLORS = ["#1C1917", "#DC2626", "#EA580C", "#CA8A04", "#16A34A", "#2563EB", "#7C3AED", "#DB2777"];
+// #119 O4: 고를 수 있는 색에서는 거의 검정(#1C1917)을 뺐다. 저장된 글은 위 8색 그대로 그린다.
+const PICKER = COLORS.filter((c) => c !== "#1C1917");
 const BGS = ["#FEF3C7", "#DCFCE7", "#DBEAFE", "#F3E8FF", "#F5F5F4"];
 // 리뷰 slice3 round1: 팔레트 밖 배경(계약은 임의 #RRGGBB 허용). 짙은 남색·중간 회색 2종
 const CUSTOM_BGS = ["#1E3A8A", "#555555", "#777777"];
@@ -372,13 +374,10 @@ async function editorScreens(page, scheme, send, csrf) {
       .catch(() => false);
     const bg = shown ? await menu.evaluate((el) => window.__lum(window.__rgb(getComputedStyle(el).backgroundColor))) : null;
     check(`F1. ${tag}: selection toolbar shown with a ${scheme} surface`, shown && (scheme === "light" ? bg > 0.9 : bg < 0.05), `shown=${shown} lum=${bg} ${JSON.stringify(await editorState())}`);
-    // 크기 목록(고정 툴바·선택 툴바)과 색 견본: 글자 대비, 견본은 지금 모드에서 글자가 보일 색
-    const selects = await page.evaluate(() =>
-      [...document.querySelectorAll('select[aria-label="글자 크기"]')].filter((s) => s.checkVisibility()).map((s) => Number(window.__ratio(window.__rgb(getComputedStyle(s).color), window.__under(s)).toFixed(2)))
-    );
-    check(`F2. ${tag}: font-size lists (toolbar and selection menu) have AA text`, selects.length === 2 && selects.every((r) => r >= 4.5), JSON.stringify(selects));
+    // #119 O3: 글자 크기 목록은 없다. 색 견본은 지금 모드에서 글자가 보일 색이다
+    check(`O3. ${tag}: no font-size list in toolbar or selection menu`, (await page.locator('select[aria-label="글자 크기"]').count()) === 0);
     const swatches = await toolbar.evaluate((t) => [...t.querySelectorAll(".pb-swatch")].map((b) => [b.getAttribute("aria-label"), window.__rgb(getComputedStyle(b).backgroundColor).slice(0, 3).join(","), b.style.getPropertyValue("--pb-c").trim(), b.style.getPropertyValue("--pb-cd").trim()]));
-    check(`D. ${tag}: colour swatches show the colour text will be drawn in`, swatches.length === COLORS.length && swatches.every(([, got, c, cd]) => got === hexRgb(scheme === "dark" ? cd : c)), JSON.stringify(swatches));
+    check(`D. ${tag}: colour swatches show the colour text will be drawn in`, swatches.length === PICKER.length && swatches.every(([, got, c, cd]) => got === hexRgb(scheme === "dark" ? cd : c)), JSON.stringify(swatches));
     if (shown) await scan(page, `${tag} selection toolbar`, scheme);
   }
 

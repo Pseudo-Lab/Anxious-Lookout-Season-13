@@ -8,8 +8,12 @@ export interface Pat {
   expiresAt: string;
   revokedAt: string | null;
   lastUsedAt: string | null;
+  // #119 M2(issue119 §M2): 읽기 전용 / 읽기+저장. 이전에 발급한 토큰(값 없음)은 지금처럼 읽기+저장이다.
+  access: PatAccess;
 }
-export interface PatInput { name: string; expiryDays: number }
+export type PatAccess = "read" | "write";
+export const PAT_ACCESS_LABELS: Record<PatAccess, string> = { read: "읽기 전용", write: "읽기+저장" };
+export interface PatInput { name: string; expiryDays: number; access: PatAccess }
 export interface IssuedPat { credential: Pat; token: string | null; secretAvailable: boolean; replayed: boolean }
 type Obj = Record<string, unknown>;
 const obj = (v: unknown): v is Obj => !!v && typeof v === "object" && !Array.isArray(v);
@@ -18,9 +22,11 @@ const time = (v: unknown): v is string => typeof v === "string" && Number.isFini
 
 export function parsePat(v: unknown): Pat | null {
   if (!obj(v) || !uuid(v.id) || typeof v.name !== "string" || !v.name.trim() || v.name.length > 80 || /[\u0000-\u001f\u007f]/.test(v.name) || !time(v.issuedAt) || !time(v.expiresAt) || (v.revokedAt !== null && !time(v.revokedAt)) || (v.lastUsedAt !== null && !time(v.lastUsedAt))) return null;
+  if (v.access !== undefined && v.access !== "read" && v.access !== "write") return null;
   return {
     id: v.id, name: v.name, issuedAt: v.issuedAt, expiresAt: v.expiresAt,
     revokedAt: v.revokedAt, lastUsedAt: v.lastUsedAt,
+    access: v.access === "read" ? "read" : "write",
   };
 }
 export function parsePatPage(v: unknown): { items: Pat[]; nextCursor: string | null } | null {
@@ -54,7 +60,7 @@ export const issuePat = async (body: PatInput, csrfToken: string, key: string) =
   credentials: "include", method: "POST",
   headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken, "Idempotency-Key": key },
   // 요청은 계약 필드만 복사한다. 비밀 값·추가 속성은 보내지 않는다.
-  body: JSON.stringify({ name: body.name, expiryDays: body.expiryDays }),
+  body: JSON.stringify({ name: body.name, expiryDays: body.expiryDays, access: body.access }),
   });
   if (result.ok && !((result.status === 201 && result.data.secretAvailable && !result.data.replayed) || (result.status === 200 && !result.data.secretAvailable && result.data.replayed))) return { ok: false as const, failure: { kind: "invalid" as const, status: result.status } };
   return result;

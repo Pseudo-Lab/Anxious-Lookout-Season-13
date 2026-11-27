@@ -369,14 +369,23 @@ export default function PostEditor({
   );
   return (
     <div className="space-y-4">
-      <p className="text-xs text-stone-500">
-        입력은 초안으로 자동 저장되어 새로고침하거나 다른 기기에서 열어도 이어 쓸 수 있습니다. 직접 편집한 내용은 ‘{post ? "새 버전으로 저장" : "글 저장"}’을 누르면 새 버전으로
-        만들어지고, 발행한 글은 다시 발행하기 전까지 바뀌지 않습니다.
+      {/* #119 O1: 안내는 한 줄. 자동 저장은 초안, 버튼은 버전, 발행은 따로 */}
+      <p className="text-xs text-stone-600">
+        입력은 초안으로 자동 저장됩니다. ‘{post ? "새 버전으로 저장" : "첫 버전으로 글 저장"}’을 눌러야 버전이 생기고, 발행은 따로 합니다.
       </p>
       <Field label="제목">
         <input value={values.title} onChange={(e) => set({ title: e.target.value })} maxLength={LIMITS.title} readOnly={locked} className={`${inputClass} read-only:bg-stone-50`} />
       </Field>
       <TagInput tags={values.tags} onChange={(tags) => set({ tags })} readOnly={locked} />
+      <PostBodyEditor
+        value={values.content}
+        onChange={(content) => set({ content })}
+        onUploading={setUploading}
+        onProblem={onBodyProblem}
+        restore={restored?.body ?? null}
+        readOnly={locked}
+      />
+      {/* #119 O6: 바탕이 된 문서·자료는 본문 편집기 아래에 둔다(본문이 화면 위쪽에 오게) */}
       <DocumentLinks ids={values.documentIds} onChange={(documentIds) => void linkDocuments(documentIds)} readOnly={locked} />
       <MaterialLinks
         ids={values.materialIds}
@@ -393,14 +402,6 @@ export default function PostEditor({
             {materialNote}
           </>
         }
-        readOnly={locked}
-      />
-      <PostBodyEditor
-        value={values.content}
-        onChange={(content) => set({ content })}
-        onUploading={setUploading}
-        onProblem={onBodyProblem}
-        restore={restored?.body ?? null}
         readOnly={locked}
       />
       {locked && (
@@ -514,7 +515,7 @@ export default function PostEditor({
           disabled={busy || locked || pending || !!bodyProblem || upgradeRequired || status.kind === "conflict"}
           className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
         >
-          {finishing === "commit" ? "저장 중..." : post ? (contentMoved && comparing ? "비교했고 이 내용으로 저장" : "새 버전으로 저장") : "글 저장"}
+          {finishing === "commit" ? "저장 중..." : post ? (contentMoved && comparing ? "비교했고 이 내용으로 저장" : "새 버전으로 저장") : "첫 버전으로 글 저장"}
         </button>
         {onClose && (
           <button type="button" onClick={() => void finish("close", close)} disabled={busy || locked || pending || !!bodyProblem || upgradeRequired} className="rounded-lg px-4 py-2 text-sm text-stone-900 hover:bg-stone-100">
@@ -522,7 +523,7 @@ export default function PostEditor({
           </button>
         )}
         {confirmDiscard ? (
-          <span className="flex items-center gap-2 text-sm">
+          <span className="ml-auto flex items-center gap-2 rounded-lg bg-red-50 px-3 py-1.5 text-sm ring-1 ring-red-200">
             <span className="text-stone-900">{post ? "초안을 버리고 저장된 글로 돌아갈까요?" : "이 초안을 버릴까요?"}</span>
             <button type="button" onClick={() => void finish("discard", discard)} disabled={busy || locked || pending} className="font-medium text-red-700 underline hover:no-underline">
               초안 버리기
@@ -532,7 +533,13 @@ export default function PostEditor({
             </button>
           </span>
         ) : (
-          <button type="button" onClick={() => setConfirmDiscard(true)} disabled={busy || locked || pending} className="ml-auto text-sm text-stone-500 hover:text-red-700">
+          // #119 O5: 버리기는 저장과 떨어뜨리고(오른쪽 끝) 붉은 테두리로 구분한다
+          <button
+            type="button"
+            onClick={() => setConfirmDiscard(true)}
+            disabled={busy || locked || pending}
+            className="ml-auto rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50"
+          >
             초안 버리기…
           </button>
         )}

@@ -240,7 +240,10 @@ export function VersionHistoryView<V extends VersionLike>({
               <span>
                 <span className="font-mono text-xs text-stone-500">v{v.number}</span>{" "}
                 <span className="text-stone-900">{v.title}</span>
-                {v.id === latestVersionId && <span className="ml-2 text-xs text-indigo-600">현재</span>}
+                {/* #119 O9: 제목과 구분되는 배지 */}
+                {v.id === latestVersionId && (
+                  <span className="ml-2 inline-block rounded-full bg-indigo-50 px-2 py-0.5 align-middle text-xs font-medium text-indigo-700">현재</span>
+                )}
               </span>
               <span className="shrink-0 text-xs text-stone-500">{formatDateTime(v.createdAt)}</span>
             </button>

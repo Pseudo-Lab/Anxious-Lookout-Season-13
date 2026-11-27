@@ -2,7 +2,8 @@
 
 import { useDeferredValue, useId, useRef, useState, type FormEvent, type ReactNode, type Ref } from "react";
 import type { FetchFailure } from "@/lib/api/client";
-import type { DocumentInput, MaterialInput } from "@/lib/research/api";
+import { fetchUrlMetadata, urlMetadataError, type DocumentInput, type MaterialInput, type UrlMetadata } from "@/lib/research/api";
+import { useAuth } from "@/hooks/useAuth";
 import { CONTENT_KINDS, CONTENT_KIND_LABELS, LIMITS, type ContentKind } from "@/lib/research/types";
 import { fromLocalInput, toLocalInput } from "@/lib/research/format";
 import { CSL_TYPES, cpLength, cslTypeLabel, fromBibliographyForm, toBibliographyForm, type BibliographyForm } from "@/lib/research/bibliography";
@@ -92,6 +93,39 @@ const BIB_TEXT_FIELDS: { key: Exclude<keyof BibliographyForm, "type" | "authors"
 
 type BibTextKey = (typeof BIB_TEXT_FIELDS)[number]["key"];
 
+const BIB_LABELS: Partial<Record<keyof BibliographyForm, string>> = {
+  type: "서지 종류",
+  authors: "저자",
+  issued: "발행일",
+  ...Object.fromEntries(BIB_TEXT_FIELDS.map((f) => [f.key, f.label])),
+};
+
+/** #119 K3 상태: 한 번이라도 503(not_ready)이면 이 화면에서는 버튼을 숨긴다. */
+function useUrlAutofill() {
+  const { csrfToken } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [available, setAvailable] = useState(true);
+  async function run(url: string): Promise<UrlMetadata | null> {
+    if (!csrfToken) {
+      setMessage("로그인 상태를 확인해 주세요.");
+      return null;
+    }
+    setBusy(true);
+    setMessage("출처 페이지를 읽는 중입니다. 몇 초 걸릴 수 있습니다.");
+    const res = await fetchUrlMetadata(url, csrfToken);
+    setBusy(false);
+    if (res.ok) return res.data;
+    if (res.failure.kind === "http" && res.failure.code === "not_ready") setAvailable(false);
+    setMessage(urlMetadataError(res.failure));
+    return null;
+  }
+  function done(filled: string[]) {
+    setMessage(filled.length ? `채웠습니다: ${filled.join(", ")}. 저장 전에 확인하세요.` : "새로 채울 빈 칸이 없습니다(이미 입력한 값은 바꾸지 않습니다).");
+  }
+  return { busy, message, available, run, done };
+}
+
 // #119 K2: 서지 종류마다 보통 쓰는 칸만 보인다(예: 웹페이지에는 ISBN·ISSN이 없다). 모르는 종류·기타 문서는 모두 보인다.
 const FIELDS_BY_TYPE: Record<string, BibTextKey[]> = {
   "article-journal": ["title", "container-title", "volume", "issue", "page", "DOI", "ISSN"],
@@ -121,11 +155,11 @@ export function bibFieldsFor(type: string, value: Partial<Record<BibTextKey, str
 }
 
 /** #105 자료 서지정보 입력(CSL-JSON 부분집합). URL·접근일은 출처 URL·수집 시각을 그대로 쓴다. #119 K1: 서지정보가 없으면 접혀 있다. */
-function BibliographyFields({ value, onChange }: { value: BibliographyForm; onChange: (v: BibliographyForm) => void }) {
+function BibliographyFields({ value, onChange, forceOpen = false }: { value: BibliographyForm; onChange: (v: BibliographyForm) => void; forceOpen?: boolean }) {
   const set = (patch: Partial<BibliographyForm>) => onChange({ ...value, ...patch });
   const { shown, extra } = bibFieldsFor(value.type, value);
   return (
-    <details open={value.type !== ""} className="rounded-lg p-3 ring-1 ring-stone-200">
+    <details open={value.type !== "" || forceOpen} className="rounded-lg p-3 ring-1 ring-stone-200">
       <summary className="cursor-pointer text-sm font-medium text-stone-900">서지정보 (선택)</summary>
       <div className="@container mt-3 space-y-3">
         <p className="text-xs text-stone-500">인용 형식에 쓰입니다. URL과 접근일은 위의 출처 URL·수집 시각을 그대로 씁니다.</p>
@@ -203,6 +237,35 @@ export function MaterialForm({
   // 처음 값(그대로 두면 저장값을 손대지 않고 다시 보낸다)
   const [initialBibliography] = useState(() => JSON.stringify(toBibliographyForm(initial?.bibliography ?? null)));
   const [localError, setLocalError] = useState<string | null>(null);
+  const [bibOpen, setBibOpen] = useState(false);
+  const autofill = useUrlAutofill();
+
+  /** #119 K3: 출처 페이지의 제목·서지정보로 빈 칸만 채운다(이미 쓴 값은 덮지 않는다). 저장은 하지 않는다. */
+  async function fillFromSource() {
+    const url = sourceUrl.trim();
+    if (!isHttpUrl(url)) return setLocalError("출처 URL은 http:// 또는 https:// 주소여야 합니다.");
+    setLocalError(null);
+    const meta = await autofill.run(url);
+    if (!meta) return;
+    const filled: string[] = [];
+    if (!title.trim() && meta.title) {
+      setTitle(meta.title.slice(0, LIMITS.title));
+      filled.push("제목");
+    }
+    if (meta.bibliography) {
+      const incoming = toBibliographyForm(meta.bibliography);
+      const next = { ...bibliography };
+      for (const key of Object.keys(incoming) as (keyof BibliographyForm)[]) {
+        if (!next[key].trim() && incoming[key].trim()) {
+          next[key] = incoming[key];
+          filled.push(BIB_LABELS[key] ?? key);
+        }
+      }
+      setBibliography(next);
+      setBibOpen(true);
+    }
+    autofill.done(filled);
+  }
 
   function submit(e: FormEvent) {
     e.preventDefault();
@@ -228,16 +291,33 @@ export function MaterialForm({
       <Field label="제목">
         <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={LIMITS.title} required className={inputClass} />
       </Field>
-      <Field label="출처 URL">
-        <input
-          type="url"
-          value={sourceUrl}
-          onChange={(e) => setSourceUrl(e.target.value)}
-          required
-          placeholder="https://"
-          className={inputClass}
-        />
-      </Field>
+      <div>
+        <Field label="출처 URL">
+          <input
+            type="url"
+            value={sourceUrl}
+            onChange={(e) => setSourceUrl(e.target.value)}
+            required
+            placeholder="https://"
+            className={inputClass}
+          />
+        </Field>
+        {autofill.available && (
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void fillFromSource()}
+              disabled={autofill.busy || !sourceUrl.trim()}
+              className="rounded-md border border-stone-300 px-2 py-1 text-xs text-stone-800 hover:bg-stone-50 disabled:opacity-50"
+            >
+              {autofill.busy ? "가져오는 중..." : "출처에서 제목·서지정보 채우기"}
+            </button>
+            <span role="status" className="text-xs text-stone-600">
+              {autofill.message}
+            </span>
+          </div>
+        )}
+      </div>
       <div className="grid gap-4 @lg:grid-cols-2">
         {/* #119 K5: 저장 방식(UTC) 안내는 사용자에게 필요하지 않다 */}
         <Field label="수집 시각">
@@ -261,7 +341,7 @@ export function MaterialForm({
         </Field>
       </div>
       <SummaryField value={summary} onChange={setSummary} />
-      <BibliographyFields value={bibliography} onChange={setBibliography} />
+      <BibliographyFields value={bibliography} onChange={setBibliography} forceOpen={bibOpen} />
       <Field label="내용" hint={contentHint}>
         <textarea
           value={content}

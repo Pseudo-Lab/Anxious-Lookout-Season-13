@@ -3,8 +3,8 @@ import { issuePat, listPats, parseIssuedPat, parsePat, parsePatPage, patFailureM
 
 const ID = "00000000-0000-4000-8000-000000000097";
 const SECRET = `rpat1.${ID}.${"a".repeat(43)}`; // 모의 값. 실제 발급/자격이 아니다.
-const PAT = { id: ID, name: "외부 도우미", issuedAt: "2026-11-17T00:00:00Z", expiresAt: "2026-12-17T00:00:00Z", revokedAt: null, lastUsedAt: null };
-const INPUT = { name: "외부 도우미", expiryDays: 30 };
+const PAT = { id: ID, name: "외부 도우미", issuedAt: "2026-11-17T00:00:00Z", expiresAt: "2026-12-17T00:00:00Z", revokedAt: null, lastUsedAt: null, access: "write" as const };
+const INPUT = { name: "외부 도우미", expiryDays: 30, access: "write" as const };
 const FIRST = { credential: PAT, token: SECRET, secretAvailable: true, replayed: false };
 const REPLAY = { credential: PAT, token: null, secretAvailable: false, replayed: true };
 function respond(body: unknown, status = 200) {
@@ -72,7 +72,16 @@ describe("#97 B8 cookie PAT management", () => {
     await issuePat({ ...INPUT, ...{ scope: "write" } }, "csrf", ID);
     expect(JSON.parse(fetch.mock.calls[0][1]?.body as string)).toEqual(INPUT);
   });
-  it.each([{ expiresAt: "bad" }, { lastUsedAt: 1 }, { name: "x\ny" }])("rejects invalid metadata %o", (extra) => expect(parsePat({ ...PAT, ...extra })).toBeNull());
+  it.each([{ expiresAt: "bad" }, { lastUsedAt: 1 }, { name: "x\ny" }, { access: "admin" }])("rejects invalid metadata %o", (extra) => expect(parsePat({ ...PAT, ...extra })).toBeNull());
+  it("#119 M2: tokens without access (issued before 0011) read as 읽기+저장; read-only is kept and sent", async () => {
+    const { access: _drop, ...legacy } = PAT;
+    void _drop;
+    expect(parsePat(legacy)).toEqual({ ...PAT, access: "write" });
+    expect(parsePat({ ...PAT, access: "read" })).toEqual({ ...PAT, access: "read" });
+    const fetch = respond({ ...FIRST, credential: { ...PAT, access: "read" } }, 201);
+    await issuePat({ ...INPUT, access: "read" }, "csrf", ID);
+    expect(JSON.parse(fetch.mock.calls[0][1]?.body as string)).toEqual({ ...INPUT, access: "read" });
+  });
   it("requires a valid page envelope", () => {
     expect(parsePatPage({ items: [PAT], nextCursor: null })).toEqual({ items: [PAT], nextCursor: null });
     expect(parsePatPage({ items: [PAT, null], nextCursor: null })).toBeNull();

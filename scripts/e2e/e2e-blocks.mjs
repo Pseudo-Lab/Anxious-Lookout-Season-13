@@ -8,6 +8,14 @@
 // - W*: WebKit·Firefox 기본 편집(조합 없는 입력만 가능).
 import { chromium, firefox, webkit } from "playwright";
 
+// #119 O2: 자주 쓰지 않는 서식(밑줄·색·정렬·표·단·영상·블록 이동 등)은 "서식 더보기" 안에 있다. 닫혀 있으면 연다.
+async function more(tb) {
+  const b = tb.getByRole("button", { name: /서식 더보기/ });
+  if ((await b.getAttribute("aria-expanded")) !== "true") await b.click();
+  return tb;
+}
+
+
 const ORIGIN = process.env.ORIGIN ?? "http://127.0.0.1:8080";
 const BASE = process.env.BASE_PATH ?? "";
 const U = (p) => `${ORIGIN}${BASE}${p}`;
@@ -230,7 +238,7 @@ async function editingRegressions(p, h, tag) {
     steps.join(" / ") === "ul[a[ul[b]],] / ul[a[ul[b]]] / ul[a[ul[b]]]" && (await shape()) === "ul[a[ul[bZ]]]", `${steps.join(" / ")} → ${await shape()}`);
   // B1e. 단 안 목록
   await h.fresh();
-  await h.tb.getByRole("combobox", { name: "단 나누기" }).selectOption({ label: "1:1" });
+  await (await more(h.tb)).getByRole("combobox", { name: "단 나누기" }).selectOption({ label: "1:1" });
   await kb.type("- a");
   await kb.press("Enter");
   await kb.press("Backspace");
@@ -250,46 +258,8 @@ async function editingRegressions(p, h, tag) {
   const saved = await h.blocks();
   check(`B1g. ${tag}: result saves as valid post-blocks`, saved.problem === 0 && saved.doc?.blocks?.[0]?.type === "quote", `problem=${saved.problem}`);
 
-  // F1k. 리뷰 full round6: 크기 목록을 실제로 눌러 연 뒤 키보드로 고르는 동안 포커스가 목록에 남고(본문으로 새지 않고),
-  //      Enter로 끝내면 고른 크기(18pt)가 선택한 단어에만 있고 본문에 새 문단이 생기지 않는다. 선택 메뉴와 고정 툴바 모두.
-  for (const where of ["menu", "toolbar"]) {
-    await h.fresh();
-    await kb.type("hello world");
-    // 리뷰 full round7: 자동 저장·주소(?draft=) 교체가 끝난 뒤에 줄을 화면 가운데로 옮기고 선택한다(그 사이 스크롤·좌표가 바뀌지 않게)
-    await h.blocks();
-    await h.editor.getByText("hello world").evaluate((el) => el.scrollIntoView({ block: "center" }));
-    await h.editor.getByText("hello world").click();
-    // 단어 선택은 키보드로 한다(브라우저마다 더블클릭 단어 판정이 다르다). 마우스를 누르지 않았으므로 선택 메뉴가 뜬다.
-    await kb.press("End");
-    for (let i = 0; i < 5; i++) await kb.press("Shift+ArrowLeft");
-    const selected = () => h.editor.evaluate((el) => el.editor.state.doc.textBetween(el.editor.state.selection.from, el.editor.state.selection.to));
-    const scope = where === "menu" ? h.main.getByRole("toolbar", { name: "선택한 글자 서식" }) : h.tb;
-    await scope.waitFor({ timeout: 5000 }).catch(() => {});
-    // 누르기 직전 확인: 목록 가운데가 화면 안이고, 그 점의 실제 요소가 바로 그 목록이며, 선택이 "world"다.
-    const why = await stableClick(p, scope.getByLabel("글자 크기"), async () => (await selected()) === "world");
-    if (why) {
-      check(`F1k. ${tag} ${where}: size list reachable at a stable on-screen point with "world" selected`, false, `selected=${await selected()} ${why}`);
-      continue;
-    }
-    const steps = [];
-    for (let i = 0; i < 6; i++) {
-      await kb.press("ArrowDown");
-      steps.push(await p.evaluate(() => document.activeElement?.tagName));
-    }
-    await kb.press("Enter");
-    await p.waitForTimeout(300);
-    const d = await h.doc();
-    const runs = d.content?.[0]?.content ?? [];
-    const w = runs.find((n) => n.text === "world");
-    const size = w?.marks?.find((m) => m.type === "textStyle")?.attrs?.fontSize ?? null;
-    const paragraphs = (d.content ?? []).filter((b) => b.type === "paragraph").length;
-    const back = await p.evaluate(() => document.activeElement?.classList.contains("ProseMirror"));
-    check(
-      `F1k. ${tag} ${where}: keyboard size choice keeps focus in the list, applies 18pt to the word only, Enter adds no paragraph and returns to the editor`,
-      steps.length === 6 && steps.every((x) => x === "SELECT") && size === 18 && !runs.find((n) => n.text === "hello ")?.marks?.length && paragraphs === 1 && back,
-      `active=${steps.join(",")} size=${size} paragraphs=${paragraphs} back=${back}`
-    );
-  }
+  // #119 O3: 글자 크기(pt) 선택은 툴바와 선택 메뉴 어디에도 없다(기존 글의 크기는 그대로 그린다, D5).
+  check(`O3. ${tag}: no font size control`, (await h.main.getByLabel("글자 크기").count()) === 0);
 
   // B2. 표는 커서가 있는 블록 뒤에 들어간다(문서 맨 위가 아니다)
   await h.fresh();
@@ -300,7 +270,7 @@ async function editingRegressions(p, h, tag) {
   await kb.type("three");
   await h.editor.getByText("two", { exact: true }).click();
   await kb.press("End");
-  await h.tb.getByRole("button", { name: "표 넣기" }).click();
+  await (await more(h.tb)).getByRole("button", { name: "표 넣기" }).click();
   await kb.type("cell");
   const mid = await shape();
   check(`B2a. ${tag}: table goes right after the block with the cursor`, mid === "p(one),p(two),table,p(three)", mid);
@@ -308,11 +278,11 @@ async function editingRegressions(p, h, tag) {
   check(`B2a. ${tag}: cursor lands in the first cell`, textOf(firstCell ?? {}) === "cell", textOf(firstCell ?? {}));
   await h.editor.getByText("three", { exact: true }).click();
   await kb.press("End");
-  await h.tb.getByRole("button", { name: "표 넣기" }).click();
+  await (await more(h.tb)).getByRole("button", { name: "표 넣기" }).click();
   check(`B2b. ${tag}: table at the last block goes after it`, (await shape()) === "p(one),p(two),table,p(three),table", await shape());
   await h.editor.getByText("one", { exact: true }).click();
   await kb.press("Home");
-  await h.tb.getByRole("button", { name: "표 넣기" }).click();
+  await (await more(h.tb)).getByRole("button", { name: "표 넣기" }).click();
   check(`B2c. ${tag}: cursor at the start of a block still inserts after that block`, (await shape()) === "p(one),table,p(two),table,p(three),table", await shape());
   const b2 = await h.blocks();
   check(`B2d. ${tag}: saved as valid post-blocks`, b2.problem === 0 && (b2.doc?.blocks ?? []).filter((b) => b.type === "table").length === 3, `problem=${b2.problem}`);
@@ -442,7 +412,7 @@ check("K7. list input rule + composing + Enter + Tab nesting", list?.type === "b
 
 // K8. 표 칸 안에서 조합 + Tab으로 다음 칸
 await H.fresh();
-await H.tb.getByRole("button", { name: "표 넣기" }).click();
+await (await more(H.tb)).getByRole("button", { name: "표 넣기" }).click();
 await typeKo("머리");
 await page.keyboard.press("Tab");
 await typeKo("칸", { leaveLast: true });
@@ -486,12 +456,12 @@ check("S1. list nesting stops at 3 levels with a notice", listDepth(d) === 3 && 
 
 // S2. 단 나누기 2:1, 단 안에서는 표 넣기 불가
 await H.fresh();
-await H.tb.getByRole("combobox", { name: "단 나누기" }).selectOption({ label: "2:1" });
+await (await more(H.tb)).getByRole("combobox", { name: "단 나누기" }).selectOption({ label: "2:1" });
 await typeKo("왼쪽 단");
 d = await H.doc();
 const cols = blocks(d).find((b) => b.type === "columns");
 check("S2. columns 2:1 inserted, text goes into first column", cols?.content?.map((c) => c.attrs.width).join(":") === "2:1" && textOf(cols.content[0]) === "왼쪽 단", JSON.stringify(cols?.content?.map((c) => c.attrs)));
-check("S2. table insert disabled inside columns", await H.tb.getByRole("button", { name: "표 넣기" }).isDisabled());
+check("S2. table insert disabled inside columns", await (await more(H.tb)).getByRole("button", { name: "표 넣기" }).isDisabled());
 await H.main.getByRole("group", { name: "단" }).getByRole("button", { name: "단 비율 1:2" }).click();
 d = await H.doc();
 check("S2. column ratio preset changes widths", blocks(d).find((b) => b.type === "columns")?.content?.map((c) => c.attrs.width).join(":") === "1:2");
@@ -534,8 +504,8 @@ await page.keyboard.press("Shift+Home");
 // 브라우저 선택을 편집기가 읽은 뒤에 누른다(selectionchange는 비동기라 무거운 실행에서 늦게 반영된다)
 await H.editor.evaluate((el) => new Promise((ok) => { const t0 = Date.now(); const tick = () => (!el.editor.state.selection.empty || Date.now() - t0 > 3000 ? ok() : setTimeout(tick, 30)); tick(); }));
 await H.tb.getByRole("button", { name: "굵게" }).click();
-await H.tb.getByRole("button", { name: "인라인 코드" }).click();
-await H.tb.getByRole("button", { name: "글자 색 #2563EB" }).click();
+await (await more(H.tb)).getByRole("button", { name: "인라인 코드" }).click();
+await (await more(H.tb)).getByRole("button", { name: "글자 색 파랑" }).click();
 d = await H.doc();
 const marks = (blocks(d)[0]?.content?.[0]?.marks ?? []).map((m) => (m.type === "textStyle" ? `color:${m.attrs.color}` : m.type)).sort().join(",");
 check("S5. code mark coexists with bold and color", marks === "bold,code,color:#2563EB", marks);
@@ -575,14 +545,14 @@ await page.keyboard.press("Enter");
 await page.keyboard.type("B");
 d = await H.doc();
 const beforeIds = blocks(d).map((b) => b.attrs.id);
-await H.tb.getByRole("button", { name: "블록 위로" }).click();
+await (await more(H.tb)).getByRole("button", { name: "블록 위로" }).click();
 d = await H.doc();
 check("S8. move block up swaps order and keeps ids", blocks(d).map(textOf).join("") === "BA" && blocks(d).map((b) => b.attrs.id).join() === [...beforeIds].reverse().join(), blocks(d).map(textOf).join(""));
 
 // S9. 표: 첫 행 머리글 토글, 칸 정렬은 cell.align, 칸 배경
 await H.fresh();
-await H.tb.getByRole("button", { name: "표 넣기" }).click();
-await H.tb.getByRole("button", { name: "가운데 정렬" }).click();
+await (await more(H.tb)).getByRole("button", { name: "표 넣기" }).click();
+await (await more(H.tb)).getByRole("button", { name: "가운데 정렬" }).click();
 await H.main.getByRole("group", { name: "칸 배경" }).getByRole("button", { name: "칸 배경 #DBEAFE" }).click();
 d = await H.doc();
 const table = blocks(d).find((b) => b.type === "table");
@@ -594,7 +564,7 @@ check("S9. table: header row, cell align/background on the cell (paragraph align
 // Y1. YouTube: 주소에서 ID만(시작 시각 버림), 편집 화면 카드는 재생하지 않음
 await H.fresh();
 nextPrompt = ["https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s"];
-await H.tb.getByRole("button", { name: "YouTube 영상" }).click();
+await (await more(H.tb)).getByRole("button", { name: "YouTube 영상" }).click();
 d = await H.doc();
 const embed = blocks(d).find((b) => b.type === "embed");
 check("Y1. YouTube URL becomes embed with 11-char id only (t= dropped)", embed?.attrs?.resourceId === "dQw4w9WgXcQ" && embed.attrs.provider === "youtube", JSON.stringify(embed?.attrs));
@@ -612,7 +582,7 @@ check("Y2. pasted YouTube URL is not auto-promoted to an embed", !blocks(d).some
 // Y3. 알 수 없는 주소는 거절
 await H.fresh();
 nextPrompt = ["https://vimeo.com/123"];
-await H.tb.getByRole("button", { name: "YouTube 영상" }).click();
+await (await more(H.tb)).getByRole("button", { name: "YouTube 영상" }).click();
 d = await H.doc();
 check("Y3. non-YouTube URL refused", !blocks(d).some((b) => b.type === "embed"));
 
@@ -694,7 +664,7 @@ F4: {
 // F5. 단 안 이미지: 단 안에서 파일로 올리거나 도구 막대 '이미지 올리기'(#44, 이미지 패널 대신)로 넣으면 그 단 안에 이미지 블록이 들어가고, 계약대로 저장된다
 F5: {
   await H.fresh();
-  await H.tb.getByRole("combobox", { name: "단 나누기" }).selectOption({ label: "1:1" });
+  await (await more(H.tb)).getByRole("combobox", { name: "단 나누기" }).selectOption({ label: "1:1" });
   await page.keyboard.type("left");
   check("F5. image upload is available inside columns", !(await H.tb.getByRole("button", { name: "이미지 올리기" }).isDisabled()));
   await H.main.getByLabel("본문 이미지 파일").setInputFiles({ name: "왼쪽.png", mimeType: "image/png", buffer: PNG });
@@ -751,9 +721,9 @@ await typeKo("하위");
 await page.keyboard.press("Enter");
 await page.keyboard.press("Enter");
 await page.keyboard.press("Enter");
-await H.tb.getByRole("button", { name: "표 넣기" }).click();
+await (await more(H.tb)).getByRole("button", { name: "표 넣기" }).click();
 await typeKo("칸");
-await H.tb.getByRole("button", { name: "오른쪽 정렬" }).click();
+await (await more(H.tb)).getByRole("button", { name: "오른쪽 정렬" }).click();
 const a1 = await H.blocks();
 const a1types = (a1.doc?.blocks ?? []).map((b) => b.type).join(",");
 const a1cell = a1.doc?.blocks?.find((b) => b.type === "table")?.rows?.[0];
@@ -784,8 +754,8 @@ await editingRegressions(page, H, "chromium");
     await setMock("postRevision=1.1");
   }
 }
-// F1·F2. 선택 툴바: 글자를 선택하면 선택 영역 위에 서식 메뉴가 뜨고, 굵게·글자 크기(pt)가 선택한 글자에만 적용된다.
-// 커서를 옮겨 선택이 풀리면 사라진다. 손가락 입력(모바일)에서는 띄우지 않고 고정 툴바의 글자 크기를 쓴다.
+// F1·F2. 선택 툴바: 글자를 선택하면 선택 영역 위에 서식 메뉴가 뜨고, 굵게·글자 색이 선택한 글자에만 적용된다.
+// 커서를 옮겨 선택이 풀리면 사라진다. 손가락 입력(모바일)에서는 띄우지 않고 고정 툴바를 쓴다.
 F1: {
   await H.fresh();
   await page.keyboard.type("hello world");
@@ -815,30 +785,24 @@ F1: {
   check("F1. double-click selection shows the menu right above the selection", selRect.text === "world" && !!mb && mb.y + mb.height <= selRect.top + 1 && mb.y + mb.height >= selRect.top - 40, `${JSON.stringify(selRect)} ${JSON.stringify(mb)}`);
   const boldWhy = await stableClick(page, menu.getByRole("button", { name: "굵게" }), async () => (await selectedWord()) === "world");
   check("F1. menu bold reachable with \"world\" selected", boldWhy === null, boldWhy ?? "");
-  // 리뷰 round2 M2: 실제로 목록을 눌러 포커스가 메뉴로 옮겨 가도 메뉴·선택이 남고, 키보드로 고른 크기가 선택한 글자에 적용된다
-  const size = menu.getByLabel("글자 크기");
-  const sizeWhy = boldWhy ?? (await stableClick(page, size, async () => (await selectedWord()) === "world"));
-  check("F1. menu size list reachable with \"world\" selected", sizeWhy === null, `${sizeWhy ?? ""} selected=${await selectedWord()}`);
-  // 누르지 못했으면 이어서 키를 보내지 않는다(본문에 키가 들어가 뒤 검사가 연쇄로 틀리지 않게)
-  if (sizeWhy) break F1;
-  check("F1. clicking the size list keeps the menu open", (await menu.count()) === 1);
-  for (let i = 0; i < 6; i++) await page.keyboard.press("ArrowDown");
-  await page.keyboard.press("Enter");
+  if (boldWhy) break F1;
+  // #119 O3·O4: 선택 메뉴에는 글자 크기가 없고, 글자 색은 색 이름으로 고른다
+  check("F1. menu has no font size control (#119 O3)", (await menu.getByLabel("글자 크기").count()) === 0);
+  const redWhy = await stableClick(page, menu.getByRole("button", { name: "글자 색 빨강" }), async () => (await selectedWord()) === "world");
+  check("F1. menu color (named) reachable with \"world\" selected", redWhy === null, redWhy ?? "");
   await page.waitForTimeout(200);
   const runs = (await H.doc()).content[0].content;
   const w = runs.find((n) => n.text === "world");
   const h = runs.find((n) => n.text === "hello ");
-  check("F1·F2. bold and 18pt apply to the selected word only", !!w && w.marks?.some((m) => m.type === "bold") && w.marks?.some((m) => m.type === "textStyle" && m.attrs.fontSize === 18) && !h?.marks?.length, JSON.stringify(runs));
+  check("F1. bold and color apply to the selected word only", !!w && w.marks?.some((m) => m.type === "bold") && w.marks?.some((m) => m.type === "textStyle" && m.attrs.color === "#DC2626") && !h?.marks?.length, JSON.stringify(runs));
   check("F1. the menu stays while the text is still selected", (await menu.count()) === 1);
-  // 크기를 고르면 편집기가 다음 frame에 포커스를 되찾는다. 그 뒤에 커서를 옮긴다
   await page.waitForFunction(() => document.activeElement?.classList.contains("ProseMirror"), null, { timeout: 5000 }).catch(() => {});
   await page.keyboard.press("ArrowRight");
   await menu.waitFor({ state: "detached", timeout: 3000 }).catch(() => {});
   check("F1. collapsing the selection hides the menu", (await menu.count()) === 0, JSON.stringify(await page.evaluate(() => ({ active: `${document.activeElement?.tagName}.${String(document.activeElement?.className).slice(0, 30)}`, sel: String(getSelection()), pm: document.querySelector("main .ProseMirror").editor.state.selection.toJSON() }))));
   const saved = await H.blocks();
   const sr = saved.doc?.blocks?.[0]?.runs ?? [];
-  check("F2. saved run carries the contract mark {fontSize: 18} after bold", saved.problem === 0 && JSON.stringify(sr) === JSON.stringify([{ text: "hello ", marks: [] }, { text: "world", marks: ["bold", { fontSize: 18 }] }]), JSON.stringify(sr));
-  check("F2. editor shows 18pt as 24px", (await H.editor.locator('[data-font-size="18"]').evaluate((el) => getComputedStyle(el).fontSize).catch(() => "")) === "24px");
+  check("F2. saved run carries bold + color", saved.problem === 0 && JSON.stringify(sr) === JSON.stringify([{ text: "hello ", marks: [] }, { text: "world", marks: ["bold", { color: "#DC2626" }] }]), JSON.stringify(sr));
 
   const mctx = await browser.newContext({ isMobile: true, hasTouch: true, viewport: { width: 390, height: 844 } });
   const mp = await mctx.newPage();
@@ -854,7 +818,7 @@ F1: {
   await mp.keyboard.type("touch text");
   await mp.keyboard.press("Shift+Home");
   await mp.waitForTimeout(300);
-  check("F1. touch device: no floating menu, the fixed toolbar keeps font size", (await mh.main.getByRole("toolbar", { name: "선택한 글자 서식" }).count()) === 0 && (await mh.tb.getByLabel("글자 크기").count()) === 1);
+  check("F1. touch device: no floating menu, the fixed toolbar keeps formatting", (await mh.main.getByRole("toolbar", { name: "선택한 글자 서식" }).count()) === 0 && (await mh.tb.getByRole("button", { name: "굵게" }).count()) === 1);
   await mctx.close();
 }
 
@@ -862,7 +826,7 @@ F1: {
 // 열을 넣고 빼면 가중치 길이도 맞춰지고, "같게"는 가중치를 없앤다(균등 = 생략).
 F6: {
   await H.fresh();
-  await H.tb.getByRole("button", { name: "표 넣기" }).click();
+  await (await more(H.tb)).getByRole("button", { name: "표 넣기" }).click();
   await page.keyboard.type("A");
   await H.blocks();
   const tableAttr = async () => (await H.doc()).content.find((b) => b.type === "table")?.attrs?.columnWidths ?? null;
@@ -964,15 +928,35 @@ F6b: {
   check("F6b. the changed weights save as valid canonical weights", saved.problem === 0 && Array.isArray(sw) && sw[0] / sw[1] < 0.5, JSON.stringify(sw));
 }
 
+// O11(#119): 원문에서 확인하지 못한 편집기 동작 — "## " 소제목 단축 입력, "- " 목록(K7에서도 확인), 빈 글 저장 안내, 기본 서식 버튼
+{
+  await H.fresh();
+  await page.keyboard.type("## 소제목 단축");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("- 항목");
+  const d0 = await H.doc();
+  const top = blocks(d0);
+  check("O11. '## ' makes a level-2 heading, '- ' makes a list", top[0]?.type === "heading" && top[0]?.attrs?.level === 2 && top[1]?.type === "bulletList", JSON.stringify(top.map((b) => [b.type, b.attrs?.level])));
+  await H.fresh();
+  await H.main.getByRole("button", { name: "글 저장" }).click();
+  check("O11. empty post save explains what is missing", await appears(H.main.getByText("제목과 본문을 모두 입력해야 저장할 수 있습니다.")));
+  await H.editor.click();
+  await page.keyboard.type("서식 확인");
+  await page.keyboard.press("Shift+Home");
+  await H.tb.getByRole("button", { name: "기울임" }).click();
+  await (await more(H.tb)).getByRole("button", { name: "밑줄" }).click();
+  const marks = (blocks(await H.doc())[0]?.content?.[0]?.marks ?? []).map((m) => m.type).sort().join(",");
+  check("O11. primary and more-row format buttons apply", marks === "italic,underline", marks);
+}
+
 // R1. renderer(저장한 글 화면의 최신 버전): 서식·영상 카드. 누르기 전에는 YouTube 요청 0, 누르면 nocookie 주소의 고정 sandbox iframe
 await H.fresh();
 await page.keyboard.type("굵은 ");
 await page.keyboard.press("Shift+Home");
 await H.tb.getByRole("button", { name: "굵게" }).click();
-await H.tb.getByLabel("글자 크기").selectOption("18");
 await page.keyboard.press("End");
 nextPrompt = ["https://youtu.be/dQw4w9WgXcQ"];
-await H.tb.getByRole("button", { name: "YouTube 영상" }).click();
+await (await more(H.tb)).getByRole("button", { name: "YouTube 영상" }).click();
 await H.main.getByLabel("제목").fill("영상 글");
 await H.main.getByRole("button", { name: "글 저장" }).click();
 await page.waitForURL(/\/write\/[0-9a-f-]{36}\//, { timeout: 15000 });
@@ -980,7 +964,7 @@ const preview = H.main.locator(".prose").first();
 await preview.waitFor({ timeout: 15000 });
 check("R1. saved post renders bold as <strong> and the inactive YouTube card", (await preview.locator("strong").first().innerText().catch(() => "")).trim() === "굵은" && (await preview.getByRole("button", { name: /눌러서 재생/ }).count()) === 1);
 check("R1. no YouTube request before activation (editor + rendered post)", external.length === 0, external.slice(0, 3).join(" "));
-check("F2. renderer draws 18pt as exactly 24px", (await preview.locator("strong span").first().evaluate((el) => el.style.fontSize).catch(() => "")) === "24px");
+// #119 O3: 크기 선택은 없앴다. 저장된 크기(pt)를 그리는 규칙은 renderer 단위 테스트(blocks.test)가 지킨다(D5).
 const firstYt = page.waitForRequest((r) => YT_HOSTS.test(new URL(r.url()).hostname), { timeout: 5000 }).catch(() => null);
 await preview.getByRole("button", { name: /눌러서 재생/ }).click();
 const frame = preview.locator("iframe");
