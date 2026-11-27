@@ -185,7 +185,7 @@ export default function PatManagement() {
             const state = patStatus(pat, now);
             return (
               <li key={pat.id} className="space-y-2 rounded-xl p-4 text-sm ring-1 ring-stone-200">
-                <div className="flex flex-wrap items-baseline justify-between gap-2"><span className="break-all font-medium text-stone-900">{pat.name}</span><span className="flex items-center gap-2 text-xs text-stone-500"><span className={`rounded-full px-2 py-0.5 font-medium ${pat.access === "read" ? "bg-stone-100 text-stone-700" : "bg-indigo-50 text-indigo-700"}`}>{PAT_ACCESS_LABELS[pat.access]}</span>{state === "revoked" ? "폐기됨" : state === "expired" ? "만료됨" : "활성"}</span></div>
+                <div className="flex flex-wrap items-baseline justify-between gap-2"><span className="break-all font-medium text-stone-900">{pat.name}</span><span className="flex items-center gap-2 text-xs text-stone-500"><span className={`rounded-full px-2 py-0.5 font-medium ${pat.access === "read" ? "bg-stone-100 text-stone-700" : "bg-indigo-50 text-indigo-700"}`}>{PAT_ACCESS_LABELS[pat.access]}</span><span>{state === "revoked" ? "폐기됨" : state === "expired" ? "만료됨" : "활성"}</span></span></div>
                 <p className="text-xs text-stone-500">발급 {formatDateTime(pat.issuedAt)} · 만료 {formatDateTime(pat.expiresAt)}</p>
                 <p className="text-xs text-stone-500">마지막 사용: {pat.lastUsedAt ? formatDateTime(pat.lastUsedAt) : "아직 사용하지 않음"}</p>
                 {pat.revokedAt && <p className="text-xs text-stone-500">폐기 {formatDateTime(pat.revokedAt)}</p>}

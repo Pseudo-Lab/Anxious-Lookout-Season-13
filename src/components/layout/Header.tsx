@@ -90,7 +90,8 @@ export default function Header() {
           </nav>
         </div>
         {/* 계정 영역은 폭을 고정해(오른쪽 정렬) 확인 전 자리 표시·로그인 버튼·계정 메뉴가 같은 자리를 차지한다 */}
-        <div data-account-slot="" className="hidden w-44 shrink-0 justify-end @3xl:flex">
+        {/* 높이도 고정한다(확인 전 자리 표시 36px와 계정 버튼 높이가 달라 줄 높이가 1px 바뀌지 않게) */}
+        <div data-account-slot="" className="hidden h-10 w-44 shrink-0 items-center justify-end @3xl:flex">
           <LoginButton />
         </div>
 

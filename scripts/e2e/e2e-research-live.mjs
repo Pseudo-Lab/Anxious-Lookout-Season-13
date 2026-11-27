@@ -572,6 +572,13 @@ check("L9. session persists after reload", (await appears(chatPanel.getByRole("b
   await row.getByLabel("변경 사유").fill("실물 통합 편집자 지정");
   await row.getByRole("button", { name: "적용" }).click();
   check("L13. real membership change applied", await appears(row.getByText("대상 사용자는 다시 로그인해야 합니다")));
+  // #119 L1(리뷰 round3): 승인하면 목록을 다시 읽어 승인 대기 구역을 떠나 승인된 회원 구역에 보인다
+  {
+    const pending = am.getByRole("region", { name: "승인 대기" });
+    const approved = am.getByRole("region", { name: "승인된 회원" });
+    const moved = await approved.getByRole("listitem").filter({ hasText: new RegExp(`${pMe.user.login}\\b`) }).first().waitFor({ timeout: 10000 }).then(() => true, () => false);
+    check("L13. approved account moved out of the pending section", moved && (await pending.getByRole("listitem").filter({ hasText: new RegExp(`${pMe.user.login}\\b`) }).count()) === 0);
+  }
   check("L13. target session revoked (real)", (await P.page.request.get(U("/api/auth/me"))).status() === 401);
   await signIn(P.page);
   const pAfter = await (await P.page.request.get(U("/api/auth/me"))).json();

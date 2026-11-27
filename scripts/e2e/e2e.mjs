@@ -275,7 +275,13 @@ check("F. /write/ shows post writing (not 준비 중)", await appears(page.locat
     release();
     await nav.getByRole("link", { name: "글 쓰기" }).waitFor();
     const after = { home: await box(nav.getByRole("link", { name: "홈" })), list: await box(nav.getByRole("link", { name: "글 목록" })), account: await box(account) };
-    check("F2. A2: menu and account slot keep their place after a delayed session check (800px)", JSON.stringify(before) === JSON.stringify(after) && !!before.home, JSON.stringify({ before, after }));
+    // 계정 칸은 높이까지 고정했다. 반올림 차이만 허용한다(각 좌표·폭 1px 이하).
+    const same = (a, b) => !!a && !!b && a.every((v, i) => Math.abs(v - b[i]) <= 1);
+    check(
+      "F2. A2: menu and account slot keep their place after a delayed session check (800px, ≤1px)",
+      same(before.home, after.home) && same(before.list, after.list) && same(before.account, after.account),
+      JSON.stringify({ before, after })
+    );
     await p.close();
   }
 }

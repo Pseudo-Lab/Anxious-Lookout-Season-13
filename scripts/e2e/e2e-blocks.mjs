@@ -939,7 +939,10 @@ F6b: {
   check("O11. '## ' makes a level-2 heading, '- ' makes a list", top[0]?.type === "heading" && top[0]?.attrs?.level === 2 && top[1]?.type === "bulletList", JSON.stringify(top.map((b) => [b.type, b.attrs?.level])));
   await H.fresh();
   await H.main.getByRole("button", { name: "글 저장" }).click();
-  check("O11. empty post save explains what is missing", await appears(H.main.getByText("제목과 본문을 모두 입력해야 저장할 수 있습니다.")));
+  check(
+    "O11. empty post save explains what is missing",
+    await H.main.getByText("제목과 본문을 모두 입력해야 저장할 수 있습니다.").first().waitFor({ timeout: 8000 }).then(() => true, () => false)
+  );
   await H.editor.click();
   await page.keyboard.type("서식 확인");
   await page.keyboard.press("Shift+Home");

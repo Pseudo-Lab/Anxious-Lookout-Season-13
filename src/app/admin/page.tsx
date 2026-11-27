@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useId, useState, type FormEvent } from "react";
 import type { FetchFailure } from "@/lib/api/client";
 import { useAuth } from "@/hooks/useAuth";
 import { ROLE_LABELS } from "@/lib/auth/api";
@@ -46,12 +46,19 @@ const ACTIONS: Record<
   },
 };
 
-function AccountRow({ initial, selfId }: { initial: AdminAccount; selfId: string }) {
+/** 바꾼 뒤 목록을 다시 불러오므로(두 구역·필터가 서버 상태를 따른다) 완료 안내는 목록 쪽에서 계정별로 들고 있다. */
+interface RowEvents {
+  notice: string | null;
+  onChanged: (accountId: string, notice: string) => void;
+  onStart: (accountId: string) => void;
+}
+
+function AccountRow({ initial, selfId, events }: { initial: AdminAccount; selfId: string; events: RowEvents }) {
   const [account, setAccount] = useState(initial);
   const [action, setAction] = useState<Action | null>(null);
   const [reason, setReason] = useState("");
   const [failure, setFailure] = useState<FetchFailure | null>(null);
-  const [done, setDone] = useState<string | null>(null);
+  const done = events.notice;
   const { run, busy } = useMutation();
 
   const isSelf = account.accountId === selfId;
@@ -68,10 +75,10 @@ function AccountRow({ initial, selfId }: { initial: AdminAccount; selfId: string
     );
     if (res.ok) {
       setAccount(res.data);
-      setDone(`${ACTIONS[action].label} 완료. 대상 사용자는 다시 로그인해야 합니다.`);
       setAction(null);
       setReason("");
       setFailure(null);
+      events.onChanged(account.accountId, `${ACTIONS[action].label} 완료. 대상 사용자는 다시 로그인해야 합니다.`);
     } else {
       setFailure(res.failure);
     }
@@ -106,7 +113,7 @@ function AccountRow({ initial, selfId }: { initial: AdminAccount; selfId: string
               key={a}
               onClick={() => {
                 setAction(a);
-                setDone(null);
+                events.onStart(account.accountId);
                 setFailure(null);
               }}
               aria-label={`${ACTIONS[a].label}: ${account.login}`}
@@ -174,6 +181,9 @@ function AccountSection({
   selfId,
   emptyText,
   highlight = false,
+  notices,
+  onChanged,
+  onStart,
 }: {
   title: string;
   filter: AdminAccountFilter;
@@ -181,9 +191,13 @@ function AccountSection({
   selfId: string;
   emptyText: string;
   highlight?: boolean;
+  notices: Record<string, string>;
+  onChanged: RowEvents["onChanged"];
+  onStart: RowEvents["onStart"];
 }) {
   const list = usePagedList(`admin-accounts:${rev}:${JSON.stringify(filter)}`, (cursor) => listAdminAccounts(cursor, filter));
-  const headingId = `admin-${title}`;
+  // 리뷰 round3: 제목에 공백이 있어 id로 쓰지 않는다
+  const headingId = useId();
   return (
     <section aria-labelledby={headingId} className="space-y-2">
       <h2 id={headingId} className="text-base font-semibold text-stone-900">
@@ -196,7 +210,12 @@ function AccountSection({
           className={`divide-y divide-stone-100 rounded-2xl bg-white shadow-sm ring-1 ${highlight ? "ring-amber-300" : "ring-stone-200/60"}`}
         >
           {list.items.map((a) => (
-            <AccountRow key={`${a.accountId}:${a.version}`} initial={a} selfId={selfId} />
+            <AccountRow
+              key={`${a.accountId}:${a.version}`}
+              initial={a}
+              selfId={selfId}
+              events={{ notice: notices[a.accountId] ?? null, onChanged, onStart }}
+            />
           ))}
         </ul>
       )}
@@ -213,6 +232,20 @@ function AccountSection({
 /** #119 L1·L5: 승인 대기 회원을 맨 위에 따로 모으고, 나머지는 검색·역할로 거른다(서버 필터, issue119 §L1). */
 function AccountList({ selfId }: { selfId: string }) {
   const [rev, setRev] = useState(0);
+  const [notices, setNotices] = useState<Record<string, string>>({});
+  // 권한을 바꾸면 두 구역(승인 대기·승인된 회원)과 건수를 서버에서 다시 읽는다(리뷰 round3)
+  const onChanged = (accountId: string, notice: string) => {
+    setNotices((n) => ({ ...n, [accountId]: notice }));
+    setRev((r) => r + 1);
+  };
+  const onStart = (accountId: string) =>
+    setNotices((n) => {
+      if (!(accountId in n)) return n;
+      const next = { ...n };
+      delete next[accountId];
+      return next;
+    });
+  const rowProps = { notices, onChanged, onStart };
   const [text, setText] = useState("");
   const [q, setQ] = useState("");
   const [role, setRole] = useState<"" | AdminAccount["role"]>("");
@@ -267,6 +300,7 @@ function AccountList({ selfId }: { selfId: string }) {
         selfId={selfId}
         emptyText={filtered ? "조건에 맞는 승인 대기 회원이 없습니다." : "승인을 기다리는 회원이 없습니다."}
         highlight
+        {...rowProps}
       />
       <AccountSection
         title="승인된 회원"
@@ -274,6 +308,7 @@ function AccountList({ selfId }: { selfId: string }) {
         rev={rev}
         selfId={selfId}
         emptyText={filtered ? "조건에 맞는 회원이 없습니다." : "승인된 회원이 없습니다."}
+        {...rowProps}
       />
     </div>
   );

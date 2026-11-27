@@ -1,6 +1,6 @@
 "use client";
 
-import { useDeferredValue, useId, useRef, useState, type FormEvent, type ReactNode, type Ref } from "react";
+import { useDeferredValue, useEffect, useId, useRef, useState, type FormEvent, type ReactNode, type Ref } from "react";
 import type { FetchFailure } from "@/lib/api/client";
 import { fetchUrlMetadata, urlMetadataError, type DocumentInput, type MaterialInput, type UrlMetadata } from "@/lib/research/api";
 import { useAuth } from "@/hooks/useAuth";
@@ -123,7 +123,10 @@ function useUrlAutofill() {
   function done(filled: string[]) {
     setMessage(filled.length ? `채웠습니다: ${filled.join(", ")}. 저장 전에 확인하세요.` : "새로 채울 빈 칸이 없습니다(이미 입력한 값은 바꾸지 않습니다).");
   }
-  return { busy, message, available, run, done };
+  function stale() {
+    setMessage("기다리는 동안 출처 URL이 바뀌어 가져온 결과를 쓰지 않았습니다. 다시 눌러 주세요.");
+  }
+  return { busy, message, available, run, done, stale };
 }
 
 // #119 K2: 서지 종류마다 보통 쓰는 칸만 보인다(예: 웹페이지에는 ISBN·ISSN이 없다). 모르는 종류·기타 문서는 모두 보인다.
@@ -240,29 +243,39 @@ export function MaterialForm({
   const [bibOpen, setBibOpen] = useState(false);
   const autofill = useUrlAutofill();
 
-  /** #119 K3: 출처 페이지의 제목·서지정보로 빈 칸만 채운다(이미 쓴 값은 덮지 않는다). 저장은 하지 않는다. */
+  // 응답을 기다리는 동안 바뀐 입력을 덮지 않도록, 응답 시점의 최신 값을 ref로 본다(리뷰 round3).
+  const latest = useRef({ title, sourceUrl, bibliography });
+  useEffect(() => {
+    latest.current = { title, sourceUrl, bibliography };
+  });
+
+  /** #119 K3: 출처 페이지의 제목·서지정보로 응답 시점에 비어 있는 칸만 채운다. 그사이 출처를 바꿨으면 결과를 버린다. 저장은 하지 않는다. */
   async function fillFromSource() {
     const url = sourceUrl.trim();
     if (!isHttpUrl(url)) return setLocalError("출처 URL은 http:// 또는 https:// 주소여야 합니다.");
     setLocalError(null);
     const meta = await autofill.run(url);
     if (!meta) return;
+    const now = latest.current;
+    if (now.sourceUrl.trim() !== url) return autofill.stale();
     const filled: string[] = [];
-    if (!title.trim() && meta.title) {
+    if (!now.title.trim() && meta.title) {
       setTitle(meta.title.slice(0, LIMITS.title));
       filled.push("제목");
     }
     if (meta.bibliography) {
       const incoming = toBibliographyForm(meta.bibliography);
-      const next = { ...bibliography };
+      const next = { ...now.bibliography };
       for (const key of Object.keys(incoming) as (keyof BibliographyForm)[]) {
         if (!next[key].trim() && incoming[key].trim()) {
           next[key] = incoming[key];
           filled.push(BIB_LABELS[key] ?? key);
         }
       }
-      setBibliography(next);
-      setBibOpen(true);
+      if (filled.some((f) => f !== "제목")) {
+        setBibliography(next);
+        setBibOpen(true);
+      }
     }
     autofill.done(filled);
   }

@@ -321,6 +321,8 @@ function Toolbar({ editor, onPickImage, uploading }: { editor: Editor; onPickIma
         type="button"
         aria-expanded={moreOpen}
         aria-controls={moreId}
+        // 다른 서식 버튼처럼 눌러도 편집기 선택(커서)과 포커스를 잃지 않게 한다
+        onMouseDown={(e) => e.preventDefault()}
         onClick={() => setMoreOpen((v) => !v)}
         className="ml-auto rounded px-2 py-1 text-xs font-medium text-stone-700 hover:bg-stone-100"
       >

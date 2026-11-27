@@ -111,6 +111,12 @@ try {
   await list.getByRole("button", { name: "토큰 폐기: Desktop", exact: true }).click();
   await list.getByRole("button", { name: "폐기 확인: Desktop", exact: true }).click();
   await list.getByText("폐기됨", { exact: true }).waitFor();
+  // #119 M2: 같은 행에 권한 범위와 폐기 상태가 함께 보인다
+  {
+    const row = list.getByRole("listitem").filter({ hasText: "Desktop" });
+    const t = await row.innerText();
+    assert.ok(t.includes("읽기 전용") && t.includes("폐기됨"), t);
+  }
   assert.equal(deletes, 1);
   console.log("PASS F5: first-only memory value/copy, no storage or URL, list has last use and immediate revoke; base-path downloads");
 

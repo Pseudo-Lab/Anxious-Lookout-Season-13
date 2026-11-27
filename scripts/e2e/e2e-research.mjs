@@ -120,6 +120,38 @@ await page.goto(U("/research/material/new/"));
   await main.getByRole("button", { name: "출처에서 제목·서지정보 채우기" }).click();
   await main.getByText(/새로 채울 빈 칸이 없습니다|채웠습니다/).waitFor();
   check("K3. existing values are not overwritten", (await main.getByLabel("제목").inputValue()) === "내가 고친 제목");
+  // 리뷰 round3: 응답을 기다리는 동안 바꾼 입력은 덮지 않고, 출처가 바뀌었으면 결과를 버린다
+  {
+    await main.getByLabel("제목").fill("");
+    let release;
+    const gate = new Promise((r) => (release = r));
+    await page.route("**/api/research/url-metadata", async (route) => {
+      await gate;
+      await route.continue();
+    });
+    await main.getByLabel("출처 URL").fill("https://example.com/slow");
+    await main.getByRole("button", { name: "출처에서 제목·서지정보 채우기" }).click();
+    await main.getByLabel("제목").fill("기다리는 동안 쓴 제목");
+    await main.getByLabel("출처 URL").fill("https://example.com/other");
+    release();
+    await main.getByText("출처 URL이 바뀌어 가져온 결과를 쓰지 않았습니다", { exact: false }).waitFor({ timeout: 8000 }).catch(() => {});
+    check("K3. stale response after a source change is dropped", (await main.getByLabel("제목").inputValue()) === "기다리는 동안 쓴 제목");
+    // 출처는 그대로 두고 응답을 기다리는 동안 제목을 쓰면 그 제목이 남는다
+    let release2;
+    const gate2 = new Promise((r) => (release2 = r));
+    await page.unroute("**/api/research/url-metadata");
+    await page.route("**/api/research/url-metadata", async (route) => {
+      await gate2;
+      await route.continue();
+    });
+    await main.getByLabel("제목").fill("");
+    await main.getByRole("button", { name: "출처에서 제목·서지정보 채우기" }).click();
+    await main.getByLabel("제목").fill("응답 전에 쓴 제목");
+    release2();
+    await main.getByText(/채웠습니다|새로 채울 빈 칸이 없습니다/).first().waitFor({ timeout: 8000 }).catch(() => {});
+    check("K3. value typed while waiting is not overwritten", (await main.getByLabel("제목").inputValue()) === "응답 전에 쓴 제목");
+    await page.unroute("**/api/research/url-metadata");
+  }
   await main.getByLabel("출처 URL").fill("https://blocked.example/x");
   await main.getByRole("button", { name: "출처에서 제목·서지정보 채우기" }).click();
   check("K3. guard error explained", await appears(main.getByText("이 주소는 가져올 수 없습니다", { exact: false })));
