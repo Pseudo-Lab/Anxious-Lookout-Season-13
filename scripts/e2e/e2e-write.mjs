@@ -707,10 +707,16 @@ check(
 }
 
 // #119 B2(D2)·#39: 예전 주소(/write/?id=)는 새 경로로 넘어가고(#조각 유지), 직접 연 글 화면에서 목록 링크(next/link)가 동작한다.
-await page.goto(U(`/write/?id=${postId}#version-history`));
-await page.waitForURL(U(`/write/${postId}/#version-history`), { timeout: 15000 });
-check("WP4b. legacy /write/?id= redirects to /write/<id>/ keeping #hash", true);
-check("WP4b. tab title names the post (#119 A3)", (await page.title()).endsWith("· 내 글 | 초조한 전망대"), await page.title());
+await page.goto(U(`/write/?id=${postId}&keep=two+words#version-history`));
+await page.waitForURL(U(`/write/${postId}/?keep=two+words#version-history`), { timeout: 15000 });
+check("WP4b. legacy /write/?id= redirects to /write/<id>/ keeping other params and #hash", new URL(page.url()).searchParams.get("keep") === "two words");
+{
+  // 글을 불러온 뒤의 탭 제목은 실제 글 제목 + "· 내 글"이다
+  const postTitle = (await api.get(`/research/posts/${postId}`)).latestVersion.title;
+  const want = `${postTitle} · 내 글 | 초조한 전망대`;
+  const ok = await page.waitForFunction((t) => document.title === t, want, { timeout: 15000 }).then(() => true, () => false);
+  check("WP4b. tab title is the post title (#119 A3)", ok, await page.title());
+}
 await page.reload();
 await main.getByRole("link", { name: "← 내 글" }).click();
 check("#39 direct-open post → list link navigates", await page.waitForURL(U("/write/"), { timeout: 10000 }).then(() => true, () => false), page.url());

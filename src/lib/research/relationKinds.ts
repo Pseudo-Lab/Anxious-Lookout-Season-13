@@ -58,10 +58,30 @@ export function readsAsSource(rel: Relation, self: Pick<Endpoint, "type" | "id">
   return rel.source.type === self.type && rel.source.id === self.id;
 }
 
-/** 이 항목 쪽에서 읽는 관계 문구. 기존 자유 텍스트는 ‘기타 (원래 문자열)’. */
+// #119 J3(D6): 예전 자유 텍스트 유형 중 영어 내부 이름으로 남은 것은 읽는 이름으로 보인다(저장 값은 바꾸지 않는다).
+const LEGACY_NAMES: Record<string, string> = {
+  reference: "참고",
+  references: "참고",
+  related: "관련",
+  relates_to: "관련",
+  source: "출처",
+  cites: "인용",
+  supports: "뒷받침",
+  contradicts: "반박",
+  extends: "확장",
+  example: "예시",
+  background: "배경",
+};
+
+/** 예전 유형의 읽는 이름(모르는 영어 이름·자유 텍스트는 그대로). */
+export function legacyName(kind: string): string {
+  return LEGACY_NAMES[kind.trim().toLowerCase().replace(/[\s-]+/g, "_")] ?? kind;
+}
+
+/** 이 항목 쪽에서 읽는 관계 문구. 기존 자유 텍스트는 ‘기타 (읽는 이름)’. */
 export function relationLabel(kinds: RelationKinds, rel: Relation, self: Pick<Endpoint, "type" | "id">): string {
   const kind = kindOf(kinds, rel);
-  if (!kind) return `${kinds.legacyLabel} (${rel.kind})`;
+  if (!kind) return `${kinds.legacyLabel} (${legacyName(rel.kind)})`;
   return readsAsSource(rel, self) ? kind.label : kind.inverseLabel;
 }
 

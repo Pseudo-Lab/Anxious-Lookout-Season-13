@@ -70,24 +70,27 @@ export default function Header() {
 
   return (
     <header ref={header} className="@container sticky top-0 z-50 border-b border-white/30 bg-white/60 backdrop-blur-md">
-      <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
-        {/* Logo */}
-        <Link href="/" className="flex items-center gap-2 text-xl font-bold tracking-tight text-stone-900">
-          <svg className="h-7 w-7 text-indigo-600" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6.115 5.19l.319 1.913A6 6 0 0 0 8.11 10.36L9.75 12l-.387.775c-.217.433-.132.956.21 1.298l1.348 1.348c.21.21.329.497.329.795v1.089c0 .426.24.815.622 1.006l.153.076c.433.217.956.132 1.298-.21l.723-.723a8.7 8.7 0 0 0 2.288-4.042 1.087 1.087 0 0 0-.358-1.099l-1.33-1.108c-.251-.21-.582-.299-.905-.245l-1.17.195a1.125 1.125 0 0 1-.98-.314l-.295-.295a1.125 1.125 0 0 1 0-1.591l.13-.132a1.125 1.125 0 0 1 1.3-.21l.603.302a.809.809 0 0 0 1.086-1.086L14.25 7.5l1.256-.837a4.5 4.5 0 0 0 1.528-1.732l.146-.292M6.115 5.19A9 9 0 1 0 17.18 4.64M6.115 5.19A8.965 8.965 0 0 1 12 3c1.929 0 3.72.607 5.18 1.64" />
-          </svg>
-          {SITE_NAME}
-        </Link>
+      <div className="mx-auto flex max-w-7xl items-center justify-between gap-6 px-6 py-4">
+        {/* #119 A2: 메뉴는 로고 바로 뒤에 왼쪽 정렬한다. 로그인 확인 뒤 붙는 항목(내 연구·글 쓰기)은 끝에 붙으므로 앞 항목이 움직이지 않는다. */}
+        <div className="flex min-w-0 items-center gap-8">
+          <Link href="/" className="flex shrink-0 items-center gap-2 whitespace-nowrap text-xl font-bold tracking-tight text-stone-900">
+            <svg className="h-7 w-7 text-indigo-600" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6.115 5.19l.319 1.913A6 6 0 0 0 8.11 10.36L9.75 12l-.387.775c-.217.433-.132.956.21 1.298l1.348 1.348c.21.21.329.497.329.795v1.089c0 .426.24.815.622 1.006l.153.076c.433.217.956.132 1.298-.21l.723-.723a8.7 8.7 0 0 0 2.288-4.042 1.087 1.087 0 0 0-.358-1.099l-1.33-1.108c-.251-.21-.582-.299-.905-.245l-1.17.195a1.125 1.125 0 0 1-.98-.314l-.295-.295a1.125 1.125 0 0 1 0-1.591l.13-.132a1.125 1.125 0 0 1 1.3-.21l.603.302a.809.809 0 0 0 1.086-1.086L14.25 7.5l1.256-.837a4.5 4.5 0 0 0 1.528-1.732l.146-.292M6.115 5.19A9 9 0 1 0 17.18 4.64M6.115 5.19A8.965 8.965 0 0 1 12 3c1.929 0 3.72.607 5.18 1.64" />
+            </svg>
+            {SITE_NAME}
+          </Link>
 
-        {/* 넓은 탐색: 화면이 아니라 header 폭 기준(공통 대화창이 본문 폭을 줄여도 메뉴가 넘치지 않게) */}
-        <div className="hidden items-center gap-6 @3xl:flex">
-          <nav aria-label="주 메뉴" className="flex items-center gap-5 text-sm font-medium">
+          {/* 넓은 탐색: 화면이 아니라 header 폭 기준(공통 대화창이 본문 폭을 줄여도 메뉴가 넘치지 않게) */}
+          <nav aria-label="주 메뉴" className="hidden items-center gap-5 text-sm font-medium @3xl:flex">
             {navLinks.map((link) => (
-              <Link key={link.href} href={link.href} aria-current={link.current ? "page" : undefined} className={desktopLink}>
+              <Link key={link.href} href={link.href} aria-current={link.current ? "page" : undefined} className={`${desktopLink} whitespace-nowrap`}>
                 {link.label}
               </Link>
             ))}
           </nav>
+        </div>
+        {/* 계정 영역은 폭을 고정해(오른쪽 정렬) 확인 전 자리 표시·로그인 버튼·계정 메뉴가 같은 자리를 차지한다 */}
+        <div data-account-slot="" className="hidden w-44 shrink-0 justify-end @3xl:flex">
           <LoginButton />
         </div>
 

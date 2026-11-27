@@ -13,7 +13,7 @@ const sessions = new Map(); // sid -> { user, csrf }
 // reuse=1: 다음 로그인이 직전 계정(같은 accountId)으로 다시 로그인한다(세션 만료 후 재로그인 검증용).
 // as=<accountId>: 다음 로그인이 그 계정으로 로그인한다.
 // codexRunner: ""면 me에 필드 없음(이전 API), "true"/"false"면 그 값(#10 준비 요청 대상 신호)
-const mode = { me: "normal", health: "normal", nextLogin: "pending", logout: "normal", reuse: "0", as: "", codexRunner: "" };
+const mode = { me: "normal", session: "normal", health: "normal", nextLogin: "pending", logout: "normal", reuse: "0", as: "", codexRunner: "" };
 let lastUser = null;
 const users = new Map(); // accountId -> user
 const calls = []; // 검증용 요청 기록
@@ -81,6 +81,21 @@ async function api(req, res, path, url) {
       "Set-Cookie": `mock_sid=${id}; Path=${BASE}/api; HttpOnly; SameSite=Lax`,
     });
     return res.end();
+  }
+  // #119 B11(issue119 §B11): 비로그인도 200 {user:null, csrfToken:null}. me 모드(503·html502)는 같이 따른다.
+  // session=404는 이 엔드포인트가 없는 이전 API(→ front가 /auth/me로 되돌아감)를 흉내 낸다.
+  if (path === "/auth/session") {
+    if (mode.session === "404") return err(res, 404, "not_found", "Not found");
+    if (mode.me === "503") return err(res, 503, "not_ready", "Service is not ready");
+    if (mode.me === "html502") {
+      res.writeHead(502, { "Content-Type": "text/html" });
+      return res.end("<html>Bad Gateway</html>");
+    }
+    const s = sessions.get(sid(req));
+    res.setHeader("Cache-Control", "no-store");
+    if (!s) return json(res, 200, { user: null, csrfToken: null });
+    const user = mode.codexRunner === "" ? s.user : { ...s.user, codexRunner: mode.codexRunner === "true" };
+    return json(res, 200, { user, csrfToken: s.csrf });
   }
   if (path === "/auth/me") {
     if (mode.me === "503") return err(res, 503, "not_ready", "Service is not ready");
@@ -189,7 +204,7 @@ http
   .createServer((req, res) => {
     const url = new URL(req.url, "http://x");
     if (url.pathname === "/__mock/set") {
-      for (const k of ["me", "health", "nextLogin", "logout", "reuse", "as", "codexRunner"]) if (url.searchParams.has(k)) mode[k] = url.searchParams.get(k);
+      for (const k of ["me", "session", "health", "nextLogin", "logout", "reuse", "as", "codexRunner"]) if (url.searchParams.has(k)) mode[k] = url.searchParams.get(k);
       // #10 실행 환경: runner=<처음 상태|"">, prepare=<동작>, readyMs=<ms>, hint=<retryAfterSeconds>, runnerAll=<모든 계정 상태|"">
       // #16 credHint=0: 운영자 토큰 오류에 안내 간격을 주지 않는다(이전 응답).
       for (const k of ["prepare", "hint", "credHint"]) if (url.searchParams.has(k)) runnerMode[k] = url.searchParams.get(k);

@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useDeferredValue, useId, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { API_ENABLED } from "@/lib/constants";
 import { listPostAuthors, listPostTags, listPublicPosts } from "@/lib/posts/api";
@@ -32,8 +32,17 @@ function Filters() {
     setSeen(current.q);
     setQ(current.q);
   }
-  const tags = useLoad("post-browser-tags", () => listPostTags(null));
+  // 태그는 수가 많을 수 있어 목록 전체를 내려받지 않고 입력한 글자로 찾는다(post-tags ?q=, #119 A7·O10).
+  const [tagText, setTagText] = useState(current.tag);
+  const [seenTag, setSeenTag] = useState(current.tag);
+  if (seenTag !== current.tag) {
+    setSeenTag(current.tag);
+    setTagText(current.tag);
+  }
+  const tagQuery = useDeferredValue(tagText.trim().slice(0, 50));
+  const tags = useLoad(`post-browser-tags:${tagQuery}`, () => listPostTags(null, tagQuery || undefined));
   const authors = useLoad("post-browser-authors", () => listPostAuthors());
+  const tagListId = useId();
 
   function apply(next: Partial<typeof current>) {
     const merged = { ...current, ...next };
@@ -55,7 +64,7 @@ function Filters() {
       aria-label="글 찾기"
       onSubmit={(e) => {
         e.preventDefault();
-        apply({ q: q.trim() });
+        apply({ q: q.trim(), tag: tagText.trim() });
       }}
       className="mb-6 grid gap-3 rounded-xl bg-white p-4 shadow-sm ring-1 ring-stone-200/60 sm:grid-cols-[1fr_auto_auto]"
     >
@@ -78,16 +87,27 @@ function Filters() {
       </div>
       <label className="flex items-center gap-2 text-sm text-stone-700">
         <span className="shrink-0">태그</span>
-        <select value={current.tag} onChange={(e) => apply({ tag: e.target.value })} className={inputClass}>
-          <option value="">전체</option>
-          {/* 고른 태그가 첫 100개 밖이어도 보이게 */}
-          {current.tag && !tagOptions.some((t) => t.tag === current.tag) && <option value={current.tag}>{current.tag}</option>}
+        <input
+          type="search"
+          list={tagListId}
+          value={tagText}
+          maxLength={100}
+          onChange={(e) => {
+            const v = e.target.value;
+            setTagText(v);
+            // 제안 목록에서 고르면(정확히 같은 태그) 바로 적용하고, 지우면 태그 조건을 뺀다
+            if (v === "" || tagOptions.some((t) => t.tag === v)) apply({ q: q.trim(), tag: v });
+          }}
+          placeholder="태그 찾기"
+          className={inputClass}
+        />
+        <datalist id={tagListId}>
           {tagOptions.map((t) => (
             <option key={t.tag} value={t.tag}>
               {t.tag} ({t.count})
             </option>
           ))}
-        </select>
+        </datalist>
       </label>
       <label className="flex items-center gap-2 text-sm text-stone-700">
         <span className="shrink-0">작성자</span>
@@ -106,6 +126,7 @@ function Filters() {
           type="button"
           onClick={() => {
             setQ("");
+            setTagText("");
             apply({ q: "", tag: "", author: "" });
           }}
           className="self-center text-sm font-medium text-indigo-600 hover:text-indigo-800"

@@ -127,7 +127,9 @@ export default function PatManagement() {
           <input id={`${formId}-name`} value={name} onChange={(event) => setName(event.target.value)} maxLength={80} required readOnly={locked} autoComplete="off" className={`${inputClass} mt-1`} />
         </div>
         <div><label htmlFor={`${formId}-expiry`} className="block text-sm text-stone-900">만료 기간(일)</label>
-          <input id={`${formId}-expiry`} type="number" min={1} max={90} step={1} value={expiryDays} onChange={(event) => setExpiryDays(event.target.value)} required readOnly={locked} className={`${inputClass} mt-1`} />
+          {/* #119 M1: 허용 범위를 화면에 보이고 입력과 연결한다 */}
+          <input id={`${formId}-expiry`} type="number" min={1} max={90} step={1} value={expiryDays} onChange={(event) => setExpiryDays(event.target.value)} required readOnly={locked} aria-describedby={`${formId}-expiry-hint`} className={`${inputClass} mt-1`} />
+          <p id={`${formId}-expiry-hint`} className="mt-1 text-xs text-stone-600">1–90일. 기본 30일이며, 지나면 자동으로 쓸 수 없게 됩니다.</p>
         </div>
         <button type="submit" disabled={locked || !user?.isApproved || !csrfToken} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{busy && pending ? "발급 결과 확인 중..." : "API 토큰 발급"}</button>
       </form>
@@ -172,8 +174,8 @@ export default function PatManagement() {
                 <p className="text-xs text-stone-500">마지막 사용: {pat.lastUsedAt ? formatDateTime(pat.lastUsedAt) : "아직 사용하지 않음"}</p>
                 {pat.revokedAt && <p className="text-xs text-stone-500">폐기 {formatDateTime(pat.revokedAt)}</p>}
                 {!pat.revokedAt && (confirmRevoke === pat.id ? (
-                  <div className="space-y-2"><p>‘{pat.name}’ 토큰을 폐기할까요?</p><div className="flex gap-4"><button type="button" disabled={busy} onClick={() => void revoke(pat.id)} className="font-medium text-red-700 underline">폐기 확인</button><button type="button" disabled={busy} onClick={() => setConfirmRevoke(null)} className="text-stone-900 underline">취소</button></div></div>
-                ) : <button type="button" disabled={busy} onClick={() => setConfirmRevoke(pat.id)} className="text-red-700 underline">토큰 폐기</button>)}
+                  <div className="space-y-2"><p>‘{pat.name}’ 토큰을 폐기할까요?</p><div className="flex gap-4"><button type="button" disabled={busy} onClick={() => void revoke(pat.id)} aria-label={`폐기 확인: ${pat.name}`} className="font-medium text-red-700 underline">폐기 확인</button><button type="button" disabled={busy} onClick={() => setConfirmRevoke(null)} className="text-stone-900 underline">취소</button></div></div>
+                ) : <button type="button" disabled={busy} onClick={() => setConfirmRevoke(pat.id)} aria-label={`토큰 폐기: ${pat.name}`} className="text-red-700 underline">토큰 폐기</button>)}
               </li>
             );
           })}

@@ -154,7 +154,7 @@ try {
   assert.ok(!(await page.content()).includes(commenterSecret));
   await list.getByText("Commenter", { exact: true }).waitFor();
   assert.ok(!(await list.innerText()).includes("권한"));
-  await page.route(U("/api/auth/me"), async (route) => {
+  await page.route(U("/api/auth/session"), async (route) => {
     const response = await route.fetch();
     const body = await response.json();
     await route.fulfill({ json: { ...body, user: { ...body.user, isApproved: false } } });

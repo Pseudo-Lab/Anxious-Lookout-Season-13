@@ -43,7 +43,8 @@ const mockCalls = () => fetch(`${ORIGIN}/__mock/calls`).then((r) => r.json());
 const prepares = async () => (await mockCalls()).filter((c) => c.method === "POST" && c.path === "/research/codex/runner");
 const statusReads = async () => (await mockCalls()).filter((c) => c.method === "GET" && c.path === "/research/codex/status").length;
 const messagePosts = async () => (await mockCalls()).filter((c) => c.method === "POST" && /\/research\/sessions\/[^/]+\/messages$/.test(c.path)).length;
-const meReads = async () => (await mockCalls()).filter((c) => c.method === "GET" && c.path === "/auth/me").length;
+// #119 B11: 로그인 상태 조회는 /auth/session(없으면 /auth/me)이다
+const meReads = async () => (await mockCalls()).filter((c) => c.method === "GET" && (c.path === "/auth/me" || c.path === "/auth/session")).length;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const SHOTS = process.env.SHOTS_DIR;
 const TAG = (process.env.EXPECT_SHA ?? "local").slice(0, 7);
@@ -1270,7 +1271,8 @@ await step("N27", async () => {
   await login(ed);
   await setMock("nextLogin=admin");
   const edHeader = ed.locator("header").first();
-  check("N27. editor: no 상태 nav", (await edHeader.getByRole("link", { name: "상태" }).count()) === 0);
+  { const m = edHeader.getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
+  check("N27. editor: no 서비스 상태 in nav or account menu", (await edHeader.getByRole("link", { name: /^(서비스 )?상태$/ }).count()) === 0);
   check("N27. editor: no 서비스 상태 button on home", (await ed.locator("main").getByRole("link", { name: "서비스 상태" }).count()) === 0);
   await ed.goto(U("/status/"));
   check("N27. editor: status page admin-only notice", await appears(ed.getByText("서비스 상태는 관리자만 볼 수 있습니다.")));
@@ -1340,7 +1342,9 @@ await step("N27", async () => {
 
   // 관리자(이 시험의 기본 계정)는 연결 상태와 상태 메뉴를 본다.
   await page.goto(U("/"));
-  check("N27. admin: 상태 nav shown", await appears(page.locator("header").first().getByRole("link", { name: "상태" })));
+  { const m = page.locator("header").first().getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
+  check("N27. admin: 서비스 상태 in account menu (#119 D4)", await appears(page.locator("header").first().getByRole("link", { name: "서비스 상태" })));
+  await page.keyboard.press("Escape");
   await openPanel();
   await chat.getByRole("button", { name: "← 대화 목록" }).click().catch(() => {});
   check("N27. admin: connection status panel shown", await appears(chat.getByText(/테스트 연결|연결됨|환경/).first(), 8000));

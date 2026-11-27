@@ -1009,7 +1009,7 @@ export default function SessionView({ id, onArchived, onBack }: { id: string; on
   const s = result.data;
 
   async function archive() {
-    if (!window.confirm("이 대화를 보관할까요? 목록에서 숨겨지지만 기록은 보존됩니다.")) return;
+    if (!window.confirm("이 대화를 보관할까요? 목록에서 숨겨지지만 기록은 보존되며, 대화 목록의 ‘보관한 대화 보기’에서 되돌릴 수 있습니다.")) return;
     const res = await run(`session:archive:${s.id}:${s.version}`, (ctx) => archiveSession(s.id, s.version, ctx));
     if (res.ok) onArchived(s.id);
     else setArchiveFailure(res.failure);

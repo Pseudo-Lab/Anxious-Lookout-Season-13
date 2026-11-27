@@ -145,7 +145,8 @@ check("setup. material B / document D created", matB.status === 201 && docD.stat
 // R5. 관계(#105 고정 어휘·근거 필수): 방향 없는 자료↔자료(같은 주제), 문서→자료 고정(방향 있는 유형만)
 const isRelationPost = (r) => r.method() === "POST" && new URL(r.url()).pathname.endsWith("/api/research/relations");
 await page.goto(materialAUrl);
-await main.getByLabel("연결할 대상").selectOption({ label: "자료 B" });
+await main.getByRole("combobox", { name: /연결할 (자료|문서) 찾기/ }).fill("자료 B");
+await main.getByRole("option", { name: "자료 B", exact: true }).click(); // #119 J2 검색형 콤보박스
 await main.getByLabel("관계 유형").selectOption("same_topic");
 check("R5. undirected kind has no direction choice", await appears(main.getByText("‘같은 주제’은(는) 방향이 없는 관계입니다.")));
 await main.getByLabel("연결한 이유").fill("같은 사건을 다룬다");
@@ -156,7 +157,8 @@ check("R5. create omits directed (server decides from kind)", undirectedBody.kin
 check("R5. undirected relation listed", await appears(main.getByRole("link", { name: "자료 B" })));
 check("R5. undirected relation grouped as neutral", await appears(main.getByRole("group", { name: "중립" }).getByText("같은 주제", { exact: true })));
 await page.goto(U(`/research/document/${docD.body.id}/`));
-await main.getByLabel("연결할 대상").selectOption({ label: "자료 A" });
+await main.getByRole("combobox", { name: /연결할 (자료|문서) 찾기/ }).fill("자료 A");
+await main.getByRole("option", { name: "자료 A", exact: true }).click(); // #119 J2 검색형 콤보박스
 check(
   "R5. document↔material offers only directed kinds",
   (await main.getByLabel("관계 유형").locator('option[value="same_topic"]').count()) === 0 && (await main.getByLabel("관계 유형").locator('option[value="supports"]').count()) === 1
@@ -207,7 +209,7 @@ check("R5. incoming relation on material A reads inverse", await appears(main.ge
   check("R5b. legacy group listed after polarity groups", JSON.stringify(groupOrder) === JSON.stringify(["지지·확장", "중립", "기타 (유형 미지정)"]), JSON.stringify(groupOrder));
   check("R5b. empty reason flagged", await appears(legacy.getByText("연결한 이유가 비어 있습니다.")));
   await legacy.getByRole("button", { name: "관계 수정: 자료 B" }).click();
-  check("R5b. edit asks to pick a new kind", await appears(legacy.getByText("예전 유형 ‘후속 연구’은(는) 더 이상 쓰지 않습니다.", { exact: false })));
+  check("R5b. edit asks to pick a new kind", await appears(legacy.getByText("예전 유형 ‘후속 연구’ 대신 쓸 유형을 골라 주세요.", { exact: false })));
   const kindSelect = legacy.getByLabel("관계 유형");
   check(
     "R5b. only kinds matching the relation's direction offered",
@@ -298,7 +300,9 @@ async function openBibliography() {
   await page.goto(U("/research/?tab=materials"));
   const rowA = main.getByRole("link", { name: /자료 A/ }).first();
   check("R5w. list shows summary", await appears(rowA.getByText("자료 A 요약")));
-  check("R5w. list shows relation count", await appears(rowA.getByText("관계 3", { exact: false })));
+  // #119 I1: 배지 "연결 3"(설명은 화면 읽기 도구용 글자와 title)
+  check("R5w. list shows relation count badge", (await appears(rowA.getByText("연결 3", { exact: true }))) && (await appears(rowA.getByTitle("연결된 자료·문서 3개"))));
+  check("R5w. list badges explain content kind and version", (await rowA.getByTitle(/^저장 범위: /).count()) === 1 && (await rowA.getByTitle(/^버전 \d+$/).count()) === 1);
 
   // 저장된 CSL 이름(쉼표가 든 기관·성)은 다른 칸만 고쳐도 그대로 다시 보낸다.
   const storedBib = {
@@ -1279,7 +1283,9 @@ async function confirmSingleTurn(label, text) {
   await chat.getByRole("button", { name: "보내기" }).click();
   await chat.getByText("전송 결과를 확인하세요.").waitFor();
   await chat.getByText("모의 응답: 범위 고정 재전송").first().waitFor({ timeout: 15000 });
-  await header.getByRole("link", { name: "상태" }).first().click();
+  // #119 D4: 서비스 상태는 계정 메뉴 안에 있다(클라이언트 이동 유지)
+  { const m = header.getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
+  await header.getByRole("link", { name: "서비스 상태" }).first().click();
   await page.waitForURL(/\/status\/$/);
   check("R22. retry notice: original page is used", await appears(chat.getByText("처음 보낸 화면(이 자료) 기준으로 처리됩니다", { exact: false })));
   await chat.getByRole("button", { name: "다시 보내기" }).click();
@@ -1594,7 +1600,8 @@ let docEUrl;
   await setMock("nextLogin=admin&reuse=0&as=");
   const adm = await newPage();
   await login(adm.page);
-  check("R21. admin sees 관리 nav", await appears(adm.page.locator("header").getByRole("link", { name: "관리" })));
+  { const m = adm.page.locator("header").getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
+  check("R21. admin sees 관리 in account menu (#119 D4)", await appears(adm.page.locator("header").getByRole("link", { name: "관리" })));
   await adm.page.goto(U("/admin/"));
   const am = adm.page.locator("main");
   const rowOf = (login) => am.getByRole("listitem").filter({ hasText: new RegExp(`${login}\\b`) });

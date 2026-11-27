@@ -172,7 +172,8 @@ check("setup. B/D created", matB.status === 201 && docD.status === 201, `${matB.
 
 // L5. 관계
 await page.goto(materialAUrl);
-await main.getByLabel("연결할 대상").selectOption({ label: "실물 자료 B" });
+await main.getByRole("combobox", { name: /연결할 (자료|문서) 찾기/ }).fill("실물 자료 B");
+await main.getByRole("option", { name: "실물 자료 B", exact: true }).click(); // #119 J2 검색형 콤보박스
 // #105 관계 유형은 실제 API의 어휘(GET /research/relation-kinds)에서 온다.
 await main.getByLabel("관계 유형").selectOption("same_topic");
 await main.getByLabel("연결한 이유").fill("같은 사건을 다룬다");
@@ -181,7 +182,8 @@ check("L5. undirected relation via real API", await appears(main.getByRole("link
 check("L5. undirected relation grouped as neutral", await appears(main.getByRole("group", { name: "중립" }).getByText("같은 주제", { exact: true })));
 const docUrl = U(`/research/document/${docD.body.id}/`);
 await page.goto(docUrl);
-await main.getByLabel("연결할 대상").selectOption({ label: "실물 자료 A" });
+await main.getByRole("combobox", { name: /연결할 (자료|문서) 찾기/ }).fill("실물 자료 A");
+await main.getByRole("option", { name: "실물 자료 A", exact: true }).click(); // #119 J2 검색형 콤보박스
 await main.getByLabel("관계 유형").selectOption("supports");
 await main.getByLabel("연결한 이유").fill("문서의 주장 근거");
 // 근거 위치: 실제 버전 ID로 저장되고 버전 번호와 함께 돌아온다.

@@ -25,7 +25,7 @@ describe("excerpt", () => {
     const text = "가나다 ".repeat(50).trim();
     const out = excerpt(text, 20, 30);
     expect(out.endsWith("가나다…")).toBe(true);
-    expect(Array.from(out).length).toBeLessThanOrEqual(31);
+    expect(Array.from(out).length).toBeLessThanOrEqual(30);
   });
 });
 

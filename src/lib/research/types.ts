@@ -323,6 +323,8 @@ export interface SessionSummary {
   scope?: AcceptedScope;
   // #90 메시지 전송(202) 응답에만: 그 턴의 요청 id(중지 대상, 스트림 이벤트의 requestId). 이전 API에는 없다.
   requestId?: string;
+  // #119 N4: 보관한 대화인지. 이전 API에는 없다.
+  archived?: boolean;
 }
 
 export interface MessageItem {

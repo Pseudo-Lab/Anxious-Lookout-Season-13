@@ -70,7 +70,8 @@ export function excerpt(text: string, max = 200, hardMax = 400): string {
   const first = sentences[0].trim();
   const chars = Array.from(first);
   if (chars.length <= hardMax) return first;
-  const head = chars.slice(0, hardMax).join("");
+  // "…"까지 합쳐 hardMax자를 넘지 않는다(issue119 r1)
+  const head = chars.slice(0, hardMax - 1).join("");
   const cut = head.lastIndexOf(" ");
   return `${(cut > 0 ? head.slice(0, cut) : head).trimEnd()}…`;
 }

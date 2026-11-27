@@ -90,9 +90,40 @@ const BIB_TEXT_FIELDS: { key: Exclude<keyof BibliographyForm, "type" | "authors"
   { key: "ISSN", label: "ISSN" },
 ];
 
-/** #105 자료 서지정보 입력(CSL-JSON 부분집합). URL·접근일은 출처 URL·수집 시각을 그대로 쓴다. */
+type BibTextKey = (typeof BIB_TEXT_FIELDS)[number]["key"];
+
+// #119 K2: 서지 종류마다 보통 쓰는 칸만 보인다(예: 웹페이지에는 ISBN·ISSN이 없다). 모르는 종류·기타 문서는 모두 보인다.
+const FIELDS_BY_TYPE: Record<string, BibTextKey[]> = {
+  "article-journal": ["title", "container-title", "volume", "issue", "page", "DOI", "ISSN"],
+  "paper-conference": ["title", "container-title", "publisher", "page", "DOI"],
+  article: ["title", "container-title", "number", "DOI"],
+  book: ["title", "publisher", "volume", "ISBN", "DOI"],
+  chapter: ["title", "container-title", "publisher", "page", "ISBN", "DOI"],
+  report: ["title", "publisher", "number", "DOI"],
+  thesis: ["title", "publisher"],
+  webpage: ["title", "container-title"],
+  "post-weblog": ["title", "container-title"],
+  "article-newspaper": ["title", "container-title", "issue", "page", "ISSN"],
+  "article-magazine": ["title", "container-title", "volume", "issue", "page", "ISSN"],
+  dataset: ["title", "publisher", "number", "DOI"],
+  software: ["title", "publisher", "number", "DOI"],
+  motion_picture: ["title", "container-title", "publisher"],
+  interview: ["title", "container-title"],
+  legislation: ["title", "container-title", "number", "page"],
+};
+
+/** 이 종류에서 보일 칸. 종류에 없는 칸이라도 이미 값이 있으면 보인다(숨겨서 지워지지 않게, 아래에서 알린다). */
+export function bibFieldsFor(type: string, value: Partial<Record<BibTextKey, string>>): { shown: BibTextKey[]; extra: BibTextKey[] } {
+  const all = BIB_TEXT_FIELDS.map((f) => f.key);
+  const wanted = type === "" ? [] : (FIELDS_BY_TYPE[type] ?? all);
+  const extra = all.filter((k) => !wanted.includes(k) && (value[k] ?? "").trim() !== "");
+  return { shown: all.filter((k) => wanted.includes(k) || extra.includes(k)), extra };
+}
+
+/** #105 자료 서지정보 입력(CSL-JSON 부분집합). URL·접근일은 출처 URL·수집 시각을 그대로 쓴다. #119 K1: 서지정보가 없으면 접혀 있다. */
 function BibliographyFields({ value, onChange }: { value: BibliographyForm; onChange: (v: BibliographyForm) => void }) {
   const set = (patch: Partial<BibliographyForm>) => onChange({ ...value, ...patch });
+  const { shown, extra } = bibFieldsFor(value.type, value);
   return (
     <details open={value.type !== ""} className="rounded-lg p-3 ring-1 ring-stone-200">
       <summary className="cursor-pointer text-sm font-medium text-stone-900">서지정보 (선택)</summary>
@@ -114,11 +145,26 @@ function BibliographyFields({ value, onChange }: { value: BibliographyForm; onCh
             <input value={value.issued} onChange={(e) => set({ issued: e.target.value })} placeholder="2024" className={inputClass} />
           </Field>
         </div>
-        <Field label="저자" hint="한 줄에 한 명. 사람은 ‘성, 이름’(예: Kim, Minji), 기관이나 나눌 수 없는 이름은 그대로. 쉼표가 든 기관 이름은 앞에 =(예: =Research, Inc.).">
-          <textarea value={value.authors} onChange={(e) => set({ authors: e.target.value })} rows={3} className={inputClass} />
-        </Field>
+        {/* #119 K4: 안내는 예시 한 줄, 자세한 규칙은 펼쳐 본다 */}
+        <div>
+          <Field label="저자" hint="한 줄에 한 명. 예: Kim, Minji">
+            <textarea value={value.authors} onChange={(e) => set({ authors: e.target.value })} rows={3} className={inputClass} />
+          </Field>
+          <details className="mt-1 text-xs text-stone-600">
+            <summary className="cursor-pointer select-none">저자 입력 규칙</summary>
+            <p className="mt-1">
+              사람은 ‘성, 이름’(예: Kim, Minji 또는 홍, 길동), 기관이나 나눌 수 없는 이름은 그대로 씁니다. 쉼표가 든 기관 이름은 앞에 =를 붙입니다(예: =Research, Inc.).
+            </p>
+          </details>
+        </div>
+        {value.type === "" && <p className="text-xs text-stone-600">서지 종류를 고르면 그 종류에 필요한 칸이 보입니다.</p>}
+        {extra.length > 0 && (
+          <p className="text-xs text-amber-800">
+            이 종류에는 보통 쓰지 않는 칸에 값이 있습니다({extra.map((k) => BIB_TEXT_FIELDS.find((f) => f.key === k)?.label).join(", ")}). 지우지 않으면 그대로 저장됩니다.
+          </p>
+        )}
         <div className="grid gap-3 @lg:grid-cols-2">
-          {BIB_TEXT_FIELDS.map((f) => (
+          {BIB_TEXT_FIELDS.filter((f) => shown.includes(f.key)).map((f) => (
             <div key={f.key} className={f.wide ? "@lg:col-span-2" : undefined}>
               <Field label={f.label}>
                 <input value={value[f.key]} onChange={(e) => set({ [f.key]: e.target.value })} placeholder={f.placeholder} className={inputClass} />
@@ -193,7 +239,8 @@ export function MaterialForm({
         />
       </Field>
       <div className="grid gap-4 @lg:grid-cols-2">
-        <Field label="수집 시각" hint="브라우저 시간대 기준으로 입력하며 UTC로 저장됩니다.">
+        {/* #119 K5: 저장 방식(UTC) 안내는 사용자에게 필요하지 않다 */}
+        <Field label="수집 시각">
           <input
             type="datetime-local"
             value={collectedAt}
@@ -202,7 +249,8 @@ export function MaterialForm({
             className={inputClass}
           />
         </Field>
-        <Field label="저장 범위">
+        {/* #119 K6 */}
+        <Field label="저장 범위" hint="전체 = 원문 전체 · 발췌 = 일부를 옮겨 적음 · 요약 = 내 말로 줄여 적음">
           <select value={contentKind} onChange={(e) => setContentKind(e.target.value as ContentKind)} className={inputClass}>
             {CONTENT_KINDS.map((k) => (
               <option key={k} value={k}>

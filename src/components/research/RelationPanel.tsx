@@ -1,15 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type SetStateAction } from "react";
+import { useEffect, useRef, useState, type Dispatch, type FormEvent, type SetStateAction } from "react";
 import Link from "next/link";
 import type { FetchFailure } from "@/lib/api/client";
 import {
   createRelation,
   deleteRelation,
   getRelationKinds,
-  listDocuments,
   listItemRelations,
-  listMaterials,
   listVersions,
   updateRelation,
   type RelationInput,
@@ -17,12 +15,13 @@ import {
 import { checkEvidence, evidencePayload, nextDraftKey, savedPayload, toDraft, type EvidenceDraft } from "@/lib/research/wikiInput";
 import { useLoad, useMutation } from "@/lib/research/hooks";
 import { usePagedList } from "@/lib/research/usePagedList";
-import { groupRelations, kindChoices, kindOf, readsAsSource, relationLabel, type RelationKind, type RelationKinds } from "@/lib/research/relationKinds";
+import { groupRelations, kindChoices, kindOf, legacyName, readsAsSource, relationLabel, type RelationKind, type RelationKinds } from "@/lib/research/relationKinds";
 import { formatDateTime } from "@/lib/research/format";
 import { ITEM_TYPE_LABELS, LIMITS, type Endpoint, type ItemType, type Relation } from "@/lib/research/types";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import { CharCount } from "@/components/research/ItemForms";
 import { documentPath, materialPath } from "@/lib/routes";
+import TargetCombobox from "@/components/research/TargetCombobox";
 
 export function itemHref(type: ItemType, id: string): string {
   return type === "material" ? materialPath(id) : documentPath(id);
@@ -34,8 +33,9 @@ function otherEnd(rel: Relation, self: Endpoint): Endpoint {
 
 // 방향 기호와 설명(이 항목 기준)
 function directionLabel(rel: Relation, self: Endpoint): { symbol: string; text: string } {
-  if (!rel.directed || rel.direction === "bidirectional") return { symbol: "↔", text: "방향 없음" };
-  return readsAsSource(rel, self) ? { symbol: "→", text: "이 항목 → 대상" } : { symbol: "←", text: "대상 → 이 항목" };
+  // #119 J3: 내부 용어(방향 없음·대상 → 이 항목) 대신 읽는 문장으로
+  if (!rel.directed || rel.direction === "bidirectional") return { symbol: "↔", text: "서로 같은 관계" };
+  return readsAsSource(rel, self) ? { symbol: "→", text: "이 항목에서 상대 항목으로" } : { symbol: "←", text: "상대 항목에서 이 항목으로" };
 }
 
 const fieldClass = "rounded-lg border border-stone-300 px-3 py-1.5 text-sm";
@@ -315,7 +315,11 @@ function RelationRow({
               ) : (
                 <p className="mt-1 text-xs text-amber-800">연결한 이유가 비어 있습니다.</p>
               )}
-              {kinds && !known && <p className="mt-1 text-xs text-amber-800">예전 형식의 유형입니다. 수정할 때 유형을 새로 골라야 합니다.</p>}
+              {kinds && !known && (
+                <p className="mt-1 text-xs text-stone-600" title={`저장된 유형: ${rel.kind}`}>
+                  예전 유형 · 수정할 때 새 유형으로 바꿀 수 있습니다
+                </p>
+              )}
               <EvidenceList rel={rel} self={self} />
             </>
           )}
@@ -342,7 +346,7 @@ function RelationRow({
         <form onSubmit={save} className="space-y-2">
           {!known && (
             <p className="text-xs text-amber-800">
-              예전 유형 ‘{rel.kind}’은(는) 더 이상 쓰지 않습니다. 이 관계의 방향({rel.directed ? "방향 있음" : "방향 없음"})에 맞는 유형을 골라 주세요.
+              예전 유형 ‘{legacyName(rel.kind)}’ 대신 쓸 유형을 골라 주세요.
             </p>
           )}
           <KindSelect
@@ -392,8 +396,8 @@ type DirectionChoice = "out" | "in";
 
 function AddRelationForm({ self, kinds, onAdded }: { self: Endpoint; kinds: RelationKinds; onAdded: () => void }) {
   const [otherType, setOtherType] = useState<ItemType>("material");
-  const [otherId, setOtherId] = useState("");
-  const [filter, setFilter] = useState("");
+  const [otherEndpoint, setOtherEndpoint] = useState<Endpoint | null>(null);
+  const otherId = otherEndpoint?.id ?? "";
   const [kindKey, setKindKey] = useState("");
   const [choice, setChoice] = useState<DirectionChoice>("out");
   const [description, setDescription] = useState("");
@@ -402,18 +406,6 @@ function AddRelationForm({ self, kinds, onAdded }: { self: Endpoint; kinds: Rela
   const [failure, setFailure] = useState<FetchFailure | null>(null);
   const { run, busy } = useMutation();
 
-  const candidates = usePagedList<{ id: string; title: string }>(`candidates:${otherType}`, (cursor) =>
-    otherType === "material" ? listMaterials(cursor) : listDocuments(cursor)
-  );
-  const visible = useMemo(
-    () =>
-      candidates.items.filter(
-        (c) => !(otherType === self.type && c.id === self.id) && c.title.toLowerCase().includes(filter.trim().toLowerCase())
-      ),
-    [candidates.items, otherType, self, filter]
-  );
-  const other = candidates.items.find((c) => c.id === otherId);
-  const otherEndpoint: Endpoint | null = other ? { type: otherType, id: other.id, title: other.title } : null;
 
   // 문서↔자료는 항상 문서가 source이고 방향 있는 유형만 된다.
   const mixed = otherType !== self.type;
@@ -421,9 +413,9 @@ function AddRelationForm({ self, kinds, onAdded }: { self: Endpoint; kinds: Rela
   const kind = choices.find((k) => k.key === kindKey) ?? null;
   const direction: DirectionChoice | null = !kind?.directed ? null : mixed ? (self.type === "document" ? "out" : "in") : choice;
 
-  function changeOther(type: ItemType, id: string) {
+  function changeOther(type: ItemType, next: Endpoint | null) {
     setOtherType(type);
-    setOtherId(id);
+    setOtherEndpoint(next);
     // 바뀐 대상을 가리키던 근거는 뺀다(관계의 두 끝만 가리킬 수 있다).
     setRows((rs) => rs.filter((r) => r.itemId === self.id));
     if (type !== self.type && !kinds.items.find((k) => k.key === kindKey)?.directed) setKindKey("");
@@ -442,7 +434,7 @@ function AddRelationForm({ self, kinds, onAdded }: { self: Endpoint; kinds: Rela
     const input: RelationInput = { source, target, kind: kind.key, description, ...(rows.length ? { evidence: evidencePayload(rows) } : {}) };
     const res = await run(`relation:create:${JSON.stringify(input)}`, (ctx) => createRelation(input, ctx));
     if (res.ok) {
-      setOtherId("");
+      setOtherEndpoint(null);
       setKindKey("");
       setDescription("");
       setRows([]);
@@ -458,41 +450,23 @@ function AddRelationForm({ self, kinds, onAdded }: { self: Endpoint; kinds: Rela
       <div className="flex flex-wrap gap-2">
         <select
           value={otherType}
-          onChange={(e) => changeOther(e.target.value as ItemType, "")}
+          onChange={(e) => changeOther(e.target.value as ItemType, null)}
           aria-label="대상 종류"
           className={fieldClass}
         >
           <option value="material">자료</option>
           <option value="document">문서</option>
         </select>
-        <input
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="제목으로 찾기"
-          aria-label="대상 제목 검색"
-          className={`${fieldClass} min-w-0 flex-1`}
-        />
+        <div className="min-w-0 flex-1">
+          <TargetCombobox
+            type={otherType}
+            exclude={{ type: self.type, id: self.id }}
+            value={otherEndpoint}
+            onChange={(v) => changeOther(otherType, v)}
+            fieldClass={fieldClass}
+          />
+        </div>
       </div>
-      <select
-        value={otherId}
-        onChange={(e) => changeOther(otherType, e.target.value)}
-        required
-        aria-label="연결할 대상"
-        className={`${fieldClass} w-full`}
-        size={Math.min(6, Math.max(2, visible.length))}
-      >
-        {visible.map((c) => (
-          <option key={c.id} value={c.id}>
-            {c.title || "(제목 없음)"}
-          </option>
-        ))}
-      </select>
-      {candidates.failure && <ErrorNotice failure={candidates.failure} prefix="대상 목록을 불러오지 못했습니다." />}
-      {candidates.nextCursor && !candidates.loading && (
-        <button type="button" onClick={() => void candidates.loadMore()} className="text-xs text-indigo-600 hover:text-indigo-800">
-          대상 더 불러오기
-        </button>
-      )}
       <KindSelect
         choices={choices}
         value={kind ? kind.key : ""}
@@ -512,8 +486,8 @@ function AddRelationForm({ self, kinds, onAdded }: { self: Endpoint; kinds: Rela
             <legend className="sr-only">방향</legend>
             {(
               [
-                ["out", `이 항목이 ${kind.label} (이 항목 → 대상)`],
-                ["in", `이 항목이 ${kind.inverseLabel} (대상 → 이 항목)`],
+                ["out", `이 항목이 상대 항목을 ‘${kind.label}’`],
+                ["in", `상대 항목이 이 항목을 ‘${kind.label}’ (이 항목은 ‘${kind.inverseLabel}’)`],
               ] as const
             ).map(([value, text]) => (
               <label key={value} className="flex items-center gap-1.5">
@@ -576,7 +550,7 @@ export default function RelationPanel({ self, editable }: { self: Endpoint; edit
       {groups.map((g) => (
         <div key={g.key} role="group" aria-label={g.label} className="space-y-1">
           <h3 className="text-sm font-medium text-stone-900">
-            {g.label} <span className="text-xs font-normal text-stone-500">{g.items.length}</span>
+            {g.label} <span className="text-xs font-normal text-stone-600">· {g.items.length}개</span>
           </h3>
           <ul className="divide-y divide-stone-100 rounded-lg ring-1 ring-stone-200">
             {g.items.map((rel) => (

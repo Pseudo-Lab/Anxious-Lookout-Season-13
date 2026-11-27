@@ -33,7 +33,7 @@ function StartConversation({ doc }: { doc: PublicSnapshot }) {
         </p>
       ) : status === "authenticated" && user ? (
         // 개인 입력(복구된 제목 포함)은 계정에 묶는다. 계정이 바뀌면 폼을 새로 그려 이전 계정 입력을 버린다.
-        <NewSessionForm key={user.accountId} publicDocumentId={doc.documentId} defaultTitle={doc.title.slice(0, 280)} />
+        <NewSessionForm key={user.accountId} publicDocumentId={doc.documentId} />
       ) : status === "unauthenticated" ? (
         <p className="text-sm text-stone-900">
           <a href={GITHUB_LOGIN_URL} className="font-medium text-indigo-600 hover:text-indigo-800">

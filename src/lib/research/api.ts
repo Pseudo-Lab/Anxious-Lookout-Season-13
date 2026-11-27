@@ -533,6 +533,8 @@ function parseSessionSummary(v: unknown): SessionSummary | null {
   const scope = parseScope(v);
   if (scope) out.scope = scope;
   if (isStr(v.requestId) && UUID_LOWER.test(v.requestId)) out.requestId = v.requestId;
+  // #119 N4(issue119 §N4): 보관 여부. 이전 API에는 없다.
+  if (typeof v.archived === "boolean") out.archived = v.archived;
   return out;
 }
 
@@ -649,17 +651,25 @@ export interface DocumentInput {
   summary?: string | null;
 }
 
-export const listMaterials = (cursor?: string | null, archived = false) =>
-  fetchJson(
-    apiUrl(`/research/materials${listQuery(cursor, archived ? { archived: "true" } : undefined)}`),
-    parsePage(parseMaterialSummary)
-  );
+// #119 I2(issue119 §I2): q = 최신 제목(자료는 원본 주소도) 부분 일치, sort = updated(기본)|created|title|domain(자료만).
+// cursor는 같은 sort에서만 이어 쓸 수 있다(바꾸면 처음부터).
+export type ItemSort = "updated" | "created" | "title" | "domain";
+export interface ItemListOptions {
+  q?: string;
+  sort?: ItemSort;
+}
 
-export const listDocuments = (cursor?: string | null, archived = false) =>
-  fetchJson(
-    apiUrl(`/research/documents${listQuery(cursor, archived ? { archived: "true" } : undefined)}`),
-    parsePage(parseDocumentSummary)
-  );
+const itemQuery = (archived: boolean, opts: ItemListOptions) => ({
+  ...(archived ? { archived: "true" } : {}),
+  ...(opts.q ? { q: opts.q } : {}),
+  ...(opts.sort && opts.sort !== "updated" ? { sort: opts.sort } : {}),
+});
+
+export const listMaterials = (cursor?: string | null, archived = false, opts: ItemListOptions = {}) =>
+  fetchJson(apiUrl(`/research/materials${listQuery(cursor, itemQuery(archived, opts))}`), parsePage(parseMaterialSummary));
+
+export const listDocuments = (cursor?: string | null, archived = false, opts: Omit<ItemListOptions, "sort"> & { sort?: Exclude<ItemSort, "domain"> } = {}) =>
+  fetchJson(apiUrl(`/research/documents${listQuery(cursor, itemQuery(archived, opts))}`), parsePage(parseDocumentSummary));
 
 export const getMaterial = (id: string) => fetchJson(apiUrl(`/research/materials/${enc(id)}`), parseMaterial);
 export const getDocument = (id: string) => fetchJson(apiUrl(`/research/documents/${enc(id)}`), parseDocument);
@@ -825,8 +835,13 @@ export const getCodexStatus = () => fetchJson(apiUrl("/research/codex/status"), 
 export const prepareCodexRunner = (ctx: MutationContext) =>
   mutate("/research/codex/runner", "POST", {}, parseCodexStatus, ctx);
 
-export const listSessions = (cursor?: string | null) =>
-  fetchJson(apiUrl(`/research/sessions${listQuery(cursor)}`), parsePage(parseSessionSummary));
+/** archived: #119 N4 보관한 대화만(기본은 보관하지 않은 대화). */
+export const listSessions = (cursor?: string | null, archived = false) =>
+  fetchJson(apiUrl(`/research/sessions${listQuery(cursor, archived ? { archived: "true" } : undefined)}`), parsePage(parseSessionSummary));
+
+/** #119 N4: 보관한 대화를 되돌린다(owner + CSRF + Idempotency-Key). 404 = 내 보관 대화 아님, 409 = 버전 불일치. */
+export const restoreSession = (id: string, expectedVersion: number, ctx: MutationContext) =>
+  mutate(`/research/sessions/${enc(id)}/restore`, "POST", { expectedVersion }, parseSessionSummary, ctx);
 
 export const getSession = (id: string) => fetchJson(apiUrl(`/research/sessions/${enc(id)}`), parseSessionDetail);
 

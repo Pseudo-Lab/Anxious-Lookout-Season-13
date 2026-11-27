@@ -87,12 +87,12 @@ function AccountDropdown({ user }: { user: AuthUser }) {
         aria-expanded={open}
         aria-controls={panelId}
         onClick={() => setOpen((v) => !v)}
-        className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors hover:bg-stone-100 ${
+        className={`flex max-w-44 items-center gap-2 rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors hover:bg-stone-100 ${
           current ? "border-indigo-300 text-indigo-700" : "border-stone-300 text-stone-900"
         }`}
       >
         <span className="sr-only">계정 메뉴: </span>
-        {user.login}
+        <span className="min-w-0 truncate">{user.login}</span>
         {!user.isApproved && <PendingBadge />}
         <svg aria-hidden="true" className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
@@ -205,7 +205,7 @@ export default function LoginButton({ variant = "dropdown", onNavigate }: { vari
     return (
       <a
         href={GITHUB_LOGIN_URL}
-        className="flex w-fit items-center gap-2 rounded-lg bg-stone-900 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-stone-800"
+        className="flex w-fit items-center gap-2 whitespace-nowrap rounded-lg bg-stone-900 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-stone-800"
       >
         <GitHubIcon className="h-4 w-4" />
         GitHub 로그인

@@ -698,6 +698,16 @@ function handleMutation(owner, method, path, b, user) {
     sessions.set(s.id, s);
     return ok(201, sessionSummary(s));
   }
+  // #119 N4(issue119 §N4): 보관한 내 대화 되돌리기. 404 = 내 보관 대화 아님, 409 = 버전 불일치.
+  if (method === "POST" && (m = /^\/research\/sessions\/([^/]+)\/restore$/.exec(path))) {
+    const s = sessions.get(m[1]);
+    if (!s || s.owner !== owner || !s.archived) return fail(404, "not_found", "Not found");
+    if (b.expectedVersion !== s.version) return fail(409, "conflict", "Version conflict");
+    s.archived = false;
+    s.version++;
+    s.updatedAt = now();
+    return ok(200, sessionSummary(s));
+  }
   if ((m = /^\/research\/sessions\/([^/]+)(\/messages)?$/.exec(path))) {
     const s = sessions.get(m[1]);
     if (!s || s.owner !== owner) return fail(404, "not_found", "Not found");
@@ -972,7 +982,8 @@ function nativeItem(kind) {
 }
 
 function sessionSummary(s) {
-  const out = { id: s.id, title: s.title, state: s.state, createdAt: s.createdAt, updatedAt: s.updatedAt, version: s.version };
+  // #119 N4: summary에 archived
+  const out = { id: s.id, title: s.title, state: s.state, createdAt: s.createdAt, updatedAt: s.updatedAt, version: s.version, archived: !!s.archived };
   if (s.context) out.context = s.context;
   // #9: 가장 최근 접수 요청의 범위(없으면 general/owner_research)
   Object.assign(out, s.scope ?? GENERAL_SCOPE);
@@ -1126,11 +1137,35 @@ function handleRead(owner, path, url) {
     // #105 목록(index)에는 활성 관계 수(양 끝이 모두 보관되지 않은 관계)를 싣는다.
     const activeCount = (id) =>
       [...relations.values()].filter((r) => !r.archived && (r.source.id === id || r.target.id === id) && !items.get(r.source.id).archived && !items.get(r.target.id).archived).length;
+    // #119 I2(issue119 §I2): q = 최신 제목(자료는 sourceUrl도) 대소문자 무시, sort = updated|created|title|domain(자료만), total.
+    const q = url.searchParams.get("q")?.toLowerCase();
+    const sort = url.searchParams.get("sort") ?? "updated";
+    if (!["updated", "created", "title", "domain"].includes(sort) || (sort === "domain" && type !== "material"))
+      return fail(422, "validation_error", "Invalid sort", { fields: [{ path: "query.sort", message: "invalid" }] });
+    const host = (u) => {
+      try {
+        return new URL(u).host.toLowerCase();
+      } catch {
+        return null;
+      }
+    };
+    const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+    const order = {
+      updated: byUpdated,
+      created: (a, b) => cmp(b.createdAt, a.createdAt),
+      title: (a, b) => cmp(a.title, b.title) || cmp(a.id, b.id),
+      domain: (a, b) => {
+        const ha = host(a.sourceUrl), hb = host(b.sourceUrl);
+        if (ha === null || hb === null) return ha === hb ? cmp(a.id, b.id) : ha === null ? 1 : -1;
+        return cmp(ha, hb) || cmp(a.id, b.id);
+      },
+    }[sort];
     const list = [...items.values()]
       .filter((i) => i.owner === owner && i.type === type && i.archived === archived)
-      .sort(byUpdated)
-      .map((i) => ({ ...summary(i), relationCount: activeCount(i.id) }));
-    return ok(200, page(list, url));
+      .map((i) => ({ ...summary(i), relationCount: activeCount(i.id) }))
+      .filter((i) => !q || i.title.toLowerCase().includes(q) || (type === "material" && (i.sourceUrl ?? "").toLowerCase().includes(q)))
+      .sort(order);
+    return ok(200, { ...page(list, url), total: list.length });
   }
   if ((m = /^\/research\/(materials|documents)\/([^/]+)(?:\/(versions|relations)(?:\/([^/]+))?)?$/.exec(path))) {
     const item = owned(m[2], owner, m[1] === "materials" ? "material" : "document");
@@ -1174,7 +1209,9 @@ function handleRead(owner, path, url) {
     return ok(200, researchMode.codex === "fixture" ? { available: true, reason: null, verification: "fixture" } : { available: false, reason: "not_configured", verification: "unverified" });
   }
   if (path === "/research/sessions") {
-    const list = [...sessions.values()].filter((s) => s.owner === owner && !s.archived).sort(byUpdated).map(sessionSummary);
+    // #119 N4: ?archived=true는 보관한 대화만
+    const archivedOnly = url.searchParams.get("archived") === "true";
+    const list = [...sessions.values()].filter((s) => s.owner === owner && !!s.archived === archivedOnly).sort(byUpdated).map(sessionSummary);
     return ok(200, page(list, url));
   }
   if ((m = /^\/research\/sessions\/([^/]+)\/research-calls$/.exec(path))) {
