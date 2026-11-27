@@ -1069,12 +1069,13 @@ export const fetchUrlMetadata = (url: string, csrfToken: string) =>
 export function urlMetadataError(failure: FetchFailure): string {
   if (failure.kind === "http") {
     switch (failure.code) {
+      // issue119 r2: 이름이 없거나 내부 주소라는 뜻을 비치지 않는 한 문장(내부 이름 탐색 방지)
       case "url_not_allowed":
-        return "이 주소는 가져올 수 없습니다(공개 인터넷의 http·https 주소만 됩니다).";
+        return "이 주소는 가져올 수 없습니다. 직접 입력해 주세요.";
       case "validation_error":
         return "출처 URL 형식을 확인해 주세요.";
       case "unsupported_content":
-        return "웹페이지(HTML)가 아니라 정보를 읽지 못했습니다. 직접 입력해 주세요.";
+        return "웹페이지(HTML)가 아니거나 읽을 수 없는 형식이라 정보를 가져오지 못했습니다. 직접 입력해 주세요.";
       case "fetch_failed":
         return "페이지를 불러오지 못했습니다(응답 없음·오류·너무 많은 이동). 직접 입력해 주세요.";
       case "rate_limited":
