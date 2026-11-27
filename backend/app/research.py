@@ -808,6 +808,8 @@ def register_research(app, sessions, settings, current_session, error):
     register_conversations(app, authorized, sessions, settings, response, write, current_session)
     from .pat_management import register as register_pats
     register_pats(app, sessions, settings, current_session, response)
+    from .url_metadata import register as register_url_metadata
+    register_url_metadata(app, authorized, settings, response)
     from .research_rate import install as install_research_rate
     install_research_rate(app, sessions, settings)
     from .pat_distribution import register as register_pat_distribution
