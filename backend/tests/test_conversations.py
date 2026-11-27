@@ -254,3 +254,31 @@ def test_ambiguous_dispatch_failure_does_not_auto_retry_or_release_active_turn(c
     assert client.post(root + "/messages", json=body, headers=headers(auth, key)).status_code == 202
     assert runner.count == 1
     assert client.post(root + "/messages", json={"text": "new", "expectedVersion": current["version"]}, headers=headers(auth)).status_code == 409
+
+
+def test_issue119_archive_is_listed_separately_and_restorable(client, admin):
+    """#119 N4 / D8: archive hides, ?archived=true lists, restore brings the conversation back; never another owner's."""
+    _, auth = identity(client, admin)
+    row = create_session(client, auth)
+    assert row["archived"] is False
+    root = "/api/research/sessions/" + row["id"]
+    archived = client.request("DELETE", root, json={"expectedVersion": row["version"]}, headers=headers(auth))
+    assert archived.status_code == 200 and archived.json()["archived"] is True
+    assert row["id"] not in [item["id"] for item in client.get("/api/research/sessions").json()["items"]]
+    hidden = client.get("/api/research/sessions", params={"archived": "true"}).json()["items"]
+    assert [item["id"] for item in hidden] == [row["id"]] and hidden[0]["archived"] is True
+    stale = client.post(root + "/restore", json={"expectedVersion": row["version"]}, headers=headers(auth))
+    assert stale.status_code == 409
+    key = str(uuid.uuid4())
+    restored = client.post(root + "/restore", json={"expectedVersion": archived.json()["version"]}, headers=headers(auth, key))
+    assert restored.status_code == 200 and restored.json()["archived"] is False
+    assert restored.json()["version"] == archived.json()["version"] + 1
+    replay = client.post(root + "/restore", json={"expectedVersion": archived.json()["version"]}, headers=headers(auth, key))
+    assert replay.status_code == 200 and replay.json() == restored.json()
+    assert client.get(root).status_code == 200
+    assert row["id"] in [item["id"] for item in client.get("/api/research/sessions").json()["items"]]
+    assert client.post(root + "/restore", json={"expectedVersion": restored.json()["version"]}, headers=headers(auth)).status_code == 404
+    client.request("DELETE", root, json={"expectedVersion": restored.json()["version"]}, headers=headers(auth))
+    _, other = identity(client, admin, number="222119")
+    assert client.post(root + "/restore", json={"expectedVersion": restored.json()["version"] + 1}, headers=headers(other)).status_code == 404
+    assert client.get("/api/research/sessions", params={"archived": "true"}).json()["items"] == []

@@ -299,7 +299,7 @@ def sync_running(sessions, runner, owner, *, seconds=SYNC_SECONDS, clock=None):
 
 def summary(row):
     metadata = request_metadata(row)
-    return {"id": str(row.id), "title": row.title, "state": row.state, "version": row.version,
+    return {"id": str(row.id), "title": row.title, "state": row.state, "version": row.version, "archived": bool(row.archived),
             "createdAt": stamp(row.created_at), "updatedAt": stamp(row.updated_at),
             **scope_summary(metadata["scope"] if metadata else None),
             "context": {"documentId": row.context["documentId"], "publicationId": row.context["id"], "title": row.context["title"]} if row.context else None}
@@ -602,10 +602,10 @@ def register_conversations(app, authorized, sessions, settings, response, write,
             return response(connection_status(store.owner))
 
     @app.get(prefix + "/sessions")
-    def listing(request: Request, limit: int = 30, cursor: str | None = None):
+    def listing(request: Request, limit: int = 30, cursor: str | None = None, archived: bool = False):
         with authorized(request) as store:
             require_schema(store)
-            query = select(Conversation).where(Conversation.owner_id == store.owner, Conversation.archived.is_(False))
+            query = select(Conversation).where(Conversation.owner_id == store.owner, Conversation.archived.is_(archived))
             rows = store.db.scalars(page_query(query, Conversation, limit, cursor)).all()
             return response({"items": [summary(row) for row in rows[:limit]],
                              "nextCursor": encode_cursor(rows[limit - 1]) if len(rows) > limit else None})
@@ -813,6 +813,23 @@ def register_conversations(app, authorized, sessions, settings, response, write,
                 row.updated_at = datetime.now(timezone.utc)
                 store.db.flush()
                 return {"id": str(row.id), "archived": True, "version": row.version}
+            return write(store, request, Expected, body, action)
+
+    @app.post(prefix + "/sessions/{identity}/restore")
+    def restore(identity: uuid.UUID, body: dict, request: Request):
+        """#119 N4: undo an archive. No grant comes back: archive cleared the tool token and revoked the research
+        grants, and every later message issues its own."""
+        with authorized(request, True) as store:
+            require_schema(store)
+            def action(parsed):
+                row = store.db.scalar(select(Conversation).where(Conversation.id == identity, Conversation.owner_id == store.owner,
+                                      Conversation.archived.is_(True)).with_for_update())
+                if row is None:
+                    fail("not_found", "Not found", 404)
+                Store.expect(row, parsed.expectedVersion)
+                row.archived, row.version, row.updated_at = False, row.version + 1, datetime.now(timezone.utc)
+                store.db.flush()
+                return summary(row)
             return write(store, request, Expected, body, action)
 
     @app.post(settings.base_path + "/api/internal/research/tools")
