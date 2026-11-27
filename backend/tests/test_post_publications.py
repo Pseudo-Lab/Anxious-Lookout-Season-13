@@ -292,16 +292,24 @@ def test_issue119_post_authors_and_filters_on_postgresql(client, admin):
 
 
 def test_issue119_related_for_seeded_posts_with_null_author_login(client, admin):
-    """review major (bd3cbbb): seeded releases have author.login null; PostRef keeps both keys, login may be null."""
-    seeds = ('welcome-to-observatory', 'understanding-transformer-architecture', 'docker-basics-for-developers')
-    live = [slug for slug in seeds if client.get('/api/public/posts/'+slug).status_code == 200]
-    assert live, 'seeded legacy releases are expected in a fresh test database'
-    refs = []
-    for slug in live:
-        reply = client.get('/api/public/posts/'+slug+'/related')
-        assert reply.status_code == 200, reply.text
-        value = reply.json()
-        refs += [ref for ref in [value['previous'], value['next'], *value['sameTag']] if ref is not None]
-    assert refs and all(set(ref['author']) == {'login', 'name'} for ref in refs)
-    assert any(ref['author']['login'] is None for ref in refs if ref['slug'] in seeds)
-    assert all(item['login'] is not None for item in client.get('/api/public/post-authors').json()['items'])
+    """review major (bd3cbbb): seeded releases have author.login null; PostRef keeps both keys, login may be null.
+
+    review r2: the admin fixture truncates accounts (CASCADE removes the ownerless seed rows), so this test does not
+    rely on the seeds. It gives one of its own releases the seed author shape (asserted by the 0006 seed test above:
+    snapshot author.login null) and reads it back through every path that reports authors."""
+    _, auth = identity(client, admin, number='119002')
+    tag = 'seedlike-'+uuid.uuid4().hex[:8]
+    seeded = publish(client, auth, commit(client, auth, make_draft(client, auth, title='Seed-like', tags=[tag])))
+    later = publish(client, auth, commit(client, auth, make_draft(client, auth, title='Later', tags=[tag])))
+    with admin.begin() as db:
+        db.execute(text('''UPDATE research.post_publications SET snapshot=jsonb_set(snapshot,'{author}',
+            '{"login": null, "name": "초조한 전망대"}'::jsonb) WHERE id=:id'''), {'id': seeded['id']})
+    assert client.get('/api/public/posts/'+seeded['slug']).json()['author'] == {'login': None, 'name': '초조한 전망대'}
+    value = client.get('/api/public/posts/'+later['slug']+'/related').json()
+    seed_refs = [ref for ref in [value['previous'], *value['sameTag']] if ref and ref['slug'] == seeded['slug']]
+    assert len(seed_refs) == 2 and all(ref['author'] == {'login': None, 'name': '초조한 전망대'} for ref in seed_refs)
+    back = client.get('/api/public/posts/'+seeded['slug']+'/related').json()
+    assert back['next']['slug'] == later['slug'] and set(back['next']['author']) == {'login', 'name'}
+    authors = client.get('/api/public/post-authors').json()['items']
+    assert all(item['login'] is not None for item in authors)
+    assert {'login': later['author']['login'], 'count': 1} in authors  # the seed-like release is not counted for anyone
