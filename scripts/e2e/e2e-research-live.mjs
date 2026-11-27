@@ -312,6 +312,8 @@ const publicUrl = U(`/public/document/${docD.body.id}/`);
 const chatPanel = page.locator("#chat-panel");
 await page.goto(publicUrl);
 await main.getByLabel("새 대화 제목").waitFor();
+// #119 N1: 제목 기본값(문서 제목)은 없다. 첫 질문을 적어야 '새 대화'를 누를 수 있다.
+await main.getByLabel("새 대화 제목").fill("이 공개 문서의 요점은?");
 await main.getByRole("button", { name: "새 대화" }).click();
 // #94: 대화 화면에는 시작 맥락 줄을 표시하지 않는다. 맥락이 저장됐는지는 아래에서 API로 확인한다.
 check("L8b. session opened from public document", await appears(chatPanel.getByLabel("메시지")));
@@ -322,6 +324,8 @@ const publicSessionId = await page.evaluate(() => {
 });
 check("L8b. new public session opened in panel", !!publicSessionId, String(publicSessionId));
 check("L8b. session context from public document stored (API)", !!(await api.get(`/research/sessions/${publicSessionId}`)).body?.context);
+check("L8b. title comes from the first question (N1)", (await api.get(`/research/sessions/${publicSessionId}`)).body?.title === "이 공개 문서의 요점은?");
+check("L8b. first question is in the composer (N1)", (await chatPanel.getByLabel("메시지").inputValue()) === "이 공개 문서의 요점은?");
 const publicSessionUrl = U(`/research/session/?id=${publicSessionId}`);
 
 // L8c. 공개 중 문서를 보관해도 철회할 수 있다(리뷰 F1): 보관 → 철회 버튼 유지 → 철회 → 익명 404
