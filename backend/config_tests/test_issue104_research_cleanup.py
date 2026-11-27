@@ -76,7 +76,7 @@ def test_pre104_ack_loss_retry_matches_name_expiry_without_reissuing_or_backfill
         assert replay.status_code==200,replay.text
         value=replay.json()
         assert value['credential']['id']==identity and value['token'] is None and not value['secretAvailable'] and value['replayed']
-        assert set(value['credential'])=={'id','name','issuedAt','expiresAt','revokedAt','lastUsedAt'}
+        assert set(value['credential'])=={'id','name','access','issuedAt','expiresAt','revokedAt','lastUsedAt'}
     assert row.scope==old_scope and issuance.fingerprint==previous and len(db.rows)==len(db.issuances)==1
     for changed in ({'name':'different','expiryDays':30},{'name':'Legacy token','expiryDays':31}):
         assert client.post('/api/research/pats',json=changed,headers=headers).status_code==409

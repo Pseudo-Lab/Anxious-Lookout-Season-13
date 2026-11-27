@@ -60,6 +60,10 @@ export function CodexStatusView({ result }: { result: FetchResult<CodexStatus> |
   </Notice>;
   return <Notice tone={s.verification === "fixture" ? "warn" : "info"}>
     {s.verification === "fixture" ? "테스트 연결" : s.verification === "unverified" ? "연결됨 · 응답 미확인" : "연결됨"}
+    {/* #119 N2: 상태 뜻 */}
+    {s.verification === "unverified" && (
+      <span className="block text-xs">실행 환경에 연결되었지만 아직 실제 답변으로 확인하지 않았습니다. 질문을 보내면 확인됩니다.</span>
+    )}
     {s.accessExpiresAt && <span className="block text-xs">기한: {formatDateTime(s.accessExpiresAt)}까지</span>}
     {s.remainingAdmissions !== undefined && <span className="block text-xs">남은 요청: {s.remainingAdmissions}</span>}
   </Notice>;

@@ -21,23 +21,28 @@ import PostMetaDiff from "./PostMetaDiff";
 
 // #28 발행: 버전을 골라 미리보기 → 현재 공개본과 비교 → 발행. 발행본은 그 버전의 스냅샷이며 이후 편집과 무관하다.
 
-function Preview({ preview }: { preview: PostPublicationPreview }) {
+/**
+ * #119 F4(issue119 §F4): 독자에게는 지금 공개 중인 바탕 문서만 보인다(비공개 문서는 제목도 보이지 않고, 나중에 공개하면 그때 링크된다).
+ * authorDocs: 현재 공개본의 작성자용 연결 문서(비공개 포함, Post.publication.documents). 없으면(이전 API) 공개 응답의 문서로 비교한다.
+ */
+function Preview({ preview, authorDocs }: { preview: PostPublicationPreview; authorDocs?: { id: string }[] }) {
   const [mode, setMode] = useState<"diff" | "page">(preview.currentPublication ? "diff" : "page");
   const cur = preview.currentPublication;
+  const publicDocs = preview.documents.filter((d) => d.publicUrl);
   const privateDocs = preview.documents.filter((d) => !d.publicUrl);
   return (
     <div className="space-y-3">
       {preview.documents.length > 0 && (
         <div className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900 ring-1 ring-amber-200">
-          <p className="font-medium">함께 공개되는 문서 제목 ({preview.documents.length})</p>
+          <p className="font-medium">바탕이 된 참고 문서 ({preview.documents.length})</p>
           <p className="mt-1 text-xs">
-            연결 문서의 <strong>제목</strong>은 공개 글의 ‘바탕이 된 참고 문서’에 보입니다. 문서 본문은 공개되지 않으며, 공개 문서만 링크됩니다.
-            {privateDocs.length > 0 && ` 공개하지 않은 문서 ${privateDocs.length}개도 제목은 보입니다.`}
+            공개 문서는 공개 글의 ‘바탕이 된 참고 문서’에 <strong>제목과 링크</strong>로 보입니다. 문서 본문은 글에 들어가지 않습니다.
+            {privateDocs.length > 0 && ` 공개하지 않은 문서 ${privateDocs.length}개는 독자에게 보이지 않으며, 내 연구에서 공개하면 링크됩니다.`}
           </p>
           <ul className="mt-2 space-y-0.5 text-xs">
             {preview.documents.map((d) => (
               <li key={d.id}>
-                · {d.title || "(제목 없음)"} — {d.publicUrl ? "공개 문서로 링크" : "제목만 표시(비공개 문서)"}
+                · {d.title || "(제목 없음)"} — {d.publicUrl ? "공개 문서로 링크" : "독자에게 숨김(비공개 문서 · 공개하면 링크됩니다)"}
               </li>
             ))}
           </ul>
@@ -75,7 +80,8 @@ function Preview({ preview }: { preview: PostPublicationPreview }) {
             before={{
               ...cur,
               coverImageId: cur.coverImageUrl,
-              documentIds: cur.documents.map((d) => d.id),
+              // 저장된 연결끼리 비교한다(앞: 현재 공개본의 작성자용 연결, 뒤: 이번 버전의 연결)
+              documentIds: (authorDocs ?? cur.documents).map((d) => d.id),
               materialIds: cur.materials.map((m) => m.id),
               materialTitles: Object.fromEntries(cur.materials.map((m) => [m.id, m.title])),
             }}
@@ -97,7 +103,8 @@ function Preview({ preview }: { preview: PostPublicationPreview }) {
               content: preview.content,
               tags: preview.tags,
               coverImageUrl: preview.images.find((i) => i.id === preview.coverImageId)?.url ?? null,
-              documents: preview.documents,
+              // 독자에게 보이는 그대로(공개 문서만)
+              documents: publicDocs,
               materials: preview.materials,
               author: { name: preview.author.login },
               publishedAt: null,
@@ -189,7 +196,15 @@ export default function PublishPanel({ post, onChanged }: { post: Post; onChange
           {pub.versionId !== post.latestVersion.id && <span className="ml-1 text-xs text-amber-800">(최신 버전 v{post.latestVersion.number}은 아직 발행하지 않았습니다)</span>}
         </p>
       ) : (
-        <p className="text-sm text-stone-900">발행하지 않은 글입니다. 내 글 목록에서만 보입니다.</p>
+        <>
+          <p className="text-sm text-stone-900">발행하지 않은 글입니다. 내 글 목록에서만 보입니다.</p>
+          {/* #119 O7(PM: #109의 예외): 발행할 때 나갈 주소를 링크 없이 보인다. 발행 후에는 위 '공개 글 보기' 링크다. */}
+          {post.latestVersion.slug && (
+            <p className="text-xs text-stone-600">
+              발행하면 이 주소로 공개됩니다: <span className="font-mono">/posts/{post.latestVersion.slug}/</span>
+            </p>
+          )}
+        </>
       )}
       {post.archived ? (
         <p className="text-xs text-stone-500">삭제한 글은 발행할 수 없습니다.</p>
@@ -227,7 +242,7 @@ export default function PublishPanel({ post, onChanged }: { post: Post; onChange
       )}
       {preview && preview.versionId === versionId && (
         <div className="space-y-3">
-          <Preview preview={preview} />
+          <Preview preview={preview} authorDocs={post.publication?.documents} />
           {!preview.publishable && (
             <Notice tone="warn">이 버전은 지금 발행할 수 없습니다(연결 문서·이미지 확인 필요). 연결을 고친 새 버전을 저장한 뒤 다시 미리보세요.</Notice>
           )}

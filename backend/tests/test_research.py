@@ -292,3 +292,55 @@ def test_incomplete_schema_or_wrong_privileges_rejected_without_repair(client, a
         with admin.begin() as db:
             db.execute(text(repair))
     assert client.get("/api/research/health").status_code == 200
+
+
+def test_issue119_list_search_sort_total_and_sort_bound_cursors(client, admin):
+    """#119 I2/I3/J2: q over latest title (and material URL), sort orders with their own cursors, total."""
+    _, auth = identity(client, admin, number="119119")
+    made = [create(client, auth, title=title, sourceUrl=url) for title, url in (
+        ("Beta 50% report", "https://B.example.org/x"), ("alpha", "https://a.example.com/y"),
+        ("Gamma", "https://a.example.com/z"), ("Delta", "https://c.example.net/"))]
+    root = "/api/research/materials"
+    everything = client.get(root, params={"limit": 2}).json()
+    assert everything["total"] == 4 and len(everything["items"]) == 2 and everything["nextCursor"]
+    assert client.get(root, params={"q": "50%"}).json()["total"] == 1
+    assert {item["title"] for item in client.get(root, params={"q": "A.EXAMPLE.COM"}).json()["items"]} == {"alpha", "Gamma"}
+    def walk(sort):
+        titles, cursor = [], None
+        while True:
+            page = client.get(root, params={"sort": sort, "limit": 1, **({"cursor": cursor} if cursor else {})})
+            assert page.status_code == 200, page.text
+            titles += [item["title"] for item in page.json()["items"]]
+            cursor = page.json()["nextCursor"]
+            if not cursor:
+                return titles, page.json()["total"]
+    assert walk("title") == (["Beta 50% report", "Delta", "Gamma", "alpha"], 4)  # COLLATE "C": upper before lower
+    assert walk("created") == ([value["title"] for value in reversed(made)], 4)
+    domains, _ = walk("domain")
+    assert domains[:2] in (["alpha", "Gamma"], ["Gamma", "alpha"]) and domains[2:] == ["Beta 50% report", "Delta"]  # b.example.org (lowercased), c.example.net
+    title_cursor = client.get(root, params={"sort": "title", "limit": 1}).json()["nextCursor"]
+    assert client.get(root, params={"sort": "created", "cursor": title_cursor}).status_code == 422
+    assert client.get(root, params={"cursor": title_cursor}).status_code == 422
+    assert client.get("/api/research/documents", params={"sort": "domain"}).status_code == 422
+    assert client.get(root, params={"sort": "nope"}).status_code == 422
+
+
+def test_issue119_long_titles_and_ipv6_hosts_page_through_every_sort(client, admin):
+    """review r1 (d0e8a3d): a 300-character Korean title cursor must be accepted; IPv6 hosts sort as whole hosts."""
+    _, auth = identity(client, admin, number="119120")
+    root = "/api/research/materials"
+    for title, url in (("가" * 299 + "나", "https://[2001:db8::3]/c"), ("가" * 300, "https://[2001:db8::1]:8443/a"),
+                       ("\U0001F600" * 300, "https://[2001:db8::2]/b"), ("plain", "https://[2001:db8::1]/again")):
+        create(client, auth, title=title, sourceUrl=url)
+    def walk(sort):
+        seen, cursor = [], None
+        while True:
+            page = client.get(root, params={"sort": sort, "limit": 1, **({"cursor": cursor} if cursor else {})})
+            assert page.status_code == 200, page.text
+            seen += [(item["title"], item["sourceUrl"]) for item in page.json()["items"]]
+            cursor = page.json()["nextCursor"]
+            if not cursor:
+                return seen
+    assert [title for title, _ in walk("title")] == ["plain", "가" * 300, "가" * 299 + "나", "\U0001F600" * 300]
+    hosts = [url.split("/")[2].rsplit("]", 1)[0] + "]" for _, url in walk("domain")]
+    assert hosts == ["[2001:db8::1]", "[2001:db8::1]", "[2001:db8::2]", "[2001:db8::3]"]

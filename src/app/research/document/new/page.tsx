@@ -13,6 +13,7 @@ import DocumentEditor from "@/components/research/DocumentEditor";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
 import { NewDocumentProposalReview, NewDocumentProposals } from "@/components/research/NewDocumentProposals";
+import { documentPath } from "@/lib/routes";
 
 // #22 새 문서: 입력은 서버 초안(documentId 없음)으로 자동 저장되고 주소(?draft=)로 복구된다. ‘문서 저장’만 문서와 첫 버전을 만든다.
 // 초안은 계정별 서버 자원이라 다른 계정에는 보이지 않는다(브라우저 저장소에 본문을 두지 않는다).
@@ -65,7 +66,7 @@ async function lookup(id: string): Promise<DraftLookup<Draft>> {
   const r = await getDraft(id);
   if (r.ok && r.data.state === "active" && r.data.documentId === null) return { kind: "active", draft: r.data };
   if (r.ok && r.data.state === "committed" && r.data.documentId)
-    return { kind: "committed", href: `/research/document/?id=${encodeURIComponent(r.data.documentId)}` };
+    return { kind: "committed", href: documentPath(r.data.documentId) };
   return { kind: "missing" };
 }
 
@@ -75,7 +76,7 @@ function ReviewProposal({ id }: { id: string }) {
   return (
     <NewDocumentProposalReview
       id={id}
-      onDone={(doc) => (doc ? router.push(`/research/document/?id=${encodeURIComponent(doc.id)}`) : router.replace("/research/?tab=documents"))}
+      onDone={(doc) => (doc ? router.push(documentPath(doc.id)) : router.replace("/research/?tab=documents"))}
     />
   );
 }
@@ -100,7 +101,7 @@ function NewDocument({ param }: { param: string | null }) {
         doc={null}
         draft={view.draft}
         onDraft={(d) => onDraft(key, d)}
-        onCommitted={(doc) => router.push(`/research/document/?id=${encodeURIComponent(doc.id)}`)}
+        onCommitted={(doc) => router.push(documentPath(doc.id))}
         onDiscarded={() => onDiscarded("초안을 버렸습니다.")}
       />
       <NewDocumentProposals reload={key} />

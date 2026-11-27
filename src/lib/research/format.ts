@@ -43,3 +43,8 @@ export function hostOf(url: string): string {
     return url;
   }
 }
+
+/** 보이는 도메인(#119 F3): 앞의 "www."는 뺀다. */
+export function displayHost(url: string): string {
+  return hostOf(url).replace(/^www\./i, "");
+}

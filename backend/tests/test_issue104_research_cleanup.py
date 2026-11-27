@@ -20,17 +20,21 @@ def test_existing_read_row_can_save_without_backfill_and_keeps_owner_role_and_pu
     issued=pat_client.post('/api/research/pats',json={'name':'Unified token'},headers=headers(auth))
     assert issued.status_code==201,issued.text
     value=issued.json();token=value['token'];credential=value['credential']['id']
-    assert set(value['credential'])=={'id','name','issuedAt','expiresAt','revokedAt','lastUsedAt'}
+    assert set(value['credential'])=={'id','name','access','issuedAt','expiresAt','revokedAt','lastUsedAt'}
+    assert value['credential']['access']=='write'  # #119 M2 default
     with admin.begin() as db:
         assert db.execute(text('SELECT scope FROM research.credentials WHERE id=:id'),{'id':credential}).scalar_one()=='write'
-        # Stand in for a row issued before #104. Production performs no backfill.
-        db.execute(text("UPDATE research.credentials SET scope='read' WHERE id=:id"),{'id':credential})
-        before=dict(db.execute(text('SELECT id,owner_id,name,scope,purpose,token_hash,issued_at,expires_at,revoked_at FROM research.credentials WHERE id=:id'),{'id':credential}).one()._mapping)
+        # Stand in for a row issued before #104 (and so before #119 0011: access NULL). Production performs no backfill.
+        db.execute(text("UPDATE research.credentials SET scope='read',access=NULL WHERE id=:id"),{'id':credential})
+        before=dict(db.execute(text('SELECT id,owner_id,name,scope,access,purpose,token_hash,issued_at,expires_at,revoked_at FROM research.credentials WHERE id=:id'),{'id':credential}).one()._mapping)
+    assert before['access'] is None
+    listed=[item for item in pat_client.get('/api/research/pats').json()['items'] if item['id']==credential]
+    assert listed[0]['access']=='write'  # NULL reads as write: the pre-0011 authority is unchanged (D7)
     saved=call(pat_client,token,'research_document_save',{'title':'Legacy read can save','content':'Body','mutationId':str(uuid4())})
     assert saved.status_code==200,saved.text
     document=saved.json();assert 'author' not in document['latestVersion']
     with admin.connect() as db:
-        assert dict(db.execute(text('SELECT id,owner_id,name,scope,purpose,token_hash,issued_at,expires_at,revoked_at FROM research.credentials WHERE id=:id'),{'id':credential}).one()._mapping)==before
+        assert dict(db.execute(text('SELECT id,owner_id,name,scope,access,purpose,token_hash,issued_at,expires_at,revoked_at FROM research.credentials WHERE id=:id'),{'id':credential}).one()._mapping)==before
         row=db.execute(text('SELECT author_kind,author_credential_id,author_name FROM research.versions WHERE id=:id'),{'id':document['latestVersion']['id']}).one()
         assert (row.author_kind,str(row.author_credential_id),row.author_name)==('pat',credential,'Unified token')
     assert call(pat_client,token,'research_post_publish',{}).status_code==403

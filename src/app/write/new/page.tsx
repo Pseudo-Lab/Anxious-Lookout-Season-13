@@ -10,6 +10,7 @@ import AuthGate from "@/components/research/AuthGate";
 import Notice from "@/components/research/Notice";
 import PostEditor from "@/components/posts/PostEditor";
 import { NewPostProposals, ProposalReview } from "@/components/posts/PostProposals";
+import { writePostPath } from "@/lib/routes";
 
 // #28 새 글: 입력은 서버 초안(postId 없음)으로 자동 저장되고 주소(?draft=)로 복구된다. ‘글 저장’만 글과 첫 버전을 만든다.
 
@@ -18,7 +19,7 @@ const NEW_PATH = "/write/new/";
 async function lookup(id: string): Promise<DraftLookup<PostDraft>> {
   const r = await getPostDraft(id);
   if (r.ok && r.data.state === "active" && r.data.postId === null) return { kind: "active", draft: r.data };
-  if (r.ok && r.data.state === "committed" && r.data.postId) return { kind: "committed", href: `/write/?id=${encodeURIComponent(r.data.postId)}` };
+  if (r.ok && r.data.state === "committed" && r.data.postId) return { kind: "committed", href: writePostPath(r.data.postId) };
   return { kind: "missing" };
 }
 
@@ -31,7 +32,7 @@ function ReviewNewProposal({ id }: { id: string }) {
       <ProposalReview
         summary={{ id, version: 0 }}
         target={{ kind: "new" }}
-        onDone={(post) => (post ? router.push(`/write/?id=${encodeURIComponent(post.id)}`) : router.replace("/write/"))}
+        onDone={(post) => (post ? router.push(writePostPath(post.id)) : router.replace("/write/"))}
       />
     </section>
   );
@@ -57,7 +58,7 @@ function NewPostEditor({ param }: { param: string | null }) {
         post={null}
         draft={view.draft}
         onDraft={(d) => onDraft(key, d)}
-        onCommitted={(post) => router.push(`/write/?id=${encodeURIComponent(post.id)}`)}
+        onCommitted={(post) => router.push(writePostPath(post.id))}
         onDiscarded={() => onDiscarded("초안을 버렸습니다.")}
       />
       {view.bound && <NewPostProposals baseDraftId={view.bound} reload={key} />}

@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import type { FetchFailure } from "@/lib/api/client";
-import { BASE_PATH } from "@/lib/constants";
+import Link from "next/link";
+import { useDocumentTitle } from "@/hooks/useDocumentTitle";
 import { archivePost, getPost, getPostDraftOf, getPostVersion, listPostVersions } from "@/lib/posts/api";
 import { postErrorMessage } from "@/lib/posts/errors";
 import type { Post, PostDraft, PostText, PostVersion } from "@/lib/posts/types";
@@ -34,7 +35,12 @@ function DeletePost({ post, onDeleted }: { post: Post; onDeleted: () => void }) 
   }
   return (
     <>
-      <button onClick={() => void remove()} disabled={busy} className="text-sm text-stone-500 hover:text-red-700 disabled:opacity-50">
+      {/* #119 O5: 파괴적 동작은 붉은 테두리로 구분하고 '내용 수정'과 떨어뜨린다(오른쪽 끝) */}
+      <button
+        onClick={() => void remove()}
+        disabled={busy}
+        className="rounded-lg border border-red-200 px-3 py-1 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50"
+      >
         삭제
       </button>
       {failure && <ErrorNotice failure={failure} prefix="삭제하지 못했습니다." describe={postErrorMessage} />}
@@ -42,7 +48,7 @@ function DeletePost({ post, onDeleted }: { post: Post; onDeleted: () => void }) 
   );
 }
 
-const LIST_HREF = `${BASE_PATH}/write/`;
+const LIST_HREF = "/write/";
 
 const versionMeta = (v: PostVersion) => (
   <p className="text-xs text-stone-500">
@@ -56,6 +62,8 @@ export default function PostDetail({ id }: { id: string }) {
   const [editing, setEditing] = useState<{ draft: PostDraft | null; seed?: PostText } | null>(null);
   const [opening, setOpening] = useState(false);
   const [deleted, setDeleted] = useState(false);
+  // #119 A3: 공개 글 탭(글 제목만)과 구분되게 "· 내 글"
+  useDocumentTitle(result?.ok ? `${result.data.latestVersion.title || "(제목 없음)"} · 내 글` : null);
 
   if (!result) return <p className="text-sm text-stone-500">불러오는 중...</p>;
   if (!result.ok) return <ErrorNotice failure={result.failure} prefix="글을 불러오지 못했습니다." describe={postErrorMessage} />;
@@ -89,17 +97,17 @@ export default function PostDetail({ id }: { id: string }) {
   return (
     <article className="space-y-10" data-editing={editing ? true : undefined}>
       <header className="space-y-2">
-        {/* 글 화면을 주소로 바로 열었거나 새로고침한 뒤에는 next/link·router로 /write/(검색어만 다른 같은 정적 경로)에 가지 않는다
-            (Next 16.2, 주소가 그대로 남는다. 목록에서 들어온 경우는 된다). 목록으로는 문서 전체를 다시 연다. */}
-        <a href={LIST_HREF} className="text-sm text-stone-500 hover:text-stone-800">
+        {/* #39: 예전 글 화면(/write/?id=)은 목록과 같은 경로라 직접 열거나 새로고침한 뒤 next/link 이동이 되지 않아 문서 전체를 다시 열었다.
+            #119 B2로 글 화면이 /write/<id>/(다른 경로)가 되어 next/link로 돌아간다. */}
+        <Link href={LIST_HREF} className="text-sm text-stone-500 hover:text-stone-800">
           ← 내 글
-        </a>
+        </Link>
         {deleted && (
           <Notice tone="success">
             글을 삭제했습니다. 발행 중이었다면 공개 주소도 닫혔습니다.{" "}
-            <a href={LIST_HREF} className="font-medium underline hover:no-underline">
+            <Link href={LIST_HREF} className="font-medium underline hover:no-underline">
               내 글 목록으로
-            </a>
+            </Link>
           </Notice>
         )}
         {p.archived && <Notice tone="info">삭제한 글입니다. 내 글 목록에는 보이지 않으며 수정·발행할 수 없습니다(내용과 버전 기록은 볼 수 있습니다).</Notice>}
@@ -109,7 +117,7 @@ export default function PostDetail({ id }: { id: string }) {
           v{v.number} · 수정 {formatDateTime(p.updatedAt)}
         </p>
         {!p.archived && !editing && (
-          <div className="flex gap-4 pt-1">
+          <div className="flex flex-wrap items-center justify-between gap-4 pt-1">
             <button onClick={() => void openEditor()} disabled={opening} className="text-sm font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50">
               {activeDraft ? "초안 이어서 편집" : "내용 수정"}
             </button>

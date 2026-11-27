@@ -10,12 +10,6 @@ import Notice from "@/components/research/Notice";
 import SessionView from "@/components/research/session/SessionView";
 import { useChat } from "@/components/chat/ChatProvider";
 
-// 대화창 기본 화면에서 새 대화 제목 기본값: 지금 보고 있는 페이지 제목.
-function pageTitle(): string {
-  if (typeof document === "undefined") return "";
-  return document.title.split(" | ")[0].trim().slice(0, 280);
-}
-
 function PanelContent() {
   const { user } = useAuth();
   const chat = useChat();
@@ -48,7 +42,8 @@ function PanelContent() {
           <div className="space-y-3">
             {/* #94: 연결·실행 환경 상태는 admin에게만 보인다 */}
             {admin && <CodexStatusBanner poll={chat.open} />}
-            <NewSessionForm defaultTitle={pageTitle()} />
+            {/* #119 N1: 제목은 페이지 이름이 아니라 첫 질문에서 만든다 */}
+            <NewSessionForm />
           </div>
         }
       />

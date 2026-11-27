@@ -55,11 +55,30 @@ function parseMe(body: unknown): { user: AuthUser; csrfToken: string } | null {
   };
 }
 
-export async function getMe(): Promise<MeResult> {
+/** #119 B11: /auth/session은 비로그인도 200 {user:null, csrfToken:null}이다(콘솔에 401이 남지 않는다). */
+function parseSession(body: unknown): { user: AuthUser; csrfToken: string } | null | undefined {
+  const b = body as { user?: unknown; csrfToken?: unknown } | null;
+  if (b && typeof b === "object" && b.user === null && b.csrfToken === null) return null;
+  return parseMe(body) ?? undefined;
+}
+
+async function getMeLegacy(): Promise<MeResult> {
   const res = await fetchJson(apiUrl("/auth/me"), parseMe);
   if (res.ok) return { state: "authenticated", ...res.data };
   // 401만 비로그인이다. 5xx(not_ready 등)·비JSON·네트워크 실패는 확인 실패로 남긴다.
   if (res.failure.kind === "http" && res.failure.status === 401) return { state: "unauthenticated" };
+  return { state: "error", failure: res.failure };
+}
+
+export async function getMe(): Promise<MeResult> {
+  // parse 실패(undefined)는 형식 오류로 남기고, 비로그인(null)은 정상 응답으로 받는다.
+  const res = await fetchJson(apiUrl("/auth/session"), (body) => {
+    const v = parseSession(body);
+    return v === undefined ? null : { session: v };
+  });
+  if (res.ok) return res.data.session ? { state: "authenticated", ...res.data.session } : { state: "unauthenticated" };
+  // 이전 API 이미지(엔드포인트 없음)이면 /auth/me로 되돌아간다.
+  if (res.failure.kind === "http" && res.failure.status === 404) return getMeLegacy();
   return { state: "error", failure: res.failure };
 }
 

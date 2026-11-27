@@ -135,6 +135,7 @@ def create_app(settings=None):
             public_posts = settings.base_path + '/api/public/posts'
             cacheable_path = (request.url.path == public_posts or request.url.path.startswith(public_posts + '/')
                               or request.url.path == settings.base_path + '/api/public/post-tags'
+                              or request.url.path == settings.base_path + '/api/public/post-authors'  # #119 A7
                               or request.url.path.startswith(settings.base_path + '/api/media/post-images/'))
 
             async def send_with_cache_policy(message):
@@ -287,14 +288,27 @@ def create_app(settings=None):
             return None
         return db.scalar(select(LoginSession).where(LoginSession.token_hash == session_digest(token, settings.origin), LoginSession.expires_at > now()))
 
+    def signed_in(db, request):
+        session = current_session(db, request)
+        if not session:
+            return None
+        account = db.get(Account, session.account_id)
+        return {"user": {"accountId": str(account.id), "githubId": account.github_id, "login": account.login, "role": account.role, "isApproved": account.is_approved, "codexRunner": can_prepare(app, account)}, "csrfToken": session.csrf_token}
+
     @app.get(prefix + "/auth/me")
     def me(request: Request):
         with sessions() as db:
-            session = current_session(db, request)
-            if not session:
+            value = signed_in(db, request)
+            if value is None:
                 return error("unauthenticated", "Authentication required", 401)
-            account = db.get(Account, session.account_id)
-            return JSONResponse({"user": {"accountId": str(account.id), "githubId": account.github_id, "login": account.login, "role": account.role, "isApproved": account.is_approved, "codexRunner": can_prepare(app, account)}, "csrfToken": session.csrf_token}, headers={"Cache-Control": "no-store"})
+            return JSONResponse(value, headers={"Cache-Control": "no-store"})
+
+    @app.get(prefix + "/auth/session")
+    def session_probe(request: Request):
+        """#119 B11: same body as /auth/me, but a signed-out visitor is an ordinary 200, not a 401."""
+        with sessions() as db:
+            value = signed_in(db, request) or {"user": None, "csrfToken": None}
+            return JSONResponse(value, headers={"Cache-Control": "no-store"})
 
     @app.post(prefix + "/auth/logout")
     def logout(request: Request):

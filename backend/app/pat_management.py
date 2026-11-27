@@ -21,6 +21,7 @@ from . import research_api_budget as budget
 class Create(Input):
     name: str = Field(min_length=1, max_length=80)
     scope: Literal['read', 'write'] | None = None  # Legacy wire input, no authority.
+    access: Literal['read', 'write'] = 'write'  # #119 M2: the authority a new token is limited to.
     expiryDays: int = Field(default=30, ge=1, le=90)
 
     @field_validator('name')
@@ -76,12 +77,17 @@ def register(app, sessions, settings, current_session, response):
             if str(key) != keys[0]:
                 fail('validation_error', 'Canonical Idempotency-Key UUID required', 422)
             parsed = Create.model_validate(body)
-            payload = parsed.model_dump(exclude={'scope'})
-            # Keep the historical hash format for image rollback. Scope is
-            # ignored as authority and when matching an identical retry.
-            fingerprints = {scope: mutation_fingerprint('pat:create', {**payload, 'scope': scope})
-                            for scope in ('read', 'write')}
-            fingerprint = fingerprints[parsed.scope or 'write']
+            payload = parsed.model_dump(exclude={'scope', 'access'})
+            if parsed.access == 'write':
+                # Keep the historical hash format for image rollback. Scope is
+                # ignored as authority and when matching an identical retry.
+                fingerprints = {scope: mutation_fingerprint('pat:create', {**payload, 'scope': scope})
+                                for scope in ('read', 'write')}
+                fingerprint = fingerprints[parsed.scope or 'write']
+            else:
+                # #119: a read-only request only ever replays a read-only issue (never a write one, or vice versa).
+                fingerprint = mutation_fingerprint('pat:create', {**payload, 'access': 'read'})
+                fingerprints = {'access-read': fingerprint}
             previous = db.get(Issuance, (account.id, key))
             if previous is not None:
                 if previous.fingerprint not in fingerprints.values():
@@ -96,7 +102,7 @@ def register(app, sessions, settings, current_session, response):
                 fail('pat_limit', 'Active PAT limit reached', 409)
             identity = uuid4()
             token = pats.issue_value(identity)
-            row = Credential(id=identity, owner_id=account.id, name=parsed.name, scope='write',
+            row = Credential(id=identity, owner_id=account.id, name=parsed.name, scope='write', access=parsed.access,
                 purpose=pats.PURPOSE, token_hash=pats.token_hash(token), created_at=at,
                 expires_at=at + timedelta(days=parsed.expiryDays), rate_count=0)
             db.add(row)

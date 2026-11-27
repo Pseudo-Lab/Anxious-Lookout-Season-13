@@ -5,6 +5,7 @@ import { API_ENABLED, BASE_PATH } from "@/lib/constants";
 import { apiUrl, describeFailure, fetchJson, type FetchResult } from "@/lib/api/client";
 import { useAuth } from "@/hooks/useAuth";
 import { ROLE_LABELS } from "@/lib/auth/api";
+import { formatDateTime } from "@/lib/research/format";
 
 interface VersionInfo {
   sha: string;
@@ -44,12 +45,45 @@ function Row({ label, ok, children }: { label: string; ok: boolean | null; child
   );
 }
 
-function VersionText({ result }: { result: FetchResult<VersionInfo> }) {
+/** #119 H1: 커밋 앞 7자와 전체 해시 복사. 복사가 막힌 브라우저에서는 전체 해시를 보이고 직접 복사하게 한다. */
+function CommitSha({ label, sha }: { label: string; sha: string }) {
+  const [note, setNote] = useState("");
+  const [full, setFull] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(sha);
+      setNote("전체 해시를 복사했습니다.");
+    } catch {
+      setFull(true);
+      setNote("복사하지 못했습니다. 전체 해시를 직접 복사하세요.");
+    }
+  }
+  return (
+    <span data-commit-sha={label} className="flex flex-wrap items-center gap-2">
+      <code title={sha} className="font-mono text-xs">
+        {full ? sha : sha.slice(0, 7)}
+      </code>
+      <button type="button" onClick={() => void copy()} className="text-xs font-medium text-indigo-600 underline hover:text-indigo-800">
+        복사<span className="sr-only"> ({label} 전체 커밋 해시)</span>
+      </button>
+      {note && (
+        <span role="status" className="text-xs text-stone-600">
+          {note}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function VersionText({ label, result }: { label: string; result: FetchResult<VersionInfo> }) {
   if (!result.ok) return <>{describeFailure(result.failure)}</>;
   return (
     <>
-      <code className="font-mono text-xs">{result.data.sha}</code>
-      <span className="block text-xs text-stone-500">빌드 {result.data.builtAt}</span>
+      <CommitSha label={label} sha={result.data.sha} />
+      {/* #119 H2·B7: 현지 시각 */}
+      <span className="mt-1 block text-xs text-stone-600">
+        빌드 <time dateTime={result.data.builtAt}>{formatDateTime(result.data.builtAt)}</time>
+      </span>
     </>
   );
 }
@@ -112,13 +146,21 @@ export default function StatusPanel() {
     accountOk = true;
     accountText = (
       <>
-        <span className="font-medium text-stone-900">{auth.user.login}</span> ·{" "}
-        {ROLE_LABELS[auth.user.role]} ·{" "}
-        {auth.user.isApproved ? (
-          "승인됨"
-        ) : (
-          <span className="text-amber-700">승인 대기 — 관리자 승인 후 회원 기능을 이용할 수 있습니다.</span>
-        )}
+        {/* #119 H3: 값마다 항목 이름 */}
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+          <dt className="text-stone-600">계정</dt>
+          <dd className="font-medium text-stone-900">{auth.user.login}</dd>
+          <dt className="text-stone-600">역할</dt>
+          <dd>{ROLE_LABELS[auth.user.role]}</dd>
+          <dt className="text-stone-600">승인</dt>
+          <dd>
+            {auth.user.isApproved ? (
+              "승인됨"
+            ) : (
+              <span className="text-amber-700">승인 대기 — 관리자 승인 후 회원 기능을 이용할 수 있습니다.</span>
+            )}
+          </dd>
+        </dl>
       </>
     );
   } else if (auth.status === "unauthenticated") {
@@ -135,7 +177,7 @@ export default function StatusPanel() {
     <>
       <div className="rounded-2xl bg-white px-6 shadow-sm ring-1 ring-stone-200/60">
         <Row label="웹 버전" ok={checks ? checks.web.ok : null}>
-          {checks ? <VersionText result={checks.web} /> : "확인 중..."}
+          {checks ? <VersionText label="웹" result={checks.web} /> : "확인 중..."}
         </Row>
         <Row label="API 상태" ok={checks?.health ? checks.health.ok : null}>
           {healthText}
@@ -144,9 +186,9 @@ export default function StatusPanel() {
           {researchText}
         </Row>
         <Row label="API 버전" ok={checks?.api ? checks.api.ok : null}>
-          {!checks ? "확인 중..." : checks.api === null ? NO_API : <VersionText result={checks.api} />}
+          {!checks ? "확인 중..." : checks.api === null ? NO_API : <VersionText label="API" result={checks.api} />}
         </Row>
-        <Row label="계정" ok={accountOk}>
+        <Row label="로그인 상태" ok={accountOk}>
           {accountText}
         </Row>
       </div>

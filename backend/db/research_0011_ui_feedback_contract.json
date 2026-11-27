@@ -1,0 +1,10 @@
+{
+  "credentials": {
+    "columns": {
+      "access": ["VARCHAR(8)", true, null]
+    },
+    "checks": {
+      "credentials_access_check": "access = 'read' OR access = 'write'"
+    }
+  }
+}

@@ -197,6 +197,8 @@ export interface Relation {
 export interface Page<T> {
   items: T[];
   nextCursor: string | null;
+  // #119 A7·I3·L1: 같은 조건의 전체 건수(cursor 무관). 이전 API·건수를 주지 않는 목록에는 없다.
+  total?: number;
 }
 
 export interface PublishedMaterial {
@@ -321,6 +323,8 @@ export interface SessionSummary {
   scope?: AcceptedScope;
   // #90 메시지 전송(202) 응답에만: 그 턴의 요청 id(중지 대상, 스트림 이벤트의 requestId). 이전 API에는 없다.
   requestId?: string;
+  // #119 N4: 보관한 대화인지. 이전 API에는 없다.
+  archived?: boolean;
 }
 
 export interface MessageItem {

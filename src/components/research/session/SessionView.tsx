@@ -70,6 +70,7 @@ import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
 import SafeMarkdown, { StreamingMarkdown } from "@/components/research/SafeMarkdown";
 import ResearchActivity from "@/components/research/session/ResearchActivity";
+import { documentPath, writePostPath } from "@/lib/routes";
 
 const POLL_MS = 2000;
 // 접수된 전송을 확인하는 대화 조회가 일시 실패했을 때의 재조회 간격(늘려 가며 최대값까지).
@@ -112,12 +113,12 @@ function proposalRef(item: ToolCallItem): { href: string; text: string } | null 
     if (!v || typeof v.id !== "string" || v.status !== "pending") continue;
     const hash = `#proposal-${enc(v.id)}`;
     if (item.name === "research_post_propose") {
-      if (typeof v.postId === "string") return { href: `/write/?id=${enc(v.postId)}${hash}`, text: "글 수정 제안이 만들어졌습니다. 수락하기 전에는 글이 바뀌지 않습니다." };
+      if (typeof v.postId === "string") return { href: `${writePostPath(v.postId)}${hash}`, text: "글 수정 제안이 만들어졌습니다. 수락하기 전에는 글이 바뀌지 않습니다." };
       if (v.postId === null) return { href: `/write/new/?proposal=${enc(v.id)}`, text: "새 글 제안이 만들어졌습니다. 수락하기 전에는 글이 만들어지지 않습니다." };
       continue;
     }
     if (typeof v.documentId === "string")
-      return { href: `/research/document/?id=${enc(v.documentId)}${hash}`, text: "문서 수정 제안이 만들어졌습니다. 수락하기 전에는 문서가 바뀌지 않습니다." };
+      return { href: `${documentPath(v.documentId)}${hash}`, text: "문서 수정 제안이 만들어졌습니다. 수락하기 전에는 문서가 바뀌지 않습니다." };
     if (v.documentId === null && item.name === "research_document_save")
       return { href: `/research/document/new/?proposal=${enc(v.id)}`, text: "새 문서 제안이 만들어졌습니다. 수락하기 전에는 문서가 만들어지지 않습니다." };
   }
@@ -1008,7 +1009,7 @@ export default function SessionView({ id, onArchived, onBack }: { id: string; on
   const s = result.data;
 
   async function archive() {
-    if (!window.confirm("이 대화를 보관할까요? 목록에서 숨겨지지만 기록은 보존됩니다.")) return;
+    if (!window.confirm("이 대화를 보관할까요? 목록에서 숨겨지지만 기록은 보존되며, 대화 목록의 ‘보관한 대화 보기’에서 되돌릴 수 있습니다.")) return;
     const res = await run(`session:archive:${s.id}:${s.version}`, (ctx) => archiveSession(s.id, s.version, ctx));
     if (res.ok) onArchived(s.id);
     else setArchiveFailure(res.failure);

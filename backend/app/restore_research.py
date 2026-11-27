@@ -49,6 +49,8 @@ def restore_candidate(url, password, expected_database):
                 inputs.append('009_research_pats.sql')
             if since(marker, '0010_research_wiki'):
                 inputs.append('research_0010_wiki.sql')  # No grants of its own; kept for a complete reviewed input list.
+            if since(marker, '0011_ui_feedback'):
+                inputs.append('research_0011_ui_feedback.sql')  # REVOKE/GRANT EXECUTE on the membership audit function.
             for filename in inputs:
                 for statement in (frozen / filename).read_text().split(";"):
                     statement = statement.strip()

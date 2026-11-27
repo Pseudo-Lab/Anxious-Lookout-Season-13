@@ -76,7 +76,7 @@ def test_owner_cap_serializes_two_new_keys_and_replay_still_works_at_ten(pat_cli
 def test_commenter_read_scope_current_role_and_browser_logout_independence(pat_client,admin):
     owner,auth=identity(pat_client,admin,role='commenter')
     created=issue(pat_client,auth)
-    assert set(created['credential'])=={'id','name','issuedAt','expiresAt','revokedAt','lastUsedAt'}
+    assert set(created['credential'])=={'id','name','access','issuedAt','expiresAt','revokedAt','lastUsedAt'} and created['credential']['access']=='write'
     assert call(pat_client,created['token']).status_code==403
     assert pat_client.get('/api/public/documents',headers={'Authorization':'Bearer '+created['token']}).status_code==200
     with admin.begin() as db:db.execute(text("UPDATE auth.accounts SET role='editor' WHERE id=:id"),{'id':owner})
@@ -207,10 +207,10 @@ def test_populated_008_upgrade_and_restore_revoke_pats_preserve_provenance(admin
             before_wiki=signature(db)
             wiki_rows=[dict(row._mapping) for row in db.execute(text('SELECT * FROM research.versions ORDER BY id'))]
         # #105: the populated 0009 candidate upgrades to the current 0010 and restores there.
-        migrate('0010_research_wiki');migrate('0010_research_wiki')
-        assert restore_candidate(url.render_as_string(hide_password=False),os.environ['API_DATABASE_PASSWORD'],database)=='0010_research_wiki'
+        migrate('0011_ui_feedback');migrate('0011_ui_feedback')
+        assert restore_candidate(url.render_as_string(hide_password=False),os.environ['API_DATABASE_PASSWORD'],database)=='0011_ui_feedback'
         with candidate.connect() as db:
-            assert validate_research(db)=='0010_research_wiki'
+            assert validate_research(db)=='0011_ui_feedback'
             after_wiki=signature(db)
             for table in before_wiki:
                 if table not in {'research.versions','research.relations'}:

@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import PostDetail from "./PostDetail";
 
 // #28: 발행본은 DB에 있고 브라우저가 /api/public/posts/{slug}로 조회한다(서버는 API를 부르지 않는다).
@@ -6,6 +7,9 @@ import PostDetail from "./PostDetail";
 const EXPORT = process.env.NEXT_OUTPUT === "export";
 
 export const generateStaticParams = EXPORT ? () => [{ slug: "_" }] : undefined;
+
+// #119 A3: 글을 불러오기 전에도 탭이 "글"로 구분된다. 불러오면 글 제목으로 바뀐다(PostDetail).
+export const metadata: Metadata = { title: "글" };
 
 export default function PostPage() {
   return <PostDetail />;

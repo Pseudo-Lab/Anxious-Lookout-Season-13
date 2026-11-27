@@ -69,7 +69,7 @@ def resolve_scope(store, page):
         publication = current(store.db, post_id=page.resourceId)
         if publication is None: fail('not_found', 'Not found', 404)
         from .post_publications import public_value
-        context = public_value(publication)
+        context = public_value(publication, store.db)
         resolved['title'] = context['title']
     elif page.kind == "public_document":
         from .publications import current_publication, require_publication_schema

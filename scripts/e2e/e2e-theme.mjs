@@ -104,6 +104,8 @@ const report = (bad) => bad.slice(0, 4).map((b) => `${b.target} ${b.ratio} ${b.f
 // ---- slice 3: 편집기 화면(#36 새 UI 포함)과 D-38-1 사용자 색 ----
 // 편집기 도구 막대의 글자색 8종·칸 배경 5종(BlockEditor COLORS·CELL_BACKGROUNDS)
 const COLORS = ["#1C1917", "#DC2626", "#EA580C", "#CA8A04", "#16A34A", "#2563EB", "#7C3AED", "#DB2777"];
+// #119 O4: 고를 수 있는 색에서는 거의 검정(#1C1917)을 뺐다. 저장된 글은 위 8색 그대로 그린다.
+const PICKER = COLORS.filter((c) => c !== "#1C1917");
 const BGS = ["#FEF3C7", "#DCFCE7", "#DBEAFE", "#F3E8FF", "#F5F5F4"];
 // 리뷰 slice3 round1: 팔레트 밖 배경(계약은 임의 #RRGGBB 허용). 짙은 남색·중간 회색 2종
 const CUSTOM_BGS = ["#1E3A8A", "#555555", "#777777"];
@@ -174,7 +176,10 @@ async function stablePoint(p, locator, ok = async () => true) {
     await locator
       .evaluate((el) => {
         const r = el.getBoundingClientRect();
-        if (r.bottom <= 0 || r.top >= innerHeight || r.right <= 0 || r.left >= innerWidth) el.scrollIntoView({ block: "center", inline: "nearest" });
+        // 누를 점(중앙)이 화면 밖이면 가운데로 옮긴다(일부만 보이는 큰 대상도, #119 리뷰 F5·F6)
+        const cx = r.left + r.width / 2;
+        const cy = r.top + r.height / 2;
+        if (cy <= 0 || cy >= innerHeight || cx <= 0 || cx >= innerWidth) el.scrollIntoView({ block: "center", inline: "nearest" });
       })
       .catch(() => {});
     const b = await locator.boundingBox().catch(() => null);
@@ -359,6 +364,22 @@ async function editorScreens(page, scheme, send, csrf) {
     if (!(await reach(page, `F1. ${tag} selection toolbar`, sentence))) break;
     await page.keyboard.press("End");
     await page.keyboard.press("Shift+Home");
+    // 브라우저 선택은 selectionchange로 늦게 편집기에 반영된다(무거운 실행·다크 테마에서 간헐적). 반영될 때까지 최대 3초 기다린 뒤 읽는다.
+    await editor
+      .evaluate(
+        (el, want) =>
+          new Promise((ok) => {
+            const t0 = Date.now();
+            const tick = () => {
+              const s = el.editor.state.selection;
+              if (el.editor.state.doc.textBetween(s.from, s.to) === want || Date.now() - t0 > 3000) ok();
+              else setTimeout(tick, 30);
+            };
+            tick();
+          }),
+        SENTENCE
+      )
+      .catch(() => {});
     state = await editorState();
     if (state.selected === SENTENCE && state.focused) break;
     tries.push(state);
@@ -372,13 +393,10 @@ async function editorScreens(page, scheme, send, csrf) {
       .catch(() => false);
     const bg = shown ? await menu.evaluate((el) => window.__lum(window.__rgb(getComputedStyle(el).backgroundColor))) : null;
     check(`F1. ${tag}: selection toolbar shown with a ${scheme} surface`, shown && (scheme === "light" ? bg > 0.9 : bg < 0.05), `shown=${shown} lum=${bg} ${JSON.stringify(await editorState())}`);
-    // 크기 목록(고정 툴바·선택 툴바)과 색 견본: 글자 대비, 견본은 지금 모드에서 글자가 보일 색
-    const selects = await page.evaluate(() =>
-      [...document.querySelectorAll('select[aria-label="글자 크기"]')].filter((s) => s.checkVisibility()).map((s) => Number(window.__ratio(window.__rgb(getComputedStyle(s).color), window.__under(s)).toFixed(2)))
-    );
-    check(`F2. ${tag}: font-size lists (toolbar and selection menu) have AA text`, selects.length === 2 && selects.every((r) => r >= 4.5), JSON.stringify(selects));
+    // #119 O3: 글자 크기 목록은 없다. 색 견본은 지금 모드에서 글자가 보일 색이다
+    check(`O3. ${tag}: no font-size list in toolbar or selection menu`, (await page.locator('select[aria-label="글자 크기"]').count()) === 0);
     const swatches = await toolbar.evaluate((t) => [...t.querySelectorAll(".pb-swatch")].map((b) => [b.getAttribute("aria-label"), window.__rgb(getComputedStyle(b).backgroundColor).slice(0, 3).join(","), b.style.getPropertyValue("--pb-c").trim(), b.style.getPropertyValue("--pb-cd").trim()]));
-    check(`D. ${tag}: colour swatches show the colour text will be drawn in`, swatches.length === COLORS.length && swatches.every(([, got, c, cd]) => got === hexRgb(scheme === "dark" ? cd : c)), JSON.stringify(swatches));
+    check(`D. ${tag}: colour swatches show the colour text will be drawn in`, swatches.length === PICKER.length && swatches.every(([, got, c, cd]) => got === hexRgb(scheme === "dark" ? cd : c)), JSON.stringify(swatches));
     if (shown) await scan(page, `${tag} selection toolbar`, scheme);
   }
 
@@ -426,7 +444,7 @@ async function editorScreens(page, scheme, send, csrf) {
 
   // 편집 중 보이는 색 = 공개(renderer) 색: 같은 초안을 커밋해 글 화면에서 같은 저장 값의 그려진 색을 비교한다
   const committed = await send("POST", `/research/post-drafts/${draft.id}/commit`, { expectedDraftRevision: server.revision }, (b) => b?.post?.id);
-  await page.goto(U(`/write/?id=${committed.post.id}`), { waitUntil: "domcontentloaded" });
+  await page.goto(U(`/write/${committed.post.id}/`), { waitUntil: "domcontentloaded" });
   const article = main.locator(".prose").filter({ has: page.locator(".pb-color") }).first();
   if (!(await ready(page, "editor-render", scheme, [article, article.locator("table td").first()]))) return;
   await helpers(page);
@@ -516,10 +534,10 @@ for (const scheme of ["light", "dark"]) {
   if (FAULT === "research404") await page.route(/\/api\/research\//, (r) => (r.request().method() === "GET" ? r.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: { code: "not_found", message: "x" } }) }) : r.continue()));
   const PRIVATE = [
     ["write", "/write/", (m) => [m.getByRole("heading", { name: "내 글" }), m.getByRole("link", { name: /대비 글/ })]],
-    ["write-post", `/write/?id=${postId}`, (m) => [m.getByRole("heading", { name: "대비 글", level: 1 }), m.getByText("첫 문단"), m.getByRole("region", { name: "발행" }), m.getByRole("heading", { name: "버전 기록" })]],
+    ["write-post", `/write/${postId}/`, (m) => [m.getByRole("heading", { name: "대비 글", level: 1 }), m.getByText("첫 문단"), m.getByRole("region", { name: "발행" }), m.getByRole("heading", { name: "버전 기록" })]],
     ["research", "/research/", (m) => [m.getByRole("heading", { name: "내 연구" }), m.getByText("대비 자료").first()]],
-    ["document", `/research/document/?id=${doc.id}`, (m) => [m.getByRole("heading", { name: "대비 문서", level: 1 }), m.locator(".prose blockquote"), m.locator(".prose code").first(), m.getByText("관계 추가").first()]],
-    ["material", `/research/material/?id=${mat.id}`, (m) => [m.getByRole("heading", { name: "대비 자료", level: 1 }), m.getByText("자료 본문")]],
+    ["document", `/research/document/${doc.id}/`, (m) => [m.getByRole("heading", { name: "대비 문서", level: 1 }), m.locator(".prose blockquote"), m.locator(".prose code").first(), m.getByText("관계 추가").first()]],
+    ["material", `/research/material/${mat.id}/`, (m) => [m.getByRole("heading", { name: "대비 자료", level: 1 }), m.getByText("자료 본문")]],
     ["status", "/status/", (m) => [m.getByRole("heading", { name: "서비스 상태" }), m.getByText("정상 (요청을 받을 준비가 되었습니다)")]],
   ];
   for (const [name, path, want] of PRIVATE) {

@@ -438,13 +438,13 @@ class Store:
         self.db.flush()
         return {"id": str(row.id), "archived": True, "version": row.version}
 
-    def items(self, kind, limit=30, cursor=None, archived=False):
-        query = select(Item).where(Item.owner_id == self.owner, Item.kind == kind, Item.archived == archived)
-        rows = self.db.scalars(page_query(query, Item, limit, cursor)).all()
-        counts = self.relation_counts([row.id for row in rows[:limit]])
+    def items(self, kind, limit=30, cursor=None, archived=False, q=None, sort="updated"):
+        from .research_listing import page
+        rows, following, total = page(self.db, self.owner, kind, limit, cursor, archived, q, sort)
+        counts = self.relation_counts([row.id for row, _ in rows])
         return {"items": [{**self.serialize_item(row, content=False), "relationCount": counts.get(row.id, 0)}
-                          for row in rows[:limit]],
-                "nextCursor": encode_cursor(rows[limit - 1]) if len(rows) > limit else None}
+                          for row, _ in rows],
+                "nextCursor": following, "total": total}
 
     def active_relations(self):
         """Owner's active relations whose endpoints are both active (the visible graph)."""
@@ -664,7 +664,7 @@ def register_research(app, sessions, settings, current_session, error):
                     fail("csrf_invalid", "Invalid CSRF token", 403)
             from .research_schema_contract import validate_research
             try:
-                if validate_research(db.connection()) != '0010_research_wiki':
+                if validate_research(db.connection()) != '0011_ui_feedback':
                     raise RuntimeError('Version provenance schema is required')
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
@@ -682,7 +682,7 @@ def register_research(app, sessions, settings, current_session, error):
         from .research_schema_contract import validate_research
         with sessions() as db:
             try:
-                if validate_research(db.connection()) != '0010_research_wiki':
+                if validate_research(db.connection()) != '0011_ui_feedback':
                     raise RuntimeError('Version provenance schema is required')
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
@@ -721,9 +721,10 @@ def register_research(app, sessions, settings, current_session, error):
         return response(result, code)
 
     def item_routes(kind):
-        def list_items(request: Request, limit: int = 30, cursor: str | None = None, archived: bool = False):
+        def list_items(request: Request, limit: int = 30, cursor: str | None = None, archived: bool = False,
+                       q: str | None = None, sort: str = "updated"):
             with authorized(request) as store:
-                return response(store.items(kind, limit, cursor, archived))
+                return response(store.items(kind, limit, cursor, archived, q, sort))
 
         def detail(identity: uuid.UUID, request: Request):
             with authorized(request) as store:
@@ -807,6 +808,8 @@ def register_research(app, sessions, settings, current_session, error):
     register_conversations(app, authorized, sessions, settings, response, write, current_session)
     from .pat_management import register as register_pats
     register_pats(app, sessions, settings, current_session, response)
+    from .url_metadata import register as register_url_metadata
+    register_url_metadata(app, authorized, settings, response)
     from .research_rate import install as install_research_rate
     install_research_rate(app, sessions, settings)
     from .pat_distribution import register as register_pat_distribution

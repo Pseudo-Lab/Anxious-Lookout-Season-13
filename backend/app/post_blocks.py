@@ -358,3 +358,42 @@ def format_summary(document):
     found = {name for node in markdown_losses(document) for name in node['properties']}
     omitted = [name for name in LOSSY if name in found]
     return {'lossy': bool(omitted), 'omittedProperties': omitted, 'message': LOSSY_MESSAGE if omitted else ''}
+
+
+EXCERPT_SOFT, EXCERPT_HARD = 200, 400
+SENTENCE_END = re.compile(r'(?<=[.!?。…])\s+')
+
+
+def excerpt(document):
+    """#119 C1/C2: whole sentences from paragraph text only, for list cards.
+
+    Headings, code, tables, images, embeds and dividers never contribute; paragraphs nested in lists, quotes and
+    columns do. Computed on read, so existing releases get it without changing their snapshots."""
+    paragraphs = []
+    def walk(node):
+        kind = node.get('type')
+        if kind == 'paragraph':
+            text = ' '.join(''.join(run['text'] for run in node['runs']).split())
+            if text: paragraphs.append(text)
+        elif kind == 'list':
+            for item in node['items']:
+                for child in item['blocks']: walk(child)
+        elif kind == 'quote':
+            for child in node['blocks']: walk(child)
+        elif kind == 'columns':
+            for column in node['columns']:
+                for child in column['blocks']: walk(child)
+    for node in document.get('blocks', []): walk(node)
+    sentences = [part for text in paragraphs for part in SENTENCE_END.split(text) if part]
+    if not sentences: return ''
+    first = sentences[0]
+    if len(first) > EXCERPT_SOFT:
+        if len(first) <= EXCERPT_HARD: return first
+        cut = first[:EXCERPT_HARD - 1]  # the ellipsis counts toward the hard cap (review minor)
+        space = cut.rfind(' ')
+        return (cut[:space] if space > 0 else cut).rstrip() + '…'
+    result = first
+    for sentence in sentences[1:]:
+        if len(result) + 1 + len(sentence) > EXCERPT_SOFT: break
+        result += ' ' + sentence
+    return result

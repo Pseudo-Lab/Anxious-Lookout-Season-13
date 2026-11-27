@@ -51,8 +51,15 @@ export default function RootLayout({
         <AuthProvider>
           <CodexStatusProvider>
             <ChatProvider>
+              {/* #119 B4: 상단 바가 화면에 붙어 있어(sticky) 키보드 사용자가 메뉴를 건너뛸 수 있게 한다. 초점을 받으면 보인다. */}
+              <a
+                href="#main"
+                className="sr-only z-[60] rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white focus:not-sr-only focus:fixed focus:left-4 focus:top-4"
+              >
+                본문으로 건너뛰기
+              </a>
               <Header />
-              <main className="mx-auto w-full max-w-7xl flex-1 px-6 py-10">
+              <main id="main" tabIndex={-1} className="mx-auto w-full max-w-7xl flex-1 px-6 py-10 focus:outline-none">
                 {children}
               </main>
               <Footer />

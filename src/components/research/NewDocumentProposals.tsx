@@ -10,6 +10,7 @@ import { formatDateTime } from "@/lib/research/format";
 import type { ResearchDocument } from "@/lib/research/types";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import SafeMarkdown from "@/components/research/SafeMarkdown";
+import { documentPath } from "@/lib/routes";
 
 // #97: 바로 저장 전환 전에 남은 새 문서 제안. 수락하면 문서와 첫 버전이 만들어진다.
 
@@ -25,7 +26,7 @@ export function NewDocumentProposalReview({ id, onDone }: { id: string; onDone: 
   if (p.documentId !== null && p.status === "pending") {
     // 기존 문서에 대한 제안은 그 문서 화면에서 검토한다.
     return (
-      <Link href={`/research/document/?id=${encodeURIComponent(p.documentId)}#proposal-${encodeURIComponent(p.id)}`} className="text-sm font-medium text-indigo-600">
+      <Link href={`${documentPath(p.documentId)}#proposal-${encodeURIComponent(p.id)}`} className="text-sm font-medium text-indigo-600">
         이 제안은 기존 문서에 대한 것입니다. 문서 화면에서 검토하기 →
       </Link>
     );
@@ -71,7 +72,7 @@ export function NewDocumentProposalReview({ id, onDone }: { id: string; onDone: 
         </div>
       )}
       {p.acceptedDocumentId && (
-        <Link href={`/research/document/?id=${encodeURIComponent(p.acceptedDocumentId)}`} className="text-sm font-medium text-indigo-600 hover:text-indigo-800">
+        <Link href={documentPath(p.acceptedDocumentId)} className="text-sm font-medium text-indigo-600 hover:text-indigo-800">
           만들어진 문서 보기 →
         </Link>
       )}

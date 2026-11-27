@@ -41,12 +41,12 @@ def test_writing_restore_retains_drafts_proposals_and_reapplies_grants(admin, mo
             draft = db.execute(text("INSERT INTO research.document_drafts(owner_id,document_id,base_document_version,base_version_id,title,content) VALUES(:owner,:item,1,:version,'Draft','Retained draft') RETURNING id"), {'owner': owner, 'item': doc, 'version': version}).scalar_one()
             proposal = db.execute(text("INSERT INTO research.document_proposals(owner_id,document_id,base_document_version,base_version_id,title,content) VALUES(:owner,:item,1,:version,'Proposal','Retained proposal') RETURNING id"), {'owner': owner, 'item': doc, 'version': version}).scalar_one()
         # #105: upgrade the populated 0009 candidate to the current 0010, then restore it.
-        migrate('0010_research_wiki')
+        migrate('0011_ui_feedback')
         with candidate.begin() as db:
             db.execute(text('REVOKE UPDATE ON research.document_drafts FROM anxious_api'))
-        assert restore_candidate(url.render_as_string(hide_password=False), os.environ['API_DATABASE_PASSWORD'], database) == '0010_research_wiki'
+        assert restore_candidate(url.render_as_string(hide_password=False), os.environ['API_DATABASE_PASSWORD'], database) == '0011_ui_feedback'
         with candidate.connect() as db:
-            assert validate_research(db) == '0010_research_wiki'
+            assert validate_research(db) == '0011_ui_feedback'
             assert db.execute(text('SELECT content,state FROM research.document_drafts WHERE id=:id'), {'id': draft}).one() == ('Retained draft', 'active')
             assert db.execute(text('SELECT content,status FROM research.document_proposals WHERE id=:id'), {'id': proposal}).one() == ('Retained proposal', 'pending')
             assert db.execute(text('SELECT count(*) FROM research.versions')).scalar_one() == 1
@@ -77,7 +77,7 @@ def test_posts_restore_retains_versions_and_drafts(admin, monkeypatch):
         monkeypatch.setenv('ADMIN_DATABASE_URL', url.render_as_string(hide_password=False))
         # Restore of the current revision: post tables are unchanged by #105's 0010, and
         # posts are seeded through the current service (posts.ready requires 0010).
-        migrate('0010_research_wiki')
+        migrate('0011_ui_feedback')
         candidate = create_engine(url, hide_parameters=True)
         with Session(candidate) as db, db.begin():
             owner = db.execute(text("INSERT INTO auth.accounts(github_id,login,is_approved,role) VALUES('444444','post-restore',true,'editor') RETURNING id")).scalar_one()
@@ -91,9 +91,9 @@ def test_posts_restore_retains_versions_and_drafts(admin, monkeypatch):
             proposal = create_proposal(store, Propose(**{k:v for k,v in body.items() if k!='content'}, contentInput={'format':'markdown','text':'Unsaved words'}, postId=post['id'], expectedVersion=1, mutationId=str(uuid.uuid4())))
         with candidate.begin() as db:
             db.execute(text('REVOKE UPDATE ON research.post_drafts FROM anxious_api'))
-        assert restore_candidate(url.render_as_string(hide_password=False), os.environ['API_DATABASE_PASSWORD'], database) == '0010_research_wiki'
+        assert restore_candidate(url.render_as_string(hide_password=False), os.environ['API_DATABASE_PASSWORD'], database) == '0011_ui_feedback'
         with candidate.connect() as db:
-            assert validate_research(db) == '0010_research_wiki'
+            assert validate_research(db) == '0011_ui_feedback'
             assert db.execute(text("SELECT payload->>'textProjection',state FROM research.post_drafts WHERE id=:id"), {'id': active['id']}).one() == ('Unsaved words', 'active')
             assert db.execute(text("SELECT payload->>'textProjection' FROM research.post_versions WHERE post_id=:id"), {'id': post['id']}).scalar_one() == 'Version'
             assert db.execute(text("SELECT payload->>'textProjection',status FROM research.post_proposals WHERE id=:id"), {'id': proposal['id']}).one() == ('Unsaved words', 'pending')

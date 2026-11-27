@@ -8,6 +8,7 @@ interface PagedState<T> {
   key: string;
   items: T[];
   nextCursor: string | null;
+  total: number | null;
   failure: FetchFailure | null;
   loadingMore: boolean;
 }
@@ -29,8 +30,8 @@ export function usePagedList<T>(key: string, load: (cursor: string | null) => Pr
       if (!active) return;
       setState(
         res.ok
-          ? { key, items: res.data.items, nextCursor: res.data.nextCursor, failure: null, loadingMore: false }
-          : { key, items: [], nextCursor: null, failure: res.failure, loadingMore: false }
+          ? { key, items: res.data.items, nextCursor: res.data.nextCursor, total: res.data.total ?? null, failure: null, loadingMore: false }
+          : { key, items: [], nextCursor: null, total: null, failure: res.failure, loadingMore: false }
       );
     });
     return () => {
@@ -49,7 +50,7 @@ export function usePagedList<T>(key: string, load: (cursor: string | null) => Pr
     setState((s) => {
       if (!s || s.key !== forKey) return s;
       return res.ok
-        ? { ...s, items: [...s.items, ...res.data.items], nextCursor: res.data.nextCursor, loadingMore: false }
+        ? { ...s, items: [...s.items, ...res.data.items], nextCursor: res.data.nextCursor, total: res.data.total ?? s.total, loadingMore: false }
         : { ...s, failure: res.failure, loadingMore: false };
     });
   }, [current]);
@@ -57,6 +58,8 @@ export function usePagedList<T>(key: string, load: (cursor: string | null) => Pr
   return {
     items: current?.items ?? [],
     nextCursor: current?.nextCursor ?? null,
+    // 전체 건수(서버가 줄 때만)
+    total: current?.total ?? null,
     failure: current?.failure ?? null,
     loaded: current !== null,
     loading: current === null || current.loadingMore,

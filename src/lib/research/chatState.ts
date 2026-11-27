@@ -59,6 +59,15 @@ export function saveDraft(accountId: string, sessionId: string, text: string, ke
   } catch {}
 }
 
+/** 첫 질문의 첫 줄로 대화 제목을 만든다(최대 60자, 넘치면 "…"). 비면 "새 대화". */
+export function titleFromMessage(text: string, max = 60): string {
+  const line = text.split(/\r?\n/).map((l) => l.trim()).find((l) => l) ?? "";
+  const flat = line.replace(/\s+/g, " ");
+  const chars = Array.from(flat);
+  if (!chars.length) return "새 대화";
+  return chars.length <= max ? flat : `${chars.slice(0, max - 1).join("").trimEnd()}…`;
+}
+
 export function clearDraft(accountId: string, sessionId: string): void {
   try {
     sessionStorage.removeItem(draftKey(accountId, sessionId));

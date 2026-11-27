@@ -43,8 +43,8 @@ trap cleanup EXIT
 # 2) 이 project만 새로 시작(이전 실행의 일회용 볼륨 제거)
 $COMPOSE down --volumes >/dev/null 2>&1 || true
 $COMPOSE up -d db mock-github
-# #105 연구 위키(0010_research_wiki: 요약·서지정보·관계 근거)까지 적용한다. 현재 runtime의 스키마 계약에 맞춘다.
-$COMPOSE run --rm migrate python -m app.migrate --revision 0010_research_wiki
+# #119 0011_ui_feedback(토큰 access·감사 기록 읽기)까지 적용한다. API는 정확히 이 research revision을 요구한다(backend/compose.m3-integration.yml과 같은 값).
+$COMPOSE run --rm migrate python -m app.migrate --revision 0011_ui_feedback
 $COMPOSE up -d api web gateway
 i=0
 until [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$M3_GATEWAY_PORT/api/research/health" || true)" = 200 ]; do

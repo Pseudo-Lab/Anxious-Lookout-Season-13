@@ -8,6 +8,7 @@ import { formatDateTime } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
 import { NewPostProposals } from "@/components/posts/PostProposals";
+import { writePostPath } from "@/lib/routes";
 
 export const NEW_POST_PATH = "/write/new/";
 
@@ -50,11 +51,12 @@ function MyPosts() {
         <ul className="divide-y divide-stone-100 rounded-xl bg-white ring-1 ring-stone-200">
           {list.items.map((p) => (
             <li key={p.id}>
-              <Link href={`/write/?id=${encodeURIComponent(p.id)}`} className="block px-4 py-3 hover:bg-stone-50">
+              <Link href={writePostPath(p.id)} className="block px-4 py-3 hover:bg-stone-50">
                 <p className="font-medium text-stone-900">{p.latestVersion.title || "(제목 없음)"}</p>
                 <p className="mt-1 text-xs text-stone-500">
                   v{p.latestVersion.number} · 수정 {formatDateTime(p.updatedAt)} ·{" "}
-                  {p.publication ? <span className="text-emerald-700">발행 중</span> : <span>발행 안 함</span>}
+                  {/* #119 O8: "발행 중"은 진행 중으로 읽혀 상태 이름을 바꾼다 */}
+                  {p.publication ? <span className="font-medium text-emerald-700">발행됨</span> : <span>미발행</span>}
                 </p>
               </Link>
             </li>

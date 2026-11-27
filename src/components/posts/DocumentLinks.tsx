@@ -94,9 +94,13 @@ export default function DocumentLinks({
           </button>
         )}
       </div>
-      <p className="text-xs text-stone-500">
-        발행하면 연결 문서의 제목이 글에 함께 공개되고, 공개된 문서만 링크됩니다. 문서 본문은 공개되지 않습니다. 대화에서도 연결 문서를 읽고 수정한 내용을 새 버전으로 저장할 수 있습니다.
-      </p>
+      {/* #119 O6: 안내는 도움말 뒤로 */}
+      <details className="text-xs text-stone-600">
+        <summary className="cursor-pointer select-none">도움말</summary>
+        <p className="mt-1">
+          공개된 문서만 공개 글에 제목과 링크로 보입니다. 공개하지 않은 문서는 독자에게 보이지 않고, 문서 본문은 글에 들어가지 않습니다. 대화에서도 연결 문서를 읽고 수정한 내용을 새 버전으로 저장할 수 있습니다.
+        </p>
+      </details>
       {adding && !readOnly && <Search linked={ids} onAdd={(id) => onChange(ids.includes(id) ? ids : [...ids, id])} />}
       {ids.length > 0 && (
         <ul className="space-y-2 text-sm">

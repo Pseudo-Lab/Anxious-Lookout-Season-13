@@ -326,7 +326,9 @@ export function parsePage<T>(parse: (v: unknown) => T | null) {
       if (item === null) return null;
       items.push(item);
     }
-    return { items, nextCursor: body.nextCursor };
+    const page: Page<T> = { items, nextCursor: body.nextCursor };
+    if (isInt(body.total) && body.total >= 0) page.total = body.total;
+    return page;
   };
 }
 
@@ -531,6 +533,8 @@ function parseSessionSummary(v: unknown): SessionSummary | null {
   const scope = parseScope(v);
   if (scope) out.scope = scope;
   if (isStr(v.requestId) && UUID_LOWER.test(v.requestId)) out.requestId = v.requestId;
+  // #119 N4(issue119 §N4): 보관 여부. 이전 API에는 없다.
+  if (typeof v.archived === "boolean") out.archived = v.archived;
   return out;
 }
 
@@ -647,17 +651,25 @@ export interface DocumentInput {
   summary?: string | null;
 }
 
-export const listMaterials = (cursor?: string | null, archived = false) =>
-  fetchJson(
-    apiUrl(`/research/materials${listQuery(cursor, archived ? { archived: "true" } : undefined)}`),
-    parsePage(parseMaterialSummary)
-  );
+// #119 I2(issue119 §I2): q = 최신 제목(자료는 원본 주소도) 부분 일치, sort = updated(기본)|created|title|domain(자료만).
+// cursor는 같은 sort에서만 이어 쓸 수 있다(바꾸면 처음부터).
+export type ItemSort = "updated" | "created" | "title" | "domain";
+export interface ItemListOptions {
+  q?: string;
+  sort?: ItemSort;
+}
 
-export const listDocuments = (cursor?: string | null, archived = false) =>
-  fetchJson(
-    apiUrl(`/research/documents${listQuery(cursor, archived ? { archived: "true" } : undefined)}`),
-    parsePage(parseDocumentSummary)
-  );
+const itemQuery = (archived: boolean, opts: ItemListOptions) => ({
+  ...(archived ? { archived: "true" } : {}),
+  ...(opts.q ? { q: opts.q } : {}),
+  ...(opts.sort && opts.sort !== "updated" ? { sort: opts.sort } : {}),
+});
+
+export const listMaterials = (cursor?: string | null, archived = false, opts: ItemListOptions = {}) =>
+  fetchJson(apiUrl(`/research/materials${listQuery(cursor, itemQuery(archived, opts))}`), parsePage(parseMaterialSummary));
+
+export const listDocuments = (cursor?: string | null, archived = false, opts: Omit<ItemListOptions, "sort"> & { sort?: Exclude<ItemSort, "domain"> } = {}) =>
+  fetchJson(apiUrl(`/research/documents${listQuery(cursor, itemQuery(archived, opts))}`), parsePage(parseDocumentSummary));
 
 export const getMaterial = (id: string) => fetchJson(apiUrl(`/research/materials/${enc(id)}`), parseMaterial);
 export const getDocument = (id: string) => fetchJson(apiUrl(`/research/documents/${enc(id)}`), parseDocument);
@@ -823,8 +835,13 @@ export const getCodexStatus = () => fetchJson(apiUrl("/research/codex/status"), 
 export const prepareCodexRunner = (ctx: MutationContext) =>
   mutate("/research/codex/runner", "POST", {}, parseCodexStatus, ctx);
 
-export const listSessions = (cursor?: string | null) =>
-  fetchJson(apiUrl(`/research/sessions${listQuery(cursor)}`), parsePage(parseSessionSummary));
+/** archived: #119 N4 보관한 대화만(기본은 보관하지 않은 대화). */
+export const listSessions = (cursor?: string | null, archived = false) =>
+  fetchJson(apiUrl(`/research/sessions${listQuery(cursor, archived ? { archived: "true" } : undefined)}`), parsePage(parseSessionSummary));
+
+/** #119 N4: 보관한 대화를 되돌린다(owner + CSRF + Idempotency-Key). 404 = 내 보관 대화 아님, 409 = 버전 불일치. */
+export const restoreSession = (id: string, expectedVersion: number, ctx: MutationContext) =>
+  mutate(`/research/sessions/${enc(id)}/restore`, "POST", { expectedVersion }, parseSessionSummary, ctx);
 
 export const getSession = (id: string) => fetchJson(apiUrl(`/research/sessions/${enc(id)}`), parseSessionDetail);
 
@@ -970,8 +987,111 @@ export function researchErrorMessage(failure: FetchFailure): string | null {
 
 // ---- 관리자 (승인된 admin 전용) ----
 
-export const listAdminAccounts = (cursor?: string | null) =>
-  fetchJson(apiUrl(`/admin/accounts${listQuery(cursor)}`), parsePage(parseAdminAccount));
+export interface AdminAccountFilter {
+  // #119 L1·L5(issue119 §L1): 승인 여부, 역할, login 부분 일치
+  approved?: boolean;
+  role?: AdminAccount["role"];
+  q?: string;
+}
+
+export const listAdminAccounts = (cursor?: string | null, f: AdminAccountFilter = {}) =>
+  fetchJson(
+    apiUrl(
+      `/admin/accounts${listQuery(cursor, {
+        ...(f.approved !== undefined ? { approved: String(f.approved) } : {}),
+        ...(f.role ? { role: f.role } : {}),
+        ...(f.q ? { q: f.q } : {}),
+      })}`
+    ),
+    parsePage(parseAdminAccount)
+  );
+
+export interface AuditEntry {
+  id: string;
+  createdAt: string;
+  actor: { kind: "account"; accountId: string; login: string | null } | { kind: "operator"; label: string };
+  account: { accountId: string; login: string; githubId: string };
+  reason: string;
+  before: { role: string; isApproved: boolean };
+  after: { role: string; isApproved: boolean };
+}
+
+function parseMembershipState(v: unknown): AuditEntry["before"] | null {
+  return isObj(v) && isStr(v.role) && typeof v.isApproved === "boolean" ? { role: v.role, isApproved: v.isApproved } : null;
+}
+
+function parseAuditEntry(v: unknown): AuditEntry | null {
+  if (!isObj(v) || !isId(v.id) || !isStr(v.createdAt) || !isStr(v.reason) || !isObj(v.actor) || !isObj(v.account)) return null;
+  const before = parseMembershipState(v.before);
+  const after = parseMembershipState(v.after);
+  const a = v.account;
+  if (!before || !after || !isId(a.accountId) || !isStr(a.login) || !isStr(a.githubId)) return null;
+  const act = v.actor;
+  let actor: AuditEntry["actor"];
+  if (act.kind === "account" && isId(act.accountId) && (act.login === null || isStr(act.login))) actor = { kind: "account", accountId: act.accountId, login: act.login };
+  else if (act.kind === "operator" && isStr(act.label)) actor = { kind: "operator", label: act.label };
+  else return null;
+  return { id: v.id, createdAt: v.createdAt, actor, account: { accountId: a.accountId, login: a.login, githubId: a.githubId }, reason: v.reason, before, after };
+}
+
+export interface UrlMetadata {
+  url: string;
+  title?: string;
+  siteName?: string;
+  bibliography: Bibliography | null;
+}
+
+function parseUrlMetadata(v: unknown): UrlMetadata | null {
+  if (!isObj(v) || !isStr(v.url)) return null;
+  const bib = v.bibliography === undefined ? null : parseBibliography(v.bibliography);
+  if (bib === undefined) return null;
+  return {
+    url: v.url,
+    ...(isStr(v.title) && v.title ? { title: v.title } : {}),
+    ...(isStr(v.siteName) && v.siteName ? { siteName: v.siteName } : {}),
+    bibliography: bib,
+  };
+}
+
+/**
+ * #119 K3(issue119 §K3): 출처 URL의 제목·서지정보를 서버가 읽어 준다(저장하지 않는다). 승인 회원 session + CSRF, Idempotency-Key 없음.
+ * 몇 초 걸릴 수 있다(서버 예산 5초 + 느린 응답).
+ */
+export const fetchUrlMetadata = (url: string, csrfToken: string) =>
+  fetchJson(
+    apiUrl("/research/url-metadata"),
+    parseUrlMetadata,
+    { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: JSON.stringify({ url }) },
+    15_000
+  );
+
+/** K3 오류 안내 */
+export function urlMetadataError(failure: FetchFailure): string {
+  if (failure.kind === "http") {
+    switch (failure.code) {
+      // issue119 r2: 이름이 없거나 내부 주소라는 뜻을 비치지 않는 한 문장(내부 이름 탐색 방지)
+      case "url_not_allowed":
+        return "이 주소는 가져올 수 없습니다. 직접 입력해 주세요.";
+      case "validation_error":
+        return "출처 URL 형식을 확인해 주세요.";
+      case "unsupported_content":
+        return "웹페이지(HTML)가 아니거나 읽을 수 없는 형식이라 정보를 가져오지 못했습니다. 직접 입력해 주세요.";
+      case "fetch_failed":
+        return "페이지를 불러오지 못했습니다(응답 없음·오류·너무 많은 이동). 직접 입력해 주세요.";
+      case "rate_limited":
+        return "요청이 많습니다. 잠시 뒤 다시 시도해 주세요.";
+      case "not_ready":
+        return "이 서버에서는 자동 채우기를 쓸 수 없습니다. 직접 입력해 주세요.";
+    }
+    if (failure.status === 401 || failure.status === 403) return "로그인·승인 상태를 확인해 주세요.";
+  }
+  if (failure.kind === "timeout") return "응답이 늦어 멈췄습니다. 다시 시도하거나 직접 입력해 주세요.";
+  return "정보를 가져오지 못했습니다. 직접 입력해 주세요.";
+}
+
+/** #119 L3(issue119 §L3): 권한 변경 감사 기록(관리자 전용, 최신순, 읽기 전용). */
+export const listAdminAudit = (cursor?: string | null, accountId?: string) =>
+  fetchJson(apiUrl(`/admin/audit${listQuery(cursor, accountId ? { accountId } : undefined)}`), parsePage(parseAuditEntry));
 
 export const setMembership = (
   accountId: string,

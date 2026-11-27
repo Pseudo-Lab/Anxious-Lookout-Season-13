@@ -55,6 +55,9 @@ describe("relationLabel", () => {
   });
   it("shows legacy free text as 기타 (원래 문자열)", () => {
     expect(relationLabel(kinds, rel("1", "근거", { kindKnown: false }), A)).toBe("기타 (근거)");
+    // #119 J3: 영어 내부 이름은 읽는 이름으로
+    expect(relationLabel(kinds, rel("1", "reference", { kindKnown: false }), A)).toBe("기타 (참고)");
+    expect(relationLabel(kinds, rel("1", "Relates-To", { kindKnown: false }), A)).toBe("기타 (관련)");
   });
 });
 

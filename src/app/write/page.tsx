@@ -1,31 +1,16 @@
-"use client";
-
-import { Suspense } from "react";
-import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import LegacyIdRedirect from "@/components/layout/LegacyIdRedirect";
 import AuthGate from "@/components/research/AuthGate";
-import PostDetail from "./PostDetail";
 import PostIndex from "./PostIndex";
+import WriteFrame from "./WriteFrame";
 
-// #28 글 쓰기. 목록(/write/)과 글 화면(/write/?id=)은 같은 경로이고, 새 글은 /write/new/(?draft=)에서 쓴다.
-function WriteInner() {
-  const id = useSearchParams().get("id");
-  if (id) return <PostDetail key={id} id={id} />;
-  return <PostIndex />;
-}
-
+// #28 글 쓰기 목록(/write/). 새 글은 /write/new/(?draft=), 글 화면은 /write/<id>/(#119 B2).
+// 예전 글 화면 주소(/write/?id=<id>)는 다른 상세 주소와 같은 규칙으로 넘긴다(다른 검색어·#조각 유지).
 export default function WritePage() {
   return (
-    // 편집 중에는 나란히 보기를 위해 페이지 폭을 넓힌다(data-editing).
-    <div className="mx-auto max-w-3xl has-[[data-editing]]:max-w-6xl">
+    <WriteFrame>
       <AuthGate>
-        <Suspense>
-          <WriteInner />
-        </Suspense>
+        <LegacyIdRedirect route="post" fallback={<PostIndex />} />
       </AuthGate>
-      <p className="mt-10 text-xs text-stone-500">
-        글은 <Link href="/research/" className="underline">내 연구</Link>의 문서를 바탕으로 씁니다. 자료 → 문서 → 글 순서로 정리하고, 어느 단계에서든 대화창에서 도움을 받을 수 있습니다.
-      </p>
-    </div>
+    </WriteFrame>
   );
 }

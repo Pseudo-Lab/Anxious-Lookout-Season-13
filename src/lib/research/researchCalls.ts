@@ -1,5 +1,6 @@
 import { apiUrl, fetchJson } from "@/lib/api/client";
 import { BASE_PATH } from "@/lib/constants";
+import { DETAIL_PATH } from "@/lib/routes";
 
 // api-contracts/issue97-agent-research-r2-v1.md. 이 endpoint의 DTO만 연구 작업 기록의 근거다.
 type Resource = "material" | "document" | "post";
@@ -125,9 +126,10 @@ export function researchCallHref(call: ResearchCall): string | null {
   if (call.status !== "succeeded") return null;
   // 모델이 제공한 URL은 사용하지 않는다. 해석된 receipt의 고정 route + UUID만으로 만든다.
   const saved = call.saved;
-  if (saved) return `${BASE_PATH}${PATHS[saved.resourceType]}?${new URLSearchParams({ id: saved.id })}#version-history`;
+  // #119 B2: 화면 주소는 경로형이다(서버 destination.path는 예전 목록 경로 그대로 검사만 한다).
+  if (saved) return `${BASE_PATH}${DETAIL_PATH[saved.resourceType](saved.id)}#version-history`;
   const t = call.target;
-  if (!call.snapshot && t?.type && resource(t.type) && t.id) return `${BASE_PATH}${PATHS[t.type]}?${new URLSearchParams({ id: t.id })}`;
+  if (!call.snapshot && t?.type && resource(t.type) && t.id) return `${BASE_PATH}${DETAIL_PATH[t.type](t.id)}`;
   return null;
 }
 

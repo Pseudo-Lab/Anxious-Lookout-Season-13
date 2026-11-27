@@ -102,14 +102,68 @@ const unsafe = [
   "",
   "![외부 이미지](https://tracker.invalid/pixel.png)",
 ].join("\n");
+// #119 K3·K1·K5: 출처에서 빈 칸만 채운다(쓴 값은 그대로), 서지정보는 처음엔 접혀 있다가 채우면 펼쳐진다. UTC 안내 없음.
+await page.goto(U("/research/material/new/"));
+{
+  const bib = main.locator("details").filter({ has: page.getByText("서지정보 (선택)", { exact: true }) });
+  check("K1. bibliography collapsed on a new material", !(await bib.evaluate((d) => d.open)));
+  check("K5. no UTC storage note", !(await main.innerText()).includes("UTC"));
+  await main.getByLabel("출처 URL").fill("https://example.com/meta");
+  await main.getByLabel("내용").fill("직접 쓴 내용");
+  await main.getByRole("button", { name: "출처에서 제목·서지정보 채우기" }).click();
+  await main.getByText(/채웠습니다: /).waitFor();
+  check("K3. title filled from source", (await main.getByLabel("제목").inputValue()) === "모의 페이지 제목");
+  check("K3. bibliography opened and filled", (await bib.evaluate((d) => d.open)) && (await main.getByLabel("게재처").inputValue()) === "Example" && (await main.getByLabel("서지 종류").inputValue()) === "webpage");
+  check("K2. webpage type hides ISBN/ISSN", (await main.getByLabel("ISBN").count()) === 0 && (await main.getByLabel("ISSN").count()) === 0);
+  check("K3. typed content untouched", (await main.getByLabel("내용").inputValue()) === "직접 쓴 내용");
+  await main.getByLabel("제목").fill("내가 고친 제목");
+  await main.getByRole("button", { name: "출처에서 제목·서지정보 채우기" }).click();
+  await main.getByText(/새로 채울 빈 칸이 없습니다|채웠습니다/).waitFor();
+  check("K3. existing values are not overwritten", (await main.getByLabel("제목").inputValue()) === "내가 고친 제목");
+  // 리뷰 round3: 응답을 기다리는 동안 바꾼 입력은 덮지 않고, 출처가 바뀌었으면 결과를 버린다
+  {
+    await main.getByLabel("제목").fill("");
+    let release;
+    const gate = new Promise((r) => (release = r));
+    await page.route("**/api/research/url-metadata", async (route) => {
+      await gate;
+      await route.continue();
+    });
+    await main.getByLabel("출처 URL").fill("https://example.com/slow");
+    await main.getByRole("button", { name: "출처에서 제목·서지정보 채우기" }).click();
+    await main.getByLabel("제목").fill("기다리는 동안 쓴 제목");
+    await main.getByLabel("출처 URL").fill("https://example.com/other");
+    release();
+    await main.getByText("출처 URL이 바뀌어 가져온 결과를 쓰지 않았습니다", { exact: false }).waitFor({ timeout: 8000 }).catch(() => {});
+    check("K3. stale response after a source change is dropped", (await main.getByLabel("제목").inputValue()) === "기다리는 동안 쓴 제목");
+    // 출처는 그대로 두고 응답을 기다리는 동안 제목을 쓰면 그 제목이 남는다
+    let release2;
+    const gate2 = new Promise((r) => (release2 = r));
+    await page.unroute("**/api/research/url-metadata");
+    await page.route("**/api/research/url-metadata", async (route) => {
+      await gate2;
+      await route.continue();
+    });
+    await main.getByLabel("제목").fill("");
+    await main.getByRole("button", { name: "출처에서 제목·서지정보 채우기" }).click();
+    await main.getByLabel("제목").fill("응답 전에 쓴 제목");
+    release2();
+    await main.getByText(/채웠습니다|새로 채울 빈 칸이 없습니다/).first().waitFor({ timeout: 8000 }).catch(() => {});
+    check("K3. value typed while waiting is not overwritten", (await main.getByLabel("제목").inputValue()) === "응답 전에 쓴 제목");
+    await page.unroute("**/api/research/url-metadata");
+  }
+  await main.getByLabel("출처 URL").fill("https://blocked.example/x");
+  await main.getByRole("button", { name: "출처에서 제목·서지정보 채우기" }).click();
+  check("K3. guard error explained", await appears(main.getByText("이 주소는 가져올 수 없습니다", { exact: false })));
+}
 await page.goto(U("/research/material/new/"));
 await main.getByLabel("제목").fill("자료 A");
 await main.getByLabel("출처 URL").fill("https://example.com/a");
 await main.getByLabel("내용").fill(unsafe);
 await main.getByRole("button", { name: "자료 저장" }).click();
-await page.waitForURL(/\/research\/material\/\?id=/);
+await page.waitForURL(/\/research\/material\/[0-9a-f-]{36}\//);
 const materialAUrl = page.url();
-const materialAId = new URL(materialAUrl).searchParams.get("id");
+const materialAId = /* #119 B2 경로형 */ new URL(materialAUrl).pathname.split("/").filter(Boolean).pop();
 check("R3. created material detail", await appears(main.getByRole("heading", { name: "자료 A" })));
 const prose = main.locator(".prose").first();
 await prose.waitFor();
@@ -145,7 +199,8 @@ check("setup. material B / document D created", matB.status === 201 && docD.stat
 // R5. 관계(#105 고정 어휘·근거 필수): 방향 없는 자료↔자료(같은 주제), 문서→자료 고정(방향 있는 유형만)
 const isRelationPost = (r) => r.method() === "POST" && new URL(r.url()).pathname.endsWith("/api/research/relations");
 await page.goto(materialAUrl);
-await main.getByLabel("연결할 대상").selectOption({ label: "자료 B" });
+await main.getByRole("combobox", { name: /연결할 (자료|문서) 찾기/ }).fill("자료 B");
+await main.getByRole("option", { name: "자료 B", exact: true }).click(); // #119 J2 검색형 콤보박스
 await main.getByLabel("관계 유형").selectOption("same_topic");
 check("R5. undirected kind has no direction choice", await appears(main.getByText("‘같은 주제’은(는) 방향이 없는 관계입니다.")));
 await main.getByLabel("연결한 이유").fill("같은 사건을 다룬다");
@@ -155,8 +210,9 @@ const undirectedBody = (await undirectedPost).postDataJSON();
 check("R5. create omits directed (server decides from kind)", undirectedBody.kind === "same_topic" && !("directed" in undirectedBody) && !("evidence" in undirectedBody), JSON.stringify(undirectedBody));
 check("R5. undirected relation listed", await appears(main.getByRole("link", { name: "자료 B" })));
 check("R5. undirected relation grouped as neutral", await appears(main.getByRole("group", { name: "중립" }).getByText("같은 주제", { exact: true })));
-await page.goto(U(`/research/document/?id=${docD.body.id}`));
-await main.getByLabel("연결할 대상").selectOption({ label: "자료 A" });
+await page.goto(U(`/research/document/${docD.body.id}/`));
+await main.getByRole("combobox", { name: /연결할 (자료|문서) 찾기/ }).fill("자료 A");
+await main.getByRole("option", { name: "자료 A", exact: true }).click(); // #119 J2 검색형 콤보박스
 check(
   "R5. document↔material offers only directed kinds",
   (await main.getByLabel("관계 유형").locator('option[value="same_topic"]').count()) === 0 && (await main.getByLabel("관계 유형").locator('option[value="supports"]').count()) === 1
@@ -197,6 +253,40 @@ await api.send("POST", "/research/relations", {
 await page.goto(materialAUrl);
 check("R5. incoming relation on material A reads inverse", await appears(main.getByRole("group", { name: "지지·확장" }).getByText("지지받음", { exact: true })));
 
+// J2(#119): 관계 대상 콤보박스 — 같은 글자에 맞는 후보가 한 페이지(30개)를 넘어도 키보드만으로 다음 후보를 불러와 고를 수 있고,
+// 활성 후보는 목록 상자 안에 보이도록 스크롤된다.
+{
+  for (let i = 1; i <= 31; i++) {
+    const r = await api.send("POST", "/research/materials", { title: `다수 후보 ${String(i).padStart(2, "0")}`, sourceUrl: `https://example.com/many/${i}`, collectedAt: "2026-10-18T00:00:00Z", contentKind: "summary", content: "후보" });
+    if (r.status !== 201) check(`setup. candidate ${i}`, false, String(r.status));
+  }
+  await page.goto(materialAUrl);
+  const box = main.getByRole("combobox", { name: "연결할 자료 찾기" });
+  await box.fill("다수 후보");
+  const listbox = main.getByRole("listbox", { name: "자료 후보" });
+  await listbox.getByRole("option", { name: "다수 후보 30" }).waitFor();
+  check("J2. first page holds 30 candidates", (await listbox.getByRole("option").count()) === 30);
+  for (let i = 0; i < 30; i++) await box.press("ArrowDown");
+  await listbox.getByRole("option", { name: "다수 후보 31" }).waitFor({ timeout: 8000 });
+  const activeId = await box.getAttribute("aria-activedescendant");
+  const activeName = activeId ? await page.locator(`[id="${activeId}"]`).innerText() : "";
+  const visible = activeId
+    ? await page.evaluate((id) => {
+        const o = document.getElementById(id);
+        const lb = o?.closest('[role="listbox"]');
+        if (!o || !lb) return false;
+        const a = o.getBoundingClientRect();
+        const b = lb.getBoundingClientRect();
+        return a.top >= b.top - 1 && a.bottom <= b.bottom + 1;
+      }, activeId)
+    : false;
+  check("J2. ArrowDown past the last candidate loads the next page and moves to it", activeName === "다수 후보 31", activeName);
+  check("J2. active candidate is scrolled into the listbox", visible);
+  await box.press("Enter");
+  check("J2. keyboard choice selects the 31st candidate", await appears(main.getByText("다수 후보 31", { exact: true })));
+  await main.getByRole("button", { name: "다른 자료 고르기" }).click();
+}
+
 // R5b. #105 예전 자유 텍스트 관계: ‘기타 (원래 문자열)’로 맨 뒤에 묶이고, 수정할 때 같은 방향의 유형을 골라야 한다.
 {
   await setMock(`legacyRelation=${materialAId},${matB.body.id},${encodeURIComponent("후속 연구")},1`);
@@ -207,7 +297,7 @@ check("R5. incoming relation on material A reads inverse", await appears(main.ge
   check("R5b. legacy group listed after polarity groups", JSON.stringify(groupOrder) === JSON.stringify(["지지·확장", "중립", "기타 (유형 미지정)"]), JSON.stringify(groupOrder));
   check("R5b. empty reason flagged", await appears(legacy.getByText("연결한 이유가 비어 있습니다.")));
   await legacy.getByRole("button", { name: "관계 수정: 자료 B" }).click();
-  check("R5b. edit asks to pick a new kind", await appears(legacy.getByText("예전 유형 ‘후속 연구’은(는) 더 이상 쓰지 않습니다.", { exact: false })));
+  check("R5b. edit asks to pick a new kind", await appears(legacy.getByText("예전 유형 ‘후속 연구’ 대신 쓸 유형을 골라 주세요.", { exact: false })));
   const kindSelect = legacy.getByLabel("관계 유형");
   check(
     "R5b. only kinds matching the relation's direction offered",
@@ -298,7 +388,9 @@ async function openBibliography() {
   await page.goto(U("/research/?tab=materials"));
   const rowA = main.getByRole("link", { name: /자료 A/ }).first();
   check("R5w. list shows summary", await appears(rowA.getByText("자료 A 요약")));
-  check("R5w. list shows relation count", await appears(rowA.getByText("관계 3", { exact: false })));
+  // #119 I1: 배지 "연결 3"(설명은 화면 읽기 도구용 글자와 title)
+  check("R5w. list shows relation count badge", (await appears(rowA.getByText("연결 3", { exact: true }))) && (await appears(rowA.getByTitle("연결된 자료·문서 3개"))));
+  check("R5w. list badges explain content kind and version", (await rowA.getByTitle(/^저장 범위: /).count()) === 1 && (await rowA.getByTitle(/^버전 \d+$/).count()) === 1);
 
   // 저장된 CSL 이름(쉼표가 든 기관·성)은 다른 칸만 고쳐도 그대로 다시 보낸다.
   const storedBib = {
@@ -314,7 +406,7 @@ async function openBibliography() {
     content: "기관 저자",
     bibliography: storedBib,
   });
-  await page.goto(U(`/research/material/?id=${org.body.id}`));
+  await page.goto(U(`/research/material/${org.body.id}/`));
   await main.getByRole("button", { name: "내용 수정" }).click();
   await main.getByLabel("한 줄 요약 (선택)").fill("요약만 고침");
   const orgPatch = page.waitForRequest(isPatch(`/research/materials/${org.body.id}`));
@@ -337,7 +429,7 @@ async function openBibliography() {
   );
 
   const w = await api.send("POST", "/research/documents", { title: "위키 문서 W", content: "W 본문" });
-  const wUrl = U(`/research/document/?id=${w.body.id}`);
+  const wUrl = U(`/research/document/${w.body.id}/`);
   await page.goto(wUrl);
   // 요약만 바꾸면 초안이 없으므로 문서 수정(PATCH)으로 새 버전을 만든다.
   await main.getByRole("button", { name: "내용 수정" }).click();
@@ -414,7 +506,7 @@ await main.getByRole("button", { name: "문서 저장" }).click();
 check("R7. lost response shows failure", await appears(main.getByText("서버에 연결할 수 없습니다")));
 check("R7. draft address kept for recovery", await page.waitForURL(/\?draft=/, { timeout: 8000 }).then(() => true, () => false), page.url());
 await main.getByRole("button", { name: "문서 저장" }).click();
-await page.waitForURL(/\/research\/document\/\?id=/);
+await page.waitForURL(/\/research\/document\/[0-9a-f-]{36}\//);
 await page.unroute(COMMIT);
 const after = await counts();
 const posts = (await mockCalls()).filter(isCommit).slice(-2);
@@ -423,7 +515,7 @@ check("R7. exactly one document created", after.documents === before.documents +
 
 // R8. 공개(확정 정책): 글→자료 직접 연결 전체를 미리보기 후 공개, 간접 연결 제외, 미리보기 뒤 변경은 409 → 재미리보기,
 //     보관 자료는 공개 차단(연결 해제로 해소), 최신 공개본만 열람, 철회
-const docUrl = U(`/research/document/?id=${docD.body.id}`);
+const docUrl = U(`/research/document/${docD.body.id}/`);
 const newMaterial = (title) =>
   api.send("POST", "/research/materials", {
     title,
@@ -473,7 +565,7 @@ const publishButton = () => main.getByRole("button", { name: /글과 참고 자�
 }
 {
   const visitor = await newPage();
-  await visitor.page.goto(U(`/public/document/?id=${docD.body.id}`));
+  await visitor.page.goto(U(`/public/document/${docD.body.id}/`));
   const vm = visitor.page.locator("main");
   check("R8. public page shows document", await appears(vm.getByRole("heading", { name: "문서 D", exact: true })));
   const pubText = await vm.innerText();
@@ -515,7 +607,7 @@ const publishButton = () => main.getByRole("button", { name: /글과 참고 자�
   const pvG = await api.get(`/research/documents/${gid}/publication-preview`);
   const pubG = await api.send("POST", `/research/documents/${gid}/publications`, { versionId: pvG.versionId, expectedVersion: pvG.expectedVersion, previewToken: pvG.previewToken });
   check("R8c. setup published", pubG.status === 201, String(pubG.status));
-  await page.goto(U(`/research/document/?id=${gid}`));
+  await page.goto(U(`/research/document/${gid}/`));
   await main.getByRole("button", { name: "보관", exact: true }).click();
   await main.getByText("보관한 문서입니다").waitFor();
   check("R8c. archived+published still offers withdraw", await appears(main.getByRole("button", { name: "공개 철회" })));
@@ -551,7 +643,7 @@ const publishButton = () => main.getByRole("button", { name: /글과 참고 자�
     });
   }
   await api.send("DELETE", `/research/materials/${x.body.id}`, { expectedVersion: x.body.version });
-  await page.goto(U(`/research/document/?id=${h.body.id}`));
+  await page.goto(U(`/research/document/${h.body.id}/`));
   await main.getByRole("button", { name: "공개하기" }).click();
   await main.getByText("보관됨").waitFor();
   const deletes = [];
@@ -597,7 +689,7 @@ const publishButton = () => main.getByRole("button", { name: /글과 참고 자�
     });
   }
   await api.send("DELETE", `/research/materials/${x.body.id}`, { expectedVersion: x.body.version });
-  await page.goto(U(`/research/document/?id=${h.body.id}`));
+  await page.goto(U(`/research/document/${h.body.id}/`));
   await main.getByRole("button", { name: "공개하기" }).click();
   await main.getByText("보관됨").waitFor();
   const deletes = [];
@@ -1062,6 +1154,7 @@ async function confirmSingleTurn(label, text) {
 {
   // R12e. 명시적 로그아웃은 미확인 전송(입력 포함)을 지운다
   await makeUnconfirmedSend("로그아웃 질문");
+  { const m = page.locator("header").getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
   await page.locator("header").getByRole("button", { name: "로그아웃", exact: true }).first().click();
   await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
   check("R12e. logout clears unconfirmed sends, drafts and chat state", (await fullStore()) === "{}", await fullStore());
@@ -1151,7 +1244,7 @@ async function confirmSingleTurn(label, text) {
   check("R22. workspace: allowed tool completed", await appears(lastTool().getByText("도구 실행함", { exact: true })));
 
   // 자료 상세: 보낸 뒤 바로 다른 페이지로 이동해도 접수 범위는 그대로
-  const materialId = new URL(materialAUrl).searchParams.get("id");
+  const materialId = /* #119 B2 경로형 */ new URL(materialAUrl).pathname.split("/").filter(Boolean).pop();
   await page.goto(materialAUrl);
   await chat.getByLabel("메시지").waitFor();
   check("R22. material page hint shown", await appears(chat.getByText("보고 있는 화면: 이 자료")));
@@ -1175,7 +1268,7 @@ async function confirmSingleTurn(label, text) {
     previewToken: pv22.previewToken,
   });
   check("R22. setup: publication", pubd22.status === 201, String(pubd22.status));
-  await page.goto(U(`/public/document/?id=${pub22.body.id}`));
+  await page.goto(U(`/public/document/${pub22.body.id}/`));
   await chat.getByLabel("메시지").waitFor();
   check("R22. public document scope shown", await appears(chat.getByText("다음 질문 범위: 이 공개 글")));
   check("R22. public wording: read only, no web search or shell (scope help, not body)", await scopeHelp("웹 검색·명령 실행이나 저장·수정은 하지 않습니다"));
@@ -1278,7 +1371,9 @@ async function confirmSingleTurn(label, text) {
   await chat.getByRole("button", { name: "보내기" }).click();
   await chat.getByText("전송 결과를 확인하세요.").waitFor();
   await chat.getByText("모의 응답: 범위 고정 재전송").first().waitFor({ timeout: 15000 });
-  await header.getByRole("link", { name: "상태" }).first().click();
+  // #119 D4: 서비스 상태는 계정 메뉴 안에 있다(클라이언트 이동 유지)
+  { const m = header.getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
+  await header.getByRole("link", { name: "서비스 상태" }).first().click();
   await page.waitForURL(/\/status\/$/);
   check("R22. retry notice: original page is used", await appears(chat.getByText("처음 보낸 화면(이 자료) 기준으로 처리됩니다", { exact: false })));
   await chat.getByRole("button", { name: "다시 보내기" }).click();
@@ -1291,7 +1386,7 @@ async function confirmSingleTurn(label, text) {
   await page.unroute("**/api/research/sessions/*/messages");
 
   // 확인할 수 없는 자원(없음·타인·보관): 접수 전 404, general로 낮추지 않음, 입력 유지
-  await page.goto(U(`/research/material/?id=${crypto.randomUUID()}`));
+  await page.goto(U(`/research/material/${crypto.randomUUID()}/`));
   await chat.getByLabel("메시지").waitFor();
   await chat.getByLabel("메시지").fill("없는 자료 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
@@ -1402,7 +1497,7 @@ let docEUrl;
   check("R15. csrf rejection shown", await appears(main.getByText("요청을 확인하지 못했습니다")));
   await setMock("csrf=normal");
   await main.getByRole("button", { name: "문서 저장" }).click();
-  await page.waitForURL(/\/research\/document\/\?id=/);
+  await page.waitForURL(/\/research\/document\/[0-9a-f-]{36}\//);
   await page.unroute(COMMIT);
   docEUrl = page.url();
   const posts15 = (await mockCalls()).filter(isCommit).slice(-3);
@@ -1413,7 +1508,7 @@ let docEUrl;
 // R16. #22 편집 중 다른 곳에서 문서가 저장되면 초안 자동 저장이 멈춘다. 최신 문서 다시 불러오기가 일시 실패해도 입력 유지(리뷰 major),
 //      다시 불러온 뒤에는 현재 버전과 비교해야 저장된다(비교 없이 덮어쓰지 않음).
 {
-  const id = new URL(docEUrl).searchParams.get("id");
+  const id = /* #119 B2 경로형 */ new URL(docEUrl).pathname.split("/").filter(Boolean).pop();
   await main.getByRole("button", { name: "내용 수정" }).click();
   await main.getByLabel("본문").fill("B 초안");
   const cur = await api.get(`/research/documents/${id}`);
@@ -1480,10 +1575,52 @@ let docEUrl;
   await setMock(`expire=1&as=${accountX}`);
   await login(page);
   await page.goto(draftUrl);
-  await page.waitForURL(/\/research\/document\/\?id=/);
+  await page.waitForURL(/\/research\/document\/[0-9a-f-]{36}\//);
   check("R17. same account lands on the saved document", await appears(main.getByRole("heading", { name: "재인증 문서" })));
   check("R17. exactly one document created", (await counts()).documents === before17.documents + 1, `${before17.documents} -> ${(await counts()).documents}`);
   await setMock("as=");
+}
+
+// N1(#119): 새 대화는 첫 질문으로 만든다. 생성 응답을 잃고 새로고침해도 첫 질문 전체가 돌아오고(제목 60자가 아니다),
+// 같은 요청(같은 key)으로 생성 결과를 확인하면 대화창 입력에 전체 질문이 남는다. 제목은 첫 줄 60자다.
+{
+  const long = `첫 줄 질문입니다 ${"가".repeat(70)} 둘째 문장 ${"나".repeat(80)}`;
+  // 대화창의 대화 목록 화면에서 시작한다(열린 대화가 있으면 목록으로 돌아간다)
+  const openList = async () => {
+    await page.goto(U("/research/"));
+    if (await chat.isHidden()) await page.getByRole("button", { name: "대화창 열기" }).click();
+    const back = chat.getByRole("button", { name: "← 대화 목록" });
+    if (await back.isVisible().catch(() => false)) await back.click();
+    await chat.getByLabel("새 대화 제목").waitFor();
+  };
+  await openList();
+  await chat.getByLabel("새 대화 제목").fill(long);
+  let dropped = false;
+  const posts = [];
+  await page.route("**/api/research/sessions", async (route) => {
+    if (route.request().method() === "POST") posts.push(route.request().headers()["idempotency-key"]);
+    if (route.request().method() === "POST" && !dropped) {
+      dropped = true;
+      await route.fetch();
+      return route.abort();
+    }
+    return route.continue();
+  });
+  await chat.getByRole("button", { name: "새 대화", exact: true }).click();
+  await chat.getByText("서버에 연결할 수 없습니다").waitFor();
+  await page.reload();
+  await openList();
+  check("N1. lost create response: full first question restored after reload", (await chat.getByLabel("새 대화 제목").inputValue()) === long, String((await chat.getByLabel("새 대화 제목").inputValue()).length));
+  await chat.getByRole("button", { name: "새 대화", exact: true }).click();
+  await chat.getByLabel("메시지").waitFor({ timeout: 10000 });
+  await page.unroute("**/api/research/sessions");
+  check("N1. retried with the same Idempotency-Key", posts.length === 2 && posts[0] === posts[1], JSON.stringify(posts));
+  check("N1. composer holds the full first question", (await chat.getByLabel("메시지").inputValue()) === long);
+  // 이 대화의 입력 초안을 비워 둔다(뒤 R11 저장소 검사는 대화창 상태만 허용한다)
+  await chat.getByLabel("메시지").fill("");
+  const sessions = await (await page.request.get(U("/api/research/sessions"))).json();
+  const titles = sessions.items.map((x) => x.title);
+  check("N1. title is the first line (≤60 chars), one session created", titles.filter((t) => t.startsWith("첫 줄 질문입니다")).length === 1 && titles.some((t) => t.startsWith("첫 줄 질문입니다") && [...t].length <= 60 && t.endsWith("…")), JSON.stringify(titles.slice(0, 3)));
 }
 
 // R18. 공개 문서 페이지의 개인 대화 생성 폼: 복구된 개인 제목은 계정에 묶여, 같은 탭 계정 전환 시 버린다(리뷰 F3-1)
@@ -1497,7 +1634,7 @@ let docEUrl;
     previewToken: pv.previewToken,
   });
   check("setup. fixture publication", pub.status === 201, String(pub.status));
-  const pubUrl = U(`/public/document/?id=${pubDoc.body.id}`);
+  const pubUrl = U(`/public/document/${pubDoc.body.id}/`);
   await page.goto(pubUrl);
   await main.getByLabel("새 대화 제목").fill("A 개인 대화 제목");
   let dropped18 = false;
@@ -1521,8 +1658,12 @@ let docEUrl;
   await tab2.waitForURL(U("/"));
   await tab2.close();
   await main.getByRole("button", { name: "새 대화" }).click();
+  // 계정이 바뀌면 입력칸이 새로 그려진다(이전 계정 입력 없음). 입력칸이 있는 상태에서 값이 바뀔 때까지 기다린다.
   await page.waitForFunction(
-    () => !(document.querySelector('input[aria-label="새 대화 제목"]')?.value ?? "").includes("A 개인 대화 제목"),
+    () => {
+      const el = document.querySelector('main input[aria-label^="새 대화 제목"]');
+      return !!el && !el.value.includes("A 개인 대화 제목");
+    },
     null,
     { timeout: 10000 }
   ).catch(() => {});
@@ -1547,6 +1688,7 @@ let docEUrl;
   });
   void main.getByRole("button", { name: "문서 저장" }).click();
   await seen19;
+  { const m = page.locator("header").getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
   await page.locator("header").getByRole("button", { name: "로그아웃", exact: true }).first().click();
   await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
   check("R19. store empty right after logout", !(await pendingStore()).includes("로그아웃 경합"));
@@ -1567,7 +1709,7 @@ let docEUrl;
   check("R20. commenter gets forbidden guidance", await appears(cm.getByText("관리자가 승인한 편집자·관리자만 이용할 수 있습니다")));
   const pubList = await (await c.page.request.get(U("/api/public/documents"))).json();
   if (pubList.items?.length) {
-    await c.page.goto(U(`/public/document/?id=${pubList.items[0].documentId}`));
+    await c.page.goto(U(`/public/document/${pubList.items[0].documentId}/`));
     check("R20. commenter can read public document", await appears(cm.getByRole("heading").first()));
     check("R20. commenter sees question restriction, no form", (await appears(cm.getByText("관리자가 승인한 편집자·관리자만"))) && (await cm.getByLabel("새 대화 제목").count()) === 0);
   } else {
@@ -1592,10 +1734,12 @@ let docEUrl;
   await setMock("nextLogin=admin&reuse=0&as=");
   const adm = await newPage();
   await login(adm.page);
-  check("R21. admin sees 관리 nav", await appears(adm.page.locator("header").getByRole("link", { name: "관리" })));
+  { const m = adm.page.locator("header").getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
+  check("R21. admin sees 관리 in account menu (#119 D4)", await appears(adm.page.locator("header").getByRole("link", { name: "관리" })));
   await adm.page.goto(U("/admin/"));
   const am = adm.page.locator("main");
-  const rowOf = (login) => am.getByRole("listitem").filter({ hasText: new RegExp(`${login}\\b`) });
+  // 회원 행은 회원 구역(승인 대기·승인된 회원, aria-labelledby section)에서만 찾는다. 감사 기록 항목도 같은 로그인 이름을 담는다.
+  const rowOf = (login) => am.locator("section[aria-labelledby]").getByRole("listitem").filter({ hasText: new RegExp(`${login}\\b`) });
   const row = rowOf(tMe.user.login);
   await row.first().waitFor();
   check("R21. own row cannot be changed", await appears(am.getByRole("listitem").filter({ hasText: "(나)" }).getByText("본인 계정은 바꿀 수 없습니다")));
@@ -1604,6 +1748,10 @@ let docEUrl;
   await row.getByRole("button", { name: "적용" }).click();
   check("R21. grant applied with re-login notice", await appears(row.getByText("대상 사용자는 다시 로그인해야 합니다")));
   check("R21. row shows editor", (await row.innerText()).includes("편집자") && (await row.innerText()).includes("승인됨"));
+  // #119 L3·L4: 감사 기록에 사유가 남고, 이름은 GitHub 프로필 링크다(숫자 ID는 보이지 않는다)
+  await am.getByText("감사 기록", { exact: true }).click();
+  check("R21. audit log shows the change with reason", await appears(am.getByText("사유: M3 편집자 지정 확인")));
+  check("R21. login links to GitHub profile", (await row.getByRole("link", { name: new RegExp(tMe.user.login) }).getAttribute("href")) === `https://github.com/${encodeURIComponent(tMe.user.login)}` && !(await row.innerText()).includes(`GitHub ${tMe.user.githubId}`));
   check("R21. target session revoked", (await target.page.request.get(U("/api/auth/me"))).status() === 401);
   await setMock(`as=${tMe.user.accountId}`);
   await login(target.page);
@@ -1826,7 +1974,7 @@ let docEUrl;
   const w = await api.send("POST", "/research/documents", { title: "편집기 문서", content: `첫 줄\n바꿀 문장 하나\n${same}\n끝 줄\n` });
   check("W1. setup: document created", w.status === 201, String(w.status));
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto(U(`/research/document/?id=${w.body.id}`));
+  await page.goto(U(`/research/document/${w.body.id}/`));
   await main.getByRole("button", { name: "내용 수정" }).click();
   const body = main.getByLabel("본문");
   const preview = main.getByRole("region", { name: "미리보기" });
@@ -1893,7 +2041,7 @@ let docEUrl;
   const doc = await api.send("POST", "/research/documents", { title: "자동 저장 문서", content: "원래 본문\n" });
   const id = doc.body.id;
   const draftOf = async () => (await api.get(`/research/documents/${id}/draft`)).draft;
-  await page.goto(U(`/research/document/?id=${id}`));
+  await page.goto(U(`/research/document/${id}/`));
   await main.getByRole("button", { name: "내용 수정" }).click();
   await main.getByLabel("본문").fill("자동 저장된 초안");
   check("W2. autosave: saved status shown", await appears(main.getByText("초안 자동 저장됨"), 8000));
@@ -1992,7 +2140,7 @@ let docEUrl;
   const timeCompare = async (before, after, title) => {
     const d = await api.send("POST", "/research/documents", { title, content: before });
     const p = await api.send("PATCH", `/research/documents/${d.body.id}`, { title, content: after, expectedVersion: d.body.version });
-    await page.goto(U(`/research/document/?id=${d.body.id}`));
+    await page.goto(U(`/research/document/${d.body.id}/`));
     await main.getByRole("button", { name: "버전 비교", exact: true }).waitFor();
     const t0 = Date.now();
     await main.getByRole("button", { name: "버전 비교", exact: true }).click();
@@ -2070,7 +2218,7 @@ let docEUrl;
     return { release, arrived, done: () => page.unroute(pattern) };
   };
   const locked = async () => !(await main.getByLabel("본문").isEditable()) && !(await main.getByLabel("제목", { exact: true }).isEditable());
-  await page.goto(U(`/research/document/?id=${id}`));
+  await page.goto(U(`/research/document/${id}/`));
 
   // 저장(commit) 응답 보류 중
   await main.getByRole("button", { name: "내용 수정" }).click();
@@ -2147,7 +2295,7 @@ let docEUrl;
   await main.getByLabel("제목").fill("저장할 새 문서");
   await main.getByLabel("본문").fill("저장할 본문");
   await main.getByRole("button", { name: "문서 저장" }).click();
-  await page.waitForURL(/\/research\/document\/\?id=/);
+  await page.waitForURL(/\/research\/document\/[0-9a-f-]{36}\//);
   check("W3. save creates exactly one document", (await counts()).documents === before.documents + 1 && (await appears(main.getByRole("heading", { name: "저장할 새 문서" }))));
   await page.context().close();
 }
@@ -2307,11 +2455,17 @@ let docEUrl;
 
 // R11. 모든 research 변경 요청: Origin + X-CSRF-Token + UUID v4 Idempotency-Key (브라우저 요청)
 {
-  const uiMutations = (await mockCalls()).filter((c) => c.method !== "GET" && c.path.startsWith("/research/"));
+  const calls = await mockCalls();
+  // #119 K3: 출처 서지정보 미리보기(POST /research/url-metadata)는 저장하지 않는 읽기라 계약상 Idempotency-Key를 보내지 않는다(Origin·CSRF만).
+  const isK3 = (c) => c.method === "POST" && c.path === "/research/url-metadata";
+  const uiMutations = calls.filter((c) => c.method !== "GET" && c.path.startsWith("/research/") && !isK3(c));
   const bad = uiMutations.filter(
     (c) => c.origin !== ORIGIN || !c.csrf || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(c.idempotencyKey ?? "")
   );
   check("R11. mutations carry Origin/CSRF/Idempotency-Key", uiMutations.length > 0 && bad.length === 0, `${uiMutations.length} calls, bad=${JSON.stringify(bad.slice(0, 2))}`);
+  const k3 = calls.filter(isK3);
+  const k3bad = k3.filter((c) => c.origin !== ORIGIN || !c.csrf || c.idempotencyKey);
+  check("R11. K3 url-metadata calls carry Origin/CSRF and no Idempotency-Key", k3.length > 0 && k3bad.length === 0, `${k3.length} calls, bad=${JSON.stringify(k3bad.slice(0, 2))}`);
 }
 {
   // 남아도 되는 것은 계정별 대화창 상태(열림·선택 대화)뿐이다. 인증 정보·CSRF nonce는 저장하지 않는다.
@@ -2321,7 +2475,16 @@ let docEUrl;
   const text = JSON.stringify(stored);
   check(
     "R11. only per-account chat UI state in storage (no token/CSRF)",
-    Object.keys(stored.local).length === 0 && only && !/csrf|token|cookie/i.test(text),
+    // #119 A2: localStorage에는 메뉴 자리 힌트(불리언 3개)만 허용한다
+    Object.keys(stored.local).every((k) => k === "anxious:nav-hint") &&
+      (() => {
+        const raw = stored.local["anxious:nav-hint"];
+        if (raw === undefined) return true;
+        const h = JSON.parse(raw);
+        return Object.keys(h).sort().join() === "research,signedIn,write" && Object.values(h).every((v) => typeof v === "boolean");
+      })() &&
+      only &&
+      !/csrf|token|cookie/i.test(text),
     text
   );
 }

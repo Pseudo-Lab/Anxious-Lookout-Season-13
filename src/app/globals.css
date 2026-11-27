@@ -195,6 +195,18 @@ body {
   color: var(--foreground);
   /* #44: 글자 크기 단계가 없는 글(본문 prose·편집기 포함)도 같은 +2pt */
   font-size: calc(1rem * 7 / 6);
+  /* #119 A1: 한글은 어절 단위로 줄바꿈한다("가능/한가"처럼 단어 중간에서 끊지 않는다).
+     띄어쓰기 없이 한 줄보다 긴 것(URL·긴 영문)은 넘치지 않게 그 자리에서 끊는다(min-content 폭은 바꾸지 않는 break-word). */
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+/* 코드는 글자 그대로(어절 규칙을 적용하지 않는다) */
+pre,
+code,
+kbd,
+samp {
+  word-break: normal;
 }
 
 /* 넓은 화면에서 공통 대화창이 열려 있으면 본문이 가려지지 않게 대화창 폭(ChatDock이 정함)만큼 오른쪽을 비운다. */
@@ -573,4 +585,9 @@ html[data-chat-resizing] body {
 .pb-editor ol {
   list-style: decimal;
   padding-left: 1.5rem;
+}
+
+/* #119 F1: 목차로 이동할 때 소제목이 화면 위에 붙은 상단 바에 가려지지 않게 */
+.post-body :is(h1, h2, h3, h4, h5, h6)[id] {
+  scroll-margin-top: calc(var(--site-header-height, 4.5rem) + 1rem);
 }

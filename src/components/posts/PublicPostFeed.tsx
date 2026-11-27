@@ -6,16 +6,19 @@ import { usePagedList } from "@/lib/research/usePagedList";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
 import PostList from "./PostList";
+import { PostListSkeleton } from "./PostSkeleton";
 
 export const NO_API_POSTS = "이 정적 사이트에는 API 서버가 없어 글을 제공하지 않습니다.";
 
 // 현재 발행본 목록(#28 GET /api/public/posts). 서버 HTML에는 글이 없고 브라우저가 조회한다.
-function Feed({ tag, limit, more }: { tag?: string; limit?: number; more: boolean }) {
+function Feed({ tag, limit, more, showTotal }: { tag?: string; limit?: number; more: boolean; showTotal: boolean }) {
   const list = usePagedList(`public-posts:${tag ?? ""}:${limit ?? ""}`, (cursor) => listPublicPosts(cursor, { tag, limit }));
   if (list.failure && list.items.length === 0) return <ErrorNotice failure={list.failure} prefix="글을 불러오지 못했습니다." />;
-  if (!list.loaded) return <p className="text-sm text-stone-500">불러오는 중...</p>;
+  if (!list.loaded) return <PostListSkeleton count={Math.min(limit ?? 3, 3)} />;
   return (
     <div className="space-y-4">
+      {/* #119 E2: 전체 건수(서버가 줄 때만) */}
+      {showTotal && list.total !== null && list.total > 0 && <p className="text-sm text-stone-600">글 {list.total}편</p>}
       <PostList posts={list.items} />
       {list.failure && <ErrorNotice failure={list.failure} prefix="다음 글을 불러오지 못했습니다." />}
       {more && list.nextCursor && (
@@ -32,7 +35,17 @@ function Feed({ tag, limit, more }: { tag?: string; limit?: number; more: boolea
 }
 
 /** tag: 정확히 이 태그가 달린 글만. limit+more=false: 첫 장만(홈 최근 글). */
-export default function PublicPostFeed({ tag, limit, more = true }: { tag?: string; limit?: number; more?: boolean }) {
+export default function PublicPostFeed({
+  tag,
+  limit,
+  more = true,
+  showTotal = false,
+}: {
+  tag?: string;
+  limit?: number;
+  more?: boolean;
+  showTotal?: boolean;
+}) {
   if (!API_ENABLED) return <Notice tone="info">{NO_API_POSTS}</Notice>;
-  return <Feed tag={tag} limit={limit} more={more} />;
+  return <Feed tag={tag} limit={limit} more={more} showTotal={showTotal} />;
 }

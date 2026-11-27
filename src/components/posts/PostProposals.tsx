@@ -15,6 +15,7 @@ import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
 import BodyDiff from "@/components/blocks/BodyDiff";
 import PostMetaDiff from "./PostMetaDiff";
+import { writePostPath } from "@/lib/routes";
 
 // #97: 바로 저장 전환 전에 남은 Codex 글 제안을 처리한다. 수락하면 새 버전 하나가 된다.
 // 새 글 제안은 수락할 때 처음 글이 만들어진다.
@@ -223,7 +224,7 @@ export function ProposalReview({
           </div>
         ))}
       {!pending && p.acceptedPostId && target.kind === "new" && (
-        <Link href={`/write/?id=${encodeURIComponent(p.acceptedPostId)}`} className="text-sm font-medium text-indigo-600 hover:text-indigo-800">
+        <Link href={writePostPath(p.acceptedPostId)} className="text-sm font-medium text-indigo-600 hover:text-indigo-800">
           수락해 만든 글 보기 →
         </Link>
       )}

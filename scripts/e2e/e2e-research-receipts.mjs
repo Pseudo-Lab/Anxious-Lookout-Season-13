@@ -94,7 +94,7 @@ try {
   assert.equal(await activity.locator("[data-research-call]").count(), 1);
   assert.equal(await activity.locator("img").count(), 0);
   assert.ok((await activity.innerText()).includes(saved.title));
-  assert.equal(await activity.getByRole("link", { name: "보기", exact: true }).getAttribute("href"), `${BASE}/research/document/?id=${resourceId}#version-history`);
+  assert.equal(await activity.getByRole("link", { name: "보기", exact: true }).getAttribute("href"), `${BASE}/research/document/${resourceId}/#version-history`);
   assert.ok(!(await activity.innerText()).includes("private-native-reason"));
   console.log("PASS F2: latest authoritative receipts survive slow initial GET; replay groups once, plain title and safe link");
 

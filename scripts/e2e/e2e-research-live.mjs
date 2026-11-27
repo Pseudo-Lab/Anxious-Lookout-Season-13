@@ -46,7 +46,7 @@ async function signIn(page) {
   await page.goto(U("/"));
   await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().click();
   await page.waitForURL(U("/"));
-  await page.locator("header").getByRole("button", { name: "로그아웃" }).first().waitFor();
+  await page.locator("header").getByRole("button", { name: /계정 메뉴/ }).first().waitFor();
 }
 
 // 로그인 → fixture githubId 공유 → 운영자 승인 대기 → 같은 browser로 재로그인(승인 시 기존 session 폐기)
@@ -138,9 +138,9 @@ await main.getByLabel("제목").fill("실물 자료 A");
 await main.getByLabel("출처 URL").fill("https://example.com/a");
 await main.getByLabel("내용").fill(unsafe);
 await main.getByRole("button", { name: "자료 저장" }).click();
-await page.waitForURL(/\/research\/material\/\?id=/);
+await page.waitForURL(/\/research\/material\/[0-9a-f-]{36}\//);
 const materialAUrl = page.url();
-const materialAId = new URL(materialAUrl).searchParams.get("id");
+const materialAId = /* #119 B2 경로형 */ new URL(materialAUrl).pathname.split("/").filter(Boolean).pop();
 check("L3. created via real API", await appears(main.getByRole("heading", { name: "실물 자료 A" })));
 const prose = main.locator(".prose").first();
 await prose.waitFor();
@@ -172,16 +172,18 @@ check("setup. B/D created", matB.status === 201 && docD.status === 201, `${matB.
 
 // L5. 관계
 await page.goto(materialAUrl);
-await main.getByLabel("연결할 대상").selectOption({ label: "실물 자료 B" });
+await main.getByRole("combobox", { name: /연결할 (자료|문서) 찾기/ }).fill("실물 자료 B");
+await main.getByRole("option", { name: "실물 자료 B", exact: true }).click(); // #119 J2 검색형 콤보박스
 // #105 관계 유형은 실제 API의 어휘(GET /research/relation-kinds)에서 온다.
 await main.getByLabel("관계 유형").selectOption("same_topic");
 await main.getByLabel("연결한 이유").fill("같은 사건을 다룬다");
 await main.getByRole("button", { name: "관계 추가" }).click();
 check("L5. undirected relation via real API", await appears(main.getByRole("link", { name: "실물 자료 B" })));
 check("L5. undirected relation grouped as neutral", await appears(main.getByRole("group", { name: "중립" }).getByText("같은 주제", { exact: true })));
-const docUrl = U(`/research/document/?id=${docD.body.id}`);
+const docUrl = U(`/research/document/${docD.body.id}/`);
 await page.goto(docUrl);
-await main.getByLabel("연결할 대상").selectOption({ label: "실물 자료 A" });
+await main.getByRole("combobox", { name: /연결할 (자료|문서) 찾기/ }).fill("실물 자료 A");
+await main.getByRole("option", { name: "실물 자료 A", exact: true }).click(); // #119 J2 검색형 콤보박스
 await main.getByLabel("관계 유형").selectOption("supports");
 await main.getByLabel("연결한 이유").fill("문서의 주장 근거");
 // 근거 위치: 실제 버전 ID로 저장되고 버전 번호와 함께 돌아온다.
@@ -254,7 +256,7 @@ check("L6. save after reload succeeds", await appears(main.locator(".prose").get
   await main.getByRole("button", { name: "문서 저장" }).click();
   check("L7. lost response shows failure", await appears(main.getByText("서버에 연결할 수 없습니다")));
   await main.getByRole("button", { name: "문서 저장" }).click();
-  await page.waitForURL(/\/research\/document\/\?id=/);
+  await page.waitForURL(/\/research\/document\/[0-9a-f-]{36}\//);
   await page.unroute("**/api/research/document-drafts/*/commit");
   check("L7. same key reused", keys.length === 2 && keys[0] === keys[1], JSON.stringify(keys));
   check("L7. exactly one document created", (await countDocs()) === before + 1);
@@ -274,7 +276,7 @@ await publishButton().waitFor();
 }
 await publishButton().click();
 check("L8. published via real API", await appears(main.getByText("공개 중", { exact: true })));
-const publicUrl = U(`/public/document/?id=${docD.body.id}`);
+const publicUrl = U(`/public/document/${docD.body.id}/`);
 {
   const V = await newPage();
   await V.page.goto(publicUrl);
@@ -310,6 +312,8 @@ const publicUrl = U(`/public/document/?id=${docD.body.id}`);
 const chatPanel = page.locator("#chat-panel");
 await page.goto(publicUrl);
 await main.getByLabel("새 대화 제목").waitFor();
+// #119 N1: 제목 기본값(문서 제목)은 없다. 첫 질문을 적어야 '새 대화'를 누를 수 있다.
+await main.getByLabel("새 대화 제목").fill("이 공개 문서의 요점은?");
 await main.getByRole("button", { name: "새 대화" }).click();
 // #94: 대화 화면에는 시작 맥락 줄을 표시하지 않는다. 맥락이 저장됐는지는 아래에서 API로 확인한다.
 check("L8b. session opened from public document", await appears(chatPanel.getByLabel("메시지")));
@@ -320,6 +324,8 @@ const publicSessionId = await page.evaluate(() => {
 });
 check("L8b. new public session opened in panel", !!publicSessionId, String(publicSessionId));
 check("L8b. session context from public document stored (API)", !!(await api.get(`/research/sessions/${publicSessionId}`)).body?.context);
+check("L8b. title comes from the first question (N1)", (await api.get(`/research/sessions/${publicSessionId}`)).body?.title === "이 공개 문서의 요점은?");
+check("L8b. first question is in the composer (N1)", (await chatPanel.getByLabel("메시지").inputValue()) === "이 공개 문서의 요점은?");
 const publicSessionUrl = U(`/research/session/?id=${publicSessionId}`);
 
 // L8c. 공개 중 문서를 보관해도 철회할 수 있다(리뷰 F1): 보관 → 철회 버튼 유지 → 철회 → 익명 404
@@ -329,7 +335,7 @@ const publicSessionUrl = U(`/research/session/?id=${publicSessionId}`);
   const pvG = (await api.get(`/research/documents/${gid}/publication-preview`)).body;
   const pubG = await api.send("POST", `/research/documents/${gid}/publications`, { versionId: pvG.versionId, expectedVersion: pvG.expectedVersion, previewToken: pvG.previewToken });
   check("L8c. setup published", pubG.status === 201, String(pubG.status));
-  await page.goto(U(`/research/document/?id=${gid}`));
+  await page.goto(U(`/research/document/${gid}/`));
   await main.getByRole("button", { name: "보관", exact: true }).click();
   await main.getByText("보관한 문서입니다").waitFor();
   check("L8c. archived+published still offers withdraw", await appears(main.getByRole("button", { name: "공개 철회" })));
@@ -365,7 +371,7 @@ const publicSessionUrl = U(`/research/session/?id=${publicSessionId}`);
     });
   }
   await api.send("DELETE", `/research/materials/${x.body.id}`, { expectedVersion: x.body.version });
-  await page.goto(U(`/research/document/?id=${h.body.id}`));
+  await page.goto(U(`/research/document/${h.body.id}/`));
   await main.getByRole("button", { name: "공개하기" }).click();
   await main.getByText("보관됨").waitFor();
   const deletes = [];
@@ -411,7 +417,7 @@ const publicSessionUrl = U(`/research/session/?id=${publicSessionId}`);
     });
   }
   await api.send("DELETE", `/research/materials/${x.body.id}`, { expectedVersion: x.body.version });
-  await page.goto(U(`/research/document/?id=${h.body.id}`));
+  await page.goto(U(`/research/document/${h.body.id}/`));
   await main.getByRole("button", { name: "공개하기" }).click();
   await main.getByText("보관됨").waitFor();
   const deletes = [];
@@ -508,7 +514,7 @@ check("L9. session persists after reload", (await appears(chatPanel.getByRole("b
   check("LW. setup: document", created.status === 201, String(created.status));
   const id = created.body.id;
   const draftOf = async () => (await api.get(`/research/documents/${id}/draft`)).body?.draft ?? null;
-  await page.goto(U(`/research/document/?id=${id}`));
+  await page.goto(U(`/research/document/${id}/`));
   await main.getByRole("button", { name: "내용 수정" }).click();
   await main.getByLabel("본문").fill("실물 자동 저장 초안");
   check("LW. autosave saved", await appears(main.getByText("초안 자동 저장됨"), 10000));
@@ -563,13 +569,20 @@ check("L9. session persists after reload", (await appears(chatPanel.getByRole("b
   check("L13. operator-bootstrapped admin", adminUser.role === "admin" && adminUser.isApproved);
   await ADM.page.goto(U("/admin/"));
   const am = ADM.page.locator("main");
-  const row = am.getByRole("listitem").filter({ hasText: new RegExp(`${pMe.user.login}\\b`) });
+  const row = am.locator("section[aria-labelledby]").getByRole("listitem").filter({ hasText: new RegExp(`${pMe.user.login}\\b`) });
   await row.first().waitFor();
   check("L13. admin own row locked", await appears(am.getByRole("listitem").filter({ hasText: "(나)" }).getByText("본인 계정은 바꿀 수 없습니다")));
   await row.getByRole("button", { name: /^편집자로 지정/ }).click();
   await row.getByLabel("변경 사유").fill("실물 통합 편집자 지정");
   await row.getByRole("button", { name: "적용" }).click();
   check("L13. real membership change applied", await appears(row.getByText("대상 사용자는 다시 로그인해야 합니다")));
+  // #119 L1(리뷰 round3): 승인하면 목록을 다시 읽어 승인 대기 구역을 떠나 승인된 회원 구역에 보인다
+  {
+    const pending = am.getByRole("region", { name: "승인 대기" });
+    const approved = am.getByRole("region", { name: "승인된 회원" });
+    const moved = await approved.getByRole("listitem").filter({ hasText: new RegExp(`${pMe.user.login}\\b`) }).first().waitFor({ timeout: 10000 }).then(() => true, () => false);
+    check("L13. approved account moved out of the pending section", moved && (await pending.getByRole("listitem").filter({ hasText: new RegExp(`${pMe.user.login}\\b`) }).count()) === 0);
+  }
   check("L13. target session revoked (real)", (await P.page.request.get(U("/api/auth/me"))).status() === 401);
   await signIn(P.page);
   const pAfter = await (await P.page.request.get(U("/api/auth/me"))).json();
@@ -609,7 +622,8 @@ check("L9. session persists after reload", (await appears(chatPanel.getByRole("b
   void main.getByRole("button", { name: "문서 저장" }).click();
   await seen;
   check("L11. real create committed before logout", createdStatus === 200, String(createdStatus));
-  await page.locator("header").getByRole("button", { name: "로그아웃" }).first().click();
+  { const m = page.locator("header").getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
+  await page.locator("header").getByRole("button", { name: "로그아웃", exact: true }).first().click();
   await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
   const store = () => page.evaluate(() => JSON.stringify({ ...sessionStorage }));
   check("L11. store empty right after logout", (await store()) === "{}", await store());
@@ -623,7 +637,17 @@ check("L9. session persists after reload", (await appears(chatPanel.getByRole("b
 await page.goto(U("/research/"));
 check("L12. after logout API 401", (await api.get("/research/materials")).status === 401);
 check("L12. after logout UI asks login", await appears(main.getByText("로그인이 필요합니다")));
-check("L12. nothing left in session/localStorage", (await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))) === "{}");
+// #119 A2: 남아도 되는 것은 로그아웃 상태의 메뉴 자리 힌트(세 값 모두 false) 하나뿐이다. 계정별 대화·요청·토큰은 없어야 한다.
+{
+  const stored = await page.evaluate(() => ({ local: { ...localStorage }, session: { ...sessionStorage } }));
+  const hint = stored.local["anxious:nav-hint"];
+  const okHint = hint === undefined || JSON.stringify(JSON.parse(hint)) === JSON.stringify({ signedIn: false, research: false, write: false });
+  check(
+    "L12. after logout storage holds only the signed-out nav hint",
+    Object.keys(stored.local).every((k) => k === "anxious:nav-hint") && okHint && Object.keys(stored.session).length === 0,
+    JSON.stringify(stored)
+  );
+}
 
 check("console has no errors", consoleErrors.length === 0, consoleErrors.join(" | "));
 check("no external tracker requests", ![...externalHosts].some((h) => h.includes("tracker") || h.includes("example.com")), [...externalHosts].join(", "));

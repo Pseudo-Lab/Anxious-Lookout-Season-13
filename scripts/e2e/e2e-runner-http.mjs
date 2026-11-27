@@ -102,7 +102,7 @@ async function signIn(p) {
   await p.goto(U("/"));
   await p.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().click();
   await p.waitForURL(U("/"));
-  await p.locator("header").getByRole("button", { name: "로그아웃" }).first().waitFor();
+  await p.locator("header").getByRole("button", { name: /계정 메뉴/ }).first().waitFor();
 }
 const meOf = async (p) => (await (await p.request.get(U("/api/auth/me"))).json()).user;
 async function approvedAccount(name, p, role) {

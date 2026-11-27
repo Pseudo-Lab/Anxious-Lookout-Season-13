@@ -383,7 +383,7 @@ def test_lint_is_a_read_operation_everywhere():
 def test_schema_revision_order_and_contract():
     from app.research_schema_contract import CURRENT, REVISIONS, since
     from app.migrate import RESEARCH_REVISIONS
-    assert CURRENT == '0010_research_wiki' and REVISIONS == RESEARCH_REVISIONS
+    assert CURRENT == '0011_ui_feedback' and REVISIONS == RESEARCH_REVISIONS
     assert since('0010_research_wiki', '0009_research_pats') and not since('0009_research_pats', '0010_research_wiki')
     assert not since('9999_unknown', '0002_research')
     base = json.loads((ROOT / 'db/002_research_contract.json').read_text())
