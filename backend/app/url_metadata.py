@@ -4,7 +4,9 @@ No network-policy change: API egress is default-allow (compose `outbound`, k3s P
 - http/https only, no userinfo, port 80/443 only, URL <= 2048, approved editor/admin session + CSRF
 - every resolved address must be public unicast (also the IPv4 inside mapped/6to4/Teredo/NAT64 IPv6 forms);
   the connection goes to the validated address with Host/SNI = the original name (no DNS rebinding)
-- <= 3 redirects, each re-validated; 5 s total; at most 1 MiB read; HTML only; proxy env ignored
+- <= 3 redirects, each re-validated; one 5 s deadline over DNS and every socket operation of every hop
+- at most 1 MiB raw and 1 MiB decoded (identity/gzip/deflate only); HTML only; proxy env ignored
+- a name that does not resolve, resolves privately or times out gets the same 422 url_not_allowed
 - 10 requests/minute per account and 4 concurrent fetches per API process
 Nothing is stored. Kill switch: URL_METADATA_FETCH=off.
 """
@@ -14,11 +16,13 @@ import re
 import socket
 import threading
 import time
+import zlib
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
+import httpcore
 import httpx
 from fastapi import Request
 from pydantic import Field
@@ -28,7 +32,6 @@ from .research import Input, fail
 MAX_URL = 2048
 MAX_BYTES = 1024 * 1024
 TOTAL_SECONDS = 5.0
-READ_SECONDS = 2.0
 MAX_REDIRECTS = 3
 PORTS = {80, 443}
 PER_MINUTE = 10
@@ -75,7 +78,8 @@ def target(url):
         fail("url_not_allowed", "Only http and https URLs are allowed", 422)
     if parts.username is not None or parts.password is not None:
         fail("url_not_allowed", "URLs with credentials are not allowed", 422)
-    port = port or (443 if scheme == "https" else 80)
+    if port is None:  # review r1 minor: an explicit :0 is an explicit port, not the default
+        port = 443 if scheme == "https" else 80
     if port not in PORTS:
         fail("url_not_allowed", "Only ports 80 and 443 are allowed", 422)
     host = parts.hostname
@@ -87,22 +91,107 @@ def target(url):
     return scheme, host, port
 
 
+def refuse_address():
+    # review r1 / PM: one answer for "does not resolve", "resolves privately" and "lookup ran out of time", so the
+    # endpoint cannot be used to learn which internal names exist.
+    fail("url_not_allowed", "This address cannot be fetched", 422)
+
+
 def resolve(host, port, lookup=socket.getaddrinfo, timeout=TOTAL_SECONDS):
     """Every address the name resolves to must be public; returns the first (connections are pinned to it).
     getaddrinfo has no timeout of its own, so it runs on a small pool and is waited for at most `timeout`."""
+    if timeout <= 0:  # the deadline passed before this hop's lookup: same answer as a lookup that timed out
+        refuse_address()
     try:
         infos = RESOLVER.submit(lookup, host, port, type=socket.SOCK_STREAM).result(timeout=timeout)
     except (socket.gaierror, UnicodeError, OSError, FutureTimeout):
-        fail("fetch_failed", "The address could not be resolved", 502)
-    addresses = []
-    for info in infos:
-        address = info[4][0].split("%", 1)[0]
-        if not public_address(address):
-            fail("url_not_allowed", "The address is not public", 422)
-        addresses.append(address)
-    if not addresses:
-        fail("fetch_failed", "The address could not be resolved", 502)
+        refuse_address()
+    addresses = [info[4][0].split("%", 1)[0] for info in infos]
+    if not addresses or not all(public_address(address) for address in addresses):
+        refuse_address()
     return addresses[0]
+
+
+class DeadlineStream(httpcore.NetworkStream):
+    """Every socket operation (TLS handshake, header and body reads, writes) waits at most until the fetch deadline."""
+    def __init__(self, stream, backend):
+        self.stream, self.backend = stream, backend
+
+    def read(self, max_bytes, timeout=None):
+        return self.stream.read(max_bytes, self.backend.budget(timeout, httpcore.ReadTimeout))
+
+    def write(self, buffer, timeout=None):
+        self.stream.write(buffer, self.backend.budget(timeout, httpcore.WriteTimeout))
+
+    def close(self):
+        self.stream.close()
+
+    def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        return DeadlineStream(self.stream.start_tls(ssl_context, server_hostname, self.backend.budget(timeout, httpcore.ConnectTimeout)),
+                              self.backend)
+
+    def get_extra_info(self, info):
+        return self.stream.get_extra_info(info)
+
+
+class DeadlineBackend(httpcore.NetworkBackend):
+    def __init__(self, deadline, clock=time.monotonic, inner=None):
+        self.deadline, self.clock, self.inner = deadline, clock, inner or httpcore.SyncBackend()
+
+    def budget(self, timeout, error):
+        left = self.deadline - self.clock()
+        if left <= 0:
+            raise error("The fetch deadline has passed")
+        return left if timeout is None else min(timeout, left)
+
+    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        return DeadlineStream(self.inner.connect_tcp(host, port, self.budget(timeout, httpcore.ConnectTimeout),
+                                                     local_address, socket_options), self)
+
+    def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        raise httpcore.ConnectError("Unix sockets are not used")
+
+    def sleep(self, seconds):
+        self.inner.sleep(seconds)
+
+
+class DeadlineTransport(httpx.HTTPTransport):
+    """httpx's own transport (TLS verification, h11) over a pool whose sockets all share one absolute deadline."""
+    def __init__(self, deadline, clock=time.monotonic, inner=None):
+        super().__init__(trust_env=False)
+        ssl_context = self._pool._ssl_context  # the verifying default context httpx built (httpx 0.28 / httpcore 1.0)
+        self._pool.close()
+        self._pool = httpcore.ConnectionPool(ssl_context=ssl_context, max_connections=1, max_keepalive_connections=0,
+                                             network_backend=DeadlineBackend(deadline, clock, inner))
+
+
+def read_body(response):
+    """At most MAX_BYTES of raw bytes are read and at most MAX_BYTES are produced, before and after decompression."""
+    encoding = response.headers.get("content-encoding", "").strip().lower()
+    if encoding in ("", "identity"):
+        inflater = None
+    elif encoding in ("gzip", "x-gzip"):
+        inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    elif encoding == "deflate":
+        inflater = zlib.decompressobj(zlib.MAX_WBITS)
+    else:
+        fail("unsupported_content", "The page uses an unsupported content encoding", 415)
+    raw, body = 0, bytearray()
+    for chunk in response.iter_raw():
+        data = chunk[:MAX_BYTES - raw]
+        raw += len(data)
+        if inflater is None:
+            body += data[:MAX_BYTES - len(body)]
+        else:
+            while data and len(body) < MAX_BYTES:
+                try:
+                    body += inflater.decompress(data, MAX_BYTES - len(body))
+                except zlib.error:
+                    fail("fetch_failed", "The page could not be decoded", 502)
+                data = inflater.unconsumed_tail
+        if raw >= MAX_BYTES or len(body) >= MAX_BYTES:
+            break
+    return bytes(body)
 
 
 class Limits:
@@ -127,30 +216,29 @@ class Limits:
         self.slots.release()
 
 
-def fetch(url, *, lookup=socket.getaddrinfo, transport=None, clock=time.monotonic):
-    """GET with every hop re-validated and pinned. Returns (final URL, decoded HTML prefix)."""
+def fetch(url, *, lookup=socket.getaddrinfo, transport=None, clock=time.monotonic, backend=None):
+    """GET with every hop re-validated and pinned. Returns (final URL, decoded HTML prefix).
+
+    One absolute deadline (TOTAL_SECONDS) covers DNS and every socket operation of every hop: connect, TLS, request
+    write, header and body reads (review r1). `transport`/`backend` are test seams; production uses DeadlineTransport."""
     deadline = clock() + TOTAL_SECONDS
+    transport = transport or DeadlineTransport(deadline, clock, backend)
     current = url
-    with httpx.Client(trust_env=False, follow_redirects=False, transport=transport) as client:
+    with httpx.Client(trust_env=False, follow_redirects=False, transport=transport, timeout=TOTAL_SECONDS) as client:
         for _ in range(MAX_REDIRECTS + 1):
             scheme, host, port = target(current)
-            address = resolve(host, port, lookup, timeout=max(deadline - clock(), 0.01))
+            address = resolve(host, port, lookup, timeout=deadline - clock())
             parts = urlsplit(current)
             literal = "[" + address + "]" if ":" in address else address
             pinned = urlunsplit((scheme, literal + ":" + str(port), parts.path or "/", parts.query, ""))
-            remaining = deadline - clock()
-            if remaining <= 0:
+            if deadline - clock() <= 0:
                 fail("fetch_failed", "The page took too long", 502)
             name = "[" + host + "]" if ":" in host else host
             default = 443 if scheme == "https" else 80
-            headers = {"Host": name if port == default else f"{name}:{port}",
-                       "User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml;q=0.9"}
-            # Each read waits at most READ_SECONDS, and the body loop stops at the deadline, so a trickling server
-            # ends by TOTAL_SECONDS + READ_SECONDS at the latest.
-            timeout = httpx.Timeout(remaining, read=min(remaining, READ_SECONDS))
+            headers = {"Host": name if port == default else f"{name}:{port}", "User-Agent": USER_AGENT,
+                       "Accept": "text/html,application/xhtml+xml;q=0.9", "Accept-Encoding": "gzip, deflate"}
             try:
-                with client.stream("GET", pinned, headers=headers, timeout=timeout,
-                                   extensions={"sni_hostname": host}) as response:
+                with client.stream("GET", pinned, headers=headers, extensions={"sni_hostname": host}) as response:
                     if response.status_code in REDIRECTS and response.headers.get("location"):
                         current = urljoin(current, response.headers["location"])
                         continue
@@ -159,12 +247,7 @@ def fetch(url, *, lookup=socket.getaddrinfo, transport=None, clock=time.monotoni
                     kind = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
                     if kind not in HTML_TYPES:
                         fail("unsupported_content", "Only HTML pages can be read", 415)
-                    body = bytearray()
-                    for chunk in response.iter_bytes():
-                        body += chunk
-                        if len(body) >= MAX_BYTES or clock() > deadline:
-                            break
-                    return current, decode(bytes(body[:MAX_BYTES]), response.headers.get("content-type", ""))
+                    return current, decode(read_body(response), response.headers.get("content-type", ""))
             except httpx.HTTPError:
                 fail("fetch_failed", "The page could not be fetched", 502)
     fail("fetch_failed", "Too many redirects", 502)

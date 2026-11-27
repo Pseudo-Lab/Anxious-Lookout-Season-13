@@ -55,9 +55,11 @@ def test_audit_reads_through_the_definer_function_only_for_a_live_approved_admin
     editor, _ = identity(client, admin, number='310003', role='editor')
     editor_cookie = client.cookies.get('anxious_session')
     with admin.begin() as db:
+        # review r1: JSON goes in as a parameter (a literal `:false` would be parsed as a bind name by text()).
+        state = '{"role": "commenter", "isApproved": false}'
         db.execute(text("INSERT INTO auth.permission_audit(actor,account_id,reason,before,after,created_at) VALUES"
-                        "('operator-cli',:id,'operator fixture','{\"role\":\"commenter\",\"isApproved\":false}',"
-                        "'{\"role\":\"commenter\",\"isApproved\":false}',now()-interval '1 hour')"), {'id': target})
+                        "('operator-cli',:id,'operator fixture',CAST(:state AS jsonb),CAST(:state AS jsonb),now()-interval '1 hour')"),
+                   {'id': target, 'state': state})
     with TestClient(create_app(), base_url=origin, cookies={'anxious_session': manager_cookie}) as manager_client:
         change(manager_client, auth, target, 'approve fixture')
         page = manager_client.get('/api/admin/audit', params={'limit': 1})

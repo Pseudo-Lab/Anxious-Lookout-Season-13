@@ -43,7 +43,9 @@ HTML = '''<html><head><meta charset="utf-8"><title> Fallback  title </title>
 
 
 def page(body=HTML, status=200, kind='text/html; charset=utf-8', headers=None):
-    return httpx.Response(status, headers={'content-type': kind, **(headers or {})}, content=body.encode() if isinstance(body, str) else body)
+    # A streamed body, as a real transport returns it (content= would be pre-read and leave nothing for iter_raw).
+    return httpx.Response(status, headers={'content-type': kind, **(headers or {})},
+                          stream=Counted(body.encode() if isinstance(body, str) else body))
 
 
 def run(url, routes, table=None, clock=None):
@@ -63,6 +65,7 @@ def run(url, routes, table=None, clock=None):
     ('javascript:alert(1)', ('url_not_allowed', 422)), ('https://user:pw@example.com/', ('url_not_allowed', 422)),
     ('https://user@example.com/', ('url_not_allowed', 422)), ('https://example.com:8443/', ('url_not_allowed', 422)),
     ('http://example.com:22/', ('url_not_allowed', 422)), ('https://example.com:99999/', ('validation_error', 422)),
+    ('https://example.com:0/', ('url_not_allowed', 422)), ('http://example.com:00/', ('url_not_allowed', 422)),
     ('https://exa mple.com/', ('validation_error', 422)), ('https://example.com/\x00', ('validation_error', 422)),
     ('https://example.com/' + 'a' * 2048, ('validation_error', 422)), ('https:///nohost', ('url_not_allowed', 422))])
 def test_scheme_userinfo_port_and_shape_guards(url, expected):
@@ -94,22 +97,31 @@ def test_public_addresses_pass(address):
     assert um.public_address(address)
 
 
-def test_any_private_answer_refuses_the_whole_name_and_dns_failure_is_502():
-    assert code(lambda: um.resolve('h', 443, lookup_of({'h': [PUBLIC4, '10.0.0.1']}))) == ('url_not_allowed', 422)
-    assert code(lambda: um.resolve('h', 443, lookup_of({'h': socket.gaierror('nx')}))) == ('fetch_failed', 502)
-    assert code(lambda: um.resolve('h', 443, lookup_of({'h': []}))) == ('fetch_failed', 502)
+def refusal(call):
+    with pytest.raises(ResearchError) as caught:
+        call()
+    return caught.value.args
 
 
-def test_dns_lookup_is_waited_for_only_until_the_deadline():
+def test_unresolvable_private_and_timed_out_names_get_one_identical_answer():
+    """review r1 major / PM: status, code, message and details are the same, so internal names cannot be probed."""
     import threading
     release = threading.Event()
     def slow(host, port, type=None):
         release.wait(5)
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (PUBLIC4, port))]
     try:
-        assert code(lambda: um.resolve('h', 443, slow, timeout=0.05)) == ('fetch_failed', 502)
+        answers = [refusal(lambda: um.resolve('h', 443, lookup_of({'h': [PUBLIC4, '10.0.0.1']}))),  # any private answer
+                   refusal(lambda: um.resolve('h', 443, lookup_of({'h': ['10.96.0.10']}))),          # cluster-internal
+                   refusal(lambda: um.resolve('h', 443, lookup_of({'h': socket.gaierror('nx')}))),   # does not exist
+                   refusal(lambda: um.resolve('h', 443, lookup_of({'h': OSError('resolver')}))),
+                   refusal(lambda: um.resolve('h', 443, lookup_of({'h': []}))),
+                   refusal(lambda: um.resolve('h', 443, slow, timeout=0.05)),                        # lookup timed out
+                   refusal(lambda: um.resolve('h', 443, lookup_of({'h': [PUBLIC4]}), timeout=0))]    # deadline already gone
     finally:
         release.set()
+    assert all(answer == answers[0] for answer in answers)
+    assert answers[0][0] == 'url_not_allowed' and answers[0][2] == 422 and answers[0][1] == 'This address cannot be fetched'
 
 
 # --- connection pinning, redirects, limits --------------------------------------------------------------------------
@@ -184,9 +196,191 @@ def test_body_read_stops_at_one_mebibyte():
 
 
 def test_total_deadline_stops_further_hops():
+    """A later hop whose name lookup starts after the deadline gets the unified address refusal (PM: same answer)."""
     times = iter([0.0, 1.0, 1.0, 6.0, 6.0, 6.0])
     hops = iter([httpx.Response(302, headers={'location': '/next'}), page()])
-    assert code(lambda: run('https://example.com/', lambda request: next(hops), clock=lambda: next(times))) == ('fetch_failed', 502)
+    assert code(lambda: run('https://example.com/', lambda request: next(hops), clock=lambda: next(times))) == ('url_not_allowed', 422)
+
+
+def test_deadline_after_lookup_but_before_the_request_is_502():
+    times = iter([0.0, 1.0, 6.0])
+    assert code(lambda: run('https://example.com/', page(), clock=lambda: next(times))) == ('fetch_failed', 502)
+
+
+# --- one absolute deadline over every socket operation (review r1 blocker) -------------------------------------------
+
+class FakeStream:
+    def __init__(self, log):
+        self.log = log
+
+    def read(self, max_bytes, timeout=None):
+        self.log.append(('read', timeout)); return b''
+
+    def write(self, buffer, timeout=None):
+        self.log.append(('write', timeout))
+
+    def close(self):
+        self.log.append(('close', None))
+
+    def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        self.log.append(('tls', timeout, server_hostname)); return self
+
+    def get_extra_info(self, info):
+        return None
+
+
+class FakeInner:
+    def __init__(self, log):
+        self.log = log
+
+    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        self.log.append(('connect', timeout, host, port)); return FakeStream(self.log)
+
+    def sleep(self, seconds):
+        pass
+
+
+def test_every_socket_operation_waits_at_most_until_the_deadline():
+    import httpcore
+    now = [0.0]
+    log = []
+    backend = um.DeadlineBackend(5.0, clock=lambda: now[0], inner=FakeInner(log))
+    stream = backend.connect_tcp('93.184.216.34', 443, timeout=30)
+    now[0] = 1.5; tls = stream.start_tls(None, 'example.com', timeout=30)
+    now[0] = 4.0; tls.write(b'GET', timeout=30)
+    now[0] = 4.75; tls.read(10, timeout=None)
+    assert log == [('connect', 5.0, '93.184.216.34', 443), ('tls', 3.5, 'example.com'), ('write', 1.0), ('read', 0.25)]
+    now[0] = 5.0
+    for operation, error in ((lambda: tls.read(10, 1), httpcore.ReadTimeout), (lambda: tls.write(b'x', 1), httpcore.WriteTimeout),
+                             (lambda: backend.connect_tcp('h', 443, 1), httpcore.ConnectTimeout),
+                             (lambda: tls.start_tls(None, 'h', 1), httpcore.ConnectTimeout)):
+        with pytest.raises(error):
+            operation()
+    assert len(log) == 4  # nothing reached the socket after the deadline
+
+
+def test_production_transport_keeps_tls_verification_and_uses_the_deadline_backend():
+    import ssl
+    transport = um.DeadlineTransport(10.0)
+    context = transport._pool._ssl_context
+    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+    assert isinstance(transport._pool._network_backend, um.DeadlineBackend)
+    transport.close()
+
+
+class Trickle:
+    """Loopback HTTP server that answers slowly at the header or body stage."""
+    def __init__(self, stage):
+        import threading
+        self.stage, self.server = stage, socket.socket()
+        self.server.bind(('127.0.0.1', 0)); self.server.listen(1)
+        self.port = self.server.getsockname()[1]
+        self.done = threading.Event()
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        connection, _ = self.server.accept()
+        with connection:
+            connection.recv(4096)
+            if self.stage == 'headers':
+                connection.sendall(b'HTTP/1.1 200 OK\r\n')
+                payload = b'X-Slow: ' + b'a' * 100
+            else:
+                connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 100000\r\n\r\n<title>t</title>')
+                payload = b'a' * 100
+            for byte in payload:
+                if self.done.wait(0.05):
+                    break
+                try:
+                    connection.sendall(bytes([byte]))
+                except OSError:
+                    break
+
+    def close(self):
+        self.done.set(); self.server.close()
+
+
+class Loopback:
+    """Connects every pinned public address to the local trickle server (the real socket backend underneath)."""
+    def __init__(self, port):
+        import httpcore
+        self.port, self.inner = port, httpcore.SyncBackend()
+
+    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        return self.inner.connect_tcp('127.0.0.1', self.port, timeout, local_address, socket_options)
+
+    def sleep(self, seconds):
+        pass
+
+
+@pytest.mark.parametrize('stage', ['headers', 'body'])
+def test_a_trickling_server_is_cut_at_the_deadline(monkeypatch, stage):
+    """review r1 blocker: a server that keeps sending header (or body) bytes cannot hold the fetch past 5 s."""
+    monkeypatch.setattr(um, 'TOTAL_SECONDS', 0.6)
+    server = Trickle(stage)
+    try:
+        started = um.time.monotonic()
+        assert code(lambda: um.fetch('http://example.com/', lookup=lookup_of({'example.com': [PUBLIC4]}),
+                                     backend=Loopback(server.port))) == ('fetch_failed', 502)
+        assert um.time.monotonic() - started < 1.2
+    finally:
+        server.close()
+
+
+# --- decompression bounds (review r1 major) ---------------------------------------------------------------------------
+
+class Counted(httpx.SyncByteStream):
+    def __init__(self, data, size=65536):
+        self.data, self.size, self.pulled = data, size, 0
+
+    def __iter__(self):
+        for start in range(0, len(self.data), self.size):
+            chunk = self.data[start:start + self.size]
+            self.pulled += len(chunk)
+            yield chunk
+
+
+def encoded(data, encoding):
+    import gzip, zlib
+    return gzip.compress(data) if encoding == 'gzip' else zlib.compress(data)
+
+
+@pytest.mark.parametrize('encoding', ['gzip', 'deflate'])
+def test_compression_bomb_is_bounded_after_decoding(encoding):
+    body = encoded(b'<title>bomb</title>' + b'\0' * (64 * um.MAX_BYTES), encoding)
+    import tracemalloc
+    stream = Counted(body, size=len(body))  # one raw chunk that would inflate to 64 MiB at once
+    response = httpx.Response(200, headers={'content-type': 'text/html', 'content-encoding': encoding}, stream=stream)
+    tracemalloc.start()
+    try:
+        _, html, _ = run('https://example.com/', response)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert len(html) == um.MAX_BYTES and html.startswith('<title>bomb</title>')
+    assert peak < 16 * um.MAX_BYTES, peak  # decoding stops at 1 MiB; it never holds the 64 MiB expansion
+
+
+def test_raw_bytes_are_bounded_before_decoding():
+    import os as _os
+    noise = _os.urandom(4 * um.MAX_BYTES)  # incompressible: the raw stream itself is ~4 MiB
+    stream = Counted(encoded(b'<title>n</title>' + noise, 'gzip'))
+    response = httpx.Response(200, headers={'content-type': 'text/html', 'content-encoding': 'gzip'}, stream=stream)
+    _, html, _ = run('https://example.com/', response)
+    assert len(html) <= um.MAX_BYTES and stream.pulled <= um.MAX_BYTES + 65536
+    plain = Counted(b'<title>p</title>' + b'a' * (4 * um.MAX_BYTES))
+    _, html, _ = run('https://example.com/', httpx.Response(200, headers={'content-type': 'text/html'}, stream=plain))
+    assert len(html) == um.MAX_BYTES and plain.pulled <= um.MAX_BYTES + 65536
+
+
+def test_only_identity_gzip_and_deflate_are_accepted():
+    for encoding in ('br', 'zstd', 'compress', 'gzip, gzip'):
+        response = httpx.Response(200, headers={'content-type': 'text/html', 'content-encoding': encoding}, stream=Counted(b'x'))
+        assert code(lambda: run('https://example.com/', response)) == ('unsupported_content', 415)
+    broken = httpx.Response(200, headers={'content-type': 'text/html', 'content-encoding': 'gzip'}, stream=Counted(b'not gzip'))
+    assert code(lambda: run('https://example.com/', broken)) == ('fetch_failed', 502)
+    _, _, seen = run('https://example.com/', page())
+    assert seen[0].headers['accept-encoding'] == 'gzip, deflate'
 
 
 def test_proxy_environment_is_ignored(monkeypatch):

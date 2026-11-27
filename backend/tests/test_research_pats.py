@@ -76,7 +76,7 @@ def test_owner_cap_serializes_two_new_keys_and_replay_still_works_at_ten(pat_cli
 def test_commenter_read_scope_current_role_and_browser_logout_independence(pat_client,admin):
     owner,auth=identity(pat_client,admin,role='commenter')
     created=issue(pat_client,auth)
-    assert set(created['credential'])=={'id','name','issuedAt','expiresAt','revokedAt','lastUsedAt'}
+    assert set(created['credential'])=={'id','name','access','issuedAt','expiresAt','revokedAt','lastUsedAt'} and created['credential']['access']=='write'
     assert call(pat_client,created['token']).status_code==403
     assert pat_client.get('/api/public/documents',headers={'Authorization':'Bearer '+created['token']}).status_code==200
     with admin.begin() as db:db.execute(text("UPDATE auth.accounts SET role='editor' WHERE id=:id"),{'id':owner})
