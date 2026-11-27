@@ -389,7 +389,7 @@ def excerpt(document):
     first = sentences[0]
     if len(first) > EXCERPT_SOFT:
         if len(first) <= EXCERPT_HARD: return first
-        cut = first[:EXCERPT_HARD]
+        cut = first[:EXCERPT_HARD - 1]  # the ellipsis counts toward the hard cap (review minor)
         space = cut.rfind(' ')
         return (cut[:space] if space > 0 else cut).rstrip() + '…'
     result = first

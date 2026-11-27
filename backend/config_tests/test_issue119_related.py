@@ -100,3 +100,9 @@ def test_owner_info_lists_every_document_with_its_state(base):
                                   {'id': B, 'title': 'Public B', 'public': True, 'publicUrl': '/base/public/document/?id='+B}]
     db.row = None
     assert pp.info(db, RELEASE) is None
+
+
+def test_post_ref_keeps_both_author_keys_for_seeded_and_legacy_snapshots():
+    assert pp.post_ref(release(author={'login': None, 'name': '초조한 전망대'}))['author'] == {'login': None, 'name': '초조한 전망대'}
+    legacy = release(); legacy.snapshot.pop('author')
+    assert pp.post_ref(legacy)['author'] == {'login': None, 'name': None}

@@ -64,13 +64,19 @@ def test_long_first_sentence_is_kept_whole_up_to_the_hard_cap():
 def test_beyond_the_hard_cap_cuts_at_whitespace_with_ellipsis():
     long = ' '.join(['단어들'] * 200)
     value = excerpt(doc(para(long)))
-    assert value.endswith('…') and len(value) <= EXCERPT_HARD + 1
+    assert value.endswith('…') and len(value) <= EXCERPT_HARD
     assert value[:-1].split(' ') == ['단어들'] * len(value[:-1].split(' '))  # no word cut in half
 
 
 def test_beyond_the_hard_cap_without_whitespace_is_a_hard_cut():
     value = excerpt(doc(para('가' * 1000)))
-    assert value == '가' * EXCERPT_HARD + '…'
+    assert value == '가' * (EXCERPT_HARD - 1) + '…' and len(value) == EXCERPT_HARD
+
+
+def test_hard_cap_boundary_includes_the_ellipsis():
+    assert excerpt(doc(para('가' * EXCERPT_HARD))) == '가' * EXCERPT_HARD
+    over = excerpt(doc(para('가' * (EXCERPT_HARD + 1))))
+    assert len(over) == EXCERPT_HARD and over == '가' * (EXCERPT_HARD - 1) + '…'
 
 
 def test_no_paragraph_text_is_empty():

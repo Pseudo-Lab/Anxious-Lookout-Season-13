@@ -289,3 +289,19 @@ def test_issue119_post_authors_and_filters_on_postgresql(client, admin):
     assert client.get('/api/public/posts', params={'tag': marker}).json()['total'] == 1
     assert client.get('/api/public/posts', params={'q': '100%'}).json()['total'] == 0
     assert client.get('/api/public/post-tags', params={'q': marker.upper()}).json()['items'] == [{'tag': marker, 'count': 1}]
+
+
+def test_issue119_related_for_seeded_posts_with_null_author_login(client, admin):
+    """review major (bd3cbbb): seeded releases have author.login null; PostRef keeps both keys, login may be null."""
+    seeds = ('welcome-to-observatory', 'understanding-transformer-architecture', 'docker-basics-for-developers')
+    live = [slug for slug in seeds if client.get('/api/public/posts/'+slug).status_code == 200]
+    assert live, 'seeded legacy releases are expected in a fresh test database'
+    refs = []
+    for slug in live:
+        reply = client.get('/api/public/posts/'+slug+'/related')
+        assert reply.status_code == 200, reply.text
+        value = reply.json()
+        refs += [ref for ref in [value['previous'], value['next'], *value['sameTag']] if ref is not None]
+    assert refs and all(set(ref['author']) == {'login', 'name'} for ref in refs)
+    assert any(ref['author']['login'] is None for ref in refs if ref['slug'] in seeds)
+    assert all(item['login'] is not None for item in client.get('/api/public/post-authors').json()['items'])

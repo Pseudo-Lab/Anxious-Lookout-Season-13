@@ -212,8 +212,10 @@ def related_queries(row):
 
 def post_ref(row):
     if row is None: return None
+    # Seeded/legacy releases carry author.login null (same as PublicPost.author); always send both keys.
+    author = row.snapshot.get('author') or {}
     return {'slug': row.snapshot['slug'], 'title': row.snapshot['title'], 'publishedAt': row.snapshot['publishedAt'],
-            'tags': row.snapshot.get('tags', []), 'author': row.snapshot.get('author')}
+            'tags': row.snapshot.get('tags', []), 'author': {'login': author.get('login'), 'name': author.get('name')}}
 
 
 def count(query):
