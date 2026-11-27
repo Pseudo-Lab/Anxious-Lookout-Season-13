@@ -364,6 +364,22 @@ async function editorScreens(page, scheme, send, csrf) {
     if (!(await reach(page, `F1. ${tag} selection toolbar`, sentence))) break;
     await page.keyboard.press("End");
     await page.keyboard.press("Shift+Home");
+    // 브라우저 선택은 selectionchange로 늦게 편집기에 반영된다(무거운 실행·다크 테마에서 간헐적). 반영될 때까지 최대 3초 기다린 뒤 읽는다.
+    await editor
+      .evaluate(
+        (el, want) =>
+          new Promise((ok) => {
+            const t0 = Date.now();
+            const tick = () => {
+              const s = el.editor.state.selection;
+              if (el.editor.state.doc.textBetween(s.from, s.to) === want || Date.now() - t0 > 3000) ok();
+              else setTimeout(tick, 30);
+            };
+            tick();
+          }),
+        SENTENCE
+      )
+      .catch(() => {});
     state = await editorState();
     if (state.selected === SENTENCE && state.focused) break;
     tries.push(state);
