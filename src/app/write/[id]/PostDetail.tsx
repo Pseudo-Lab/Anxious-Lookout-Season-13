@@ -50,23 +50,6 @@ function DeletePost({ post, onDeleted }: { post: Post; onDeleted: () => void }) 
 
 const LIST_HREF = "/write/";
 
-function PublicAddress({ slug, published }: { slug: string; published: boolean }) {
-  const path = `/posts/${encodeURIComponent(slug)}/`;
-  return published ? (
-    <p className="text-xs text-stone-600">
-      공개 주소:{" "}
-      <Link href={path} className="font-medium text-indigo-600 hover:text-indigo-800">
-        공개 글 보기
-      </Link>{" "}
-      <span className="font-mono">{path}</span>
-    </p>
-  ) : (
-    <p className="text-xs text-stone-600">
-      발행하면 이 주소로 공개됩니다: <span className="font-mono">{path}</span>
-    </p>
-  );
-}
-
 const versionMeta = (v: PostVersion) => (
   <p className="text-xs text-stone-500">
     {v.tags.length > 0 && `태그 ${v.tags.join(", ")} · `}연결 문서 {v.documentIds.length}개 · 자료 {v.materialIds.length}개
@@ -133,8 +116,6 @@ export default function PostDetail({ id }: { id: string }) {
         <p className="text-xs text-stone-500">
           v{v.number} · 수정 {formatDateTime(p.updatedAt)}
         </p>
-        {/* #119 O7: 공개 주소. 발행 중이면 보기 링크, 아니면 발행할 때 나갈 주소(편집 중에는 숨긴다, #37) */}
-        {!p.archived && !editing && v.slug && <PublicAddress slug={v.slug} published={!!p.publication} />}
         {!p.archived && !editing && (
           <div className="flex flex-wrap items-center justify-between gap-4 pt-1">
             <button onClick={() => void openEditor()} disabled={opening} className="text-sm font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50">

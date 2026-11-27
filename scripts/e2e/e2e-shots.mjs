@@ -93,35 +93,44 @@ const PAGES = [
 
 // 보조 글자(작성자·날짜·메타 줄 등 회색 글자)의 대비. 실제 그려진 바탕(투명하지 않은 가장 가까운 조상)과 비교한다.
 const CONTRAST = () => {
-  const rgb = (s) => (s.match(/[\d.]+/g) ?? []).map(Number);
   const lum = ([r, g, b]) => {
     const f = (c) => ((c /= 255) <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
     return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
   };
-  // oklch 등은 canvas로 sRGB 값을 얻는다
-  const ctx = document.createElement("canvas").getContext("2d");
-  const toRgb = (color) => {
-    ctx.fillStyle = "#000";
+  // 계산된 색은 lab()/oklch()로 올 수 있다(리뷰: 정규식으로 읽으면 Lab 성분을 RGB로 착각). 캔버스에 칠한 픽셀의 sRGB와 알파를 읽는다.
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 1;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const toRgba = (color) => {
+    ctx.clearRect(0, 0, 1, 1);
+    ctx.fillStyle = "rgba(0,0,0,0)";
     ctx.fillStyle = color;
-    const v = ctx.fillStyle;
-    if (v.startsWith("#")) return [1, 3, 5].map((i) => parseInt(v.slice(i, i + 2), 16)).concat(1);
-    const n = rgb(v);
-    return [n[0], n[1], n[2], n[3] ?? 1];
+    ctx.fillRect(0, 0, 1, 1);
+    const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+    // 반투명 픽셀은 premultiplied에서 되돌린 값이므로 그대로 쓴다
+    return [r, g, b, a / 255];
   };
+  const over = (top, under) => {
+    const a = top[3];
+    return [0, 1, 2].map((i) => top[i] * a + under[i] * (1 - a)).concat(1);
+  };
+  // 실제 바탕: 페이지 바탕(html/body, 불투명) 위에 조상들의 배경을 바깥부터 차례로 합성한다
   const bgOf = (el) => {
-    for (let e = el; e; e = e.parentElement) {
-      const c = toRgb(getComputedStyle(e).backgroundColor);
-      if (c[3] > 0.5) return c;
-    }
-    return toRgb(getComputedStyle(document.body).backgroundColor);
+    const layers = [];
+    for (let e = el; e && e !== document.documentElement; e = e.parentElement) layers.push(toRgba(getComputedStyle(e).backgroundColor));
+    let base = toRgba(getComputedStyle(document.documentElement).backgroundColor);
+    if (base[3] < 1) base = over(base, [255, 255, 255, 1]);
+    for (let i = layers.length - 1; i >= 0; i--) if (layers[i][3] > 0) base = over(layers[i], base);
+    return base;
   };
   const out = [];
   for (const el of document.querySelectorAll("main [class*='text-stone-500'], main [class*='text-stone-600'], footer [class*='text-stone-600']")) {
     if (!el.checkVisibility() || !el.textContent.trim()) continue;
-    const fg = toRgb(getComputedStyle(el).color);
     const bg = bgOf(el);
-    const [a, b] = [lum(fg), lum(bg)].sort((x, y) => y - x);
-    out.push({ text: el.textContent.trim().slice(0, 30), ratio: Math.round(((a + 0.05) / (b + 0.05)) * 100) / 100 });
+    const fgRaw = toRgba(getComputedStyle(el).color);
+    const fg = fgRaw[3] < 1 ? over(fgRaw, bg) : fgRaw;
+    const [hi, lo] = [lum(fg), lum(bg)].sort((x, y) => y - x);
+    out.push({ text: el.textContent.trim().slice(0, 30), fg: fg.slice(0, 3).map(Math.round), bg: bg.slice(0, 3).map(Math.round), ratio: Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100 });
   }
   return out;
 };

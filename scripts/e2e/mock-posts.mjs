@@ -163,6 +163,26 @@ function authorDocuments(p) {
   });
 }
 
+function paragraphText(blocks, out = []) {
+  for (const b of blocks ?? []) {
+    if (b.type === "paragraph") out.push((b.runs ?? []).map((r) => r.text).join(""));
+    else if (b.type === "list") for (const it of b.items ?? []) paragraphText(it.blocks, out);
+    else if (b.type === "quote") paragraphText(b.blocks, out);
+    else if (b.type === "columns") for (const c of b.columns ?? []) paragraphText(c.blocks, out);
+  }
+  return out;
+}
+function excerptOf(content) {
+  const flat = paragraphText(content?.blocks).join(" ").replace(/\s+/g, " ").trim();
+  if ([...flat].length <= 200) return flat;
+  let out = "";
+  for (const s of flat.match(/[^.!?。…]+[.!?。…]+(\s|$)|[^.!?。…]+$/g) ?? []) {
+    if ([...(out + s)].length > 200) break;
+    out += s;
+  }
+  return out.trim() || [...flat].slice(0, 399).join("") + "…";
+}
+
 function publicView(p, withContent = true) {
   const pub = p.publication;
   const v = p.versions.find((x) => x.id === pub.versionId);
@@ -175,6 +195,8 @@ function publicView(p, withContent = true) {
     description: v.description,
     content: v.content,
     textProjection: projection(v.content),
+    // #119 C(issue119 §C): 문단만(소제목·코드·표 제외)에서 문장 단위로 뽑은 요약. 실제 규칙의 단순화(200자 안 문장들).
+    excerpt: excerptOf(v.content),
     tags: v.tags,
     coverImageUrl: v.coverImageId ? imageUrl(v.coverImageId) : null,
     author: { login: pub.authorLogin, name: pub.authorName },

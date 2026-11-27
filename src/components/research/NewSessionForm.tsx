@@ -50,7 +50,8 @@ export default function NewSessionForm({ publicDocumentId }: { publicDocumentId?
           onChange={(e) => setMessage(e.target.value)}
           maxLength={LIMITS.content}
           required
-          placeholder="무엇을 알아볼까요? (대화 제목이 됩니다)"
+          placeholder="무엇을 알아볼까요?"
+          title="첫 줄이 대화 제목이 됩니다"
           aria-label="새 대화 제목(첫 질문)"
           className="min-w-0 flex-1 rounded-lg border border-stone-300 px-3 py-1.5 text-sm"
         />

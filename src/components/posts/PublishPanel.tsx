@@ -196,7 +196,15 @@ export default function PublishPanel({ post, onChanged }: { post: Post; onChange
           {pub.versionId !== post.latestVersion.id && <span className="ml-1 text-xs text-amber-800">(최신 버전 v{post.latestVersion.number}은 아직 발행하지 않았습니다)</span>}
         </p>
       ) : (
-        <p className="text-sm text-stone-900">발행하지 않은 글입니다. 내 글 목록에서만 보입니다.</p>
+        <>
+          <p className="text-sm text-stone-900">발행하지 않은 글입니다. 내 글 목록에서만 보입니다.</p>
+          {/* #119 O7(PM: #109의 예외): 발행할 때 나갈 주소를 링크 없이 보인다. 발행 후에는 위 '공개 글 보기' 링크다. */}
+          {post.latestVersion.slug && (
+            <p className="text-xs text-stone-600">
+              발행하면 이 주소로 공개됩니다: <span className="font-mono">/posts/{post.latestVersion.slug}/</span>
+            </p>
+          )}
+        </>
       )}
       {post.archived ? (
         <p className="text-xs text-stone-500">삭제한 글은 발행할 수 없습니다.</p>

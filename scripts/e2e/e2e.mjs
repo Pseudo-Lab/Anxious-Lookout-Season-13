@@ -352,6 +352,13 @@ check("J. tab title is the post title (#119 A3)", (await page.title()).startsWit
   check("P. home shows all 3 imported posts, newest first",
     home.indexOf("Observatory에 오신") < home.indexOf("Transformer 아키텍처") && home.indexOf("Transformer 아키텍처") < home.indexOf("개발자를 위한 Docker"), home.slice(0, 400));
   check("P. home shows imported author name", home.includes("관리자"));
+  // #119 C1/C2: 카드 요약은 서버 excerpt(소제목 제외, 문장 단위)이고 화면에서만 두 줄로 줄인다
+  {
+    const card = page.locator("main article", { hasText: "Observatory에 오신" }).first();
+    const summary = (await card.locator("p.line-clamp-2").first().textContent()) ?? "";
+    check("P. C2: card summary has no heading text", summary.startsWith("Observatory는") && !summary.includes("Observatory란?"), summary);
+    check("P. C1: summary in the DOM is not cut mid-sentence", !summary.endsWith("…") && /[.!?다]$/.test(summary.trim()), summary);
+  }
   check("P. #80: card of the republished post shows the revised date", await appears(page.locator("main article", { hasText: "Observatory에 오신" }).locator('time[datetime="2026-03-21T03:00:00Z"]')));
   check("P. home asks first page only (limit=5)", apiCalls.some((c) => c.startsWith(`${BASE}/api/public/posts?`) && c.includes("limit=5")), apiCalls.join(","));
   await page.goto(U("/posts/"));
