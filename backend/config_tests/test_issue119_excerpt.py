@@ -83,6 +83,6 @@ def test_public_value_adds_excerpt_without_touching_the_snapshot():
     content = doc(heading('소제목'), para('요약될 첫 문장. 둘째 문장.'))
     snapshot = {'id': 'r', 'slug': 's', 'content': content, 'publishedAt': '2026-11-01T00:00:00Z'}
     before = repr(snapshot)
-    value = public_value(SimpleNamespace(snapshot=snapshot))
+    value = public_value(SimpleNamespace(snapshot=snapshot), None, set())
     assert value['excerpt'] == '요약될 첫 문장. 둘째 문장.'
     assert repr(snapshot) == before and 'excerpt' not in snapshot

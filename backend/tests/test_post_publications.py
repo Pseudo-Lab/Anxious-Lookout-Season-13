@@ -113,7 +113,10 @@ def test_preview_staleness_and_private_reference_body_never_public(client, admin
         json={key: shown[key] for key in ('expectedVersion', 'versionId', 'previewToken')}, headers=headers(auth))
     assert result.status_code == 409 and result.json()['error']['details']['reason'] == 'preview_changed'
     release = publish(client, auth, post)
-    assert release['documents'][0]['title'] == 'Changed reference'
+    # #119 F4: a private reference is left out of every PublicPost (title included); the owner still sees it.
+    assert release['documents'] == [] and 'Changed reference' not in json.dumps(release)
+    owned = client.get('/api/research/posts/'+post['id']).json()['publication']['documents']
+    assert owned == [{'id': doc['id'], 'title': 'Changed reference', 'public': False, 'publicUrl': None}]
     assert 'DO NOT PUBLISH' not in json.dumps(release)
     client.request('DELETE', '/api/research/documents/'+doc['id'], json={'expectedVersion': 2}, headers=headers(auth))
     assert client.get('/api/public/posts/'+post['latestVersion']['slug']).json() == release
@@ -223,3 +226,47 @@ def test_populated_0005_upgrade_preserves_documents_drafts_and_public_snapshot(a
         if candidate: candidate.dispose()
         with admin.connect().execution_options(isolation_level='AUTOCOMMIT') as db:
             db.execute(text('DROP DATABASE '+database+' WITH (FORCE)'))
+
+
+def test_issue119_reader_documents_follow_the_live_document_publication(client, admin):
+    """#119 F4: private references are omitted; publishing the document later links it; withdrawing hides it again."""
+    from tests.test_policy_publication import publish as publish_document
+    _, auth = identity(client, admin)
+    doc = create(client, auth, 'documents', content='reference body')
+    post = commit(client, auth, make_draft(client, auth, documentIds=[doc['id']]))
+    release = publish(client, auth, post)
+    url = '/api/public/posts/'+release['slug']
+    assert release['documents'] == [] and client.get(url).json()['documents'] == []
+    publish_document(client, auth, doc)
+    linked = client.get(url).json()['documents']
+    assert [value['id'] for value in linked] == [doc['id']] and linked[0]['publicUrl'].endswith('/public/document/?id='+doc['id'])
+    assert client.get('/api/public/posts', params={'q': release['title']}).json()['items'][0]['documents'] == linked
+    owned = client.get('/api/research/posts/'+post['id']).json()['publication']['documents']
+    assert owned == [{**linked[0], 'public': True}]
+    version = client.get('/api/research/documents/'+doc['id']).json()['version']
+    withdrawn = client.request('DELETE', '/api/research/documents/'+doc['id']+'/publication', json={'expectedVersion': version}, headers=headers(auth))
+    assert withdrawn.status_code == 200, withdrawn.text
+    assert client.get(url).json()['documents'] == []
+    assert client.get('/api/research/posts/'+post['id']).json()['publication']['documents'][0]['public'] is False
+
+
+def test_issue119_related_neighbours_by_first_publication_and_same_tag(client, admin):
+    """#119 F2: previous/next by first publishedAt (a republish keeps its place); sameTag shares a tag."""
+    _, auth = identity(client, admin)
+    tag = 'related-'+uuid.uuid4().hex[:8]
+    first = commit(client, auth, make_draft(client, auth, title='First', tags=[tag]))
+    second = commit(client, auth, make_draft(client, auth, title='Second', tags=['elsewhere']))
+    third = commit(client, auth, make_draft(client, auth, title='Third', tags=[tag, 'other']))
+    slugs = [publish(client, auth, post)['slug'] for post in (first, second, third)]
+    middle = client.get('/api/public/posts/'+slugs[1]+'/related')
+    assert middle.status_code == 200 and middle.headers['cache-control'] == 'public, max-age=0, must-revalidate'
+    assert middle.json()['previous']['slug'] == slugs[0] and middle.json()['next']['slug'] == slugs[2]
+    assert set(middle.json()['previous']) == {'slug', 'title', 'publishedAt', 'tags', 'author'}
+    assert middle.json()['sameTag'] == [] or all(slugs[1] != value['slug'] for value in middle.json()['sameTag'])
+    last = client.get('/api/public/posts/'+slugs[2]+'/related').json()
+    assert last['next'] is None and last['previous']['slug'] == slugs[1]
+    assert [value['slug'] for value in last['sameTag'] if tag in value['tags']] == [slugs[0]]
+    later = commit(client, auth, make_draft(client, auth, client.get('/api/research/posts/'+first['id']).json(), title='First again', tags=[tag]), expectedVersion=2)
+    publish(client, auth, later)
+    assert client.get('/api/public/posts/'+slugs[1]+'/related').json()['previous']['slug'] == slugs[0]
+    assert client.get('/api/public/posts/missing-slug/related').status_code == 404

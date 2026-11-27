@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import DateTime, and_, cast, func, or_, select, text
 from . import posts
 from .models import Account
 from .post_models import Post, PostVersion, PostPublication, PostPublicationHead
@@ -35,7 +35,25 @@ def current(db, post_id=None, slug=None):
 def info(db, post_id):
     row = current(db, post_id=post_id)
     if row is None: return None
-    return {**{key: row.snapshot[key] for key in ('id', 'versionId', 'publishedAt', 'slug')}, 'updatedAt': updated_at(row.snapshot)}
+    return {**{key: row.snapshot[key] for key in ('id', 'versionId', 'publishedAt', 'slug')}, 'updatedAt': updated_at(row.snapshot),
+            'documents': [{'id': value['id'], 'title': value['title'], 'public': value['publicUrl'] is not None, 'publicUrl': value['publicUrl']}
+                          for value in documents(row.snapshot, live_documents(db, [row]))]}
+
+
+def live_documents(db, rows):
+    """#119 F4: ids of the documents, referenced by these releases, that have a live research publication now."""
+    ids = {parse_id(value['id']) for row in rows for value in row.snapshot.get('documents', [])}
+    if not ids: return set()
+    return {str(value) for value in db.scalars(select(PublicationHead.document_id).where(
+        PublicationHead.document_id.in_(ids), PublicationHead.publication_id.is_not(None)))}
+
+
+def documents(snapshot, live):
+    """Every referenced document with its link as of now; a private or withdrawn one has publicUrl None."""
+    from .post_images import base_path
+    return [{'id': value['id'], 'title': value['title'],
+             'publicUrl': base_path() + '/public/document/?id=' + value['id'] if value['id'] in live else None}
+            for value in snapshot.get('documents', [])]
 
 
 def updated_at(snapshot):
@@ -88,7 +106,7 @@ def preview(store, identity, version_id=None, base_path=''):
     token = hashlib.sha256(json.dumps(state, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
     return {**value, 'postId': str(post.id), 'versionId': str(version.id), 'expectedVersion': post.version,
             'previewToken': token, 'publishable': publishable, 'author': author, 'documents': documents,
-            'images': images, 'materials': materials, 'currentPublication': public_value(previous) if previous else None}
+            'images': images, 'materials': materials, 'currentPublication': public_value(previous, store.db) if previous else None}
 
 
 def publish(store, identity, body, base_path):
@@ -111,7 +129,7 @@ def publish(store, identity, body, base_path):
     post.version += 1
     post.updated_at = now
     store.db.flush()
-    return public_value(row)
+    return public_value(row, store.db)
 
 
 def withdraw(store, identity, body):
@@ -127,10 +145,14 @@ def withdraw(store, identity, body):
     return {'id': str(post.id), 'version': post.version, 'publication': None}
 
 
-def public_value(row):
+def public_value(row, db, live=None):
+    """`live` = live_documents() for a batch of rows; read here when not given. Documents that are not public now are
+    left out entirely (#119 F4): readers never get a private document's title. The stored snapshot is not changed."""
     from .post_blocks import markdown_projection, format_summary, excerpt
     from .post_images import base_path
+    live = live_documents(db, [row]) if live is None else live
     return {**row.snapshot, 'materials': row.snapshot.get('materials', []), 'updatedAt': updated_at(row.snapshot),
+            'documents': [value for value in documents(row.snapshot, live) if value['publicUrl'] is not None],
             'excerpt': excerpt(row.snapshot['content']),
             'markdownProjection': markdown_projection(row.snapshot['content'], base_path()),
             'formatSummary': format_summary(row.snapshot['content'])}
@@ -164,6 +186,34 @@ def live_filters(tag=None, q=None, author=None):
         if not 1 <= len(author) <= 100 or '\x00' in author: fail('validation_error', 'Invalid author', 422)
         query = query.where(PostPublication.snapshot['author']['login'].astext == author)
     return query
+
+
+SAME_TAG_LIMIT = 5
+
+
+def published_at():
+    return cast(PostPublication.snapshot['publishedAt'].astext, DateTime(timezone=True))
+
+
+def related_queries(row):
+    """#119 F2: neighbours by first publication time (ties by release id), so a republish does not reorder them;
+    up to SAME_TAG_LIMIT other live releases sharing a tag, newest first. sameTag is None without tags."""
+    mine = datetime.fromisoformat(row.snapshot['publishedAt'].replace('Z', '+00:00'))
+    other = live().where(PostPublication.id != row.id)
+    previous = other.where(or_(published_at() < mine, and_(published_at() == mine, PostPublication.id < row.id))) \
+        .order_by(published_at().desc(), PostPublication.id.desc()).limit(1)
+    following = other.where(or_(published_at() > mine, and_(published_at() == mine, PostPublication.id > row.id))) \
+        .order_by(published_at().asc(), PostPublication.id.asc()).limit(1)
+    tags = row.snapshot.get('tags') or []
+    same = other.where(or_(*[PostPublication.snapshot['tags'].contains([tag]) for tag in tags])) \
+        .order_by(published_at().desc(), PostPublication.id.desc()).limit(SAME_TAG_LIMIT) if tags else None
+    return previous, following, same
+
+
+def post_ref(row):
+    if row is None: return None
+    return {'slug': row.snapshot['slug'], 'title': row.snapshot['title'], 'publishedAt': row.snapshot['publishedAt'],
+            'tags': row.snapshot.get('tags', []), 'author': row.snapshot.get('author')}
 
 
 def count(query):
@@ -205,7 +255,8 @@ def register(app, authorized, sessions, settings, response, write):
             ready(db)
             query = live_filters(tag, q, author)
             rows = db.scalars(page_query(query, PostPublication, limit, cursor)).all()
-            value = {'items': [{key: value for key, value in public_value(row).items() if key != 'content'} for row in rows[:limit]],
+            live = live_documents(db, rows[:limit])
+            value = {'items': [{key: value for key, value in public_value(row, db, live).items() if key != 'content'} for row in rows[:limit]],
                      'nextCursor': encode_cursor(rows[limit-1]) if len(rows)>limit else None,
                      'total': db.scalar(count(query))}
             return public_response(request, value)
@@ -223,7 +274,17 @@ def register(app, authorized, sessions, settings, response, write):
             ready(db)
             row = current(db, slug=slug)
             if row is None: fail('not_found', 'Not found', 404)
-            return public_response(request, public_value(row))
+            return public_response(request, public_value(row, db))
+
+    @app.get(public + '/posts/{slug}/related')
+    def neighbours(slug: str, request: Request):
+        with sessions() as db:
+            ready(db)
+            row = current(db, slug=slug)
+            if row is None: fail('not_found', 'Not found', 404)
+            previous, following, same = related_queries(row)
+            return public_response(request, {'previous': post_ref(db.scalar(previous)), 'next': post_ref(db.scalar(following)),
+                                             'sameTag': [post_ref(value) for value in db.scalars(same).all()] if same is not None else []})
 
     @app.get(public + '/post-tags')
     def tags(request: Request, limit: int = 30, cursor: str | None = None, q: str | None = None):
