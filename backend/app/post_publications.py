@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
-from sqlalchemy import select, text
+from sqlalchemy import func, or_, select, text
 from . import posts
 from .models import Account
 from .post_models import Post, PostVersion, PostPublication, PostPublicationHead
@@ -146,6 +146,37 @@ def public_response(request, value):
     return response
 
 
+def live():
+    return select(PostPublication).join(PostPublicationHead, PostPublicationHead.publication_id == PostPublication.id)
+
+
+def live_filters(tag=None, q=None, author=None):
+    """#119 A7: the public list's filters. `q` matches title or body text; `author` is the release's author login."""
+    query = live()
+    if tag is not None:
+        if not 1 <= len(tag) <= 50 or '\x00' in tag: fail('validation_error', 'Invalid tag', 422)
+        query = query.where(PostPublication.snapshot['tags'].contains([tag]))
+    if q is not None:
+        if not 1 <= len(q) <= 200 or '\x00' in q: fail('validation_error', 'Invalid search query', 422)
+        query = query.where(or_(PostPublication.snapshot['title'].astext.icontains(q, autoescape=True),
+                                PostPublication.snapshot['textProjection'].astext.icontains(q, autoescape=True)))
+    if author is not None:
+        if not 1 <= len(author) <= 100 or '\x00' in author: fail('validation_error', 'Invalid author', 422)
+        query = query.where(PostPublication.snapshot['author']['login'].astext == author)
+    return query
+
+
+def count(query):
+    return select(func.count()).select_from(query.order_by(None).subquery())
+
+
+def author_counts():
+    return text('''SELECT p.snapshot->'author'->>'login' AS login, count(*) AS count FROM research.post_publications p
+        JOIN research.post_publication_heads h ON h.publication_id=p.id
+        WHERE p.snapshot->'author'->>'login' IS NOT NULL
+        GROUP BY p.snapshot->'author'->>'login' ORDER BY p.snapshot->'author'->>'login' COLLATE "C"''')
+
+
 def register(app, authorized, sessions, settings, response, write):
     private = settings.base_path + '/api/research/posts'
     public = settings.base_path + '/api/public'
@@ -168,18 +199,23 @@ def register(app, authorized, sessions, settings, response, write):
             return write(store, request, Expected, body, lambda parsed: withdraw(store, identity, parsed))
 
     @app.get(public + '/posts')
-    def listing(request: Request, tag: str | None = None, q: str | None = None, limit: int = 30, cursor: str | None = None):
+    def listing(request: Request, tag: str | None = None, q: str | None = None, author: str | None = None,
+                limit: int = 30, cursor: str | None = None):
         with sessions() as db:
             ready(db)
-            query = select(PostPublication).join(PostPublicationHead, PostPublicationHead.publication_id == PostPublication.id)
-            if tag is not None:
-                if not 1 <= len(tag) <= 50 or '\x00' in tag: fail('validation_error', 'Invalid tag', 422)
-                query = query.where(PostPublication.snapshot['tags'].contains([tag]))
-            query = posts.search(query, PostPublication.snapshot['title'].astext, q)
+            query = live_filters(tag, q, author)
             rows = db.scalars(page_query(query, PostPublication, limit, cursor)).all()
             value = {'items': [{key: value for key, value in public_value(row).items() if key != 'content'} for row in rows[:limit]],
-                     'nextCursor': encode_cursor(rows[limit-1]) if len(rows)>limit else None}
+                     'nextCursor': encode_cursor(rows[limit-1]) if len(rows)>limit else None,
+                     'total': db.scalar(count(query))}
             return public_response(request, value)
+
+    @app.get(public + '/post-authors')
+    def authors(request: Request):
+        with sessions() as db:
+            ready(db)
+            rows = db.execute(author_counts()).all()
+            return public_response(request, {'items': [{'login': row.login, 'count': row._mapping['count']} for row in rows]})
 
     @app.get(public + '/posts/{slug}')
     def detail(slug: str, request: Request):
@@ -190,8 +226,9 @@ def register(app, authorized, sessions, settings, response, write):
             return public_response(request, public_value(row))
 
     @app.get(public + '/post-tags')
-    def tags(request: Request, limit: int = 30, cursor: str | None = None):
+    def tags(request: Request, limit: int = 30, cursor: str | None = None, q: str | None = None):
         if not 1 <= limit <= 100: fail('validation_error', 'Invalid limit', 422)
+        if q is not None and (not 1 <= len(q) <= 50 or '\x00' in q): fail('validation_error', 'Invalid tag query', 422)
         after = None
         if cursor is not None:
             try:
@@ -206,6 +243,7 @@ def register(app, authorized, sessions, settings, response, write):
                 JOIN research.post_publication_heads h ON h.publication_id=p.id
                 CROSS JOIN LATERAL jsonb_array_elements_text(p.snapshot->'tags') AS tags(tag)
                 WHERE (CAST(:after AS text) IS NULL OR tag COLLATE "C" > :after)
-                GROUP BY tag ORDER BY tag COLLATE "C" LIMIT :limit'''), {'after': after, 'limit': limit+1}).all()
+                  AND (CAST(:q AS text) IS NULL OR strpos(lower(tag), lower(CAST(:q AS text))) > 0)
+                GROUP BY tag ORDER BY tag COLLATE "C" LIMIT :limit'''), {'after': after, 'q': q, 'limit': limit+1}).all()
             cursor = base64.urlsafe_b64encode(json.dumps(rows[limit-1].tag).encode()).decode().rstrip('=') if len(rows)>limit else None
             return public_response(request, {'items': [{'tag': row.tag, 'count': row._mapping['count']} for row in rows[:limit]], 'nextCursor': cursor})
