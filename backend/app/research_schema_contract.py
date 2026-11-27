@@ -9,8 +9,29 @@ from .schema_contract import normalize
 # Reviewed research Alembic revisions in upgrade order. The application image
 # serves only CURRENT; older markers are recognized for migration/restore.
 REVISIONS = ("0002_research", "0003_sessions", "0004_publication", "0005_writing", "0006_posts",
-             "0007_post_blocks", "0008_version_authors", "0009_research_pats", "0010_research_wiki")
+             "0007_post_blocks", "0008_version_authors", "0009_research_pats", "0010_research_wiki", "0011_ui_feedback")
 CURRENT = REVISIONS[-1]
+AUDIT_FUNCTION = "research.membership_audit(text,text,uuid,timestamptz,uuid,integer)"
+
+
+def reviewed_function(connection, signature, filename, tag):
+    """A SECURITY DEFINER function must be the frozen reviewed body, superuser-owned, with a pinned search_path."""
+    function = connection.execute(text("SELECT p.oid,p.prosrc,p.prosecdef,p.proconfig,r.rolsuper FROM pg_proc p "
+                                       "JOIN pg_roles r ON r.oid=p.proowner WHERE p.oid=to_regprocedure(:signature)"),
+                                  {"signature": signature}).one_or_none()
+    frozen = (Path(__file__).resolve().parent.parent / "db" / filename).read_text().split(tag)[1].strip()
+    if not function or function.prosrc.strip() != frozen or not function.prosecdef or not function.rolsuper \
+            or function.proconfig != ["search_path=pg_catalog"]:
+        raise RuntimeError("Definer function does not match the reviewed function")
+    return function
+
+
+def executable_by_api_only(connection, function, label):
+    if not connection.execute(text("SELECT has_function_privilege('anxious_api',:oid,'EXECUTE')"), {"oid": function.oid}).scalar_one():
+        raise RuntimeError(label + " execute grant is missing")
+    if connection.execute(text("SELECT count(*) FROM pg_proc p, LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a "
+                               "WHERE p.oid=:oid AND a.grantee=0 AND a.privilege_type='EXECUTE'"), {"oid": function.oid}).scalar_one():
+        raise RuntimeError(label + " function must not be public")
 
 
 def since(marker, revision):
@@ -107,6 +128,13 @@ def validate_research(connection, check_privileges=True):
         for name, changes in additions.items():
             for field, values in changes.items():
                 expected[name][field].update(values)
+    audit = None
+    if since(marker, '0011_ui_feedback'):
+        additions = json.loads((Path(__file__).resolve().parent.parent / 'db/research_0011_ui_feedback_contract.json').read_text())
+        for name, changes in additions.items():
+            for field, values in changes.items():
+                expected[name][field].update(values)
+        audit = reviewed_function(connection, AUDIT_FUNCTION, 'research_0011_ui_feedback.sql', '$audit$')
     actual = table_contracts(connection, expected)
     for name, contract in expected.items():
         if canonical(actual[name]) != canonical(contract):
@@ -151,6 +179,8 @@ def validate_research(connection, check_privileges=True):
         required['post_markdown_backups'] = set()
     if since(marker, '0009_research_pats'):
         required.update(credentials={'SELECT', 'INSERT', 'UPDATE'}, pat_issuances={'SELECT', 'INSERT'}, pat_audit={'SELECT', 'INSERT'})
+    if audit is not None:
+        executable_by_api_only(connection, audit, "Membership audit")
     # Check effective table AND column privileges (including inherited grants).
     # Batch the matrix rather than issuing a separate query for every cell.
     privileges = connection.execute(text("""

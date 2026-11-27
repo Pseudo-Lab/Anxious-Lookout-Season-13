@@ -35,7 +35,7 @@ spec.loader.exec_module(client_module)
 def principal():
     owner, identity = uuid4(), uuid4()
     token = pats.issue_value(identity)
-    row = SimpleNamespace(id=identity, owner_id=owner, name='External researcher', scope='write', purpose=pats.PURPOSE,
+    row = SimpleNamespace(id=identity, owner_id=owner, name='External researcher', scope='write', access=None, purpose=pats.PURPOSE,
         token_hash=pats.token_hash(token), expires_at=pats.now()+timedelta(days=1), revoked_at=None)
     account = SimpleNamespace(id=owner, is_approved=True, role='editor')
     return row, token, account
@@ -222,7 +222,7 @@ def test_management_one_time_secret_ack_loss_replay_precedes_cap_and_fresh_role(
     first=client.post('/api/research/pats',json={'name':'External researcher','scope':'write'},headers=headers)
     assert first.status_code==201,first.text
     token=first.json()['token'];assert pats.TOKEN.fullmatch(token) and db.open==0
-    assert set(first.json()['credential']) == {'id','name','issuedAt','expiresAt','revokedAt','lastUsedAt'}
+    assert set(first.json()['credential']) == {'id','name','access','issuedAt','expiresAt','revokedAt','lastUsedAt'}
     assert next(iter(db.rows.values())).scope == 'write'
     assert token not in repr([vars(row) for row in db.rows.values()])
     db.active=10
@@ -306,7 +306,7 @@ def test_pat_list_uses_issued_time_cursor_on_both_pages_after_approval_loss(monk
     second=client.get('/api/research/pats',params={'limit':1,'cursor':page['nextCursor']})
     assert second.status_code==200,second.text
     assert second.json()['items'][0]['id']==str(ids[1])
-    assert set(second.json()['items'][0])=={'id','name','issuedAt','expiresAt','revokedAt','lastUsedAt'}
+    assert set(second.json()['items'][0])=={'id','name','access','issuedAt','expiresAt','revokedAt','lastUsedAt'}
     assert second.json()['nextCursor'] is None
     for query in queries:
         sql=str(query.compile(dialect=postgresql.dialect()))

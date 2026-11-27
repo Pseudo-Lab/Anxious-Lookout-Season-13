@@ -44,6 +44,18 @@ backup/writer drain. Never downgrade the schema or delete provenance for rollbac
 Current API/ORM requires0010 exactly, so an0009-only image cannot serve it:
 back up → migrate `--revision 0010_research_wiki` → deploy the0010 image.
 Rollback is forward-fix with a0010-compatible image, never a downgrade.
+
+`0011_ui_feedback` (#119, `db/research_0011_ui_feedback.sql`) adds nullable
+`research.credentials.access` ('read'|'write') and the SECURITY DEFINER
+`research.membership_audit(...)` read (approved-admin session proof, same as
+`set_membership`; anxious_api gets EXECUTE only, never a grant on
+`auth.permission_audit`). Additive, no backfill: access NULL = a token issued
+before0011, which keeps its write authority (D7). The API/ORM requires0011
+exactly, so an0010 image is not ready on an0011 DB: back up → migrate
+`--revision 0011_ui_feedback` → deploy the0011 image. `downgrade()` refuses;
+rollback is forward-fix with an0011-compatible image, and **every such image
+must keep enforcing `credentials.access`** (`research_pats.allowed`: a 'read'
+token may call only READS) so a read-only token never becomes a writer.
 The relation vocabulary lives only in `app/relation_kinds.py` (no DB CHECK; kinds
 stay varchar(80)), served at `GET {BASE}/api/research/relation-kinds`. Agent
 wiki rules (`app/wiki_rules.py`) render into llm.md and must appear verbatim in

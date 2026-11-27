@@ -13,7 +13,8 @@ class Credential(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True)
     owner_id: Mapped[uuid.UUID] = mapped_column(UUID)
     name: Mapped[str] = mapped_column(String(80))
-    scope: Mapped[str] = mapped_column(String(8))
+    scope: Mapped[str] = mapped_column(String(8))  # #104: historical storage only, no authority
+    access: Mapped[str | None] = mapped_column(String(8))  # #119 M2: 'read' | 'write'; NULL = issued before 0011 (write)
     purpose: Mapped[str] = mapped_column(String(40))
     token_hash: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column('issued_at', DateTime(timezone=True), server_default=text('now()'))

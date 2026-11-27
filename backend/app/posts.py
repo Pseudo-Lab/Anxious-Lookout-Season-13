@@ -88,7 +88,7 @@ class ChangeDraft(PostText, DraftExpected):
 
 
 def ready(store):
-    if store.db.execute(text('SELECT version_num FROM research.alembic_version')).scalar_one() != '0010_research_wiki':
+    if store.db.execute(text('SELECT version_num FROM research.alembic_version')).scalar_one() != '0011_ui_feedback':
         fail('not_ready', 'Posts schema is not ready', 503)
 
 

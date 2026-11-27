@@ -51,8 +51,13 @@ def effective(account):
     return 'write' if account.role in {'editor', 'admin'} else 'none'
 
 
+def access(row):
+    """#119 M2 / D7: tokens issued before 0011 have NULL and keep exactly their current (write) authority."""
+    return row.access or 'write'
+
+
 def value(row, account):
-    return {'id': str(row.id), 'name': row.name,
+    return {'id': str(row.id), 'name': row.name, 'access': access(row),
             'issuedAt': stamp(row.created_at), 'expiresAt': stamp(row.expires_at),
             'revokedAt': stamp(row.revoked_at) if row.revoked_at else None,
             'lastUsedAt': stamp(row.last_used_at) if row.last_used_at else None}
@@ -64,6 +69,7 @@ class Principal:
     credential: UUID
     name: str
     scope: str
+    access: str = 'write'
 
 
 def resolve(row, token, account, at=None):
@@ -74,7 +80,7 @@ def resolve(row, token, account, at=None):
         fail('unauthenticated', 'Research authentication required', 401)
     if account is None or account.id != row.owner_id:
         fail('unauthenticated', 'Research authentication required', 401)
-    return Principal(row.owner_id, row.id, row.name, effective(account))
+    return Principal(row.owner_id, row.id, row.name, effective(account), access(row))
 
 
 def locked(db, token, owner):
@@ -114,3 +120,5 @@ def allowed(principal, operation, mutations):
         fail('forbidden', 'Private research is unavailable for this role', 403)
     if operation not in READS and operation not in mutations:
         fail('forbidden', 'Operation not permitted', 403)
+    if principal.access != 'write' and operation not in READS:
+        fail('forbidden', 'Read-only token', 403)

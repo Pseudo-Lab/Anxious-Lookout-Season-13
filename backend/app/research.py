@@ -664,7 +664,7 @@ def register_research(app, sessions, settings, current_session, error):
                     fail("csrf_invalid", "Invalid CSRF token", 403)
             from .research_schema_contract import validate_research
             try:
-                if validate_research(db.connection()) != '0010_research_wiki':
+                if validate_research(db.connection()) != '0011_ui_feedback':
                     raise RuntimeError('Version provenance schema is required')
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
@@ -682,7 +682,7 @@ def register_research(app, sessions, settings, current_session, error):
         from .research_schema_contract import validate_research
         with sessions() as db:
             try:
-                if validate_research(db.connection()) != '0010_research_wiki':
+                if validate_research(db.connection()) != '0011_ui_feedback':
                     raise RuntimeError('Version provenance schema is required')
             except RuntimeError:
                 fail("not_ready", "Research schema is not ready", 503)
