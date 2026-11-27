@@ -270,3 +270,22 @@ def test_issue119_related_neighbours_by_first_publication_and_same_tag(client, a
     publish(client, auth, later)
     assert client.get('/api/public/posts/'+slugs[1]+'/related').json()['previous']['slug'] == slugs[0]
     assert client.get('/api/public/posts/missing-slug/related').status_code == 404
+
+
+def test_issue119_post_authors_and_filters_on_postgresql(client, admin):
+    """#119 A7 on a real database (review blocker: post-authors 503 from ORDER BY ... COLLATE)."""
+    _, auth = identity(client, admin, number='119001')
+    marker = 'authors-'+uuid.uuid4().hex[:8]
+    release = publish(client, auth, commit(client, auth, make_draft(client, auth, title='Title '+marker, tags=[marker])))
+    login = release['author']['login']
+    reply = client.get('/api/public/post-authors')
+    assert reply.status_code == 200, reply.text
+    assert reply.headers['cache-control'] == 'public, max-age=0, must-revalidate' and reply.headers['etag']
+    items = reply.json()['items']
+    assert {'login': login, 'count': 1} in items and [item['login'] for item in items] == sorted(item['login'] for item in items)
+    assert client.get('/api/public/post-authors', headers={'If-None-Match': reply.headers['etag']}).status_code == 304
+    found = client.get('/api/public/posts', params={'q': marker.upper(), 'author': login}).json()
+    assert found['total'] == 1 and found['items'][0]['slug'] == release['slug']
+    assert client.get('/api/public/posts', params={'tag': marker}).json()['total'] == 1
+    assert client.get('/api/public/posts', params={'q': '100%'}).json()['total'] == 0
+    assert client.get('/api/public/post-tags', params={'q': marker.upper()}).json()['items'] == [{'tag': marker, 'count': 1}]

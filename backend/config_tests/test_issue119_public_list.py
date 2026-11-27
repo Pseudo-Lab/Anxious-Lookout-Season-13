@@ -122,3 +122,34 @@ def test_post_tags_passes_q_and_stays_unchanged_without_it(api):
 def test_post_tags_rejects_bad_q(api, q):
     client, _ = api
     assert client.get('/api/public/post-tags', params={'q': q}).status_code == 422
+
+
+def test_post_authors_collation_wraps_the_whole_login_expression():
+    """review blocker (29c1709): COLLATE binds tighter than ->>, so it must wrap the extracted login."""
+    statement = str(pp.author_counts())
+    assert '''ORDER BY (p.snapshot->'author'->>'login') COLLATE "C"''' in statement
+    assert '''->>'login' COLLATE''' not in statement
+
+
+def test_post_authors_keeps_public_revalidation_headers_through_the_real_middleware(monkeypatch):
+    """review: the API transport middleware forced no-store on this path; it must match the other public lists."""
+    import app.main as main
+    from config_tests.test_transport_middleware import ORIGIN, settings
+    real = main.database
+    db = FakeDB()
+
+    def database(url):
+        engine, _ = real(url)
+
+        @contextmanager
+        def sessions():
+            yield db
+        return engine, sessions
+    monkeypatch.setattr(main, 'database', database)
+    monkeypatch.setattr(pp, 'ready', lambda db: None)
+    client = TestClient(main.create_app(settings()), base_url=ORIGIN)
+    for path in ('/api/public/post-authors', '/api/public/post-tags', '/api/public/posts'):
+        reply = client.get(path)
+        assert reply.status_code == 200, (path, reply.text)
+        assert reply.headers['Cache-Control'] == 'public, max-age=0, must-revalidate' and reply.headers['ETag'], path
+        assert client.get(path, headers={'If-None-Match': reply.headers['ETag']}).status_code == 304, path

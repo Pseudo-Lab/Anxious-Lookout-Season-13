@@ -224,7 +224,8 @@ def author_counts():
     return text('''SELECT p.snapshot->'author'->>'login' AS login, count(*) AS count FROM research.post_publications p
         JOIN research.post_publication_heads h ON h.publication_id=p.id
         WHERE p.snapshot->'author'->>'login' IS NOT NULL
-        GROUP BY p.snapshot->'author'->>'login' ORDER BY p.snapshot->'author'->>'login' COLLATE "C"''')
+        GROUP BY p.snapshot->'author'->>'login' ORDER BY (p.snapshot->'author'->>'login') COLLATE "C"''')
+# COLLATE binds tighter than ->>: without the parentheses it applies to the 'login' key literal (review blocker).
 
 
 def register(app, authorized, sessions, settings, response, write):

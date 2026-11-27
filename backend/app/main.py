@@ -135,6 +135,7 @@ def create_app(settings=None):
             public_posts = settings.base_path + '/api/public/posts'
             cacheable_path = (request.url.path == public_posts or request.url.path.startswith(public_posts + '/')
                               or request.url.path == settings.base_path + '/api/public/post-tags'
+                              or request.url.path == settings.base_path + '/api/public/post-authors'  # #119 A7
                               or request.url.path.startswith(settings.base_path + '/api/media/post-images/'))
 
             async def send_with_cache_policy(message):
