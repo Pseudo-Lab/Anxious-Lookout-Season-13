@@ -8,6 +8,7 @@ import { formatDateTime } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
 import { NewPostProposals } from "@/components/posts/PostProposals";
+import { writePostPath } from "@/lib/routes";
 
 export const NEW_POST_PATH = "/write/new/";
 
@@ -50,7 +51,7 @@ function MyPosts() {
         <ul className="divide-y divide-stone-100 rounded-xl bg-white ring-1 ring-stone-200">
           {list.items.map((p) => (
             <li key={p.id}>
-              <Link href={`/write/?id=${encodeURIComponent(p.id)}`} className="block px-4 py-3 hover:bg-stone-50">
+              <Link href={writePostPath(p.id)} className="block px-4 py-3 hover:bg-stone-50">
                 <p className="font-medium text-stone-900">{p.latestVersion.title || "(제목 없음)"}</p>
                 <p className="mt-1 text-xs text-stone-500">
                   v{p.latestVersion.number} · 수정 {formatDateTime(p.updatedAt)} ·{" "}

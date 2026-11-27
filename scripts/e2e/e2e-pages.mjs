@@ -66,11 +66,12 @@ check("status page shows admin-only notice", await appears(page.getByText("서�
 check("status page shows no API details", !(await page.locator("main").innerText()).includes("API 상태"));
 
 // M3 개인/공개 화면: API 없는 배포 안내만 표시하고 조회하지 않는다.
-for (const p of ["/research/", "/research/material/?id=x", "/research/session/?id=x"]) {
+// #119 B2: 경로형 상세(자리표시 _ 하나)와 예전 ?id= 주소 모두 같은 안내
+for (const p of ["/research/", "/research/material/?id=x", "/research/material/_/", "/research/document/_/", "/write/_/", "/research/session/?id=x"]) {
   await page.goto(U(p));
   check(`${p} shows no-API notice`, await appears(page.getByText("API 서버가 없어 개인 자료 기능을 제공하지 않습니다")));
 }
-for (const p of ["/public/", "/public/document/?id=x"]) {
+for (const p of ["/public/", "/public/document/?id=x", "/public/document/_/"]) {
   await page.goto(U(p));
   check(`${p} shows no-API notice`, await appears(page.getByText("API 서버가 없어 공개 문서를 제공하지 않습니다")));
 }

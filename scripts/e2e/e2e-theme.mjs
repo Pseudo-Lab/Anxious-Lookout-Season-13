@@ -426,7 +426,7 @@ async function editorScreens(page, scheme, send, csrf) {
 
   // 편집 중 보이는 색 = 공개(renderer) 색: 같은 초안을 커밋해 글 화면에서 같은 저장 값의 그려진 색을 비교한다
   const committed = await send("POST", `/research/post-drafts/${draft.id}/commit`, { expectedDraftRevision: server.revision }, (b) => b?.post?.id);
-  await page.goto(U(`/write/?id=${committed.post.id}`), { waitUntil: "domcontentloaded" });
+  await page.goto(U(`/write/${committed.post.id}/`), { waitUntil: "domcontentloaded" });
   const article = main.locator(".prose").filter({ has: page.locator(".pb-color") }).first();
   if (!(await ready(page, "editor-render", scheme, [article, article.locator("table td").first()]))) return;
   await helpers(page);
@@ -516,10 +516,10 @@ for (const scheme of ["light", "dark"]) {
   if (FAULT === "research404") await page.route(/\/api\/research\//, (r) => (r.request().method() === "GET" ? r.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: { code: "not_found", message: "x" } }) }) : r.continue()));
   const PRIVATE = [
     ["write", "/write/", (m) => [m.getByRole("heading", { name: "내 글" }), m.getByRole("link", { name: /대비 글/ })]],
-    ["write-post", `/write/?id=${postId}`, (m) => [m.getByRole("heading", { name: "대비 글", level: 1 }), m.getByText("첫 문단"), m.getByRole("region", { name: "발행" }), m.getByRole("heading", { name: "버전 기록" })]],
+    ["write-post", `/write/${postId}/`, (m) => [m.getByRole("heading", { name: "대비 글", level: 1 }), m.getByText("첫 문단"), m.getByRole("region", { name: "발행" }), m.getByRole("heading", { name: "버전 기록" })]],
     ["research", "/research/", (m) => [m.getByRole("heading", { name: "내 연구" }), m.getByText("대비 자료").first()]],
-    ["document", `/research/document/?id=${doc.id}`, (m) => [m.getByRole("heading", { name: "대비 문서", level: 1 }), m.locator(".prose blockquote"), m.locator(".prose code").first(), m.getByText("관계 추가").first()]],
-    ["material", `/research/material/?id=${mat.id}`, (m) => [m.getByRole("heading", { name: "대비 자료", level: 1 }), m.getByText("자료 본문")]],
+    ["document", `/research/document/${doc.id}/`, (m) => [m.getByRole("heading", { name: "대비 문서", level: 1 }), m.locator(".prose blockquote"), m.locator(".prose code").first(), m.getByText("관계 추가").first()]],
+    ["material", `/research/material/${mat.id}/`, (m) => [m.getByRole("heading", { name: "대비 자료", level: 1 }), m.getByText("자료 본문")]],
     ["status", "/status/", (m) => [m.getByRole("heading", { name: "서비스 상태" }), m.getByText("정상 (요청을 받을 준비가 되었습니다)")]],
   ];
   for (const [name, path, want] of PRIVATE) {

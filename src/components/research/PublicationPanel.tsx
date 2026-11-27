@@ -17,6 +17,7 @@ import { formatDateTime } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
 import SafeMarkdown, { safeHref } from "@/components/research/SafeMarkdown";
+import { publicDocumentPath } from "@/lib/routes";
 
 // 공개 = 고른 문서 버전 + 그 글에 직접 연결된 모든 참고자료(서버가 도출해 현재 버전으로 고정).
 // 자료끼리의 연결은 따라가지 않으며, 개인 초안·관계·자료 수정은 이미 공개한 내용을 바꾸지 않는다.
@@ -224,7 +225,7 @@ export default function PublicationPanel({ doc, onChanged }: { doc: ResearchDocu
             </p>
           )}
           <p className="text-xs text-stone-500">독자는 가장 최근 공개본만 볼 수 있습니다. 다시 공개하면 이전 공개본은 더 이상 열람되지 않습니다.</p>
-          <Link href={`/public/document/?id=${encodeURIComponent(doc.id)}`} className="text-indigo-600 hover:text-indigo-800">
+          <Link href={publicDocumentPath(doc.id)} className="text-indigo-600 hover:text-indigo-800">
             공개 페이지 보기
           </Link>
         </div>

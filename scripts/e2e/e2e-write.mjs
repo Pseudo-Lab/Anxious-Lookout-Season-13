@@ -70,7 +70,7 @@ const draftParam = async () => {
   await page.waitForURL(/[?&]draft=/, { timeout: 10000 }).catch(() => {});
   return new URL(page.url()).searchParams.get("draft");
 };
-const idParam = () => new URL(page.url()).searchParams.get("id");
+const idParam = () => /* #119 B2 경로형 */ new URL(page.url()).pathname.split("/").filter(Boolean).pop();
 const saved = () => main.getByText("초안 자동 저장됨").first().waitFor({ timeout: 10000 });
 // #32 본문은 블록 편집기다. 전부 지우고 줄마다 입력한다(입력 규칙: "# " 제목, **굵게**, `코드`). 줄 사이는 Enter(새 문단).
 const bodyBox = () => main.locator(".ProseMirror");
@@ -238,7 +238,7 @@ check(
     (await appears(mats.locator("li", { hasText: "직접 고른 자료" }).getByText("직접 추가")))
 );
 await main.getByRole("button", { name: "글 저장" }).click();
-await page.waitForURL(/\/write\/\?id=/);
+await page.waitForURL(/\/write\/[0-9a-f-]{36}\//);
 const postId = idParam();
 check("WP3. commit opens post page", await appears(main.getByRole("heading", { name: "첫 글" })));
 const p1 = await api.get(`/research/posts/${postId}`);
@@ -395,7 +395,7 @@ check(
   await writeBody(["kept-valid 고침"]);
   check("WP3c. M1: fixing the body lifts the block", (await reason.count()) === 0 && !(await main.getByRole("button", { name: "글 저장" }).isDisabled()));
   await main.getByRole("button", { name: "글 저장" }).click();
-  await page.waitForURL(/\/write\/\?id=/);
+  await page.waitForURL(/\/write\/[0-9a-f-]{36}\//);
   const fixed = await api.get(`/research/posts/${idParam()}`);
   check("WP3c. M1: saved version equals what the screen showed", fixed.latestVersion.textProjection === "kept-valid 고침", JSON.stringify(fixed.latestVersion.textProjection));
   check("WP3c. round4: after fixing and saving, leaving no longer asks", !(await leaveGuarded()));
@@ -627,7 +627,7 @@ check(
   const d4 = await api.get(`/research/post-drafts/${await draftParam()}`);
   check("WP4. W3: materials-only draft", d4.documentIds.length === 0 && JSON.stringify(d4.materialIds) === JSON.stringify([matA.id]), JSON.stringify(d4));
   await main.getByRole("button", { name: "글 저장" }).click();
-  await page.waitForURL(/\/write\/\?id=/);
+  await page.waitForURL(/\/write\/[0-9a-f-]{36}\//);
   const p4 = await api.get(`/research/posts/${idParam()}`);
   check("WP4. W3: materials-only post saved", p4.latestVersion.documentIds.length === 0 && JSON.stringify(p4.latestVersion.materialIds) === JSON.stringify([matA.id]));
   const pub4 = main.getByRole("region", { name: "발행" });
@@ -706,8 +706,17 @@ check(
   await main.getByText("초안을 버렸습니다").waitFor();
 }
 
+// #119 B2(D2)·#39: 예전 주소(/write/?id=)는 새 경로로 넘어가고(#조각 유지), 직접 연 글 화면에서 목록 링크(next/link)가 동작한다.
+await page.goto(U(`/write/?id=${postId}#version-history`));
+await page.waitForURL(U(`/write/${postId}/#version-history`), { timeout: 15000 });
+check("WP4b. legacy /write/?id= redirects to /write/<id>/ keeping #hash", true);
+check("WP4b. tab title names the post (#119 A3)", (await page.title()).endsWith("· 내 글 | 초조한 전망대"), await page.title());
+await page.reload();
+await main.getByRole("link", { name: "← 내 글" }).click();
+check("#39 direct-open post → list link navigates", await page.waitForURL(U("/write/"), { timeout: 10000 }).then(() => true, () => false), page.url());
+
 // WP5. 기존 글 수정: 편집기에 주소 없음(#37), 새 버전, 버전 비교에 글 정보 변경
-await page.goto(U(`/write/?id=${postId}`));
+await page.goto(U(`/write/${postId}/`));
 await main.getByRole("button", { name: "내용 수정" }).click();
 await bodyBox().waitFor({ timeout: 15000 });
 check("WP5. #37: editor of a saved post shows no public address", (await main.getByLabel(/주소/).count()) === 0 && !(await main.innerText()).includes("공개 주소"));
@@ -756,14 +765,17 @@ check("WP6. status shows published v1 not latest", await appears(pub.getByText("
   const text = await anon.locator("main").innerText();
   check("WP6. public page shows v1 (not v2)", text.includes("첫 글 본문") && !text.includes("두 번째 버전 문장"));
   check(
-    "WP6. W3: public page lists based-on materials (title + source URL, no body)",
+    "WP6. W3: public page lists based-on materials (title linked + domain, no body; #119 F3)",
     text.includes("바탕이 된 자료") &&
       text.includes("문서 A의 자료") &&
       text.includes("직접 고른 자료") &&
-      (await anon.getByRole("link", { name: "https://example.com/source-b" }).count()) === 1 &&
+      text.includes("example.com") &&
+      !text.includes("https://example.com/source-b") &&
+      (await anon.getByRole("link", { name: /^직접 고른 자료/ }).getAttribute("href")) === "https://example.com/source-b" &&
       !text.includes("비밀 메모")
   );
-  check("WP6. public page lists based-on document title, no link, no body", text.includes("바탕이 된 참고 문서") && text.includes("바탕 문서 A") && !text.includes("문서 A 본문 비밀 문장") && (await anon.getByRole("link", { name: "바탕 문서 A" }).count()) === 0);
+  // #119 F4: 공개되지 않은 바탕 문서는 독자에게 보이지 않는다(제목도)
+  check("WP6. public page hides private based-on document (#119 F4)", !text.includes("바탕 문서 A") && !text.includes("문서 A 본문 비밀 문장") && (await anon.getByRole("link", { name: "바탕 문서 A" }).count()) === 0);
   await anon.locator("article .prose img").first().waitFor().catch(() => {});
   const pubImgs = await anon.locator("article img").evaluateAll((els) => els.map((e) => [e.getAttribute("src"), e.naturalWidth]));
   check("WP6. public page: one own body image (no cover, #44), loads anonymously", pubImgs.length === 1 && pubImgs.every(([src, w]) => src === `${BASE}/api/media/post-images/${IMG}` && w > 0), JSON.stringify(pubImgs));
@@ -797,7 +809,7 @@ check("WP7. server publication is v2", (await api.get(`/research/posts/${postId}
 // WP8. Codex 글 수정 제안: 대화 → 제안 검토 링크 → 비교 → 수락(새 버전 1개). 발행본은 그대로.
 const sess = await api.send("POST", "/research/sessions", { title: "글 대화" });
 check("WP8. setup: session", sess.status === 201, String(sess.status));
-await page.goto(U(`/write/?id=${postId}`));
+await page.goto(U(`/write/${postId}/`));
 await openChat("글 대화");
 check("WP8. chat scope: this post", await appears(chat.getByText("보고 있는 화면: 이 글")));
 const before8 = await api.get(`/research/posts/${postId}`);
@@ -837,7 +849,7 @@ await page.waitForURL(/\/write\/new\/\?proposal=/);
 check("WP9. review diffs from the draft", await appears(main.locator('[data-diff="add"]', { hasText: "Codex가 덧붙인 문단" })));
 await main.getByRole("button", { name: "제안 수락" }).click();
 await main.getByRole("button", { name: "수락 확인" }).click();
-await page.waitForURL(/\/write\/\?id=/);
+await page.waitForURL(/\/write\/[0-9a-f-]{36}\//);
 check("WP9. accepted new post opens (no slug asked)", await appears(main.getByRole("heading", { name: "초안 글 (제안)" })));
 check("WP9. W1: accept generated the slug", /^post-[0-9a-f]{32}$/.test((await api.get(`/research/posts/${idParam()}`)).latestVersion.slug));
 check("WP9. base draft closed", (await api.get(`/research/post-drafts/${draft9}`)).state === "committed");
@@ -865,7 +877,7 @@ check("WP11. no document created yet", (await api.get("/research/documents")).it
 await chat.getByRole("link", { name: "제안 검토" }).last().click();
 await page.waitForURL(/\/research\/document\/new\/\?proposal=/);
 await main.getByRole("button", { name: "제안 수락(새 문서 만들기)" }).click();
-await page.waitForURL(/\/research\/document\/\?id=/);
+await page.waitForURL(/\/research\/document\/[0-9a-f-]{36}\//);
 check("WP11. accepted: document created", await appears(main.getByRole("heading", { name: "Codex 새 문서" })));
 check("WP11. exactly one document added", (await api.get("/research/documents")).items.length === docsBefore + 1);
 
@@ -940,7 +952,7 @@ check("WP12. public post scope: bounded", await appears(chat.getByText("다음 �
 
 // WP12b. 기존 글 편집 중 도구 막대 업로드(#44): 응답을 기다리는 동안 '편집 닫기'·저장도 잠긴다(F1 terminal action).
 // 이미지 목록·지우기 화면은 없다(#44). 쓰는 이미지 보호는 서버(409 image_in_use)에 남는다.
-await page.goto(U(`/write/?id=${postId}`));
+await page.goto(U(`/write/${postId}/`));
 await main.getByRole("button", { name: "내용 수정" }).click();
 await bodyBox().waitFor({ timeout: 15000 });
 check("WP12b. #44: editing an existing post shows no summary input or image/cover panel", (await main.getByRole("region", { name: "이미지" }).count()) === 0 && (await main.getByLabel("요약").count()) === 0);
@@ -974,7 +986,7 @@ await main.getByRole("button", { name: "초안 버리기", exact: true }).click(
 await main.getByRole("button", { name: "내용 수정" }).waitFor();
 
 // WP13. 발행 취소, 다시 발행한 글 삭제(#37: 확인 → 목록에서 사라짐 → 공개 404)
-await page.goto(U(`/write/?id=${postId}`));
+await page.goto(U(`/write/${postId}/`));
 await pub.getByRole("button", { name: "발행 취소…" }).click();
 await pub.getByRole("button", { name: "발행 취소", exact: true }).click();
 check("WP13. unpublished note", await appears(pub.getByText("발행을 취소했습니다", { exact: false })));
@@ -1009,7 +1021,7 @@ check("WP13. #37: deleted post leaves the list", !(await main.innerText()).inclu
   check("WP13. #37: deleted post not found publicly", await appears(anon.getByText("글을 찾을 수 없습니다")));
   await anon.context().close();
 }
-await page.goto(U(`/write/?id=${postId}`));
+await page.goto(U(`/write/${postId}/`));
 check("WP13. #37: a deleted post opened by address says it was deleted", await appears(main.getByText("삭제한 글입니다", { exact: false })));
 // 주소로 바로 연 글 화면에서도 "← 내 글"이 목록으로 간다(Next 16.2 정적 경로의 client 이동이 주소를 바꾸지 않던 문제)
 await main.getByRole("link", { name: "← 내 글" }).click();

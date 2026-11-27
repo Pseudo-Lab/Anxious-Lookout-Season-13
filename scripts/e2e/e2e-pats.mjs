@@ -66,6 +66,8 @@ const assertNoStoredSecret = async (value) => {
 
 try {
   await login("approved");
+  // #119 D4: API 토큰은 계정 메뉴 안에 있다
+  await page.locator("header").getByRole("button", { name: /계정 메뉴/ }).first().click();
   await page.locator("header").getByRole("link", { name: "API 토큰", exact: true }).first().click();
   await page.waitForURL(U("/account/tokens/"));
   await main.getByText("발급한 API 토큰이 없습니다.").waitFor();
@@ -135,6 +137,7 @@ try {
   assert.equal(posts.length, lostPosts + 3);
   console.log("PASS F5: ACK loss then 429/503 keeps original unknown attempt and locks fresh issue; same-key replay has no value and revoke creates no replacement");
 
+  { const m = page.locator("header").getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
   await page.locator("header").getByRole("button", { name: "로그아웃", exact: true }).first().click();
   await page.locator("header").getByRole("link", { name: "GitHub 로그인", exact: true }).first().waitFor();
   records = [];

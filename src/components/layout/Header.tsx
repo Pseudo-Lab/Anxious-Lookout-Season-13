@@ -1,11 +1,24 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { API_ENABLED, SITE_NAME } from "@/lib/constants";
 import LoginButton from "@/components/auth/LoginButton";
-import { canUseResearch, isAdmin } from "@/lib/auth/api";
+import { canUseResearch } from "@/lib/auth/api";
+import { saveNavHint, useNavHint } from "@/lib/auth/navHint";
 import { useAuth } from "@/hooks/useAuth";
+
+/** 현재 화면이 이 메뉴 구역인지(#119 A4). 홈은 정확히 "/"만. */
+export function isCurrentSection(pathname: string, href: string, also: string[] = []): boolean {
+  if (href === "/") return pathname === "/";
+  return [href, ...also].some((h) => pathname === h || pathname.startsWith(h));
+}
+
+const desktopLink =
+  "relative py-1 text-stone-500 transition-colors hover:text-indigo-600 aria-[current=page]:font-semibold aria-[current=page]:text-indigo-700 aria-[current=page]:after:absolute aria-[current=page]:after:inset-x-0 aria-[current=page]:after:-bottom-1 aria-[current=page]:after:h-0.5 aria-[current=page]:after:rounded-full aria-[current=page]:after:bg-indigo-600";
+const mobileLink =
+  "rounded-lg px-3 py-2 text-sm font-medium text-stone-900 transition-colors hover:bg-stone-50 hover:text-indigo-600 aria-[current=page]:bg-indigo-50 aria-[current=page]:text-indigo-700";
 
 export default function Header() {
   const { user, status } = useAuth();
@@ -29,18 +42,31 @@ export default function Header() {
   }, []);
 
   // 메뉴 노출은 화면 안내용일 뿐이며 실제 권한은 backend가 검증한다.
-  // 글 쓰기·관리는 아직 새 API로 대체되지 않아 "준비 중" 안내 화면으로 연결된다.
+  // #119 D4: 상단은 읽기·쓰기 동선만 둔다. 관리·서비스 상태·API 토큰은 계정 메뉴(LoginButton)에 있다.
+  // #119 A2: 로그인 확인 전에는 지난번 확인 결과(navHint)로 같은 자리를 잡는다. 확인되면 실제 상태로 바꾼다.
+  const hint = useNavHint();
+  const known = status === "authenticated" || status === "unauthenticated";
+  useEffect(() => {
+    if (!known) return;
+    saveNavHint({
+      signedIn: status === "authenticated",
+      research: status === "authenticated" && canUseResearch(user),
+      write: user?.isApproved === true,
+    });
+  }, [known, status, user]);
+  const showResearch = known ? status === "authenticated" && canUseResearch(user) : hint?.research === true;
+  const showWrite = known ? user?.isApproved === true : hint?.write === true;
+  const pathname = usePathname();
   const navLinks = [
     { href: "/", label: "홈", show: true },
-    { href: "/posts/", label: "글 목록", show: true },
+    { href: "/posts/", label: "글 목록", show: true, also: ["/tags/"] },
     { href: "/public/", label: "공개 문서", show: API_ENABLED },
     // 승인된 편집자·관리자에게만 안내한다. 이용 가능 여부는 각 API 응답으로 판단한다.
-    { href: "/research/", label: "내 연구", show: status === "authenticated" && canUseResearch(user) },
-    { href: "/write/", label: "글 쓰기", show: user?.isApproved === true },
-    { href: "/admin/", label: "관리", show: user?.role === "admin" && user.isApproved },
-    // #94: 서비스 상태는 관리자에게만 보인다(정적 배포에는 관리자 로그인이 없으므로 메뉴도 없다).
-    { href: "/status/", label: "상태", show: status === "authenticated" && isAdmin(user) },
-  ].filter((l) => l.show);
+    { href: "/research/", label: "내 연구", show: showResearch },
+    { href: "/write/", label: "글 쓰기", show: showWrite },
+  ]
+    .filter((l) => l.show)
+    .map((l) => ({ ...l, current: isCurrentSection(pathname, l.href, l.also) }));
 
   return (
     <header ref={header} className="@container sticky top-0 z-50 border-b border-white/30 bg-white/60 backdrop-blur-md">
@@ -55,13 +81,9 @@ export default function Header() {
 
         {/* 넓은 탐색: 화면이 아니라 header 폭 기준(공통 대화창이 본문 폭을 줄여도 메뉴가 넘치지 않게) */}
         <div className="hidden items-center gap-6 @3xl:flex">
-          <nav className="flex items-center gap-5 text-sm font-medium">
+          <nav aria-label="주 메뉴" className="flex items-center gap-5 text-sm font-medium">
             {navLinks.map((link) => (
-              <Link
-                key={link.href}
-                href={link.href}
-                className="text-stone-500 transition-colors hover:text-indigo-600"
-              >
+              <Link key={link.href} href={link.href} aria-current={link.current ? "page" : undefined} className={desktopLink}>
                 {link.label}
               </Link>
             ))}
@@ -71,15 +93,19 @@ export default function Header() {
 
         {/* Mobile hamburger */}
         <button
+          type="button"
           onClick={() => setMobileOpen(!mobileOpen)}
-          className="flex h-9 w-9 items-center justify-center rounded-lg text-stone-900 hover:bg-stone-100 @3xl:hidden"
+          aria-label={mobileOpen ? "메뉴 닫기" : "메뉴 열기"}
+          aria-expanded={mobileOpen}
+          aria-controls="mobile-menu"
+          className="flex h-11 w-11 items-center justify-center rounded-lg text-stone-900 hover:bg-stone-100 @3xl:hidden"
         >
           {mobileOpen ? (
-            <svg className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <svg aria-hidden="true" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
             </svg>
           ) : (
-            <svg className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <svg aria-hidden="true" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
             </svg>
           )}
@@ -87,25 +113,24 @@ export default function Header() {
       </div>
 
       {/* Mobile menu */}
-      {mobileOpen && (
-        <div className="border-t border-stone-100 bg-white px-6 pb-4 @3xl:hidden">
-          <nav className="flex flex-col gap-1 py-2">
-            {navLinks.map((link) => (
-              <Link
-                key={link.href}
-                href={link.href}
-                onClick={() => setMobileOpen(false)}
-                className="rounded-lg px-3 py-2 text-sm font-medium text-stone-900 transition-colors hover:bg-stone-50 hover:text-indigo-600"
-              >
-                {link.label}
-              </Link>
-            ))}
-          </nav>
-          <div className="border-t border-stone-100 pt-3">
-            <LoginButton />
-          </div>
+      <div id="mobile-menu" hidden={!mobileOpen} className="border-t border-stone-100 bg-white px-6 pb-4 @3xl:hidden">
+        <nav aria-label="주 메뉴" className="flex flex-col gap-1 py-2">
+          {navLinks.map((link) => (
+            <Link
+              key={link.href}
+              href={link.href}
+              onClick={() => setMobileOpen(false)}
+              aria-current={link.current ? "page" : undefined}
+              className={mobileLink}
+            >
+              {link.label}
+            </Link>
+          ))}
+        </nav>
+        <div className="border-t border-stone-100 pt-3">
+          <LoginButton variant="inline" onNavigate={() => setMobileOpen(false)} />
         </div>
-      )}
+      </div>
     </header>
   );
 }

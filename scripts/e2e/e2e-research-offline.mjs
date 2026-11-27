@@ -70,7 +70,7 @@ async function signIn(page) {
   await page.goto(U("/"));
   await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().click();
   await page.waitForURL(U("/"));
-  await page.locator("header").getByRole("button", { name: "로그아웃" }).first().waitFor();
+  await page.locator("header").getByRole("button", { name: /계정 메뉴/ }).first().waitFor();
 }
 async function approvedAccount(name, page) {
   await signIn(page);
@@ -484,7 +484,7 @@ async function dropFirstSend(p) {
   docs = await fixtureDocs();
 
   // I5. 없는 문서 상세에서 질문: 접수 전 404, general로 낮추지 않음, 입력 유지
-  await page.goto(U(`/research/document/?id=${crypto.randomUUID()}`));
+  await page.goto(U(`/research/document/${crypto.randomUUID()}/`));
   await chat.getByLabel("메시지").waitFor();
   check("I5. detail page shows document hint", await appears(chat.getByText("보고 있는 화면: 이 문서")));
   await send(chat, "없는 문서 질문");
@@ -505,7 +505,7 @@ async function dropFirstSend(p) {
     : null;
   check("I6. setup: fixture publication", pub?.status === 201, `${pubDoc.status}/${pv?.status}/${pub?.status} ${pub?.body?.error?.code ?? ""}`);
   if (pub?.status === 201) {
-    await page.goto(U(`/public/document/?id=${pubDoc.body.id}`));
+    await page.goto(U(`/public/document/${pubDoc.body.id}/`));
     await chat.getByLabel("메시지").waitFor();
     check("I6. public document scope shown", await appears(chat.getByText("다음 질문 범위: 이 공개 글")));
     await send(chat, "/fixture/page-context");
@@ -625,8 +625,8 @@ async function dropFirstSend(p) {
     (await main.getByLabel("제목").inputValue()) === "오프라인 첫 글" && (await appears(matBox.locator("li", { hasText: "직접 고른 오프라인 자료" }).getByText("직접 추가")))
   );
   await main.getByRole("button", { name: "글 저장" }).click();
-  await page.waitForURL(/\/write\/\?id=/, { timeout: 20000 }).catch(() => {});
-  const postId = new URL(page.url()).searchParams.get("id");
+  await page.waitForURL(/\/write\/[0-9a-f-]{36}\//, { timeout: 20000 }).catch(() => {});
+  const postId = /* #119 B2 경로형 */ new URL(page.url()).pathname.split("/").filter(Boolean).pop();
   const p1 = postId ? await api.get(`/research/posts/${postId}`) : null;
   const slug = p1?.body?.latestVersion?.slug ?? "";
   check(
@@ -650,10 +650,10 @@ async function dropFirstSend(p) {
   await anon.locator("article h1").first().waitFor().catch(() => {});
   const pubText = await anon.locator("main").innerText();
   check("IP3. anonymous public post shows v1", pubText.includes("첫 버전 문장") && pubText.includes("오프라인 첫 글"));
-  check("IP3. based-on document title shown, private body not", pubText.includes("글 바탕 문서") && !pubText.includes("비공개 바탕 본문"));
+  check("IP3. private based-on document hidden from readers (#119 F4)", !pubText.includes("글 바탕 문서") && !pubText.includes("비공개 바탕 본문"));
   check(
-    "IP3. W3: based-on materials show title + source URL only",
-    pubText.includes("글 바탕 자료") && pubText.includes("직접 고른 오프라인 자료") && (await anon.getByRole("link", { name: "https://example.com/offline-source" }).count()) === 1 && !pubText.includes("비공개 메모")
+    "IP3. W3: based-on materials show linked title + domain only (#119 F3)",
+    pubText.includes("글 바탕 자료") && pubText.includes("직접 고른 오프라인 자료") && (await anon.getByRole("link", { name: /^글 바탕 자료/ }).getAttribute("href")) === "https://example.com/offline-source" && !pubText.includes("비공개 메모")
   );
   const pubRes = await anon.request.get(U(`/api/public/posts/${slug}`));
   check(
@@ -749,7 +749,7 @@ async function dropFirstSend(p) {
   check("IP6. human draft and editor input remain selected", new URL(page.url()).searchParams.get("draft") === ctxDraft && (await main.getByLabel("제목").inputValue()) === "문맥 초안");
 
   // 발행 취소: 익명 404, 목록에서 빠짐
-  await page.goto(U(`/write/?id=${postId}`));
+  await page.goto(U(`/write/${postId}/`));
   await pub.getByRole("button", { name: "발행 취소…" }).click();
   await pub.getByRole("button", { name: "발행 취소", exact: true }).click();
   check("IP8. unpublished", await appears(pub.getByText("발행을 취소했습니다", { exact: false })));
@@ -801,7 +801,7 @@ async function dropFirstSend(p) {
   await chat.getByLabel("메시지").waitFor();
   const row = chat.getByRole("list", { name: "저장한 문서·글" }).locator(`[data-research-call="${receiptId}"]`);
   check("R2. server-owned save appears as a short link", await appears(row.getByText(/^저장됨:/)) && (await chat.getByRole("region", { name: "연구 작업 기록" }).count()) === 0);
-  const href = `/research/document/?id=${resourceId}#version-history`;
+  const href = `/research/document/${resourceId}/#version-history`;
   const link = row.getByRole("link", { name: "보기", exact: true });
   check("R2. F2 destination uses the committed document", await link.getAttribute("href") === href);
   await link.click();
@@ -910,7 +910,7 @@ console.log(`INFO dropped message POST timings: ${JSON.stringify(postTimings)}`)
   await tab.close();
   check("I9. setup: switched to a different account", me.user?.accountId && me.user.accountId !== userA.accountId);
   await page.goto(U("/"));
-  await page.locator("header").getByRole("button", { name: "로그아웃" }).first().waitFor();
+  await page.locator("header").getByRole("button", { name: /계정 메뉴/ }).first().waitFor();
   const panelText = (await chat.count()) ? await chat.innerText() : "";
   check(
     "I9. switched account: no previous conversation or draft in panel",

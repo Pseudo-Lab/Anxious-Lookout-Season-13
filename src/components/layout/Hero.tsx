@@ -2,7 +2,43 @@
 
 import Link from "next/link";
 import { SITE_DESCRIPTION } from "@/lib/constants";
-import AdminOnly from "@/components/layout/AdminOnly";
+import { useAuth } from "@/hooks/useAuth";
+import { canUseResearch } from "@/lib/auth/api";
+
+const primary = "rounded-lg bg-slate-800 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-slate-700";
+const secondary =
+  "rounded-lg border border-slate-300 bg-white/60 px-5 py-2.5 text-sm font-medium text-slate-800 transition-colors hover:bg-white";
+
+/**
+ * #119 D-1: 로그인한 승인 회원에게는 바로 쓸 수 있는 동선(글 쓰기·내 연구)을, 그 밖에는 글 둘러보기를 보인다.
+ * 서비스 상태(운영자용)는 계정 메뉴에만 있다(D4). 로그인 확인 전에는 버튼 자리만 잡는다.
+ */
+function HeroActions() {
+  const { status, user } = useAuth();
+  if (status === "loading") return <div aria-hidden="true" className="mt-6 h-11" />;
+  const write = status === "authenticated" && user?.isApproved === true;
+  const research = status === "authenticated" && canUseResearch(user);
+  return (
+    <div className="mt-6 flex flex-wrap gap-3">
+      {write ? (
+        <>
+          <Link href="/write/" className={primary}>
+            글 쓰기
+          </Link>
+          {research && (
+            <Link href="/research/" className={secondary}>
+              내 연구
+            </Link>
+          )}
+        </>
+      ) : (
+        <Link href="/posts/" className={primary}>
+          글 둘러보기
+        </Link>
+      )}
+    </div>
+  );
+}
 
 export default function Hero() {
   return (
@@ -23,23 +59,7 @@ export default function Hero() {
         <p className="mt-3 max-w-xl text-lg text-slate-600">
           {SITE_DESCRIPTION}
         </p>
-        <div className="mt-6 flex gap-3">
-          <Link
-            href="/posts/"
-            className="rounded-lg bg-slate-800 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-slate-700"
-          >
-            글 둘러보기
-          </Link>
-          {/* #94: 서비스 상태는 관리자에게만 */}
-          <AdminOnly>
-            <Link
-              href="/status/"
-              className="rounded-lg border border-white/50 bg-white/50 px-5 py-2.5 text-sm font-medium text-slate-700 backdrop-blur-sm transition-colors hover:bg-white/80"
-            >
-              서비스 상태
-            </Link>
-          </AdminOnly>
-        </div>
+        <HeroActions />
       </div>
 
       <style>{`

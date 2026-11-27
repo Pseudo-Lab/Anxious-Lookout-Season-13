@@ -1,31 +1,40 @@
 "use client";
 
 import { Suspense } from "react";
-import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect } from "react";
+import { API_ENABLED } from "@/lib/constants";
+import { writePostPath } from "@/lib/routes";
 import AuthGate from "@/components/research/AuthGate";
-import PostDetail from "./PostDetail";
 import PostIndex from "./PostIndex";
+import WriteFrame from "./WriteFrame";
 
-// #28 글 쓰기. 목록(/write/)과 글 화면(/write/?id=)은 같은 경로이고, 새 글은 /write/new/(?draft=)에서 쓴다.
+// #28 글 쓰기 목록(/write/). 새 글은 /write/new/(?draft=), 글 화면은 /write/<id>/(#119 B2).
+// 예전 글 화면 주소(/write/?id=<id>)는 새 주소로 넘긴다(#조각 유지).
 function WriteInner() {
   const id = useSearchParams().get("id");
-  if (id) return <PostDetail key={id} id={id} />;
+  const router = useRouter();
+  useEffect(() => {
+    if (id && API_ENABLED) router.replace(`${writePostPath(id)}${window.location.hash}`);
+  }, [id, router]);
+  if (id && API_ENABLED) {
+    return (
+      <p role="status" className="text-sm text-stone-500">
+        새 주소로 이동하는 중...
+      </p>
+    );
+  }
   return <PostIndex />;
 }
 
 export default function WritePage() {
   return (
-    // 편집 중에는 나란히 보기를 위해 페이지 폭을 넓힌다(data-editing).
-    <div className="mx-auto max-w-3xl has-[[data-editing]]:max-w-6xl">
+    <WriteFrame>
       <AuthGate>
         <Suspense>
           <WriteInner />
         </Suspense>
       </AuthGate>
-      <p className="mt-10 text-xs text-stone-500">
-        글은 <Link href="/research/" className="underline">내 연구</Link>의 문서를 바탕으로 씁니다. 자료 → 문서 → 글 순서로 정리하고, 어느 단계에서든 대화창에서 도움을 받을 수 있습니다.
-      </p>
-    </div>
+    </WriteFrame>
   );
 }

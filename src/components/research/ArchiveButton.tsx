@@ -32,7 +32,12 @@ export default function ArchiveButton({
 
   return (
     <>
-      <button onClick={() => void archive()} disabled={busy} className="text-sm text-stone-500 hover:text-red-700 disabled:opacity-50">
+      <button
+        type="button"
+        onClick={() => void archive()}
+        disabled={busy}
+        className="rounded-lg border border-stone-300 px-3 py-1 text-sm text-stone-700 hover:border-amber-400 hover:bg-amber-50 hover:text-amber-800 disabled:opacity-50"
+      >
         보관
       </button>
       {failure && <ErrorNotice failure={failure} prefix="보관하지 못했습니다." />}

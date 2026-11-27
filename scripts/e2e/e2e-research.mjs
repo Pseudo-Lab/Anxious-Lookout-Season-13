@@ -107,9 +107,9 @@ await main.getByLabel("제목").fill("자료 A");
 await main.getByLabel("출처 URL").fill("https://example.com/a");
 await main.getByLabel("내용").fill(unsafe);
 await main.getByRole("button", { name: "자료 저장" }).click();
-await page.waitForURL(/\/research\/material\/\?id=/);
+await page.waitForURL(/\/research\/material\/[0-9a-f-]{36}\//);
 const materialAUrl = page.url();
-const materialAId = new URL(materialAUrl).searchParams.get("id");
+const materialAId = /* #119 B2 경로형 */ new URL(materialAUrl).pathname.split("/").filter(Boolean).pop();
 check("R3. created material detail", await appears(main.getByRole("heading", { name: "자료 A" })));
 const prose = main.locator(".prose").first();
 await prose.waitFor();
@@ -155,7 +155,7 @@ const undirectedBody = (await undirectedPost).postDataJSON();
 check("R5. create omits directed (server decides from kind)", undirectedBody.kind === "same_topic" && !("directed" in undirectedBody) && !("evidence" in undirectedBody), JSON.stringify(undirectedBody));
 check("R5. undirected relation listed", await appears(main.getByRole("link", { name: "자료 B" })));
 check("R5. undirected relation grouped as neutral", await appears(main.getByRole("group", { name: "중립" }).getByText("같은 주제", { exact: true })));
-await page.goto(U(`/research/document/?id=${docD.body.id}`));
+await page.goto(U(`/research/document/${docD.body.id}/`));
 await main.getByLabel("연결할 대상").selectOption({ label: "자료 A" });
 check(
   "R5. document↔material offers only directed kinds",
@@ -314,7 +314,7 @@ async function openBibliography() {
     content: "기관 저자",
     bibliography: storedBib,
   });
-  await page.goto(U(`/research/material/?id=${org.body.id}`));
+  await page.goto(U(`/research/material/${org.body.id}/`));
   await main.getByRole("button", { name: "내용 수정" }).click();
   await main.getByLabel("한 줄 요약 (선택)").fill("요약만 고침");
   const orgPatch = page.waitForRequest(isPatch(`/research/materials/${org.body.id}`));
@@ -337,7 +337,7 @@ async function openBibliography() {
   );
 
   const w = await api.send("POST", "/research/documents", { title: "위키 문서 W", content: "W 본문" });
-  const wUrl = U(`/research/document/?id=${w.body.id}`);
+  const wUrl = U(`/research/document/${w.body.id}/`);
   await page.goto(wUrl);
   // 요약만 바꾸면 초안이 없으므로 문서 수정(PATCH)으로 새 버전을 만든다.
   await main.getByRole("button", { name: "내용 수정" }).click();
@@ -414,7 +414,7 @@ await main.getByRole("button", { name: "문서 저장" }).click();
 check("R7. lost response shows failure", await appears(main.getByText("서버에 연결할 수 없습니다")));
 check("R7. draft address kept for recovery", await page.waitForURL(/\?draft=/, { timeout: 8000 }).then(() => true, () => false), page.url());
 await main.getByRole("button", { name: "문서 저장" }).click();
-await page.waitForURL(/\/research\/document\/\?id=/);
+await page.waitForURL(/\/research\/document\/[0-9a-f-]{36}\//);
 await page.unroute(COMMIT);
 const after = await counts();
 const posts = (await mockCalls()).filter(isCommit).slice(-2);
@@ -423,7 +423,7 @@ check("R7. exactly one document created", after.documents === before.documents +
 
 // R8. 공개(확정 정책): 글→자료 직접 연결 전체를 미리보기 후 공개, 간접 연결 제외, 미리보기 뒤 변경은 409 → 재미리보기,
 //     보관 자료는 공개 차단(연결 해제로 해소), 최신 공개본만 열람, 철회
-const docUrl = U(`/research/document/?id=${docD.body.id}`);
+const docUrl = U(`/research/document/${docD.body.id}/`);
 const newMaterial = (title) =>
   api.send("POST", "/research/materials", {
     title,
@@ -473,7 +473,7 @@ const publishButton = () => main.getByRole("button", { name: /글과 참고 자�
 }
 {
   const visitor = await newPage();
-  await visitor.page.goto(U(`/public/document/?id=${docD.body.id}`));
+  await visitor.page.goto(U(`/public/document/${docD.body.id}/`));
   const vm = visitor.page.locator("main");
   check("R8. public page shows document", await appears(vm.getByRole("heading", { name: "문서 D", exact: true })));
   const pubText = await vm.innerText();
@@ -515,7 +515,7 @@ const publishButton = () => main.getByRole("button", { name: /글과 참고 자�
   const pvG = await api.get(`/research/documents/${gid}/publication-preview`);
   const pubG = await api.send("POST", `/research/documents/${gid}/publications`, { versionId: pvG.versionId, expectedVersion: pvG.expectedVersion, previewToken: pvG.previewToken });
   check("R8c. setup published", pubG.status === 201, String(pubG.status));
-  await page.goto(U(`/research/document/?id=${gid}`));
+  await page.goto(U(`/research/document/${gid}/`));
   await main.getByRole("button", { name: "보관", exact: true }).click();
   await main.getByText("보관한 문서입니다").waitFor();
   check("R8c. archived+published still offers withdraw", await appears(main.getByRole("button", { name: "공개 철회" })));
@@ -551,7 +551,7 @@ const publishButton = () => main.getByRole("button", { name: /글과 참고 자�
     });
   }
   await api.send("DELETE", `/research/materials/${x.body.id}`, { expectedVersion: x.body.version });
-  await page.goto(U(`/research/document/?id=${h.body.id}`));
+  await page.goto(U(`/research/document/${h.body.id}/`));
   await main.getByRole("button", { name: "공개하기" }).click();
   await main.getByText("보관됨").waitFor();
   const deletes = [];
@@ -597,7 +597,7 @@ const publishButton = () => main.getByRole("button", { name: /글과 참고 자�
     });
   }
   await api.send("DELETE", `/research/materials/${x.body.id}`, { expectedVersion: x.body.version });
-  await page.goto(U(`/research/document/?id=${h.body.id}`));
+  await page.goto(U(`/research/document/${h.body.id}/`));
   await main.getByRole("button", { name: "공개하기" }).click();
   await main.getByText("보관됨").waitFor();
   const deletes = [];
@@ -1062,6 +1062,7 @@ async function confirmSingleTurn(label, text) {
 {
   // R12e. 명시적 로그아웃은 미확인 전송(입력 포함)을 지운다
   await makeUnconfirmedSend("로그아웃 질문");
+  { const m = page.locator("header").getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
   await page.locator("header").getByRole("button", { name: "로그아웃", exact: true }).first().click();
   await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
   check("R12e. logout clears unconfirmed sends, drafts and chat state", (await fullStore()) === "{}", await fullStore());
@@ -1151,7 +1152,7 @@ async function confirmSingleTurn(label, text) {
   check("R22. workspace: allowed tool completed", await appears(lastTool().getByText("도구 실행함", { exact: true })));
 
   // 자료 상세: 보낸 뒤 바로 다른 페이지로 이동해도 접수 범위는 그대로
-  const materialId = new URL(materialAUrl).searchParams.get("id");
+  const materialId = /* #119 B2 경로형 */ new URL(materialAUrl).pathname.split("/").filter(Boolean).pop();
   await page.goto(materialAUrl);
   await chat.getByLabel("메시지").waitFor();
   check("R22. material page hint shown", await appears(chat.getByText("보고 있는 화면: 이 자료")));
@@ -1175,7 +1176,7 @@ async function confirmSingleTurn(label, text) {
     previewToken: pv22.previewToken,
   });
   check("R22. setup: publication", pubd22.status === 201, String(pubd22.status));
-  await page.goto(U(`/public/document/?id=${pub22.body.id}`));
+  await page.goto(U(`/public/document/${pub22.body.id}/`));
   await chat.getByLabel("메시지").waitFor();
   check("R22. public document scope shown", await appears(chat.getByText("다음 질문 범위: 이 공개 글")));
   check("R22. public wording: read only, no web search or shell (scope help, not body)", await scopeHelp("웹 검색·명령 실행이나 저장·수정은 하지 않습니다"));
@@ -1291,7 +1292,7 @@ async function confirmSingleTurn(label, text) {
   await page.unroute("**/api/research/sessions/*/messages");
 
   // 확인할 수 없는 자원(없음·타인·보관): 접수 전 404, general로 낮추지 않음, 입력 유지
-  await page.goto(U(`/research/material/?id=${crypto.randomUUID()}`));
+  await page.goto(U(`/research/material/${crypto.randomUUID()}/`));
   await chat.getByLabel("메시지").waitFor();
   await chat.getByLabel("메시지").fill("없는 자료 질문");
   await chat.getByRole("button", { name: "보내기" }).click();
@@ -1402,7 +1403,7 @@ let docEUrl;
   check("R15. csrf rejection shown", await appears(main.getByText("요청을 확인하지 못했습니다")));
   await setMock("csrf=normal");
   await main.getByRole("button", { name: "문서 저장" }).click();
-  await page.waitForURL(/\/research\/document\/\?id=/);
+  await page.waitForURL(/\/research\/document\/[0-9a-f-]{36}\//);
   await page.unroute(COMMIT);
   docEUrl = page.url();
   const posts15 = (await mockCalls()).filter(isCommit).slice(-3);
@@ -1413,7 +1414,7 @@ let docEUrl;
 // R16. #22 편집 중 다른 곳에서 문서가 저장되면 초안 자동 저장이 멈춘다. 최신 문서 다시 불러오기가 일시 실패해도 입력 유지(리뷰 major),
 //      다시 불러온 뒤에는 현재 버전과 비교해야 저장된다(비교 없이 덮어쓰지 않음).
 {
-  const id = new URL(docEUrl).searchParams.get("id");
+  const id = /* #119 B2 경로형 */ new URL(docEUrl).pathname.split("/").filter(Boolean).pop();
   await main.getByRole("button", { name: "내용 수정" }).click();
   await main.getByLabel("본문").fill("B 초안");
   const cur = await api.get(`/research/documents/${id}`);
@@ -1480,7 +1481,7 @@ let docEUrl;
   await setMock(`expire=1&as=${accountX}`);
   await login(page);
   await page.goto(draftUrl);
-  await page.waitForURL(/\/research\/document\/\?id=/);
+  await page.waitForURL(/\/research\/document\/[0-9a-f-]{36}\//);
   check("R17. same account lands on the saved document", await appears(main.getByRole("heading", { name: "재인증 문서" })));
   check("R17. exactly one document created", (await counts()).documents === before17.documents + 1, `${before17.documents} -> ${(await counts()).documents}`);
   await setMock("as=");
@@ -1497,7 +1498,7 @@ let docEUrl;
     previewToken: pv.previewToken,
   });
   check("setup. fixture publication", pub.status === 201, String(pub.status));
-  const pubUrl = U(`/public/document/?id=${pubDoc.body.id}`);
+  const pubUrl = U(`/public/document/${pubDoc.body.id}/`);
   await page.goto(pubUrl);
   await main.getByLabel("새 대화 제목").fill("A 개인 대화 제목");
   let dropped18 = false;
@@ -1547,6 +1548,7 @@ let docEUrl;
   });
   void main.getByRole("button", { name: "문서 저장" }).click();
   await seen19;
+  { const m = page.locator("header").getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
   await page.locator("header").getByRole("button", { name: "로그아웃", exact: true }).first().click();
   await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
   check("R19. store empty right after logout", !(await pendingStore()).includes("로그아웃 경합"));
@@ -1567,7 +1569,7 @@ let docEUrl;
   check("R20. commenter gets forbidden guidance", await appears(cm.getByText("관리자가 승인한 편집자·관리자만 이용할 수 있습니다")));
   const pubList = await (await c.page.request.get(U("/api/public/documents"))).json();
   if (pubList.items?.length) {
-    await c.page.goto(U(`/public/document/?id=${pubList.items[0].documentId}`));
+    await c.page.goto(U(`/public/document/${pubList.items[0].documentId}/`));
     check("R20. commenter can read public document", await appears(cm.getByRole("heading").first()));
     check("R20. commenter sees question restriction, no form", (await appears(cm.getByText("관리자가 승인한 편집자·관리자만"))) && (await cm.getByLabel("새 대화 제목").count()) === 0);
   } else {
@@ -1826,7 +1828,7 @@ let docEUrl;
   const w = await api.send("POST", "/research/documents", { title: "편집기 문서", content: `첫 줄\n바꿀 문장 하나\n${same}\n끝 줄\n` });
   check("W1. setup: document created", w.status === 201, String(w.status));
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto(U(`/research/document/?id=${w.body.id}`));
+  await page.goto(U(`/research/document/${w.body.id}/`));
   await main.getByRole("button", { name: "내용 수정" }).click();
   const body = main.getByLabel("본문");
   const preview = main.getByRole("region", { name: "미리보기" });
@@ -1893,7 +1895,7 @@ let docEUrl;
   const doc = await api.send("POST", "/research/documents", { title: "자동 저장 문서", content: "원래 본문\n" });
   const id = doc.body.id;
   const draftOf = async () => (await api.get(`/research/documents/${id}/draft`)).draft;
-  await page.goto(U(`/research/document/?id=${id}`));
+  await page.goto(U(`/research/document/${id}/`));
   await main.getByRole("button", { name: "내용 수정" }).click();
   await main.getByLabel("본문").fill("자동 저장된 초안");
   check("W2. autosave: saved status shown", await appears(main.getByText("초안 자동 저장됨"), 8000));
@@ -1992,7 +1994,7 @@ let docEUrl;
   const timeCompare = async (before, after, title) => {
     const d = await api.send("POST", "/research/documents", { title, content: before });
     const p = await api.send("PATCH", `/research/documents/${d.body.id}`, { title, content: after, expectedVersion: d.body.version });
-    await page.goto(U(`/research/document/?id=${d.body.id}`));
+    await page.goto(U(`/research/document/${d.body.id}/`));
     await main.getByRole("button", { name: "버전 비교", exact: true }).waitFor();
     const t0 = Date.now();
     await main.getByRole("button", { name: "버전 비교", exact: true }).click();
@@ -2070,7 +2072,7 @@ let docEUrl;
     return { release, arrived, done: () => page.unroute(pattern) };
   };
   const locked = async () => !(await main.getByLabel("본문").isEditable()) && !(await main.getByLabel("제목", { exact: true }).isEditable());
-  await page.goto(U(`/research/document/?id=${id}`));
+  await page.goto(U(`/research/document/${id}/`));
 
   // 저장(commit) 응답 보류 중
   await main.getByRole("button", { name: "내용 수정" }).click();
@@ -2147,7 +2149,7 @@ let docEUrl;
   await main.getByLabel("제목").fill("저장할 새 문서");
   await main.getByLabel("본문").fill("저장할 본문");
   await main.getByRole("button", { name: "문서 저장" }).click();
-  await page.waitForURL(/\/research\/document\/\?id=/);
+  await page.waitForURL(/\/research\/document\/[0-9a-f-]{36}\//);
   check("W3. save creates exactly one document", (await counts()).documents === before.documents + 1 && (await appears(main.getByRole("heading", { name: "저장할 새 문서" }))));
   await page.context().close();
 }

@@ -29,6 +29,8 @@ export interface PublicPost {
   // 공개 본문(post-blocks). renderer가 그리기 전에 다시 검사하므로 모르는 형식도 여기서는 그대로 둔다.
   content?: unknown;
   textProjection?: string;
+  // #119 C(issue119 §C): 소제목·코드·표를 뺀 문단에서 문장 단위로 뽑은 카드 요약(""일 수 있음). 이전 API에는 없다.
+  excerpt?: string;
   tags: string[];
   coverImageUrl: string | null;
   // 이관된 MDX 글은 login이 null이고 원 작성자 이름만 있다

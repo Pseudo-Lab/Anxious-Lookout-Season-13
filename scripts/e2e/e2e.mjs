@@ -108,6 +108,9 @@ check("B. no token in local/sessionStorage", ls === "{}", ls);
 // C. 상태 화면(#94: 관리자만). 일반(승인 대기) 계정에는 메뉴·홈 버튼이 없고, 주소로 들어오면 안내만 보인다.
 check("C. non-admin: no 상태 nav", (await header.getByRole("link", { name: "상태" }).count()) === 0);
 check("C. non-admin: no 서비스 상태 button on home", (await page.locator("main").getByRole("link", { name: "서비스 상태" }).count()) === 0);
+{ const m = header.getByRole("button", { name: /계정 메뉴/ }).first(); await m.click(); }
+check("C. non-admin: account menu has API 토큰 but no 서비스 상태/관리 (#119 D4)", (await appears(header.getByRole("link", { name: "API 토큰" }))) && (await header.getByRole("link", { name: /서비스 상태|관리/ }).count()) === 0);
+await page.keyboard.press("Escape");
 await page.goto(U("/status/"));
 check("C. non-admin: status page shows admin-only notice", await appears(page.getByText("서비스 상태는 관리자만 볼 수 있습니다.")));
 check("C. non-admin: no status details", !(await page.locator("main").innerText()).includes("API 상태"));
@@ -125,13 +128,18 @@ async function adminStatusPage() {
 }
 {
   const a = await adminStatusPage();
-  check("C. admin: 상태 nav shown", await appears(a.h.getByRole("link", { name: "상태" })));
-  check("C. admin: 서비스 상태 button on home", await appears(a.p.locator("main").getByRole("link", { name: "서비스 상태" })));
+  // #119 D4: 서비스 상태·관리는 상단 메뉴가 아니라 계정 메뉴에 있고, 홈 히어로 버튼은 없다
+  check("C. admin: no 상태 in top nav", (await a.h.getByRole("navigation", { name: "주 메뉴" }).getByRole("link", { name: /상태|관리/ }).count()) === 0);
+  check("C. admin: no 서비스 상태 button on home", (await a.p.locator("main").getByRole("link", { name: "서비스 상태" }).count()) === 0);
+  await a.h.getByRole("button", { name: /계정 메뉴/ }).first().click();
+  check("C. admin: account menu has 서비스 상태 + 관리", (await appears(a.h.getByRole("link", { name: "서비스 상태" }))) && (await appears(a.h.getByRole("link", { name: "관리" }))));
   await a.p.goto(U("/status/"));
   await a.p.getByText("API 상태").waitFor();
   await a.p.waitForFunction(() => !document.body.innerText.includes("확인 중..."), null, { timeout: 10000 });
   const statusText = await a.p.locator("main").innerText();
-  check("C. status shows web sha", statusText.includes(EXPECT_SHA), "");
+  // #119 H1: 앞 7자만 보이고 전체 해시는 복사 버튼으로
+  check("C. status shows web sha (7 chars)", statusText.includes(EXPECT_SHA.slice(0, 7)) && !statusText.includes(EXPECT_SHA), "");
+  check("C. status shows build time in local format (#119 H2)", !/\d{4}-\d{2}-\d{2}T/.test(statusText));
   check("C. status shows API 정상", statusText.includes("정상 (요청을 받을 준비가 되었습니다)"));
   check("C. status shows API version", statusText.includes("b".repeat(40)));
   check("C. status shows account (admin)", statusText.includes("mock-user") && statusText.includes("관리자"));
@@ -140,21 +148,24 @@ async function adminStatusPage() {
 
 // D. 로그아웃 실패(403) -> 로그인 유지 + 오류 표시
 await setMock("logout=403");
-await header.getByRole("button", { name: "로그아웃" }).first().click();
+{ const m = header.getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
+await header.getByRole("button", { name: "로그아웃", exact: true }).first().click();
 await header.getByRole("alert").first().waitFor();
 check("D. logout 403 shows error", (await header.getByRole("alert").first().innerText()).includes("로그아웃 실패"));
 check("D. still logged in after 403", await header.getByText("mock-user").first().isVisible());
 
 // D2. #13 실행 환경 삭제 실패(503) -> 로그인 유지 + 오류 표시(성공으로 처리하지 않음)
 await setMock("logout=503");
-await header.getByRole("button", { name: "로그아웃" }).first().click();
+{ const m = header.getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
+await header.getByRole("button", { name: "로그아웃", exact: true }).first().click();
 await header.getByText("codex_runner_unreachable").first().waitFor();
 check("D2. logout 503 shows error", (await header.getByRole("alert").first().innerText()).includes("로그아웃 실패"));
 check("D2. still logged in after 503", await header.getByText("mock-user").first().isVisible());
 
 // E. 로그아웃 성공 (POST + X-CSRF-Token). #13: 서버가 실행 환경 삭제 요청으로 5초 넘게 걸려도 끊지 않고 성공한다.
 await setMock("logout=slow");
-await header.getByRole("button", { name: "로그아웃" }).first().click();
+{ const m = header.getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
+await header.getByRole("button", { name: "로그아웃", exact: true }).first().click();
 await header.getByRole("link", { name: "GitHub 로그인" }).first().waitFor({ timeout: 20000 });
 await setMock("logout=normal");
 const calls = await (await fetch(`${ORIGIN}/__mock/calls`)).json();
@@ -179,7 +190,8 @@ await setMock("nextLogin=access_denied");
 await page.goto(U("/auth/login/"));
 // 이미 로그인된 상태라 로그아웃 후 시도
 await page.goto(U("/"));
-await header.getByRole("button", { name: "로그아웃" }).first().click();
+{ const m = header.getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
+await header.getByRole("button", { name: "로그아웃", exact: true }).first().click();
 await header.getByRole("link", { name: "GitHub 로그인" }).first().click();
 await page.waitForURL(/auth_error=access_denied/);
 check("G. access_denied message", await appears(page.getByText("GitHub 로그인 동의가 취소되었습니다.")));
@@ -218,14 +230,17 @@ check("H. retry after recovery -> unauthenticated", true);
   await a.ctx.close();
 }
 
-// J. 글 상세: 좋아요·댓글 준비 중
+// J. 글 상세: #119 F5 내부 사정 문구 없음, 목록·태그로 가는 길(E3)
 await page.goto(U("/posts/welcome-to-observatory/"));
-check("J. post detail shows like/comment 준비 중", await appears(page.getByText("좋아요와 댓글 기능은 새 서버로 옮기는 중입니다")));
+await page.locator("article h1").first().waitFor();
+check("J. post detail has no 'moving servers' notice (#119 F5)", (await page.getByText("새 서버로 옮기는 중").count()) === 0);
+check("J. post detail links to tag list (#119 E3)", await appears(page.locator("main").getByRole("link", { name: "모든 태그" })));
+check("J. tab title is the post title (#119 A3)", (await page.title()).startsWith("Observatory에 오신 것을 환영합니다"), await page.title());
 // #80 F5: 다른 날 다시 발행한 글(mock seed)은 최초 발행일과 수정일을 함께 보인다
 {
   const head = page.locator("article header");
   const revised = head.locator('time[datetime="2026-03-21T03:00:00Z"]');
-  check("J. #80: republished post shows first publish date and revised date", (await appears(revised)) && (await revised.innerText()).endsWith("수정") && (await head.locator('time[title="최초 발행일"]').count()) === 1);
+  check("J. #80: republished post shows first publish date and revised date", (await appears(revised)) && (await revised.innerText()).endsWith("수정") && (await head.locator('time[title^="최초 발행일 "]').count()) === 1);
 }
 
 // P. #28 공개 글(DB 발행본, 모의 seed = 이관된 MDX 3개)
@@ -255,7 +270,7 @@ check("J. post detail shows like/comment 준비 중", await appears(page.getByTe
   check("P. no image loaded for a post without own images", (await page.locator("article img").count()) === 0);
   check("P. #32: migrated block body renders without a format error", (await page.locator("article [role=alert]").count()) === 0 && (await page.locator("article .prose h2").count()) === 1);
   check("P. tab title from post", (await page.title()).startsWith("개발자를 위한 Docker 기초"), await page.title());
-  check("P. #80: never-republished post shows no revised date", (await page.locator('article header time[title="최초 발행일"]').count()) === 1 && !(await page.locator("article header").innerText()).includes("수정"));
+  check("P. #80: never-republished post shows no revised date", (await page.locator('article header time[title^="최초 발행일 "]').count()) === 1 && !(await page.locator("article header").innerText()).includes("수정"));
   await page.goto(U("/posts/understanding-transformer-architecture/"));
   await page.locator("article table").first().waitFor();
   check("P. table block rendered (header row as th)", (await page.locator("article table").count()) === 1 && (await page.locator("article table th").count()) === 2);
@@ -313,6 +328,7 @@ async function assertStaysLoggedOut(label) {
   });
   await page.getByRole("button", { name: "다시 확인", exact: true }).click();
   await seen;
+  { const m = header.getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
   await header.getByRole("button", { name: "로그아웃", exact: true }).first().click();
   await header.getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
   release();
@@ -328,6 +344,7 @@ async function assertStaysLoggedOut(label) {
     await gate;
     await route.continue();
   });
+  { const m = header.getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
   await header.getByRole("button", { name: "로그아웃", exact: true }).first().click();
   const meDone = page.waitForResponse((r) => r.url().endsWith("/api/auth/me"));
   await page.getByRole("button", { name: "다시 확인", exact: true }).click();

@@ -197,6 +197,8 @@ export interface Relation {
 export interface Page<T> {
   items: T[];
   nextCursor: string | null;
+  // #119 A7·I3·L1: 같은 조건의 전체 건수(cursor 무관). 이전 API·건수를 주지 않는 목록에는 없다.
+  total?: number;
 }
 
 export interface PublishedMaterial {

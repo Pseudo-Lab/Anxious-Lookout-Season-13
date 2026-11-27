@@ -5,6 +5,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 import type { PageDescriptor, PageKind } from "@/lib/research/types";
 import { own } from "@/lib/research/own";
+import { parseDetailPath } from "@/lib/routes";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -54,6 +55,9 @@ export function describePage(pathname: string, search: URLSearchParams, extra?: 
   // 공개 글(#28)은 slug로는 postId를 알 수 없다. 글을 불러와 등록하기 전(또는 찾지 못한 경우)에는 자원 없는 public_post로 두어
   // 보내기를 잠근다(pageUnresolved). 소유자 범위(general)로 대신 보내지 않는다(리뷰 F2).
   if (/^\/posts\/[^/]+\/$/.test(path)) return { kind: "public_post" };
+  // #119 B2: 경로형 상세 주소(/research/material/<id>/ 등). 예전 ?id= 주소는 아래 switch가 그대로 해석한다(넘어가기 전 잠깐).
+  const routed = parseDetailPath(path);
+  if (routed) return detail(routed.route, routed.id);
   switch (path) {
     case "/public/document/":
       return detail("public_document", search.get("id"));

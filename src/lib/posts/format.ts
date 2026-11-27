@@ -1,9 +1,17 @@
+// #119 B7: 날짜만은 "2026. 11. 18.", 시각 포함은 research/format의 formatDateTime("2026. 11. 17. 오후 11:45"). 모두 브라우저 시간대.
 const date = new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "2-digit", day: "2-digit" });
+const long = new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "long", day: "numeric" });
 
 /** 발행일(날짜만). 해석할 수 없는 값은 그대로 보인다. */
 export function formatDate(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : date.format(d);
+}
+
+/** 읽어 주는 날짜(#119 B8 <time> 이름): "2026년 11월 18일". 해석할 수 없는 값은 그대로. */
+export function longDate(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : long.format(d);
 }
 
 /**
@@ -35,9 +43,34 @@ export function decodeSegment(value: string): string {
   }
 }
 
-/** 글 목록 카드의 본문 발췌(#31 W2, 요약이 빈 글). #32: 서버 textProjection(평문)의 앞부분이다. */
-export function excerpt(text: string, max = 160): string {
+/**
+ * 글 목록 카드의 본문 발췌(서버 excerpt가 없는 이전 API용, #31 W2 · #32 textProjection 평문).
+ * #119 C1: 화면은 CSS line-clamp로 줄이므로 DOM에는 단어·문장 중간에서 자른 글을 넣지 않는다.
+ * 문장 끝(. ! ? 。 … 뒤 공백·끝)까지 max자 안에서 통째로 담고, 첫 문장이 max보다 길면 hardMax까지 그대로 둔다.
+ * hardMax를 넘을 때만 마지막 공백에서 끊고 "…"를 붙인다(issue119 §C 서버 규칙과 같은 모양).
+ */
+export function excerpt(text: string, max = 200, hardMax = 400): string {
   const flat = text.replace(/\s+/g, " ").trim();
-  const chars = Array.from(flat);
-  return chars.length <= max ? flat : `${chars.slice(0, max).join("").trimEnd()}…`;
+  if (Array.from(flat).length <= max) return flat;
+  const sentences: string[] = [];
+  let start = 0;
+  for (const m of flat.matchAll(/[.!?。…]+(?=\s|$)/g)) {
+    const end = m.index + m[0].length;
+    sentences.push(flat.slice(start, end));
+    start = end;
+  }
+  if (start < flat.length) sentences.push(flat.slice(start));
+  let out = "";
+  for (const sentence of sentences) {
+    if (Array.from(out + sentence).length > max) break;
+    out += sentence;
+  }
+  out = out.trim();
+  if (out) return out;
+  const first = sentences[0].trim();
+  const chars = Array.from(first);
+  if (chars.length <= hardMax) return first;
+  const head = chars.slice(0, hardMax).join("");
+  const cut = head.lastIndexOf(" ");
+  return `${(cut > 0 ? head.slice(0, cut) : head).trimEnd()}…`;
 }

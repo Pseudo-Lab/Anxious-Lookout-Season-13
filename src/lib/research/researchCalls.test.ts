@@ -40,7 +40,7 @@ describe("#97 r2 receipt ingestion", () => {
   it("projects only safe receipt fields, ignoring args/stdout/process/provider metadata", () => {
     const call = parse(receipt({ command: "private command", headers: { Authorization: "secret" }, input: "secret", output: "secret", turnId: "native-turn", nativeThreadId: "private", saved: { ...saved, body: "private body" } }))![0];
     expect(call).toEqual(receipt());
-    expect(researchCallHref(call)).toBe(`/test-base/research/document/?id=${id(3)}#version-history`);
+    expect(researchCallHref(call)).toBe(`/test-base/research/document/${id(3)}/#version-history`);
   });
   it("accepts zero-count public reads without copying the read body", () => {
     const call = parse(receipt({ operation: "research_page_context", saved: undefined, count: 0, body: "private body", snapshot: { type: "public_document", resourceId: id(5), snapshotId: id(6), versionId: id(7) }, target: { materialId: id(8), versionId: id(9) } }))![0];
@@ -53,7 +53,7 @@ describe("#97 r2 receipt ingestion", () => {
     const call = parse(receipt({ operation: "research_archive", saved: undefined, target: { type: "document", id: id(3), version: 4 } }))![0];
     expect(call.saved).toBeUndefined();
     expect(researchCallLabel(call)).toBe("보관");
-    expect(researchCallHref(call)).toBe(`/test-base/research/document/?id=${id(3)}`);
+    expect(researchCallHref(call)).toBe(`/test-base/research/document/${id(3)}/`);
   });
 });
 
@@ -75,7 +75,7 @@ describe("#97 receipt identity, replay and display", () => {
     expect(html).toContain("저장됨:");
     expect(html.match(/data-research-call=/g)).toHaveLength(1);
     expect(html).not.toContain("연구 작업 기록");
-    expect(html).toContain(`/test-base/research/document/?id=${id(3)}#version-history`);
+    expect(html).toContain(`/test-base/research/document/${id(3)}/#version-history`);
     expect(html).not.toContain("null");
   });
   it("uses a generic label for future operations and fixed failure text without raw codes", () => {
@@ -96,7 +96,7 @@ describe("#97 receipt identity, replay and display", () => {
     ] })!;
     const html = renderToStaticMarkup(createElement(ResearchActivityList, { calls }));
     expect(html.match(/data-research-call=/g)).toHaveLength(2);
-    expect(html).toContain("/write/?id=");
+    expect(html).toContain(`/write/${id(3)}/`);
     expect(html).not.toContain("/research/material/");
     expect(html).not.toContain("작업 실패");
     expect(html).not.toContain("3건");
@@ -104,6 +104,6 @@ describe("#97 receipt identity, replay and display", () => {
   it.each(["material", "post"])("uses the fixed %s destination and base path", (type) => {
     const path = type === "post" ? "/write/" : "/research/material/";
     const call = parse(receipt({ operation: `research_${type}_save`, saved: { ...saved, resourceType: type, destination: { ...saved.destination, path } } }))![0];
-    expect(researchCallHref(call)).toBe(`/test-base${path}?id=${id(3)}#version-history`);
+    expect(researchCallHref(call)).toBe(`/test-base${path}${id(3)}/#version-history`);
   });
 });

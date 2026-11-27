@@ -916,7 +916,7 @@ F6: {
   // 공개 renderer: 같은 비율의 고정 배치
   await H.main.getByLabel("제목").fill("열 폭 글");
   await H.main.getByRole("button", { name: "글 저장" }).click();
-  const committed = await page.waitForURL(/\/write\/\?id=/, { timeout: 30000, waitUntil: "commit" }).then(() => true, () => false);
+  const committed = await page.waitForURL(/\/write\/[0-9a-f-]{36}\//, { timeout: 30000, waitUntil: "commit" }).then(() => true, () => false);
   check("F6. the post with weighted columns is saved", committed, committed ? "" : (await H.main.innerText()).slice(0, 300).replace(/\s+/g, " "));
   const art = H.main.locator(".prose").first();
   await art.locator("table").first().waitFor({ timeout: 15000 });
@@ -975,7 +975,7 @@ nextPrompt = ["https://youtu.be/dQw4w9WgXcQ"];
 await H.tb.getByRole("button", { name: "YouTube 영상" }).click();
 await H.main.getByLabel("제목").fill("영상 글");
 await H.main.getByRole("button", { name: "글 저장" }).click();
-await page.waitForURL(/\/write\/\?id=/, { timeout: 15000 });
+await page.waitForURL(/\/write\/[0-9a-f-]{36}\//, { timeout: 15000 });
 const preview = H.main.locator(".prose").first();
 await preview.waitFor({ timeout: 15000 });
 check("R1. saved post renders bold as <strong> and the inactive YouTube card", (await preview.locator("strong").first().innerText().catch(() => "")).trim() === "굵은" && (await preview.getByRole("button", { name: /눌러서 재생/ }).count()) === 1);

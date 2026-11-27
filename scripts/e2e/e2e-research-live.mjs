@@ -46,7 +46,7 @@ async function signIn(page) {
   await page.goto(U("/"));
   await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().click();
   await page.waitForURL(U("/"));
-  await page.locator("header").getByRole("button", { name: "로그아웃" }).first().waitFor();
+  await page.locator("header").getByRole("button", { name: /계정 메뉴/ }).first().waitFor();
 }
 
 // 로그인 → fixture githubId 공유 → 운영자 승인 대기 → 같은 browser로 재로그인(승인 시 기존 session 폐기)
@@ -138,9 +138,9 @@ await main.getByLabel("제목").fill("실물 자료 A");
 await main.getByLabel("출처 URL").fill("https://example.com/a");
 await main.getByLabel("내용").fill(unsafe);
 await main.getByRole("button", { name: "자료 저장" }).click();
-await page.waitForURL(/\/research\/material\/\?id=/);
+await page.waitForURL(/\/research\/material\/[0-9a-f-]{36}\//);
 const materialAUrl = page.url();
-const materialAId = new URL(materialAUrl).searchParams.get("id");
+const materialAId = /* #119 B2 경로형 */ new URL(materialAUrl).pathname.split("/").filter(Boolean).pop();
 check("L3. created via real API", await appears(main.getByRole("heading", { name: "실물 자료 A" })));
 const prose = main.locator(".prose").first();
 await prose.waitFor();
@@ -179,7 +179,7 @@ await main.getByLabel("연결한 이유").fill("같은 사건을 다룬다");
 await main.getByRole("button", { name: "관계 추가" }).click();
 check("L5. undirected relation via real API", await appears(main.getByRole("link", { name: "실물 자료 B" })));
 check("L5. undirected relation grouped as neutral", await appears(main.getByRole("group", { name: "중립" }).getByText("같은 주제", { exact: true })));
-const docUrl = U(`/research/document/?id=${docD.body.id}`);
+const docUrl = U(`/research/document/${docD.body.id}/`);
 await page.goto(docUrl);
 await main.getByLabel("연결할 대상").selectOption({ label: "실물 자료 A" });
 await main.getByLabel("관계 유형").selectOption("supports");
@@ -254,7 +254,7 @@ check("L6. save after reload succeeds", await appears(main.locator(".prose").get
   await main.getByRole("button", { name: "문서 저장" }).click();
   check("L7. lost response shows failure", await appears(main.getByText("서버에 연결할 수 없습니다")));
   await main.getByRole("button", { name: "문서 저장" }).click();
-  await page.waitForURL(/\/research\/document\/\?id=/);
+  await page.waitForURL(/\/research\/document\/[0-9a-f-]{36}\//);
   await page.unroute("**/api/research/document-drafts/*/commit");
   check("L7. same key reused", keys.length === 2 && keys[0] === keys[1], JSON.stringify(keys));
   check("L7. exactly one document created", (await countDocs()) === before + 1);
@@ -274,7 +274,7 @@ await publishButton().waitFor();
 }
 await publishButton().click();
 check("L8. published via real API", await appears(main.getByText("공개 중", { exact: true })));
-const publicUrl = U(`/public/document/?id=${docD.body.id}`);
+const publicUrl = U(`/public/document/${docD.body.id}/`);
 {
   const V = await newPage();
   await V.page.goto(publicUrl);
@@ -329,7 +329,7 @@ const publicSessionUrl = U(`/research/session/?id=${publicSessionId}`);
   const pvG = (await api.get(`/research/documents/${gid}/publication-preview`)).body;
   const pubG = await api.send("POST", `/research/documents/${gid}/publications`, { versionId: pvG.versionId, expectedVersion: pvG.expectedVersion, previewToken: pvG.previewToken });
   check("L8c. setup published", pubG.status === 201, String(pubG.status));
-  await page.goto(U(`/research/document/?id=${gid}`));
+  await page.goto(U(`/research/document/${gid}/`));
   await main.getByRole("button", { name: "보관", exact: true }).click();
   await main.getByText("보관한 문서입니다").waitFor();
   check("L8c. archived+published still offers withdraw", await appears(main.getByRole("button", { name: "공개 철회" })));
@@ -365,7 +365,7 @@ const publicSessionUrl = U(`/research/session/?id=${publicSessionId}`);
     });
   }
   await api.send("DELETE", `/research/materials/${x.body.id}`, { expectedVersion: x.body.version });
-  await page.goto(U(`/research/document/?id=${h.body.id}`));
+  await page.goto(U(`/research/document/${h.body.id}/`));
   await main.getByRole("button", { name: "공개하기" }).click();
   await main.getByText("보관됨").waitFor();
   const deletes = [];
@@ -411,7 +411,7 @@ const publicSessionUrl = U(`/research/session/?id=${publicSessionId}`);
     });
   }
   await api.send("DELETE", `/research/materials/${x.body.id}`, { expectedVersion: x.body.version });
-  await page.goto(U(`/research/document/?id=${h.body.id}`));
+  await page.goto(U(`/research/document/${h.body.id}/`));
   await main.getByRole("button", { name: "공개하기" }).click();
   await main.getByText("보관됨").waitFor();
   const deletes = [];
@@ -508,7 +508,7 @@ check("L9. session persists after reload", (await appears(chatPanel.getByRole("b
   check("LW. setup: document", created.status === 201, String(created.status));
   const id = created.body.id;
   const draftOf = async () => (await api.get(`/research/documents/${id}/draft`)).body?.draft ?? null;
-  await page.goto(U(`/research/document/?id=${id}`));
+  await page.goto(U(`/research/document/${id}/`));
   await main.getByRole("button", { name: "내용 수정" }).click();
   await main.getByLabel("본문").fill("실물 자동 저장 초안");
   check("LW. autosave saved", await appears(main.getByText("초안 자동 저장됨"), 10000));
@@ -609,7 +609,8 @@ check("L9. session persists after reload", (await appears(chatPanel.getByRole("b
   void main.getByRole("button", { name: "문서 저장" }).click();
   await seen;
   check("L11. real create committed before logout", createdStatus === 200, String(createdStatus));
-  await page.locator("header").getByRole("button", { name: "로그아웃" }).first().click();
+  { const m = page.locator("header").getByRole("button", { name: /계정 메뉴/ }).first(); if ((await m.getAttribute("aria-expanded")) !== "true") await m.click(); }
+  await page.locator("header").getByRole("button", { name: "로그아웃", exact: true }).first().click();
   await page.locator("header").getByRole("link", { name: "GitHub 로그인" }).first().waitFor();
   const store = () => page.evaluate(() => JSON.stringify({ ...sessionStorage }));
   check("L11. store empty right after logout", (await store()) === "{}", await store());

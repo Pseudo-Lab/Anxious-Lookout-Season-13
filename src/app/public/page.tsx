@@ -5,20 +5,43 @@ import { API_ENABLED } from "@/lib/constants";
 import { listPublicDocuments } from "@/lib/research/api";
 import { usePagedList } from "@/lib/research/usePagedList";
 import { formatDateTime } from "@/lib/research/format";
+import { useAuth } from "@/hooks/useAuth";
+import { canUseResearch } from "@/lib/auth/api";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
+import { publicDocumentPath } from "@/lib/routes";
+
+/** #119 G1: 0건일 때 연구 기능을 쓰는 회원에게는 공개하는 방법과 내 연구 링크를 함께 보인다. */
+function EmptyPublic() {
+  const { status, user } = useAuth();
+  const member = status === "authenticated" && canUseResearch(user);
+  return (
+    <Notice tone="info">
+      아직 공개된 문서가 없습니다.
+      {member && (
+        <>
+          {" "}
+          내 연구에서 문서를 공개하면 여기에 보입니다.{" "}
+          <Link href="/research/?tab=documents" className="font-medium underline">
+            내 연구의 문서로 가기
+          </Link>
+        </>
+      )}
+    </Notice>
+  );
+}
 
 function PublicList() {
   const list = usePagedList("public-documents", (cursor) => listPublicDocuments(cursor));
   return (
     <div className="space-y-3">
       {list.failure && <ErrorNotice failure={list.failure} prefix="공개 문서를 불러오지 못했습니다." />}
-      {list.loaded && !list.failure && list.items.length === 0 && <Notice tone="info">아직 공개된 문서가 없습니다.</Notice>}
+      {list.loaded && !list.failure && list.items.length === 0 && <EmptyPublic />}
       {list.items.length > 0 && (
         <ul className="divide-y divide-stone-100 rounded-2xl bg-white shadow-sm ring-1 ring-stone-200/60">
           {list.items.map((d) => (
             <li key={d.id}>
-              <Link href={`/public/document/?id=${encodeURIComponent(d.documentId)}`} className="block px-5 py-4 hover:bg-stone-50">
+              <Link href={publicDocumentPath(d.documentId)} className="block px-5 py-4 hover:bg-stone-50">
                 <p className="font-medium text-stone-900">{d.title || "(제목 없음)"}</p>
                 <p className="mt-1 text-xs text-stone-500">
                   {d.author.login} · {formatDateTime(d.publishedAt)}

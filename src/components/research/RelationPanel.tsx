@@ -22,9 +22,10 @@ import { formatDateTime } from "@/lib/research/format";
 import { ITEM_TYPE_LABELS, LIMITS, type Endpoint, type ItemType, type Relation } from "@/lib/research/types";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import { CharCount } from "@/components/research/ItemForms";
+import { documentPath, materialPath } from "@/lib/routes";
 
 export function itemHref(type: ItemType, id: string): string {
-  return `/research/${type}/?id=${encodeURIComponent(id)}`;
+  return type === "material" ? materialPath(id) : documentPath(id);
 }
 
 function otherEnd(rel: Relation, self: Endpoint): Endpoint {

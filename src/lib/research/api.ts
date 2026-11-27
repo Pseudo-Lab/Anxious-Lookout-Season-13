@@ -326,7 +326,9 @@ export function parsePage<T>(parse: (v: unknown) => T | null) {
       if (item === null) return null;
       items.push(item);
     }
-    return { items, nextCursor: body.nextCursor };
+    const page: Page<T> = { items, nextCursor: body.nextCursor };
+    if (isInt(body.total) && body.total >= 0) page.total = body.total;
+    return page;
   };
 }
 

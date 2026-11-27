@@ -44,7 +44,7 @@ try {
 
   // 문서: 내 초안이 이미 자동 저장된 뒤 다른 작성자가 새 버전을 만든 경우(commit 409).
   const doc = await send("POST", "/documents", { title: "충돌 확인 문서", content: "첫 버전" });
-  await page.goto(U(`/research/document/?id=${doc.id}`));
+  await page.goto(U(`/research/document/${doc.id}/`));
   await main.getByRole("button", { name: "내용 수정" }).click();
   await main.getByLabel("본문").fill("보존할 내 문서 입력");
   await main.getByText("초안 자동 저장됨").waitFor();
@@ -67,7 +67,7 @@ try {
   const text = { title: "충돌 확인 글", content: bodyOf("첫 글 본문"), description: "", tags: [], coverImageId: null, documentIds: [], materialIds: [] };
   const draft = await send("POST", "/post-drafts", text);
   const initial = (await send("POST", `/post-drafts/${draft.id}/commit`, { expectedDraftRevision: draft.revision })).post;
-  await page.goto(U(`/write/?id=${initial.id}`));
+  await page.goto(U(`/write/${initial.id}/`));
   await main.getByRole("button", { name: "내용 수정" }).click();
   const body = main.locator(".ProseMirror");
   await body.waitFor();

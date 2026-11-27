@@ -70,6 +70,7 @@ import ErrorNotice from "@/components/research/ErrorNotice";
 import Notice from "@/components/research/Notice";
 import SafeMarkdown, { StreamingMarkdown } from "@/components/research/SafeMarkdown";
 import ResearchActivity from "@/components/research/session/ResearchActivity";
+import { documentPath, writePostPath } from "@/lib/routes";
 
 const POLL_MS = 2000;
 // 접수된 전송을 확인하는 대화 조회가 일시 실패했을 때의 재조회 간격(늘려 가며 최대값까지).
@@ -112,12 +113,12 @@ function proposalRef(item: ToolCallItem): { href: string; text: string } | null 
     if (!v || typeof v.id !== "string" || v.status !== "pending") continue;
     const hash = `#proposal-${enc(v.id)}`;
     if (item.name === "research_post_propose") {
-      if (typeof v.postId === "string") return { href: `/write/?id=${enc(v.postId)}${hash}`, text: "글 수정 제안이 만들어졌습니다. 수락하기 전에는 글이 바뀌지 않습니다." };
+      if (typeof v.postId === "string") return { href: `${writePostPath(v.postId)}${hash}`, text: "글 수정 제안이 만들어졌습니다. 수락하기 전에는 글이 바뀌지 않습니다." };
       if (v.postId === null) return { href: `/write/new/?proposal=${enc(v.id)}`, text: "새 글 제안이 만들어졌습니다. 수락하기 전에는 글이 만들어지지 않습니다." };
       continue;
     }
     if (typeof v.documentId === "string")
-      return { href: `/research/document/?id=${enc(v.documentId)}${hash}`, text: "문서 수정 제안이 만들어졌습니다. 수락하기 전에는 문서가 바뀌지 않습니다." };
+      return { href: `${documentPath(v.documentId)}${hash}`, text: "문서 수정 제안이 만들어졌습니다. 수락하기 전에는 문서가 바뀌지 않습니다." };
     if (v.documentId === null && item.name === "research_document_save")
       return { href: `/research/document/new/?proposal=${enc(v.id)}`, text: "새 문서 제안이 만들어졌습니다. 수락하기 전에는 문서가 만들어지지 않습니다." };
   }

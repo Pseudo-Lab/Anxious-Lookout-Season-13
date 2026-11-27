@@ -5,6 +5,7 @@ import { parseBlockDocument } from "@/lib/blocks/document";
 import { clampImageWidth, ptToPx, type Align, type Block, type FlowBlock, type ListBlock, type Mark, type Run, type TableBlock } from "@/lib/blocks/types";
 import { CELL_BG_CLASS, CELL_TEXT_COLOR_CLASS, cellBackgroundStyle, cellTextColorStyle, textColorStyle, TEXT_COLOR_CLASS } from "@/lib/blocks/userColor";
 import { ownImageUrl } from "@/lib/posts/api";
+import { headingAnchor } from "@/lib/blocks/toc";
 import ScrollBox from "@/components/research/ScrollBox";
 import YouTubeCard from "./YouTubeCard";
 
@@ -125,7 +126,7 @@ function BlockView({ block }: { block: Block }) {
     case "heading": {
       const H = HEADINGS[block.level - 1];
       return (
-        <H style={{ textAlign: TEXT_ALIGN[block.align] }}>
+        <H id={headingAnchor(block.id)} style={{ textAlign: TEXT_ALIGN[block.align] }}>
           <Runs runs={block.runs} />
         </H>
       );

@@ -9,6 +9,7 @@ import { useMutation, useRestoredRequest } from "@/lib/research/hooks";
 import Notice from "@/components/research/Notice";
 import AuthGate from "@/components/research/AuthGate";
 import { MaterialForm } from "@/components/research/ItemForms";
+import { materialPath } from "@/lib/routes";
 
 // 결과 미확인 생성 요청의 계정별 보관 범위
 const SCOPE = "create:material";
@@ -21,7 +22,7 @@ function NewMaterial() {
 
   async function submit(input: MaterialInput) {
     const res = await run(`material:create:${JSON.stringify(input)}`, (ctx) => createMaterial(input, ctx), input);
-    if (res.ok) router.push(`/research/material/?id=${encodeURIComponent(res.data.id)}`);
+    if (res.ok) router.push(materialPath(res.data.id));
     else setFailure(res.failure);
   }
 

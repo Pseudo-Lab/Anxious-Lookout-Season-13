@@ -9,6 +9,7 @@ import { formatDateTime, hostOf } from "@/lib/research/format";
 import ErrorNotice from "@/components/research/ErrorNotice";
 import { useChat } from "@/components/chat/ChatProvider";
 import Notice from "@/components/research/Notice";
+import { documentPath, materialPath } from "@/lib/routes";
 
 function ListFrame({
   failure,
@@ -82,7 +83,7 @@ export function MaterialList() {
       >
         {list.items.map((m) => (
           <li key={m.id}>
-            <Link href={`/research/material/?id=${encodeURIComponent(m.id)}`} className="block px-5 py-4 hover:bg-stone-50">
+            <Link href={materialPath(m.id)} className="block px-5 py-4 hover:bg-stone-50">
               <p className="font-medium text-stone-900">{m.title || "(제목 없음)"}</p>
               {m.summary && <p className="mt-0.5 line-clamp-2 text-sm text-stone-900">{m.summary}</p>}
               <p className="mt-1 text-xs text-stone-500">
@@ -120,7 +121,7 @@ export function DocumentList() {
       >
         {list.items.map((d) => (
           <li key={d.id}>
-            <Link href={`/research/document/?id=${encodeURIComponent(d.id)}`} className="block px-5 py-4 hover:bg-stone-50">
+            <Link href={documentPath(d.id)} className="block px-5 py-4 hover:bg-stone-50">
               <p className="flex items-center gap-2 font-medium text-stone-900">
                 {d.title || "(제목 없음)"}
                 {d.publication && (
@@ -163,6 +164,8 @@ export function SessionList({ action, compact = false }: { action?: ReactNode; c
           <li key={s.id}>
             <Link
               href={`/research/session/?id=${encodeURIComponent(s.id)}`}
+              // #119 N3: 대화 목록은 대화창 안에서 열므로 링크마다 미리 불러오지 않는다
+              prefetch={false}
               onClick={(e) => {
                 if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
                 e.preventDefault();

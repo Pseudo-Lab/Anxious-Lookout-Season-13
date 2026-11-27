@@ -95,7 +95,8 @@ function parsePublicPost(v: unknown): PublicPost | null {
     !nullableStr(v.author.name) ||
     !isStr(v.publishedAt) ||
     !optTime(v.updatedAt) ||
-    !optStr(v.textProjection)
+    !optStr(v.textProjection) ||
+    !optStr(v.excerpt)
   ) {
     return null;
   }
@@ -119,6 +120,8 @@ function parsePublicPost(v: unknown): PublicPost | null {
   // 본문은 BlockRenderer가 그리기 전에 검사한다(모르는 형식이면 그 자리에 오류를 보인다)
   if (v.content !== undefined) post.content = v.content;
   if (isStr(v.textProjection)) post.textProjection = v.textProjection;
+  // #119 C1/C2(issue119 §C): 서버가 문단만으로 문장 단위로 뽑은 요약. 이전 API에는 없다.
+  if (isStr(v.excerpt)) post.excerpt = v.excerpt;
   if (isStr(v.updatedAt)) post.updatedAt = v.updatedAt;
   return post;
 }
