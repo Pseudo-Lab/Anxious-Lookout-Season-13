@@ -14,7 +14,9 @@ from .research_models import ContentVersion, Item
 
 SORTS = ("updated", "created", "title", "domain")
 # Host of an http(s)-style URL: scheme, optional userinfo, then the host up to port/path/query/fragment.
-HOST = r"^[A-Za-z][A-Za-z0-9+.-]*://(?:[^@/?#]*@)?([^:/?#]+)"
+HOST = r"^[A-Za-z][A-Za-z0-9+.-]*://(?:[^@/?#]*@)?(\[[^]/?#]*\]|[^:/?#]+)"  # a bracketed IPv6 literal is one host (review r1)
+HOST_KEY = 255  # longest DNS name; bounds the domain sort key and so the cursor
+CURSOR = 2048  # base64 of ["title", ≤300 code points (≤1200 UTF-8 bytes), uuid] stays well below this (review r1)
 LAST = "\U0010ffff"  # sorts after every host under COLLATE "C"; items without a URL go last
 
 
@@ -43,12 +45,12 @@ def key(sort):
         return Item.created_at, True
     if sort == "title":
         return ContentVersion.title.collate("C"), False
-    return func.coalesce(func.lower(func.substring(ContentVersion.source_url, HOST)), LAST).collate("C"), False
+    return func.coalesce(func.left(func.lower(func.substring(ContentVersion.source_url, HOST)), HOST_KEY), LAST).collate("C"), False
 
 
 def decode(cursor, sort):
     try:
-        if len(cursor) > 1024:
+        if len(cursor) > CURSOR:
             raise ValueError()
         values = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
         if not isinstance(values, list) or len(values) != 3 or values[0] != sort or not all(isinstance(v, str) for v in values):
@@ -68,7 +70,9 @@ def encode(sort, value, identity):
     if isinstance(value, datetime):
         from .research import stamp
         value = stamp(value)
-    return base64.urlsafe_b64encode(json.dumps([sort, value, str(identity)]).encode()).decode().rstrip("=")
+    # Raw UTF-8, not \uXXXX escapes: a 300-character Korean title is 900 bytes instead of 1800 (review r1 blocker).
+    payload = json.dumps([sort, value, str(identity)], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
 
 
 def page(db, owner, kind, limit, cursor, archived, q, sort):

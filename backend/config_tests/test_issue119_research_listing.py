@@ -98,7 +98,7 @@ def test_domain_sort_uses_lowercased_host_and_puts_missing_urls_last():
     db = FakeDB([], total=0)
     listing.page(db, OWNER, 'material', 30, None, False, None, 'domain')
     text, params = compiled(db.statements[1])
-    assert 'coalesce(lower(SUBSTRING(research.versions.source_url FROM ' in text and 'COLLATE "C" ASC' in text
+    assert 'coalesce(left(lower(SUBSTRING(research.versions.source_url FROM ' in text and 'COLLATE "C" ASC' in text
     assert listing.HOST in params.values() and listing.LAST in params.values()
 
 
@@ -124,7 +124,40 @@ def test_cursor_is_bound_to_its_sort():
     assert listing.decode(last, 'domain') == (listing.LAST, UUID(int=6))
 
 
-@pytest.mark.parametrize('cursor', ['', '!!!', 'a' * 1025])
+@pytest.mark.parametrize('cursor', ['', '!!!', 'a' * 2049])
 def test_garbage_cursor_is_422(cursor):
     with pytest.raises(ResearchError):
         listing.decode(cursor or 'W10', 'title')
+
+
+@pytest.mark.parametrize('char', ['가', '\U0001F600', '\U00020000'])
+def test_longest_title_cursor_round_trips(char):
+    """review r1 blocker: a cursor the API issues for a 300-character title (Korean, emoji, CJK ext. B) is accepted."""
+    title = char * 300
+    cursor = listing.encode('title', title, UUID(int=7))
+    assert len(cursor) <= listing.CURSOR
+    assert listing.decode(cursor, 'title') == (title, UUID(int=7))
+    db = FakeDB([row(1, title), row(2, title)], total=2)
+    _, following, _ = listing.page(db, OWNER, 'material', 1, None, False, None, 'title')
+    db = FakeDB([], total=2)
+    listing.page(db, OWNER, 'material', 1, following, False, None, 'title')
+    assert title in compiled(db.statements[1])[1].values()
+
+
+def test_escaped_cursors_from_before_r1_still_decode():
+    old = base64.urlsafe_b64encode(json.dumps(['title', '가나', str(UUID(int=3))]).encode()).decode().rstrip('=')
+    assert listing.decode(old, 'title') == ('가나', UUID(int=3))
+
+
+def test_domain_key_is_bounded_and_the_last_marker_round_trips():
+    text, params = compiled(listing.key('domain')[0])
+    assert 'left(lower(SUBSTRING(' in text and listing.HOST_KEY in params.values()
+    cursor = listing.encode('domain', 'h' * listing.HOST_KEY, UUID(int=1))
+    assert len(cursor) <= listing.CURSOR and listing.decode(cursor, 'domain')[0] == 'h' * listing.HOST_KEY
+
+
+@pytest.mark.parametrize('url,host', [('https://[2001:db8::1]:8443/a', '[2001:db8::1]'), ('http://[2001:db8::2]/', '[2001:db8::2]'),
+                                      ('https://u:p@[::1]:80/x', '[::1]'), ('https://example.com:8443/a', 'example.com')])
+def test_host_pattern_keeps_bracketed_ipv6_whole(url, host):
+    """review r1 major: the domain key of an IPv6 URL is the whole bracketed literal, port excluded."""
+    assert re.match(listing.HOST, url).group(1) == host
