@@ -642,7 +642,14 @@ check(
   await anon.goto(U("/posts/"));
   const card = anon.locator("main article", { hasText: "자료만 쓴 글" });
   await card.waitFor();
-  check("WP4. W2: card without summary shows plain body excerpt", await appears(card.getByText("소제목 굵은 첫 문장과 링크 그리고 코드. 둘째 문단")));
+  // #119 C1/C2: 카드 요약은 서버 excerpt(문단만, 소제목 제외)다. 첫 문단 글이 있고 제목 블록 글은 없다.
+  {
+    const summary = card.locator("p.line-clamp-2").first();
+    await summary.waitFor();
+    const text = ((await summary.textContent()) ?? "").trim();
+    check("WP4. W2/C1: card shows the plain first-paragraph excerpt", text.startsWith("굵은 첫 문장과 링크 그리고 코드.") && text.includes("둘째 문단"), text);
+    check("WP4. C2: excerpt leaves out the heading block", !text.includes("소제목"), text);
+  }
   const legacy = anon.locator("main article", { hasText: "Observatory에 오신 것을 환영합니다" });
   await legacy.waitFor();
   check("WP4. #44: a stored summary is not shown on the card", (await legacy.getByText("스터디 그룹의 관찰과 기록을 위한 공간", { exact: false }).count()) === 0);
