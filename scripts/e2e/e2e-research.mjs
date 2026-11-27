@@ -1738,7 +1738,8 @@ let docEUrl;
   check("R21. admin sees 관리 in account menu (#119 D4)", await appears(adm.page.locator("header").getByRole("link", { name: "관리" })));
   await adm.page.goto(U("/admin/"));
   const am = adm.page.locator("main");
-  const rowOf = (login) => am.getByRole("listitem").filter({ hasText: new RegExp(`${login}\\b`) });
+  // 회원 행은 회원 구역(승인 대기·승인된 회원, aria-labelledby section)에서만 찾는다. 감사 기록 항목도 같은 로그인 이름을 담는다.
+  const rowOf = (login) => am.locator("section[aria-labelledby]").getByRole("listitem").filter({ hasText: new RegExp(`${login}\\b`) });
   const row = rowOf(tMe.user.login);
   await row.first().waitFor();
   check("R21. own row cannot be changed", await appears(am.getByRole("listitem").filter({ hasText: "(나)" }).getByText("본인 계정은 바꿀 수 없습니다")));

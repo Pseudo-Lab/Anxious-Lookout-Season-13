@@ -569,7 +569,7 @@ check("L9. session persists after reload", (await appears(chatPanel.getByRole("b
   check("L13. operator-bootstrapped admin", adminUser.role === "admin" && adminUser.isApproved);
   await ADM.page.goto(U("/admin/"));
   const am = ADM.page.locator("main");
-  const row = am.getByRole("listitem").filter({ hasText: new RegExp(`${pMe.user.login}\\b`) });
+  const row = am.locator("section[aria-labelledby]").getByRole("listitem").filter({ hasText: new RegExp(`${pMe.user.login}\\b`) });
   await row.first().waitFor();
   check("L13. admin own row locked", await appears(am.getByRole("listitem").filter({ hasText: "(나)" }).getByText("본인 계정은 바꿀 수 없습니다")));
   await row.getByRole("button", { name: /^편집자로 지정/ }).click();
