@@ -2455,11 +2455,17 @@ let docEUrl;
 
 // R11. 모든 research 변경 요청: Origin + X-CSRF-Token + UUID v4 Idempotency-Key (브라우저 요청)
 {
-  const uiMutations = (await mockCalls()).filter((c) => c.method !== "GET" && c.path.startsWith("/research/"));
+  const calls = await mockCalls();
+  // #119 K3: 출처 서지정보 미리보기(POST /research/url-metadata)는 저장하지 않는 읽기라 계약상 Idempotency-Key를 보내지 않는다(Origin·CSRF만).
+  const isK3 = (c) => c.method === "POST" && c.path === "/research/url-metadata";
+  const uiMutations = calls.filter((c) => c.method !== "GET" && c.path.startsWith("/research/") && !isK3(c));
   const bad = uiMutations.filter(
     (c) => c.origin !== ORIGIN || !c.csrf || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(c.idempotencyKey ?? "")
   );
   check("R11. mutations carry Origin/CSRF/Idempotency-Key", uiMutations.length > 0 && bad.length === 0, `${uiMutations.length} calls, bad=${JSON.stringify(bad.slice(0, 2))}`);
+  const k3 = calls.filter(isK3);
+  const k3bad = k3.filter((c) => c.origin !== ORIGIN || !c.csrf || c.idempotencyKey);
+  check("R11. K3 url-metadata calls carry Origin/CSRF and no Idempotency-Key", k3.length > 0 && k3bad.length === 0, `${k3.length} calls, bad=${JSON.stringify(k3bad.slice(0, 2))}`);
 }
 {
   // 남아도 되는 것은 계정별 대화창 상태(열림·선택 대화)뿐이다. 인증 정보·CSRF nonce는 저장하지 않는다.
