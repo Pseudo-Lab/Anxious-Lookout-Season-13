@@ -128,9 +128,10 @@ def withdraw(store, identity, body):
 
 
 def public_value(row):
-    from .post_blocks import markdown_projection, format_summary
+    from .post_blocks import markdown_projection, format_summary, excerpt
     from .post_images import base_path
     return {**row.snapshot, 'materials': row.snapshot.get('materials', []), 'updatedAt': updated_at(row.snapshot),
+            'excerpt': excerpt(row.snapshot['content']),
             'markdownProjection': markdown_projection(row.snapshot['content'], base_path()),
             'formatSummary': format_summary(row.snapshot['content'])}
 
