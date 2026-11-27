@@ -255,7 +255,8 @@ check(
 {
   const meta = main.locator("article > header > p", { hasText: /^v1 · 수정 / });
   check("WP3. #109: meta line is version and updated time only", await appears(meta));
-  const metaText = (await meta.first().textContent()) ?? "";
+  // #109 리뷰 minor(이월): 메타 줄이 없으면 기본 30초를 기다려 던지지 않고 바로 빈 값으로 기록해, 뒤의 주소 단언이 계속 돌게 한다
+  const metaText = (await meta.count()) > 0 ? ((await meta.first().textContent({ timeout: 2000 }).catch(() => "")) ?? "") : "";
   check("WP3. #109: meta line has no address or created time", !metaText.includes("주소") && !metaText.includes("작성"), metaText);
   // #119 O7(PM: #109의 예외): 발행 패널에만 발행할 때 나갈 주소를 글자로 보인다(링크 없음). 제목 아래 메타 줄·머리글에는 주소가 없다(#109).
   const publishRegion = main.getByRole("region", { name: "발행" });
