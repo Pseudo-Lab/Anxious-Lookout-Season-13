@@ -221,6 +221,40 @@ await api.send("POST", "/research/relations", {
 await page.goto(materialAUrl);
 check("R5. incoming relation on material A reads inverse", await appears(main.getByRole("group", { name: "지지·확장" }).getByText("지지받음", { exact: true })));
 
+// J2(#119): 관계 대상 콤보박스 — 같은 글자에 맞는 후보가 한 페이지(30개)를 넘어도 키보드만으로 다음 후보를 불러와 고를 수 있고,
+// 활성 후보는 목록 상자 안에 보이도록 스크롤된다.
+{
+  for (let i = 1; i <= 31; i++) {
+    const r = await api.send("POST", "/research/materials", { title: `다수 후보 ${String(i).padStart(2, "0")}`, sourceUrl: `https://example.com/many/${i}`, collectedAt: "2026-10-18T00:00:00Z", contentKind: "summary", content: "후보" });
+    if (r.status !== 201) check(`setup. candidate ${i}`, false, String(r.status));
+  }
+  await page.goto(materialAUrl);
+  const box = main.getByRole("combobox", { name: "연결할 자료 찾기" });
+  await box.fill("다수 후보");
+  const listbox = main.getByRole("listbox", { name: "자료 후보" });
+  await listbox.getByRole("option", { name: "다수 후보 30" }).waitFor();
+  check("J2. first page holds 30 candidates", (await listbox.getByRole("option").count()) === 30);
+  for (let i = 0; i < 30; i++) await box.press("ArrowDown");
+  await listbox.getByRole("option", { name: "다수 후보 31" }).waitFor({ timeout: 8000 });
+  const activeId = await box.getAttribute("aria-activedescendant");
+  const activeName = activeId ? await page.locator(`[id="${activeId}"]`).innerText() : "";
+  const visible = activeId
+    ? await page.evaluate((id) => {
+        const o = document.getElementById(id);
+        const lb = o?.closest('[role="listbox"]');
+        if (!o || !lb) return false;
+        const a = o.getBoundingClientRect();
+        const b = lb.getBoundingClientRect();
+        return a.top >= b.top - 1 && a.bottom <= b.bottom + 1;
+      }, activeId)
+    : false;
+  check("J2. ArrowDown past the last candidate loads the next page and moves to it", activeName === "다수 후보 31", activeName);
+  check("J2. active candidate is scrolled into the listbox", visible);
+  await box.press("Enter");
+  check("J2. keyboard choice selects the 31st candidate", await appears(main.getByText("다수 후보 31", { exact: true })));
+  await main.getByRole("button", { name: "다른 자료 고르기" }).click();
+}
+
 // R5b. #105 예전 자유 텍스트 관계: ‘기타 (원래 문자열)’로 맨 뒤에 묶이고, 수정할 때 같은 방향의 유형을 골라야 한다.
 {
   await setMock(`legacyRelation=${materialAId},${matB.body.id},${encodeURIComponent("후속 연구")},1`);
@@ -1515,6 +1549,48 @@ let docEUrl;
   await setMock("as=");
 }
 
+// N1(#119): 새 대화는 첫 질문으로 만든다. 생성 응답을 잃고 새로고침해도 첫 질문 전체가 돌아오고(제목 60자가 아니다),
+// 같은 요청(같은 key)으로 생성 결과를 확인하면 대화창 입력에 전체 질문이 남는다. 제목은 첫 줄 60자다.
+{
+  const long = `첫 줄 질문입니다 ${"가".repeat(70)} 둘째 문장 ${"나".repeat(80)}`;
+  // 대화창의 대화 목록 화면에서 시작한다(열린 대화가 있으면 목록으로 돌아간다)
+  const openList = async () => {
+    await page.goto(U("/research/"));
+    if (await chat.isHidden()) await page.getByRole("button", { name: "대화창 열기" }).click();
+    const back = chat.getByRole("button", { name: "← 대화 목록" });
+    if (await back.isVisible().catch(() => false)) await back.click();
+    await chat.getByLabel("새 대화 제목").waitFor();
+  };
+  await openList();
+  await chat.getByLabel("새 대화 제목").fill(long);
+  let dropped = false;
+  const posts = [];
+  await page.route("**/api/research/sessions", async (route) => {
+    if (route.request().method() === "POST") posts.push(route.request().headers()["idempotency-key"]);
+    if (route.request().method() === "POST" && !dropped) {
+      dropped = true;
+      await route.fetch();
+      return route.abort();
+    }
+    return route.continue();
+  });
+  await chat.getByRole("button", { name: "새 대화", exact: true }).click();
+  await chat.getByText("서버에 연결할 수 없습니다").waitFor();
+  await page.reload();
+  await openList();
+  check("N1. lost create response: full first question restored after reload", (await chat.getByLabel("새 대화 제목").inputValue()) === long, String((await chat.getByLabel("새 대화 제목").inputValue()).length));
+  await chat.getByRole("button", { name: "새 대화", exact: true }).click();
+  await chat.getByLabel("메시지").waitFor({ timeout: 10000 });
+  await page.unroute("**/api/research/sessions");
+  check("N1. retried with the same Idempotency-Key", posts.length === 2 && posts[0] === posts[1], JSON.stringify(posts));
+  check("N1. composer holds the full first question", (await chat.getByLabel("메시지").inputValue()) === long);
+  // 이 대화의 입력 초안을 비워 둔다(뒤 R11 저장소 검사는 대화창 상태만 허용한다)
+  await chat.getByLabel("메시지").fill("");
+  const sessions = await (await page.request.get(U("/api/research/sessions"))).json();
+  const titles = sessions.items.map((x) => x.title);
+  check("N1. title is the first line (≤60 chars), one session created", titles.filter((t) => t.startsWith("첫 줄 질문입니다")).length === 1 && titles.some((t) => t.startsWith("첫 줄 질문입니다") && [...t].length <= 60 && t.endsWith("…")), JSON.stringify(titles.slice(0, 3)));
+}
+
 // R18. 공개 문서 페이지의 개인 대화 생성 폼: 복구된 개인 제목은 계정에 묶여, 같은 탭 계정 전환 시 버린다(리뷰 F3-1)
 {
   await setMock("reuse=0&as=");
@@ -1550,8 +1626,12 @@ let docEUrl;
   await tab2.waitForURL(U("/"));
   await tab2.close();
   await main.getByRole("button", { name: "새 대화" }).click();
+  // 계정이 바뀌면 입력칸이 새로 그려진다(이전 계정 입력 없음). 입력칸이 있는 상태에서 값이 바뀔 때까지 기다린다.
   await page.waitForFunction(
-    () => !(document.querySelector('input[aria-label="새 대화 제목"]')?.value ?? "").includes("A 개인 대화 제목"),
+    () => {
+      const el = document.querySelector('main input[aria-label^="새 대화 제목"]');
+      return !!el && !el.value.includes("A 개인 대화 제목");
+    },
     null,
     { timeout: 10000 }
   ).catch(() => {});
@@ -2356,7 +2436,16 @@ let docEUrl;
   const text = JSON.stringify(stored);
   check(
     "R11. only per-account chat UI state in storage (no token/CSRF)",
-    Object.keys(stored.local).length === 0 && only && !/csrf|token|cookie/i.test(text),
+    // #119 A2: localStorage에는 메뉴 자리 힌트(불리언 3개)만 허용한다
+    Object.keys(stored.local).every((k) => k === "anxious:nav-hint") &&
+      (() => {
+        const raw = stored.local["anxious:nav-hint"];
+        if (raw === undefined) return true;
+        const h = JSON.parse(raw);
+        return Object.keys(h).sort().join() === "research,signedIn,write" && Object.values(h).every((v) => typeof v === "boolean");
+      })() &&
+      only &&
+      !/csrf|token|cookie/i.test(text),
     text
   );
 }

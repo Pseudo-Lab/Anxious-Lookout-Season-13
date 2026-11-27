@@ -59,12 +59,12 @@ function CommitSha({ label, sha }: { label: string; sha: string }) {
     }
   }
   return (
-    <span className="flex flex-wrap items-center gap-2">
+    <span data-commit-sha={label} className="flex flex-wrap items-center gap-2">
       <code title={sha} className="font-mono text-xs">
         {full ? sha : sha.slice(0, 7)}
       </code>
       <button type="button" onClick={() => void copy()} className="text-xs font-medium text-indigo-600 underline hover:text-indigo-800">
-        복사<span className="sr-only">: {label} 전체 커밋 해시</span>
+        복사<span className="sr-only"> ({label} 전체 커밋 해시)</span>
       </button>
       {note && (
         <span role="status" className="text-xs text-stone-600">

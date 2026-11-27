@@ -1,6 +1,6 @@
 "use client";
 
-import { useDeferredValue, useId, useState, type KeyboardEvent } from "react";
+import { useDeferredValue, useEffect, useId, useState, type KeyboardEvent } from "react";
 import { listDocuments, listMaterials } from "@/lib/research/api";
 import { usePagedList } from "@/lib/research/usePagedList";
 import type { Endpoint, ItemType } from "@/lib/research/types";
@@ -35,6 +35,11 @@ export default function TargetCombobox({
   const options = list.items.filter((c) => !(exclude && exclude.type === type && exclude.id === c.id));
   const activeIndex = Math.min(active, Math.max(0, options.length - 1));
   const noun = type === "material" ? "자료" : "문서";
+  // 활성 후보가 목록 상자 밖이면 보이게 스크롤한다(키보드로 내려갈 때)
+  useEffect(() => {
+    if (!open) return;
+    document.getElementById(`${listId}-${activeIndex}`)?.scrollIntoView({ block: "nearest" });
+  }, [open, activeIndex, listId, options.length]);
 
   function choose(i: number) {
     const c = options[i];
@@ -48,6 +53,12 @@ export default function TargetCombobox({
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setOpen(true);
+      // 마지막 후보에서 더 내려가면 다음 페이지를 불러오고, 불러온 첫 후보로 옮긴다
+      if (activeIndex >= options.length - 1 && list.nextCursor && !list.loading) {
+        void list.loadMore();
+        setActive(options.length);
+        return;
+      }
       setActive((a) => Math.min(a + 1, options.length - 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
@@ -138,7 +149,8 @@ export default function TargetCombobox({
           </li>
         )}
         {list.nextCursor && (
-          <li role="presentation" className="px-3 py-1.5">
+          <li role="presentation" className="px-3 py-1.5 text-xs text-stone-600">
+            {/* 키보드: 마지막 후보에서 ↓를 누르면 다음 후보를 불러온다. 마우스: 아래 버튼 */}
             <button
               type="button"
               tabIndex={-1}
@@ -146,10 +158,11 @@ export default function TargetCombobox({
                 e.preventDefault();
                 void list.loadMore();
               }}
-              className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
+              className="font-medium text-indigo-600 hover:text-indigo-800"
             >
-              {list.total !== null ? `${list.total}개 중 ${list.items.length}개 · 더 불러오기` : "더 불러오기"}
+              {list.loading ? "불러오는 중..." : list.total !== null ? `${list.total}개 중 ${list.items.length}개 · 더 불러오기` : "더 불러오기"}
             </button>
+            <span className="ml-1">(마지막 후보에서 ↓)</span>
           </li>
         )}
       </ul>

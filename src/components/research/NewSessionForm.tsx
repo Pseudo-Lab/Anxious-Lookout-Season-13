@@ -19,9 +19,11 @@ export default function NewSessionForm({ publicDocumentId }: { publicDocumentId?
   const { openSession } = useChat();
   const { user } = useAuth();
   const scope = `create:session:${publicDocumentId ?? "-"}`;
-  const restored = useRestoredRequest<{ title?: string }>(scope);
+  // 결과 미확인으로 보관된 생성 요청에는 보낸 body(title·publicDocumentId)와 별도로 첫 질문 전체(message)를 남긴다.
+  // 새로고침 뒤에는 제목(60자)이 아니라 첫 질문 전체를 되살린다(이전 보관분은 message가 없어 제목으로 대신한다).
+  const restored = useRestoredRequest<{ title?: string; message?: string }>(scope);
   const { run, busy } = useMutation(scope);
-  const [message, setMessage] = useState(restored?.title ?? "");
+  const [message, setMessage] = useState(restored?.message ?? restored?.title ?? "");
   const [failure, setFailure] = useState<FetchFailure | null>(null);
 
   async function onSubmit(e: FormEvent) {
@@ -29,7 +31,8 @@ export default function NewSessionForm({ publicDocumentId }: { publicDocumentId?
     const text = message.trim();
     if (!text) return;
     const input = { title: titleFromMessage(text).slice(0, LIMITS.title), ...(publicDocumentId && { publicDocumentId }) };
-    const res = await run(`session:create:${JSON.stringify(input)}`, (ctx) => createSession(input, ctx), input);
+    // 같은 요청 판별(fingerprint)과 전송 body는 input 그대로다. 보관 값에만 첫 질문 전체를 더한다(같은 key로 결과를 다시 확인).
+    const res = await run(`session:create:${JSON.stringify(input)}`, (ctx) => createSession(input, ctx), { ...input, message: text });
     if (res.ok) {
       if (user) saveDraft(user.accountId, res.data.id, text);
       setMessage("");

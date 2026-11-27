@@ -68,9 +68,9 @@ wait_file() {
 
 $OFF down --volumes >/dev/null 2>&1 || true
 $BASE up -d db mock-github
-# #105 연구 위키(0010_research_wiki)까지 적용한다. 앞선 초안·글·블록 본문 이관과 #97 PAT·버전 작성자(0009)도 포함한다.
+# #119 0011_ui_feedback까지 적용한다(API가 정확히 요구하는 research revision). 앞선 위키(0010)·초안·글·블록 본문 이관과 #97 PAT·버전 작성자(0009)도 포함한다.
 # 현재 runtime의 스키마 계약에 맞춰 fixture DB를 준비한다.
-$BASE run --rm migrate python -m app.migrate --revision 0010_research_wiki
+$BASE run --rm migrate python -m app.migrate --revision 0011_ui_feedback
 $BASE up -d api web gateway
 wait_ready
 echo "== base stack ready"

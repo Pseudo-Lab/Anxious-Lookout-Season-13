@@ -160,8 +160,8 @@ async function adminStatusPage() {
   await a.ctx.grantPermissions(["clipboard-read", "clipboard-write"], { origin: ORIGIN });
   // 클립보드를 쓸 수 없는 origin(보안 컨텍스트 아님)이면 화면이 전체 해시를 보여 직접 복사하게 한다. 어느 쪽이든 전체 해시를 얻을 수 있어야 한다.
   const copied = async (label) => {
-    const row = a.p.locator("main").locator("div", { has: a.p.getByRole("button", { name: `복사: ${label} 전체 커밋 해시` }) }).last();
-    await row.getByRole("button", { name: `복사: ${label} 전체 커밋 해시` }).click();
+    const row = a.p.locator(`[data-commit-sha="${label}"]`);
+    await row.getByRole("button", { name: new RegExp(`복사.*${label} 전체 커밋 해시`) }).click();
     const status = row.getByRole("status");
     await status.waitFor();
     if ((await status.innerText()).includes("복사했습니다")) return a.p.evaluate(() => navigator.clipboard.readText());
