@@ -637,7 +637,17 @@ check("L9. session persists after reload", (await appears(chatPanel.getByRole("b
 await page.goto(U("/research/"));
 check("L12. after logout API 401", (await api.get("/research/materials")).status === 401);
 check("L12. after logout UI asks login", await appears(main.getByText("로그인이 필요합니다")));
-check("L12. nothing left in session/localStorage", (await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))) === "{}");
+// #119 A2: 남아도 되는 것은 로그아웃 상태의 메뉴 자리 힌트(세 값 모두 false) 하나뿐이다. 계정별 대화·요청·토큰은 없어야 한다.
+{
+  const stored = await page.evaluate(() => ({ local: { ...localStorage }, session: { ...sessionStorage } }));
+  const hint = stored.local["anxious:nav-hint"];
+  const okHint = hint === undefined || JSON.stringify(JSON.parse(hint)) === JSON.stringify({ signedIn: false, research: false, write: false });
+  check(
+    "L12. after logout storage holds only the signed-out nav hint",
+    Object.keys(stored.local).every((k) => k === "anxious:nav-hint") && okHint && Object.keys(stored.session).length === 0,
+    JSON.stringify(stored)
+  );
+}
 
 check("console has no errors", consoleErrors.length === 0, consoleErrors.join(" | "));
 check("no external tracker requests", ![...externalHosts].some((h) => h.includes("tracker") || h.includes("example.com")), [...externalHosts].join(", "));

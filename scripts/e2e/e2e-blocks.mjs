@@ -149,7 +149,10 @@ async function stablePoint(p, locator, ok = async () => true) {
     await locator
       .evaluate((el) => {
         const r = el.getBoundingClientRect();
-        if (r.bottom <= 0 || r.top >= innerHeight || r.right <= 0 || r.left >= innerWidth) el.scrollIntoView({ block: "center", inline: "nearest" });
+        // 누를 점(중앙)이 화면 밖이면 가운데로 옮긴다(일부만 보이는 큰 대상도, #119 리뷰 F5·F6)
+        const cx = r.left + r.width / 2;
+        const cy = r.top + r.height / 2;
+        if (cy <= 0 || cy >= innerHeight || cx <= 0 || cx >= innerWidth) el.scrollIntoView({ block: "center", inline: "nearest" });
       })
       .catch(() => {});
     const b = await locator.boundingBox().catch(() => null);
